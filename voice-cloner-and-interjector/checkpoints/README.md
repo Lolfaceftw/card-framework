@@ -1,7 +1,8 @@
 ---
-license: apache-2.0
 language:
 - en
+- zh
+pipeline_tag: text-to-speech
 ---
 ## 👉🏻 IndexTTS2 👈🏻
 

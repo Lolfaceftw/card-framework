@@ -86,6 +86,7 @@ We use `uv` to manage the project's dependency environment.
 4.  **Download Models:**
     ```bash
     uv tool install "huggingface-hub[cli,hf_xet]"
+    cd voice-cloner-and-interjector
     hf download IndexTeam/IndexTTS-2 --local-dir=checkpoints
     ```
 
