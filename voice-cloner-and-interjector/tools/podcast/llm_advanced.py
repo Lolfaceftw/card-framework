@@ -1,13 +1,25 @@
+"""
+LLM-enhanced multi-speaker podcast synthesis with advanced trigger detection.
+
+Uses Mistral 7B via Ollama to detect trigger phrases and generate
+contextual interjections with cross-fading between segments.
+"""
+
 import json
 import os
 import random
 import subprocess
 from pathlib import Path
 from tkinter import Tk, filedialog, messagebox
-from indextts.infer_v2 import IndexTTS2
-from pydub import AudioSegment
-import requests
 
+import requests
+from pydub import AudioSegment
+
+from indextts.infer_v2 import IndexTTS2
+from tools.podcast.logger import get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
 
 # Initialize Index-TTS-2
 tts = IndexTTS2(
@@ -23,42 +35,57 @@ OLLAMA_API_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "mistral:7b-instruct-q4_0"
 OLLAMA_CHECK_URL = "http://localhost:11434/api/tags"
 
-def check_ollama_running():
-    """Verify Ollama service is running"""
+
+def check_ollama_running() -> bool:
+    """Verify Ollama service is running.
+
+    Returns:
+        True if Ollama is reachable, False otherwise.
+    """
     try:
         response = requests.get(OLLAMA_CHECK_URL, timeout=2)
         return response.status_code == 200
-    except:
+    except Exception:
         return False
 
-def ensure_mistral_loaded():
-    """Download Mistral 7B 4-bit if not already present"""
+
+def ensure_mistral_loaded() -> bool:
+    """Download Mistral 7B 4-bit if not already present.
+
+    Returns:
+        True if model is ready, False if Ollama is not running.
+    """
     if not check_ollama_running():
-        print("\n⚠ Ollama is not running!")
-        print("   Start Ollama with: ollama serve")
-        print("   Then run this script again.")
+        logger.error("Ollama is not running!")
+        logger.info("Start Ollama with: ollama serve")
+        logger.info("Then run this script again.")
         return False
-    
+
     try:
         response = requests.get(OLLAMA_CHECK_URL, timeout=5)
         models = response.json().get("models", [])
         model_names = [m["name"] for m in models]
-        
+
         if OLLAMA_MODEL not in model_names:
-            print(f"\nDownloading {OLLAMA_MODEL}... (this is a one-time setup, ~2-3 minutes)")
+            logger.info(f"Downloading {OLLAMA_MODEL}... (one-time setup, ~2-3 minutes)")
             subprocess.run(["ollama", "pull", OLLAMA_MODEL], check=True)
-            print("✓ Mistral 7B loaded!")
+            logger.info("Mistral 7B loaded!")
         else:
-            print(f"✓ {OLLAMA_MODEL} already loaded")
+            logger.info(f"{OLLAMA_MODEL} already loaded")
         return True
     except Exception as e:
-        print(f"Error checking Ollama models: {e}")
+        logger.error(f"Error checking Ollama models: {e}")
         return False
 
-def detect_trigger_with_llm(text):
-    """
-    Use Mistral 7B to identify the best trigger point for an interjection.
-    Returns a dictionary with trigger info or None if it fails.
+
+def detect_trigger_with_llm(text: str) -> list:
+    """Use Mistral 7B to identify the best trigger point for an interjection.
+
+    Args:
+        text: Speaker text to analyze.
+
+    Returns:
+        List containing trigger data dict, or empty list on failure.
     """
     prompt = f"""
 You are an expert conversation analyst. Your task is to find the single best, high-impact trigger for a listener to make a natural interjection. Analyze the speaker's text below.
@@ -112,81 +139,74 @@ Now, analyze the provided text and give your JSON response.
                 "model": OLLAMA_MODEL,
                 "prompt": prompt,
                 "stream": False,
-                "format": "json" # Ollama has a dedicated JSON mode
+                "format": "json"
             },
             timeout=30
         )
 
         if response.status_code == 200:
             result_text = response.json().get("response", "")
-            print(f"Mistral's Response:\n{result_text}")
-            # The 'format: json' mode in Ollama returns a clean JSON string
+            logger.debug(f"LLM trigger response: {result_text}")
             trigger_data = json.loads(result_text)
 
-            # Basic validation
             if "trigger_word" in trigger_data and "char_pos" in trigger_data:
-                # Calculate the position percentage required by the downstream function
                 trigger_data["pos_percent"] = trigger_data["char_pos"] / len(text)
-                return [trigger_data] # Return as a list to match the old function's format
+                return [trigger_data]
         else:
-            print(f"   Warning: LLM trigger detection failed with status {response.status_code}")
+            logger.warning(f"LLM trigger detection failed with status {response.status_code}")
 
     except Exception as e:
-        print(f"   Warning: LLM trigger detection error: {e}")
+        logger.warning(f"LLM trigger detection error: {e}")
 
-    return [] # Return an empty list on failure, so the script can handle it gracefully
+    return []
 
-def calculate_seconds_per_word_from_audio(text, audio_path):
-    """
-    Calculate actual seconds-per-word directly from synthesized audio.
-    IMPROVED: Uses real audio measurement, not estimated.
-    
-    Returns: seconds_per_word (float)
+
+def calculate_seconds_per_word_from_audio(text: str, audio_path: str) -> float:
+    """Calculate actual seconds-per-word directly from synthesized audio.
+
+    Args:
+        text: Text that was synthesized.
+        audio_path: Path to the audio file.
+
+    Returns:
+        Seconds per word based on audio duration.
     """
     audio = AudioSegment.from_wav(audio_path)
     audio_duration_seconds = len(audio) / 1000.0
     word_count = len(text.split())
-    seconds_per_word = audio_duration_seconds / word_count
-    
-    return seconds_per_word
+    return audio_duration_seconds / word_count
 
-def calculate_interjection_timing_and_trigger(main_text, main_audio_path, seconds_per_word):
+
+def calculate_interjection_timing_and_trigger(main_text: str, main_audio_path: str,
+                                              seconds_per_word: float) -> dict:
+    """Calculate optimal interjection timing based on trigger words.
+
+    Args:
+        main_text: Main speaker's text.
+        main_audio_path: Path to main speaker's audio.
+        seconds_per_word: Calibrated speech rate.
+
+    Returns:
+        Dict with timing info, or None if no trigger found.
     """
-    Calculate optimal interjection timing based on trigger words.
-    IMPROVED: Returns trigger word info along with timing.
-    
-    Returns: {
-        "position_ms": int,
-        "trigger_word": str,
-        "trigger_category": str,
-        "trigger_position_percent": float,
-        "reaction_delay_ms": int
-    }
-    """
-    
     main_audio = AudioSegment.from_wav(main_audio_path)
     audio_duration_ms = len(main_audio)
-    
-    # Detect trigger words in the main speaker's text
-    print("      └─ Asking LLM to find a trigger point...")
-    triggers = detect_trigger_with_llm(main_text) # <-- Changed to the new function
-    
+
+    logger.debug("Asking LLM to find a trigger point...")
+    triggers = detect_trigger_with_llm(main_text)
+
     if not triggers:
-        # Fallback: use mid-speech if no triggers detected
         return None
-    
-    # Select a random trigger
+
     selected_trigger = random.choice(triggers)
     trigger_pos_percent = selected_trigger["pos_percent"]
-    
-    # Calculate position AFTER the trigger word
+
     trigger_time_ms = int(audio_duration_ms * trigger_pos_percent)
     reaction_delay = random.randint(300, 800)
     interjection_position = trigger_time_ms + reaction_delay
-    
-    # Safety check: ensure position is within audio bounds
+
     interjection_position = max(0, min(interjection_position, audio_duration_ms - 500))
-    
+
     return {
         "position_ms": interjection_position,
         "trigger_word": selected_trigger["trigger_word"],
@@ -197,11 +217,17 @@ def calculate_interjection_timing_and_trigger(main_text, main_audio_path, second
         "audio_duration_ms": audio_duration_ms
     }
 
-def generate_interjection_llm(main_speaker_text, speaker_name):
+
+def generate_interjection_llm(main_speaker_text: str, speaker_name: str) -> str:
+    """Generate interjection using Mistral 7B via Ollama.
+
+    Args:
+        main_speaker_text: What the main speaker said.
+        speaker_name: Name of the interjecting speaker.
+
+    Returns:
+        Generated interjection text.
     """
-    Generate interjection using Mistral 7B via Ollama.
-    """
-    
     prompt = f"""You are {speaker_name}, listening to a podcast. The speaker just said:
 
 "{main_speaker_text}"
@@ -210,7 +236,7 @@ Generate ONE SHORT natural interjection (2-6 words only) that shows you're engag
 Make it sound natural, not robotic. Examples: "Yeah, totally!", "That's wild!", "Wait, what?", "I see what you mean."
 
 Respond with ONLY the interjection phrase, nothing else."""
-    
+
     try:
         response = requests.post(
             OLLAMA_API_URL,
@@ -224,22 +250,31 @@ Respond with ONLY the interjection phrase, nothing else."""
             },
             timeout=30
         )
-        
+
         if response.status_code == 200:
             result = response.json()
             interjection = result.get("response", "").strip()
             interjection = interjection.replace('"', '').replace("*", '')
+            logger.debug(f"LLM interjection: {interjection}")
             return interjection[:50]
-        
+
     except Exception as e:
-        print(f"   Warning: LLM error {e}, using fallback")
-    
+        logger.warning(f"LLM error {e}, using fallback")
+
     return get_fallback_interjection(main_speaker_text)
 
-def get_fallback_interjection(main_speaker_text):
-    """Fast fallback interjection pool if Ollama is down"""
+
+def get_fallback_interjection(main_speaker_text: str) -> str:
+    """Fast fallback interjection pool if Ollama is down.
+
+    Args:
+        main_speaker_text: Context for selecting appropriate fallback.
+
+    Returns:
+        Fallback interjection string.
+    """
     keywords = main_speaker_text.lower().split()
-    
+
     if any(w in keywords for w in ["problem", "issue", "concerned", "worried"]):
         return random.choice(["That's concerning.", "I'm worried too.", "Yeah, I get it."])
     elif any(w in keywords for w in ["amazing", "incredible", "awesome", "great"]):
@@ -249,110 +284,128 @@ def get_fallback_interjection(main_speaker_text):
     else:
         return random.choice(["Yeah.", "Totally.", "Right.", "I hear you."])
 
+
 def get_user_input():
-    """Prompt user with file browser dialogs"""
-    print("=" * 60)
-    print("IndexTTS2 Multi-Speaker + LLM Interjections (On-Demand Calibration)")
-    print("=" * 60)
-    
+    """Prompt user with file browser dialogs.
+
+    Returns:
+        Tuple of (json_path, output_dir, final_output_path, speaker_paths).
+    """
+    logger.info("=" * 60)
+    logger.info("IndexTTS2 Multi-Speaker + LLM Interjections (On-Demand Calibration)")
+    logger.info("=" * 60)
+
     root = Tk()
     root.withdraw()
     root.attributes('-topmost', True)
-    
-    print("\nSelect JSON input file...")
+
+    logger.info("Select JSON input file...")
     json_path = filedialog.askopenfilename(
         title="Select JSON input file",
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         initialdir=os.getcwd()
     )
-    
+
     if not json_path:
-        print("Error: No JSON file selected.")
+        logger.error("No JSON file selected.")
         root.destroy()
         return None, None, None, None
-    
-    print(f"Selected JSON file: {json_path}")
-    
+
+    logger.info(f"Selected JSON file: {json_path}")
+
     with open(json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
-    
+
     speaker_files_required = set()
     for entry in entries:
         speaker_files_required.add(entry["voice_sample"])
-    
-    print(f"\nRequired speaker WAV files from JSON:")
+
+    logger.info("Required speaker WAV files from JSON:")
     for spk in sorted(speaker_files_required):
-        print(f"  - {spk}")
-    
-    print(f"\nSelect directory containing speaker WAV files...")
+        logger.info(f"  - {spk}")
+
+    logger.info("Select directory containing speaker WAV files...")
     speaker_dir = filedialog.askdirectory(
         title="Select directory containing speaker WAV files",
         initialdir=os.getcwd()
     )
-    
+
     if not speaker_dir:
-        print("Error: No speaker directory selected.")
+        logger.error("No speaker directory selected.")
         root.destroy()
         return None, None, None, None
-    
-    print(f"Selected speaker directory: {speaker_dir}")
-    
+
+    logger.debug(f"Selected speaker directory: {speaker_dir}")
+
     speaker_paths = {}
     missing_files = []
-    
+
     for spk_file in speaker_files_required:
         full_path = os.path.join(speaker_dir, spk_file)
         if os.path.exists(full_path):
             speaker_paths[spk_file] = full_path
-            print(f"  ✓ Found: {spk_file}")
+            logger.debug(f"  Found: {spk_file}")
         else:
             missing_files.append(spk_file)
-            print(f"  ✗ Missing: {spk_file}")
-    
+            logger.warning(f"  Missing: {spk_file}")
+
     if missing_files:
-        print(f"\nError: {len(missing_files)} speaker WAV file(s) not found:")
-        messagebox.showerror("Missing Files", 
-            f"The following speaker files are missing:\n" + "\n".join(missing_files))
+        logger.error(f"{len(missing_files)} speaker WAV file(s) not found:")
+        messagebox.showerror(
+            "Missing Files",
+            f"The following speaker files are missing:\n" + "\n".join(missing_files)
+        )
         root.destroy()
         return None, None, None, None
-    
-    print(f"\n✓ All {len(speaker_files_required)} required speaker files found!")
-    
-    print("\nSelect output directory...")
+
+    logger.info(f"All {len(speaker_files_required)} required speaker files found!")
+
+    logger.info("Select output directory...")
     output_dir = filedialog.askdirectory(
         title="Select output directory",
         initialdir=os.getcwd()
     )
-    
+
     if not output_dir:
-        print("Error: No output directory selected.")
+        logger.error("No output directory selected.")
         root.destroy()
         return None, None, None, None
-    
-    print(f"Selected output directory: {output_dir}")
-    
+
+    logger.debug(f"Selected output directory: {output_dir}")
+
     root.destroy()
-    
+
     while True:
         final_output_name = input("Enter final merged output filename (e.g., merged_podcast.wav): ").strip()
         if final_output_name:
             if not final_output_name.endswith(".wav"):
                 final_output_name += ".wav"
             break
-        print("Error: Filename cannot be empty.")
-    
+        logger.warning("Filename cannot be empty.")
+
     final_output_path = os.path.join(output_dir, final_output_name)
-    
+
     return json_path, output_dir, final_output_path, speaker_paths
 
-def synthesize_entry(entry, idx, output_dir, speaker_paths):
-    """Generate TTS output for a single entry"""
+
+def synthesize_entry(entry: dict, idx: int, output_dir: str, speaker_paths: dict) -> str:
+    """Generate TTS output for a single entry.
+
+    Args:
+        entry: JSON entry with text and speaker info.
+        idx: Entry index.
+        output_dir: Output directory.
+        speaker_paths: Speaker filename to path mapping.
+
+    Returns:
+        Path to generated WAV file.
+    """
     out_wav = os.path.join(output_dir, f"gen_{idx}.wav")
-    print(f"\n[{idx + 1}] Synthesizing: Speaker {entry['speaker']}")
-    print(f"    Text: {entry['text'][:60]}...")
-    
+    logger.info(f"[{idx + 1}] Synthesizing: Speaker {entry['speaker']}")
+    logger.debug(f"    Text: {entry['text'][:60]}...")
+
     spk_audio_path = speaker_paths[entry["voice_sample"]]
-    
+
     tts.infer(
         spk_audio_prompt=spk_audio_path,
         text=entry["text"],
@@ -365,15 +418,26 @@ def synthesize_entry(entry, idx, output_dir, speaker_paths):
     )
     return out_wav
 
-def add_interjection_to_audio(main_audio_path, main_text, interjection_text, interjector_voice_path, 
-                              output_dir, idx, trigger_info):
+
+def add_interjection_to_audio(main_audio_path: str, main_text: str, interjection_text: str,
+                              interjector_voice_path: str, output_dir: str, idx: int,
+                              trigger_info: dict) -> tuple:
+    """Generate and overlay interjection on main speaker's audio.
+
+    Args:
+        main_audio_path: Path to main speaker audio.
+        main_text: Main speaker's text.
+        interjection_text: Text to synthesize as interjection.
+        interjector_voice_path: Voice sample for interjection.
+        output_dir: Output directory.
+        idx: Segment index.
+        trigger_info: Trigger timing information.
+
+    Returns:
+        Tuple of (mixed audio, metadata dict).
     """
-    Generate and overlay interjection on main speaker's audio.
-    IMPROVED: Adds fade-in/out to prevent clicks and slight volume adjustment.
-    """
-    print(f"   └─ Adding LLM-generated interjection: '{interjection_text}'")
-    
-    # Generate interjection audio
+    logger.info(f"   Adding interjection: '{interjection_text}'")
+
     interjection_wav = os.path.join(output_dir, f"interjection_{idx}.wav")
     tts.infer(
         spk_audio_prompt=interjector_voice_path,
@@ -385,27 +449,17 @@ def add_interjection_to_audio(main_audio_path, main_text, interjection_text, int
         use_random=False,
         verbose=False
     )
-    
-    # Load audios
+
     main_audio = AudioSegment.from_wav(main_audio_path)
     interjection_audio = AudioSegment.from_wav(interjection_wav)
-    
-    # --- CROSS-FADE / SMOOTHING LOGIC ---
-    # 1. Smooth the edges of the interjection to prevent "pops"
-    #    (20ms fade in, 50ms fade out)
-    interjection_audio = interjection_audio.fade_in(20).fade_out(50)
-    
-    # 2. (Optional) Lower interjection volume slightly (-2dB) so it doesn't overpower
-    interjection_audio = interjection_audio - 2
-    # ------------------------------------
 
-    # Get position from trigger info
+    # Smooth edges to prevent pops
+    interjection_audio = interjection_audio.fade_in(20).fade_out(50)
+    interjection_audio = interjection_audio - 2  # Slight volume reduction
+
     position_ms = trigger_info["position_ms"]
-    
-    # Overlay at calculated position
     mixed = main_audio.overlay(interjection_audio, position=position_ms)
-    
-    # Create metadata
+
     metadata = {
         "interjection_text": interjection_text,
         "trigger_word": trigger_info["trigger_word"],
@@ -417,63 +471,68 @@ def add_interjection_to_audio(main_audio_path, main_text, interjection_text, int
         "interjection_position_percent": f"{(position_ms / trigger_info['audio_duration_ms'])*100:.1f}%",
         "audio_duration_ms": trigger_info["audio_duration_ms"]
     }
-    
-    print(f"      └─ Trigger word: '{trigger_info['trigger_word']}' ({trigger_info['trigger_category']}) @ {trigger_info['trigger_position_ms']}ms")
-    print(f"      └─ Interjection position: {position_ms}ms")
-    
+
+    logger.debug(f"      Trigger: '{trigger_info['trigger_word']}' ({trigger_info['trigger_category']}) @ {trigger_info['trigger_position_ms']}ms")
+    logger.debug(f"      Position: {position_ms}ms")
+
     return mixed, metadata
 
-def merge_with_interjections(json_entries, wav_files, output_dir, final_output_path, speaker_paths):
+
+def merge_with_interjections(json_entries: list, wav_files: list, output_dir: str,
+                             final_output_path: str, speaker_paths: dict) -> list:
+    """Main merge function with LLM-based interjections.
+
+    Args:
+        json_entries: List of JSON entries.
+        wav_files: List of generated WAV paths.
+        output_dir: Output directory.
+        final_output_path: Final output file path.
+        speaker_paths: Speaker paths mapping.
+
+    Returns:
+        List of interjection metadata.
     """
-    Main merge function with LLM-based interjections.
-    IMPROVED: Implements true cross-fading between main segments.
-    """
-    
-    print("\nMerging with LLM interjections (on-demand calibration)...")
-    
+    logger.info("Merging with LLM interjections...")
+
     merged_audio = None
     interjection_count = 0
     interjections_log = []
-    
-    # Configuration for segment transitions
-    CROSSFADE_DURATION = 150  # ms of overlap between speakers
-    
+
+    CROSSFADE_DURATION = 150
+
     for idx, (entry, wav_path) in enumerate(zip(json_entries, wav_files)):
-        print(f"\n  Processing segment {idx + 1}/{len(wav_files)}...")
-        
-        # Load main speaker audio
+        logger.info(f"Processing segment {idx + 1}/{len(wav_files)}...")
+
         main_audio = AudioSegment.from_wav(wav_path)
-        
-        # --- INTERJECTION LOGIC (Kept same, just calling the updated function) ---
+
         if random.random() < 0.6 and idx > 0:
             other_speakers = {
-                name: path for name, path in speaker_paths.items() 
+                name: path for name, path in speaker_paths.items()
                 if name != entry["voice_sample"]
             }
-            
+
             if other_speakers:
                 interjector_voice = random.choice(list(other_speakers.keys()))
                 interjector_path = other_speakers[interjector_voice]
                 interjector_idx = list(speaker_paths.keys()).index(interjector_voice)
-                
-                print(f"      └─ Calibrating {entry['speaker']} for interjection detection...")
+
+                logger.debug(f"      Calibrating {entry['speaker']} for interjection detection...")
                 seconds_per_word = calculate_seconds_per_word_from_audio(entry["text"], wav_path)
-                
+
                 trigger_info = calculate_interjection_timing_and_trigger(
-                    entry["text"], 
-                    wav_path, 
+                    entry["text"],
+                    wav_path,
                     seconds_per_word
                 )
-                
+
                 if trigger_info:
                     interjection_text = generate_interjection_llm(
                         entry["text"],
                         f"Speaker {interjector_idx}"
                     )
-                    
-                    # This calls our updated function with smoothing
+
                     main_audio, interjection_metadata = add_interjection_to_audio(
-                        wav_path, 
+                        wav_path,
                         entry["text"],
                         interjection_text,
                         interjector_path,
@@ -481,115 +540,104 @@ def merge_with_interjections(json_entries, wav_files, output_dir, final_output_p
                         idx,
                         trigger_info
                     )
-                    
+
                     interjection_metadata["segment_idx"] = idx
                     interjection_metadata["main_speaker"] = entry["speaker"]
                     interjection_metadata["interjecting_speaker"] = interjector_idx
                     interjections_log.append(interjection_metadata)
                     interjection_count += 1
-        
-        # --- MERGE LOGIC (UPDATED) ---
+
         if merged_audio is None:
             merged_audio = main_audio
         else:
-            # Pydub's append with crossfade automatically overlaps the end of A 
-            # and start of B by X milliseconds.
-            
-            # Safety check: Crossfade cannot be longer than the audio clips
             actual_crossfade = min(len(merged_audio), len(main_audio), CROSSFADE_DURATION)
-            
-            # If you want a tiny pause BEFORE the crossfade starts (optional):
-            # silence_padding = AudioSegment.silent(duration=100) 
-            # merged_audio = merged_audio + silence_padding
-            
             merged_audio = merged_audio.append(main_audio, crossfade=actual_crossfade)
-            
-    # Export
+
     merged_audio.export(final_output_path, format="wav", bitrate="320k")
-    print(f"\n✓ Merge complete with {interjection_count} LLM interjections!")
-    print(f"✓ Output: {final_output_path}")
-    
-    # Save interjections log
+    logger.info(f"Merge complete with {interjection_count} interjections!")
+    logger.info(f"Output: {final_output_path}")
+
     log_path = final_output_path.replace(".wav", "_interjections.json")
     with open(log_path, "w") as f:
         json.dump(interjections_log, f, indent=2)
-    
+
     return interjections_log
 
-def cleanup_temp_files(output_dir):
-    """Remove temporary generated files"""
-    print("\nCleaning up temporary files...")
+
+def cleanup_temp_files(output_dir: str) -> None:
+    """Remove temporary generated files.
+
+    Args:
+        output_dir: Directory containing temp files.
+    """
+    logger.info("Cleaning up temporary files...")
     for file in Path(output_dir).glob("gen_*.wav"):
         try:
             file.unlink()
-            print(f"  Removed: {file.name}")
-        except:
+            logger.debug(f"  Removed: {file.name}")
+        except Exception:
             pass
     for file in Path(output_dir).glob("interjection_*.wav"):
         try:
             file.unlink()
-        except:
+        except Exception:
             pass
 
+
 def main():
-    """Main execution flow"""
-    
-    print("\n" + "="*60)
-    print("Checking Ollama + Mistral 7B Setup...")
-    print("="*60)
-    
+    """Main execution flow."""
+    logger.info("=" * 60)
+    logger.info("Checking Ollama + Mistral 7B Setup...")
+    logger.info("=" * 60)
+
     if not ensure_mistral_loaded():
         return
-    
+
     json_path, output_dir, final_output_path, speaker_paths = get_user_input()
-    
+
     if json_path is None:
         return
-    
-    print(f"\n{'='*60}")
-    print(f"Configuration:")
-    print(f"  Input JSON: {json_path}")
-    print(f"  Output Directory: {output_dir}")
-    print(f"  Final Output: {final_output_path}")
-    print(f"  Interjection Model: Mistral 7B (4-bit via Ollama)")
-    print(f"  Calibration: On-demand (only for segments with interjections)")
-    print(f"  Timing: Actual audio measurement + trigger word detection")
-    print(f"  Audio Levels: Preserved (no normalization)")
-    print(f"  Interjection Attenuation: NONE (full volume)")
-    print(f"{'='*60}\n")
-    
+
+    logger.info("=" * 60)
+    logger.info("Configuration:")
+    logger.info(f"  Input JSON: {json_path}")
+    logger.info(f"  Output Directory: {output_dir}")
+    logger.info(f"  Final Output: {final_output_path}")
+    logger.info(f"  Interjection Model: Mistral 7B (4-bit via Ollama)")
+    logger.info("=" * 60)
+
     with open(json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
-    
-    print(f"Processing {len(entries)} entries with on-demand interjection calibration...\n")
-    
-    # SYNTHESIS PHASE: Generate all audio segments
+
+    logger.info(f"Processing {len(entries)} entries...")
+
     wav_files = []
     for idx, entry in enumerate(entries):
         try:
             wav_file = synthesize_entry(entry, idx, output_dir, speaker_paths)
             wav_files.append(wav_file)
         except Exception as e:
-            print(f"Error synthesizing entry {idx}: {e}")
+            logger.error(f"Error synthesizing entry {idx}: {e}")
             return
-    
-    # MERGE PHASE: Add interjections and merge
+
     try:
-        interjections_log = merge_with_interjections(entries, wav_files, output_dir, final_output_path, speaker_paths)
+        interjections_log = merge_with_interjections(
+            entries, wav_files, output_dir, final_output_path, speaker_paths
+        )
     except Exception as e:
-        print(f"Error merging files: {e}")
+        logger.error(f"Error merging files: {e}")
         return
-    
+
     cleanup_response = input("\nDelete temporary files? (y/n): ").strip().lower()
     if cleanup_response == 'y':
         cleanup_temp_files(output_dir)
-    
-    print(f"\n{'='*60}")
-    print("✓ Synthesis complete!")
-    print(f"Final output: {final_output_path}")
-    print(f"Interjections recorded: {len(interjections_log)}")
-    print(f"{'='*60}")
+
+    logger.info("=" * 60)
+    logger.info("Synthesis complete!")
+    logger.info(f"Final output: {final_output_path}")
+    logger.info(f"Interjections recorded: {len(interjections_log)}")
+    logger.info("=" * 60)
+
 
 if __name__ == "__main__":
     main()
-

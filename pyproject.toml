@@ -120,6 +120,10 @@ indextts = "indextts.cli:main"
 requires = ["hatchling >= 1.27.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+# The indextts package is inside voice-cloner-and-interjector subdirectory
+packages = ["voice-cloner-and-interjector/indextts"]
+
 [tool.uv]
 # Disable build isolation when building DeepSpeed from source.
 # NOTE: This is *necessary* so that DeepSpeed builds directly within our `.venv`,
