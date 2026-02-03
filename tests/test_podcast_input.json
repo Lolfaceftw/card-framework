@@ -1,0 +1,26 @@
+[
+    {
+        "speaker": "Test Speaker A",
+        "voice_sample": "sample_prompt.wav",
+        "use_emo_text": true,
+        "emo_text": "neutral, clear",
+        "emo_alpha": 0.6,
+        "text": "Welcome to our test podcast episode. Today we'll be testing the voice cloning system."
+    },
+    {
+        "speaker": "Test Speaker B",
+        "voice_sample": "sample_prompt.wav",
+        "use_emo_text": true,
+        "emo_text": "enthusiastic, warm",
+        "emo_alpha": 0.7,
+        "text": "That sounds exciting! I can't wait to see how well this works."
+    },
+    {
+        "speaker": "Test Speaker A",
+        "voice_sample": "sample_prompt.wav",
+        "use_emo_text": true,
+        "emo_text": "confident, measured",
+        "emo_alpha": 0.5,
+        "text": "Let's run through all the test cases and verify everything functions correctly."
+    }
+]
