@@ -1,0 +1,30 @@
+[
+  {
+    "interjection_text": "Interjection: Wow, really?",
+    "trigger_word": "Research shows past winners rarely stay winners, right?",
+    "trigger_category": "inquisitive",
+    "trigger_position_ms": 2967,
+    "trigger_position_percent": "22.1%",
+    "reaction_delay_ms": 350,
+    "interjection_position_ms": 3317,
+    "interjection_position_percent": "24.7%",
+    "audio_duration_ms": 13433,
+    "segment_idx": 3,
+    "main_speaker": "Speaker 0",
+    "interjecting_speaker": 2
+  },
+  {
+    "interjection_text": "That's wise advice!",
+    "trigger_word": "folks",
+    "trigger_category": "friendly",
+    "trigger_position_ms": 1409,
+    "trigger_position_percent": "12.3%",
+    "reaction_delay_ms": 541,
+    "interjection_position_ms": 1950,
+    "interjection_position_percent": "17.0%",
+    "audio_duration_ms": 11494,
+    "segment_idx": 4,
+    "main_speaker": "Speaker 2",
+    "interjecting_speaker": 1
+  }
+]

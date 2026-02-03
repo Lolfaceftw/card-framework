@@ -1,0 +1,44 @@
+[
+  {
+    "interjection_text": "Wow, that's intense!",
+    "trigger_word": "man?!",
+    "trigger_category": "question",
+    "trigger_position_ms": 4351,
+    "trigger_position_percent": "26.4%",
+    "reaction_delay_ms": 651,
+    "interjection_position_ms": 5002,
+    "interjection_position_percent": "30.3%",
+    "audio_duration_ms": 16486,
+    "segment_idx": 2,
+    "main_speaker": "Aatrox",
+    "interjecting_speaker": 0
+  },
+  {
+    "interjection_text": "Wow.",
+    "trigger_word": "offer",
+    "trigger_category": "statement",
+    "trigger_position_ms": 5558,
+    "trigger_position_percent": "29.9%",
+    "reaction_delay_ms": 437,
+    "interjection_position_ms": 5995,
+    "interjection_position_percent": "32.2%",
+    "audio_duration_ms": 18622,
+    "segment_idx": 4,
+    "main_speaker": "Aatrox",
+    "interjecting_speaker": 0
+  },
+  {
+    "interjection_text": "Wow, that's intense!",
+    "trigger_word": "defiance",
+    "trigger_category": "statement",
+    "trigger_position_ms": 1203,
+    "trigger_position_percent": "9.0%",
+    "reaction_delay_ms": 332,
+    "interjection_position_ms": 1535,
+    "interjection_position_percent": "11.5%",
+    "audio_duration_ms": 13317,
+    "segment_idx": 5,
+    "main_speaker": "Pantheon",
+    "interjecting_speaker": 1
+  }
+]

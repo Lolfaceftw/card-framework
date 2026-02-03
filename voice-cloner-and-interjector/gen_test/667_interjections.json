@@ -1,0 +1,30 @@
+[
+  {
+    "interjection_text": "Hmm, interesting point.",
+    "trigger_word": "the same power introduces ethical risks\u2014such as, you know, bias and misuse of personal data",
+    "trigger_category": "hesitant",
+    "trigger_position_ms": 7208,
+    "trigger_position_percent": "99.0%",
+    "reaction_delay_ms": 971,
+    "interjection_position_ms": 6779,
+    "interjection_position_percent": "93.1%",
+    "audio_duration_ms": 7279,
+    "segment_idx": 2,
+    "main_speaker": "A",
+    "interjecting_speaker": 0
+  },
+  {
+    "interjection_text": "Wow!",
+    "trigger_word": "and, um, that's truly exciting",
+    "trigger_category": "inquisitive",
+    "trigger_position_ms": 7407,
+    "trigger_position_percent": "99.2%",
+    "reaction_delay_ms": 188,
+    "interjection_position_ms": 6965,
+    "interjection_position_percent": "93.3%",
+    "audio_duration_ms": 7465,
+    "segment_idx": 4,
+    "main_speaker": "A",
+    "interjecting_speaker": 0
+  }
+]

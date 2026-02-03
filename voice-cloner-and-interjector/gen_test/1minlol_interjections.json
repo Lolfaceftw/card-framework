@@ -1,0 +1,44 @@
+[
+  {
+    "interjection_text": "Gotcha!",
+    "trigger_word": "ETFs",
+    "trigger_category": "question",
+    "trigger_position_ms": 1048,
+    "trigger_position_percent": "6.2%",
+    "reaction_delay_ms": 515,
+    "interjection_position_ms": 1563,
+    "interjection_position_percent": "9.2%",
+    "audio_duration_ms": 16974,
+    "segment_idx": 1,
+    "main_speaker": "Speaker 1",
+    "interjecting_speaker": 2
+  },
+  {
+    "interjection_text": "Interesting!",
+    "trigger_word": "misunderstanding",
+    "trigger_category": "problem",
+    "trigger_position_ms": 3220,
+    "trigger_position_percent": "30.5%",
+    "reaction_delay_ms": 524,
+    "interjection_position_ms": 3744,
+    "interjection_position_percent": "35.5%",
+    "audio_duration_ms": 10553,
+    "segment_idx": 2,
+    "main_speaker": "Speaker 2",
+    "interjecting_speaker": 0
+  },
+  {
+    "interjection_text": "Interesting point!",
+    "trigger_word": "takeaway",
+    "trigger_category": "question",
+    "trigger_position_ms": 659,
+    "trigger_position_percent": "5.7%",
+    "reaction_delay_ms": 648,
+    "interjection_position_ms": 1307,
+    "interjection_position_percent": "11.4%",
+    "audio_duration_ms": 11482,
+    "segment_idx": 4,
+    "main_speaker": "Speaker 2",
+    "interjecting_speaker": 2
+  }
+]
