@@ -1,0 +1,32 @@
+[
+    {
+        "start": 0.0,
+        "end": 2.5,
+        "speaker": "SPEAKER_00",
+        "text": "Hello there, how are you doing today?"
+    },
+    {
+        "start": 2.3,
+        "end": 5.0,
+        "speaker": "SPEAKER_01",
+        "text": "Hi, nice to meet you! I'm doing great."
+    },
+    {
+        "start": 5.5,
+        "end": 8.0,
+        "speaker": "SPEAKER_00",
+        "text": "That's wonderful to hear."
+    },
+    {
+        "start": 7.8,
+        "end": 10.5,
+        "speaker": "SPEAKER_01",
+        "text": "Thanks for asking, really appreciate it."
+    },
+    {
+        "start": 11.0,
+        "end": 14.0,
+        "speaker": "SPEAKER_00",
+        "text": "Let me tell you about this interesting project."
+    }
+]

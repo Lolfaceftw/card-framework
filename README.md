@@ -7,7 +7,8 @@
   <a href="#-abstract">Abstract</a> | 
   <a href="#-system-architecture">Architecture</a> | 
   <a href="#-installation">Installation</a> | 
-  <a href="#-usage-workflow">Usage</a>
+  <a href="#-usage-workflow">Usage</a> | 
+  <a href="#-testing">Testing</a>
 </div>
 
 <br/>
@@ -144,12 +145,92 @@ uv run tools/podcast/llm_context_vibe.py
 
 ---
 
+## 🧪 Testing
+
+The CARD framework includes a comprehensive test suite using **pytest** to validate both the Speaker Extraction and Voice Cloning modules.
+
+### Installing Test Dependencies
+
+```bash
+uv sync --extra dev
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+uv run python -m pytest tests/test_card_voice_integration.py -v --tb=short
+
+# Run with coverage report
+uv run python -m pytest tests/test_card_voice_integration.py -v --cov=CARD-SpeakerAudioExtraction --cov-report=term-missing
+
+# Run specific test categories
+uv run python -m pytest tests/test_card_voice_integration.py -v -k "CARD"           # CARD-SpeakerAudioExtraction tests
+uv run python -m pytest tests/test_card_voice_integration.py -v -k "Voice"          # Voice-cloner import tests
+uv run python -m pytest tests/test_card_voice_integration.py -v -k "Audio"          # AudioService tests
+uv run python -m pytest tests/test_card_voice_integration.py -v -k "Integration"    # Integration tests
+```
+
+### Test Structure
+
+| Test Class | Purpose |
+|------------|---------|
+| `TestCARDImports` | Verifies CARD separation modules are importable |
+| `TestCARDDiarization` | Tests diarization JSON parsing and overlap detection |
+| `TestCARDTargetedSeparator` | Tests `TargetedSpeakerSeparator` functionality |
+| `TestCARDCrossfade` | Tests audio crossfade utilities |
+| `TestVoiceClonerImports` | Verifies voice-cloner modules are importable |
+| `TestAudioService` | Tests timing calculations and segment merging |
+| `TestLLMService` | Tests LLM trigger detection with mocking |
+| `TestTTSService` | Tests TTS service structure |
+| `TestCardPipeline` | Tests pipeline orchestration |
+| `TestIntegration` | End-to-end workflow tests |
+
+### Adding New Tests
+
+1. **Create or edit test files** in the `tests/` directory following the naming convention `test_*.py`.
+
+2. **Use the existing fixtures** defined in `test_card_voice_integration.py`:
+   - `test_diarization_data` - Sample diarization JSON
+   - `test_podcast_data` - Sample podcast input
+   - `output_dir` - Test output directory
+   - `sample_audio_array` - Synthetic audio for testing
+
+3. **Follow the test class pattern**:
+   ```python
+   class TestMyNewFeature:
+       """Test description."""
+
+       def test_something(self, test_diarization_data: List[Dict]) -> None:
+           """Test that something works correctly."""
+           # Your test code here
+           assert result == expected
+   ```
+
+4. **Handle missing dependencies gracefully**:
+   ```python
+   def test_optional_feature(self) -> None:
+       try:
+           from optional_module import SomeClass
+           # Test code
+       except ImportError as e:
+           pytest.skip(f"Optional module not available: {e}")
+   ```
+
+5. **Run your new tests**:
+   ```bash
+   uv run python -m pytest tests/test_my_new_feature.py -v
+   ```
+
+---
+
 ## 📂 Project Structure
 
 *   `indextts/` - Core IndexTTS2 inference engine (Voice Cloner).
 *   `CARD-SpeakerAudioExtraction/` - The Audio2Script and Separation modules (SepFormer/Demucs integration).
 *   `tools/podcast/` - The CARD integration scripts (Mistral Backchanneling + Pipeline Orchestration).
 *   `checkpoints/` - Model weights.
+*   `tests/` - Test suite for CARD and Voice Cloning components.
 
 ---
 
