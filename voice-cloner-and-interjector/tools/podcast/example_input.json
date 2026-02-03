@@ -1,0 +1,42 @@
+[
+  {
+    "speaker": "Speaker 0",
+    "voice_sample": "speaker_0.mp3",
+    "use_emo_text": true,
+    "emo_text": "confident, clear",
+    "emo_alpha": 0.6,
+    "text": "I’m making the case for low‑cost, cap‑weighted total market index funds, okay? ... they’re simple, broadly diversified, tax efficient, and honestly their low fees plus minimal trading costs give most investors the best chance of long‑term success compared with typical active strategies."
+  },
+  {
+    "speaker": "Speaker 1",
+    "voice_sample": "speaker_1.mp3",
+    "use_emo_text": true,
+    "emo_text": "measured, precise",
+    "emo_alpha": 0.6,
+    "text": "I’ll add, just to be clear, that ETFs and index funds aren’t the same thing... many ETFs are active, and if you build a portfolio from core cap‑weighted funds you can often cut costs even further than a one‑ticket solution while keeping broad market exposure."
+  },
+  {
+    "speaker": "Speaker 2",
+    "voice_sample": "speaker_2.mp3",
+    "use_emo_text": true,
+    "emo_text": "practical, candid",
+    "emo_alpha": 0.6,
+    "text": "From a Canadian view, most assets are still in active funds, believe it or not... people often say they’re indexed but actually hold narrow thematic ETFs, and that misunderstanding leads to unintended concentration risk and worse long‑term outcomes."
+  },
+  {
+    "speaker": "Speaker 0",
+    "voice_sample": "speaker_0.mp3",
+    "use_emo_text": true,
+    "emo_text": "analytical, steady",
+    "emo_alpha": 0.6,
+    "text": "Research shows past winners rarely stay winners, right? ... and fees matter a lot, so Sharpe’s arithmetic and many empirical studies imply that after costs the average active dollar underperforms, meaning minimizing fees and trading drag is crucial."
+  },
+  {
+    "speaker": "Speaker 2",
+    "voice_sample": "speaker_2.mp3",
+    "use_emo_text": true,
+    "emo_text": "warm, direct",
+    "emo_alpha": 0.6,
+    "text": "So the practical takeaway, folks, is this: favor broad, low‑cost, diversified market exposure, and please resist chasing thematic hype... focus on a simple plan you can stick with over decades, and that will protect you from behavioral mistakes and fee erosion."
+  }
+]

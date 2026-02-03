@@ -1,0 +1,62 @@
+# Development Tools.
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+.idea/
+.vscode/
+
+# Environments.
+.venv*/
+venv*/
+conda_env*/
+
+# Python Bytecode.
+*.py[cod]
+
+# Distribution/Packaging.
+/build/
+/dist/
+*.egg-info/
+.pypirc
+
+# Operating System Junk.
+*.DS_Store
+Thumbs.db
+desktop.ini
+
+# IndexTTS.
+/cache/
+/checkpoints/*
+!/checkpoints/*.yaml
+!/checkpoints/*.vocab
+/outputs/
+
+# Large Audio/Video Files (exclude from repo).
+*.wav
+*.mp3
+*.mp4
+*.flac
+*.ogg
+*.m4a
+
+# Keep specific example audio files.
+!examples/voice_*.wav
+!examples/emo_*.wav
+
+# Large Generated Files.
+repomix-output.md
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Temporary/Generated Test Files.
+/gen_test/
+gen_*.wav
+interjection_*.wav
+calibration_*.wav
+
+# Logs.
+*.log
+logs/
