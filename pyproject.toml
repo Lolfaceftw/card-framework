@@ -100,6 +100,11 @@ speaker-extraction = [
   "pyloudnorm>=0.1.1",
   "rich>=14.0.0",
 ]
+# Development and testing dependencies
+dev = [
+  "pytest>=9.0.0",
+  "pytest-cov>=6.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/index-tts/index-tts"
