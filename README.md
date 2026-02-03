@@ -73,7 +73,7 @@ We use `uv` to manage the project's dependency environment.
 
 2.  **Clone the Repository:**
     ```bash
-    git clone https://github.com/index-tts/index-tts.git && cd index-tts
+    git clone https://github.com/Lolfaceftw/card-framework.git && cd card-framework
     git lfs pull
     ```
 
