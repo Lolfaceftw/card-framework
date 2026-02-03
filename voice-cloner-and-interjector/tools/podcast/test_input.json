@@ -1,0 +1,18 @@
+[
+    {
+        "speaker": "Host",
+        "voice_sample": "examples/voice_01.wav",
+        "use_emo_text": true,
+        "emo_text": "Warm welcoming slightly thoughtful with genuine fascination.",
+        "emo_alpha": 0.6,
+        "text": "Welcome back to the show. Today we are discussing the future of AI."
+    },
+    {
+        "speaker": "Guest",
+        "voice_sample": "examples/voice_02.wav",
+        "use_emo_text": true,
+        "emo_text": "Excited and fast-paced.",
+        "emo_alpha": 0.7,
+        "text": "It's great to be here! The pace of innovation is just exploding."
+    }
+]
