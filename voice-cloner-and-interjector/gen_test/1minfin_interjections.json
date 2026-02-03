@@ -1,0 +1,44 @@
+[
+  {
+    "interjection_text": "Got it!",
+    "trigger_word": "ETFs and index funds aren\u2019t the same thing... many ETFs are active",
+    "trigger_category": "inquisitive",
+    "trigger_position_ms": 6492,
+    "trigger_position_percent": "38.2%",
+    "reaction_delay_ms": 197,
+    "interjection_position_ms": 6689,
+    "interjection_position_percent": "39.4%",
+    "audio_duration_ms": 16985,
+    "segment_idx": 1,
+    "main_speaker": "Speaker 1",
+    "interjecting_speaker": 0
+  },
+  {
+    "interjection_text": "Huh, interesting!",
+    "trigger_word": "narrow thematic ETFs",
+    "trigger_category": "shocking",
+    "trigger_position_ms": 6228,
+    "trigger_position_percent": "61.4%",
+    "reaction_delay_ms": 176,
+    "interjection_position_ms": 6404,
+    "interjection_position_percent": "63.2%",
+    "audio_duration_ms": 10136,
+    "segment_idx": 2,
+    "main_speaker": "Speaker 2",
+    "interjecting_speaker": 1
+  },
+  {
+    "interjection_text": "Right, fees matter a lot.",
+    "trigger_word": "Research shows past winners rarely stay winners, right?",
+    "trigger_category": "inquisitive",
+    "trigger_position_ms": 2867,
+    "trigger_position_percent": "22.1%",
+    "reaction_delay_ms": 220,
+    "interjection_position_ms": 3087,
+    "interjection_position_percent": "23.8%",
+    "audio_duration_ms": 12980,
+    "segment_idx": 3,
+    "main_speaker": "Speaker 0",
+    "interjecting_speaker": 1
+  }
+]

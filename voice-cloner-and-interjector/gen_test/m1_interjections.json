@@ -1,0 +1,44 @@
+[
+  {
+    "interjection_text": "Interesting.",
+    "trigger_word": "merge",
+    "trigger_category": "statement",
+    "trigger_position_ms": 1470,
+    "trigger_position_percent": "20.5%",
+    "reaction_delay_ms": 620,
+    "interjection_position_ms": 2090,
+    "interjection_position_percent": "29.2%",
+    "audio_duration_ms": 7163,
+    "segment_idx": 1,
+    "main_speaker": "B",
+    "interjecting_speaker": 1
+  },
+  {
+    "interjection_text": "Understood.",
+    "trigger_word": "um",
+    "trigger_category": "filler",
+    "trigger_position_ms": 238,
+    "trigger_position_percent": "2.9%",
+    "reaction_delay_ms": 694,
+    "interjection_position_ms": 932,
+    "interjection_position_percent": "11.4%",
+    "audio_duration_ms": 8185,
+    "segment_idx": 2,
+    "main_speaker": "A",
+    "interjecting_speaker": 0
+  },
+  {
+    "interjection_text": "Huh?",
+    "trigger_word": "emotionally",
+    "trigger_category": "statement",
+    "trigger_position_ms": 3649,
+    "trigger_position_percent": "45.3%",
+    "reaction_delay_ms": 458,
+    "interjection_position_ms": 4107,
+    "interjection_position_percent": "51.0%",
+    "audio_duration_ms": 8057,
+    "segment_idx": 3,
+    "main_speaker": "B",
+    "interjecting_speaker": 1
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "interjection_text": "Gotcha!",
+    "trigger_word": "ETFs and index funds aren\u2019t the same thing",
+    "trigger_category": "inquisitive",
+    "trigger_position_ms": 5046,
+    "trigger_position_percent": "29.0%",
+    "reaction_delay_ms": 305,
+    "interjection_position_ms": 5351,
+    "interjection_position_percent": "30.7%",
+    "audio_duration_ms": 17427,
+    "segment_idx": 1,
+    "main_speaker": "Speaker 1",
+    "interjecting_speaker": 1
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "interjection_text": "Huh, that's interesting!",
+    "trigger_word": "merge",
+    "trigger_category": "problem",
+    "trigger_position_ms": 2114,
+    "trigger_position_percent": "27.7%",
+    "reaction_delay_ms": 495,
+    "interjection_position_ms": 2609,
+    "interjection_position_percent": "34.2%",
+    "audio_duration_ms": 7639,
+    "segment_idx": 1,
+    "main_speaker": "B",
+    "interjecting_speaker": 0
+  }
+]

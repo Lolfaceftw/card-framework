@@ -1,0 +1,55 @@
+# Audio Splitter Configuration File
+
+# Device
+device:
+  type: "mps"  # metal performance shaders for M4 Mac
+  fallback: "cpu"
+
+# Data
+data:
+  sample_rate: 16000
+  audio_format: "wav"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+
+# Model and its paths
+models:
+  base_dir: "models"
+  whisper:
+    model_name: "base"  # (tiny, base, small, medium, large)
+    compute_type: "float16"
+    batch_size: 16
+  speechbrain:
+    model_id: "speechbrain/spkrec-ecapa-voxceleb"
+    embedding_dim: 192
+  separation:
+    model_name: "mpariente/DPRNNTasNet-ks16_WHAM_sepclean"
+    sample_rate: 16000
+
+# Diarization
+diarization:
+  similarity_threshold: 0.75  # cosine similarity threshold for speaker matching
+  min_segment_duration: 0.5   # min segment duration in seconds
+  ema_alpha: 0.3              # EMA weight for speaker profiles
+
+# Separation
+separation:
+  max_speakers: 4             # max number of speakers to separate
+  chunk_size: 32000           # audio chunk size for processing
+
+# Attribution
+attribution:
+  min_confidence: 0.6         # min confidence for speaker attribution
+
+# Output
+output:
+  separated_dir: "outputs/separated"
+  diarized_dir: "outputs/diarized"
+  save_format: "wav"
+  include_timestamps: true
+
+# Logging
+logging:
+  level: "INFO"               # (DEBUG, INFO, WARNING, ERROR)
+  log_dir: "logs"
+  log_file: "audio_splitter.log"
