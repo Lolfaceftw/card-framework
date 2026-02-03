@@ -91,6 +91,11 @@ We use `uv` to manage the project's dependency environment.
     hf download IndexTeam/IndexTTS-2 --local-dir=checkpoints
     ```
 
+> [!IMPORTANT]
+> **Always run `uv run` from the project root directory** (`card-framework/` or `index-tts/`), not from subdirectories like `voice-cloner-and-interjector/` or `CARD-SpeakerAudioExtraction/`.
+>
+> Subdirectories may contain their own `.venv` folders which will cause `ModuleNotFoundError` for core packages like `indextts`. If you encounter import errors, ensure you are in the root directory and delete any nested `.venv` folders.
+
 ---
 
 ## 🚀 Usage Workflow
@@ -137,11 +142,34 @@ This stage combines IndexTTS2 for identity preservation and Mistral 7B for conve
 This script corresponds to Section 4.4, handling "Post-Hoc Acoustic Alignment" and "Context-Aware Response Generation."
 
 ```bash
-# Ensure you have your summarized JSON ready
-uv run tools/podcast/llm_context_vibe.py
+# Ensure you have your summarized JSON ready (run from project root)
+uv run voice-cloner-and-interjector/tools/podcast/llm_context_vibe.py
 ```
 
 *Note: This script uses the quantized Mistral model to detect trigger words (e.g., conflict, surprise) and inserts asynchronous overlaps.*
+
+### Logging Configuration
+
+All podcast tools use Python's built-in `logging` module with ISO 8601 timestamps. By default, only `INFO` level messages are displayed to keep the output clean.
+
+**Default output:**
+```
+[2026-02-03 19:53:17] [INFO   ] Checking Ollama + Mistral 7B Setup...
+[2026-02-03 19:53:17] [INFO   ] mistral:7b-instruct-q4_0 already loaded
+```
+
+**Enable DEBUG for verbose output (including LLM responses):**
+
+```bash
+# Windows (run from project root)
+set LOG_LEVEL=DEBUG
+uv run voice-cloner-and-interjector/tools/podcast/llm_context_vibe.py
+
+# Linux/Mac (run from project root)
+LOG_LEVEL=DEBUG uv run voice-cloner-and-interjector/tools/podcast/llm_context_vibe.py
+```
+
+The logger utility is located at `voice-cloner-and-interjector/tools/podcast/logger.py` and can be reused in other scripts.
 
 ---
 
@@ -226,10 +254,11 @@ uv run python -m pytest tests/test_card_voice_integration.py -v -k "Integration"
 
 ## 📂 Project Structure
 
-*   `indextts/` - Core IndexTTS2 inference engine (Voice Cloner).
+*   `voice-cloner-and-interjector/` - Voice Cloning and Podcast Generation module.
+    *   `indextts/` - Core IndexTTS2 inference engine (Voice Cloner).
+    *   `tools/podcast/` - The CARD integration scripts (Mistral Backchanneling + Pipeline Orchestration).
+    *   `checkpoints/` - Model weights for IndexTTS2.
 *   `CARD-SpeakerAudioExtraction/` - The Audio2Script and Separation modules (SepFormer/Demucs integration).
-*   `tools/podcast/` - The CARD integration scripts (Mistral Backchanneling + Pipeline Orchestration).
-*   `checkpoints/` - Model weights.
 *   `tests/` - Test suite for CARD and Voice Cloning components.
 
 ---

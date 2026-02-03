@@ -1,16 +1,22 @@
 import json
 import os
 import random
+import re
 import subprocess
+import time
 from pathlib import Path
 from tkinter import Tk, filedialog, messagebox
-from indextts.infer_v2 import IndexTTS2
-from pydub import AudioSegment
-import soundfile as sf
+
 import numpy as np
 import requests
-import time
-import re
+import soundfile as sf
+from pydub import AudioSegment
+
+from indextts.infer_v2 import IndexTTS2
+from tools.podcast.logger import get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
 
 # Initialize Index-TTS-2
 tts = IndexTTS2(
@@ -40,9 +46,9 @@ def check_ollama_running():
 def ensure_mistral_loaded():
     """Download Mistral 7B 4-bit if not already present"""
     if not check_ollama_running():
-        print("\n⚠ Ollama is not running!")
-        print("   Start Ollama with: ollama serve")
-        print("   Then run this script again.")
+        logger.info("\n⚠ Ollama is not running!")
+        logger.info("   Start Ollama with: ollama serve")
+        logger.info("   Then run this script again.")
         return False
     
     try:
@@ -51,14 +57,14 @@ def ensure_mistral_loaded():
         model_names = [m["name"] for m in models]
         
         if OLLAMA_MODEL not in model_names:
-            print(f"\nDownloading {OLLAMA_MODEL}... (this is a one-time setup, ~2-3 minutes)")
+            logger.info(f"\nDownloading {OLLAMA_MODEL}... (this is a one-time setup, ~2-3 minutes)")
             subprocess.run(["ollama", "pull", OLLAMA_MODEL], check=True)
-            print("✓ Mistral 7B loaded!")
+            logger.info("✓ Mistral 7B loaded!")
         else:
-            print(f"✓ {OLLAMA_MODEL} already loaded")
+            logger.info(f"✓ {OLLAMA_MODEL} already loaded")
         return True
     except Exception as e:
-        print(f"Error checking Ollama models: {e}")
+        logger.error(f"Error checking Ollama models: {e}")
         return False
 
 def calibrate_speaker_speech_rate(speaker_voice_path, speaker_name, emo_alpha, emo_text, 
@@ -77,10 +83,10 @@ def calibrate_speaker_speech_rate(speaker_voice_path, speaker_name, emo_alpha, e
     
     # Check if already calibrated with these exact parameters
     if cache_key in SPEAKER_CALIBRATION:
-        print(f"      └─ Using cached calibration: {speaker_name} (emo_alpha={emo_alpha}, emo_text='{emo_text[:30]}...')")
+        logger.info(f"      └─ Using cached calibration: {speaker_name} (emo_alpha={emo_alpha}, emo_text='{emo_text[:30]}...')")
         return SPEAKER_CALIBRATION[cache_key]
     
-    print(f"      └─ Calibrating {speaker_name} with emotion: emo_alpha={emo_alpha}, emo_text='{emo_text[:30]}...'")
+    logger.info(f"      └─ Calibrating {speaker_name} with emotion: emo_alpha={emo_alpha}, emo_text='{emo_text[:30]}...'")
     
     # Calibration text: simple, known word count
     calibration_text = "The quick brown fox jumps over the lazy dog. This is a test."
@@ -110,8 +116,8 @@ def calibrate_speaker_speech_rate(speaker_voice_path, speaker_name, emo_alpha, e
     # Cache result
     SPEAKER_CALIBRATION[cache_key] = seconds_per_word
     
-    print(f"         └─ Calibrated: {seconds_per_word:.4f} sec/word")
-    print(f"            (Audio: {audio_duration_seconds:.2f}s for {word_count} words with emotion: {emo_text})")
+    logger.info(f"         └─ Calibrated: {seconds_per_word:.4f} sec/word")
+    logger.info(f"            (Audio: {audio_duration_seconds:.2f}s for {word_count} words with emotion: {emo_text})")
     
     # Clean up calibration file
     try:
@@ -204,8 +210,8 @@ def calculate_interjection_timing(main_text, main_audio_path, seconds_per_word):
     # Safety check: ensure position is within audio bounds
     interjection_position = max(0, min(interjection_position, audio_duration_ms - 500))
     
-    print(f"      └─ Trigger detected: '{selected_trigger['word']}' ({selected_trigger['category']}) @ {trigger_time_ms}ms")
-    print(f"      └─ Interjection scheduled at: {interjection_position}ms (after {reaction_delay}ms reaction)")
+    logger.info(f"      └─ Trigger detected: '{selected_trigger['word']}' ({selected_trigger['category']}) @ {trigger_time_ms}ms")
+    logger.info(f"      └─ Interjection scheduled at: {interjection_position}ms (after {reaction_delay}ms reaction)")
     
     return interjection_position
 
@@ -245,7 +251,7 @@ Respond with ONLY the interjection phrase, nothing else."""
             return interjection[:50]
         
     except Exception as e:
-        print(f"   Warning: LLM error {e}, using fallback")
+        logger.info(f"   Warning: LLM error {e}, using fallback")
     
     return get_fallback_interjection(main_speaker_text)
 
@@ -264,15 +270,15 @@ def get_fallback_interjection(main_speaker_text):
 
 def get_user_input():
     """Prompt user with file browser dialogs"""
-    print("=" * 60)
-    print("IndexTTS2 Multi-Speaker + LLM Interjections (Emotion-Aware Calibration)")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("IndexTTS2 Multi-Speaker + LLM Interjections (Emotion-Aware Calibration)")
+    logger.info("=" * 60)
     
     root = Tk()
     root.withdraw()
     root.attributes('-topmost', True)
     
-    print("\nSelect JSON input file...")
+    logger.info("\nSelect JSON input file...")
     json_path = filedialog.askopenfilename(
         title="Select JSON input file",
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
@@ -280,11 +286,11 @@ def get_user_input():
     )
     
     if not json_path:
-        print("Error: No JSON file selected.")
+        logger.info("Error: No JSON file selected.")
         root.destroy()
         return None, None, None, None
     
-    print(f"Selected JSON file: {json_path}")
+    logger.info(f"Selected JSON file: {json_path}")
     
     with open(json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
@@ -293,22 +299,22 @@ def get_user_input():
     for entry in entries:
         speaker_files_required.add(entry["voice_sample"])
     
-    print(f"\nRequired speaker WAV files from JSON:")
+    logger.info(f"\nRequired speaker WAV files from JSON:")
     for spk in sorted(speaker_files_required):
-        print(f"  - {spk}")
+        logger.info(f"  - {spk}")
     
-    print(f"\nSelect directory containing speaker WAV files...")
+    logger.info(f"\nSelect directory containing speaker WAV files...")
     speaker_dir = filedialog.askdirectory(
         title="Select directory containing speaker WAV files",
         initialdir=os.getcwd()
     )
     
     if not speaker_dir:
-        print("Error: No speaker directory selected.")
+        logger.info("Error: No speaker directory selected.")
         root.destroy()
         return None, None, None, None
     
-    print(f"Selected speaker directory: {speaker_dir}")
+    logger.info(f"Selected speaker directory: {speaker_dir}")
     
     speaker_paths = {}
     missing_files = []
@@ -317,32 +323,32 @@ def get_user_input():
         full_path = os.path.join(speaker_dir, spk_file)
         if os.path.exists(full_path):
             speaker_paths[spk_file] = full_path
-            print(f"  ✓ Found: {spk_file}")
+            logger.info(f"  ✓ Found: {spk_file}")
         else:
             missing_files.append(spk_file)
-            print(f"  ✗ Missing: {spk_file}")
+            logger.info(f"  ✗ Missing: {spk_file}")
     
     if missing_files:
-        print(f"\nError: {len(missing_files)} speaker WAV file(s) not found:")
+        logger.info(f"\nError: {len(missing_files)} speaker WAV file(s) not found:")
         messagebox.showerror("Missing Files", 
             f"The following speaker files are missing:\n" + "\n".join(missing_files))
         root.destroy()
         return None, None, None, None
     
-    print(f"\n✓ All {len(speaker_files_required)} required speaker files found!")
+    logger.info(f"\n✓ All {len(speaker_files_required)} required speaker files found!")
     
-    print("\nSelect output directory...")
+    logger.info("\nSelect output directory...")
     output_dir = filedialog.askdirectory(
         title="Select output directory",
         initialdir=os.getcwd()
     )
     
     if not output_dir:
-        print("Error: No output directory selected.")
+        logger.info("Error: No output directory selected.")
         root.destroy()
         return None, None, None, None
     
-    print(f"Selected output directory: {output_dir}")
+    logger.info(f"Selected output directory: {output_dir}")
     
     root.destroy()
     
@@ -352,7 +358,7 @@ def get_user_input():
             if not final_output_name.endswith(".wav"):
                 final_output_name += ".wav"
             break
-        print("Error: Filename cannot be empty.")
+        logger.info("Error: Filename cannot be empty.")
     
     final_output_path = os.path.join(output_dir, final_output_name)
     
@@ -361,8 +367,8 @@ def get_user_input():
 def synthesize_entry(entry, idx, output_dir, speaker_paths):
     """Generate TTS output for a single entry"""
     out_wav = os.path.join(output_dir, f"gen_{idx}.wav")
-    print(f"\n[{idx + 1}] Synthesizing: Speaker {entry['speaker']}")
-    print(f"    Text: {entry['text'][:60]}...")
+    logger.info(f"\n[{idx + 1}] Synthesizing: Speaker {entry['speaker']}")
+    logger.info(f"    Text: {entry['text'][:60]}...")
     
     spk_audio_path = speaker_paths[entry["voice_sample"]]
     
@@ -384,7 +390,7 @@ def add_interjection_to_audio(main_audio_path, main_text, interjection_text, int
     Generate and overlay interjection on main speaker's audio.
     Uses emotion-calibrated timing.
     """
-    print(f"   └─ Adding LLM-generated interjection: '{interjection_text}'")
+    logger.info(f"   └─ Adding LLM-generated interjection: '{interjection_text}'")
     
     # Generate interjection audio
     interjection_wav = os.path.join(output_dir, f"interjection_{idx}.wav")
@@ -416,13 +422,13 @@ def merge_with_interjections(json_entries, wav_files, output_dir, final_output_p
     Main merge function with LLM-based interjections using emotion-aware calibrated speech rates.
     """
     
-    print("\nMerging with LLM interjections (emotion-calibrated timing)...")
+    logger.info("\nMerging with LLM interjections (emotion-calibrated timing)...")
     
     merged_audio = None
     interjection_count = 0
     
     for idx, (entry, wav_path) in enumerate(zip(json_entries, wav_files)):
-        print(f"\n  Processing segment {idx + 1}/{len(wav_files)}...")
+        logger.info(f"\n  Processing segment {idx + 1}/{len(wav_files)}...")
         
         # Load main speaker audio (no normalization)
         main_audio = AudioSegment.from_wav(wav_path)
@@ -476,16 +482,16 @@ def merge_with_interjections(json_entries, wav_files, output_dir, final_output_p
     
     # Export
     merged_audio.export(final_output_path, format="wav", bitrate="320k")
-    print(f"\n✓ Merge complete with {interjection_count} LLM interjections (emotion-aware timing)!")
-    print(f"✓ Output: {final_output_path}")
+    logger.info(f"\n✓ Merge complete with {interjection_count} LLM interjections (emotion-aware timing)!")
+    logger.info(f"✓ Output: {final_output_path}")
 
 def cleanup_temp_files(output_dir):
     """Remove temporary generated files"""
-    print("\nCleaning up temporary files...")
+    logger.info("\nCleaning up temporary files...")
     for file in Path(output_dir).glob("gen_*.wav"):
         try:
             file.unlink()
-            print(f"  Removed: {file.name}")
+            logger.info(f"  Removed: {file.name}")
         except:
             pass
     for file in Path(output_dir).glob("interjection_*.wav"):
@@ -502,9 +508,9 @@ def cleanup_temp_files(output_dir):
 def main():
     """Main execution flow"""
     
-    print("\n" + "="*60)
-    print("Checking Ollama + Mistral 7B Setup...")
-    print("="*60)
+    logger.info("\n" + "="*60)
+    logger.info("Checking Ollama + Mistral 7B Setup...")
+    logger.info("="*60)
     
     if not ensure_mistral_loaded():
         return
@@ -514,24 +520,24 @@ def main():
     if json_path is None:
         return
     
-    print(f"\n{'='*60}")
-    print(f"Configuration:")
-    print(f"  Input JSON: {json_path}")
-    print(f"  Output Directory: {output_dir}")
-    print(f"  Final Output: {final_output_path}")
-    print(f"  Interjection Model: Mistral 7B (4-bit via Ollama)")
-    print(f"  Timing Strategy: Smart trigger word + emotion-calibrated speech rate")
-    print(f"  Audio Levels: Preserved (no normalization)")
-    print(f"  Interjection Attenuation: NONE (full volume)")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Configuration:")
+    logger.info(f"  Input JSON: {json_path}")
+    logger.info(f"  Output Directory: {output_dir}")
+    logger.info(f"  Final Output: {final_output_path}")
+    logger.info(f"  Interjection Model: Mistral 7B (4-bit via Ollama)")
+    logger.info(f"  Timing Strategy: Smart trigger word + emotion-calibrated speech rate")
+    logger.info(f"  Audio Levels: Preserved (no normalization)")
+    logger.info(f"  Interjection Attenuation: NONE (full volume)")
+    logger.info(f"{'='*60}\n")
     
     with open(json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
     
-    print(f"Processing {len(entries)} entries with emotion-aware interjections...\n")
+    logger.info(f"Processing {len(entries)} entries with emotion-aware interjections...\n")
     
     # CALIBRATION PHASE: Measure each speaker's speech rate per emotion
-    print("CALIBRATION PHASE: Measuring each speaker's speech rate for each emotion profile...\n")
+    logger.info("CALIBRATION PHASE: Measuring each speaker's speech rate for each emotion profile...\n")
     speaker_calibration = {}
     unique_emotion_profiles = {}
     
@@ -567,7 +573,7 @@ def main():
         )
         speaker_calibration[cache_key] = secs_per_word
     
-    print(f"\n✓ Calibration complete for {len(speaker_calibration)} emotion profile(s)\n")
+    logger.info(f"\n✓ Calibration complete for {len(speaker_calibration)} emotion profile(s)\n")
     
     # SYNTHESIS PHASE: Generate all audio segments
     wav_files = []
@@ -576,24 +582,25 @@ def main():
             wav_file = synthesize_entry(entry, idx, output_dir, speaker_paths)
             wav_files.append(wav_file)
         except Exception as e:
-            print(f"Error synthesizing entry {idx}: {e}")
+            logger.error(f"Error synthesizing entry {idx}: {e}")
             return
     
     # MERGE PHASE: Add interjections and merge
     try:
         merge_with_interjections(entries, wav_files, output_dir, final_output_path, speaker_paths, speaker_calibration)
     except Exception as e:
-        print(f"Error merging files: {e}")
+        logger.error(f"Error merging files: {e}")
         return
     
     cleanup_response = input("\nDelete temporary files? (y/n): ").strip().lower()
     if cleanup_response == 'y':
         cleanup_temp_files(output_dir)
     
-    print(f"\n{'='*60}")
-    print("✓ Synthesis complete!")
-    print(f"Final output: {final_output_path}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info("✓ Synthesis complete!")
+    logger.info(f"Final output: {final_output_path}")
+    logger.info(f"{'='*60}")
 
 if __name__ == "__main__":
     main()
+

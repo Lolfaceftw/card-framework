@@ -1,10 +1,23 @@
+"""
+Basic multi-speaker podcast synthesis module.
+
+Generates TTS audio for multiple speakers from JSON input,
+then merges the segments into a single output file.
+"""
+
 import json
 import os
 from pathlib import Path
 from tkinter import Tk, filedialog, messagebox
-from indextts.infer_v2 import IndexTTS2
-import soundfile as sf
+
 import numpy as np
+import soundfile as sf
+
+from indextts.infer_v2 import IndexTTS2
+from tools.podcast.logger import get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
 
 # Load configuration for IndexTTS2
 tts = IndexTTS2(
@@ -15,98 +28,106 @@ tts = IndexTTS2(
     use_cuda_kernel=True
 )
 
+
 def get_user_input():
-    """Prompt user with file browser dialogs for JSON input, output directory, and speaker WAV files"""
-    print("=" * 60)
-    print("IndexTTS2 Multi-Speaker Voice Synthesis")
-    print("=" * 60)
-    
+    """Prompt user with file browser dialogs for JSON input, output directory, and speaker WAV files.
+
+    Returns:
+        Tuple of (json_path, output_dir, final_output_path, speaker_paths) or
+        (None, None, None, None) if user cancels.
+    """
+    logger.info("=" * 60)
+    logger.info("IndexTTS2 Multi-Speaker Voice Synthesis")
+    logger.info("=" * 60)
+
     # Initialize Tkinter root window (hidden)
     root = Tk()
     root.withdraw()
     root.attributes('-topmost', True)
-    
+
     # Get JSON input file
-    print("\nSelect JSON input file...")
+    logger.info("Select JSON input file...")
     json_path = filedialog.askopenfilename(
         title="Select JSON input file",
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         initialdir=os.getcwd()
     )
-    
+
     if not json_path:
-        print("Error: No JSON file selected.")
+        logger.error("No JSON file selected.")
         root.destroy()
         return None, None, None, None
-    
-    print(f"Selected JSON file: {json_path}")
-    
+
+    logger.info(f"Selected JSON file: {json_path}")
+
     # Load JSON to get speaker WAV requirements
     with open(json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
-    
+
     speaker_files_required = set()
     for entry in entries:
         speaker_files_required.add(entry["voice_sample"])
-    
-    print(f"\nRequired speaker WAV files from JSON:")
+
+    logger.info("Required speaker WAV files from JSON:")
     for spk in sorted(speaker_files_required):
-        print(f"  - {spk}")
-    
+        logger.info(f"  - {spk}")
+
     # Prompt user to select speaker WAV files
-    print(f"\nSelect directory containing speaker WAV files...")
+    logger.info("Select directory containing speaker WAV files...")
     speaker_dir = filedialog.askdirectory(
         title="Select directory containing speaker WAV files",
         initialdir=os.getcwd()
     )
-    
+
     if not speaker_dir:
-        print("Error: No speaker directory selected.")
+        logger.error("No speaker directory selected.")
         root.destroy()
         return None, None, None, None
-    
-    print(f"Selected speaker directory: {speaker_dir}")
-    
+
+    logger.debug(f"Selected speaker directory: {speaker_dir}")
+
     # Verify all required speaker files exist in the selected directory
     speaker_paths = {}
     missing_files = []
-    
+
     for spk_file in speaker_files_required:
         full_path = os.path.join(speaker_dir, spk_file)
         if os.path.exists(full_path):
             speaker_paths[spk_file] = full_path
-            print(f"  ✓ Found: {spk_file}")
+            logger.debug(f"  Found: {spk_file}")
         else:
             missing_files.append(spk_file)
-            print(f"  ✗ Missing: {spk_file}")
-    
+            logger.warning(f"  Missing: {spk_file}")
+
     if missing_files:
-        print(f"\nError: {len(missing_files)} speaker WAV file(s) not found in selected directory:")
+        logger.error(f"{len(missing_files)} speaker WAV file(s) not found:")
         for mf in missing_files:
-            print(f"  - {mf}")
-        messagebox.showerror("Missing Files", 
-            f"The following speaker files are missing:\n" + "\n".join(missing_files))
+            logger.error(f"  - {mf}")
+        messagebox.showerror(
+            "Missing Files",
+            f"The following speaker files are missing:\n" + "\n".join(missing_files)
+        )
         root.destroy()
         return None, None, None, None
-    
-    print(f"\n✓ All {len(speaker_files_required)} required speaker files found!")
-    
+
+    logger.info(f"All {len(speaker_files_required)} required speaker files found!")
+
     # Get output directory
-    print("\nSelect output directory...")
+    logger.info("Select output directory...")
     output_dir = filedialog.askdirectory(
         title="Select output directory",
         initialdir=os.getcwd()
     )
-    
+
     if not output_dir:
-        print("Error: No output directory selected.")
+        logger.error("No output directory selected.")
         root.destroy()
         return None, None, None, None
-    
-    print(f"Selected output directory: {output_dir}")
-    
+
+    logger.debug(f"Selected output directory: {output_dir}")
+
     root.destroy()
-    
+
     # Get final output filename
     while True:
         final_output_name = input("Enter final merged output filename (e.g., merged_podcast.wav): ").strip()
@@ -114,21 +135,32 @@ def get_user_input():
             if not final_output_name.endswith(".wav"):
                 final_output_name += ".wav"
             break
-        print("Error: Filename cannot be empty.")
-    
+        logger.warning("Filename cannot be empty.")
+
     final_output_path = os.path.join(output_dir, final_output_name)
-    
+
     return json_path, output_dir, final_output_path, speaker_paths
 
+
 def synthesize_entry(entry, idx, output_dir, speaker_paths):
-    """Generate TTS output for a single entry"""
+    """Generate TTS output for a single entry.
+
+    Args:
+        entry: JSON entry with text and speaker info.
+        idx: Entry index.
+        output_dir: Directory to save output WAV.
+        speaker_paths: Mapping of speaker filenames to full paths.
+
+    Returns:
+        Path to generated WAV file.
+    """
     out_wav = os.path.join(output_dir, f"gen_{idx}.wav")
-    print(f"\n[{idx + 1}] Synthesizing: Speaker {entry['speaker']}")
-    print(f"    Text: {entry['text'][:60]}...")
-    
+    logger.info(f"[{idx + 1}] Synthesizing: Speaker {entry['speaker']}")
+    logger.debug(f"    Text: {entry['text'][:60]}...")
+
     # Get full path to speaker WAV from speaker_paths mapping
     spk_audio_path = speaker_paths[entry["voice_sample"]]
-    
+
     # Synthesize with TTS2 using parameters from JSON
     tts.infer(
         spk_audio_prompt=spk_audio_path,
@@ -142,55 +174,67 @@ def synthesize_entry(entry, idx, output_dir, speaker_paths):
     )
     return out_wav
 
+
 def merge_wavs(wav_paths, output_path):
-    """Merge multiple WAV files sequentially"""
-    print("\nMerging audio files...")
+    """Merge multiple WAV files sequentially.
+
+    Args:
+        wav_paths: List of WAV file paths to merge.
+        output_path: Path for merged output file.
+    """
+    logger.info("Merging audio files...")
     merged_audio = []
     samplerate = None
-    
+
     for i, path in enumerate(wav_paths):
-        print(f"  Adding segment {i + 1}/{len(wav_paths)}")
+        logger.debug(f"  Adding segment {i + 1}/{len(wav_paths)}")
         audio, sr = sf.read(path)
         if samplerate is None:
             samplerate = sr
         elif samplerate != sr:
             raise ValueError(f"Sample rate mismatch: {sr} vs {samplerate}")
         merged_audio.append(audio)
-    
+
     merged_audio = np.concatenate(merged_audio)
     sf.write(output_path, merged_audio, samplerate)
-    print(f"✓ Merge complete. Output: {output_path}")
+    logger.info(f"Merge complete. Output: {output_path}")
+
 
 def cleanup_temp_files(wav_paths):
-    """Remove temporary generated files"""
-    print("\nCleaning up temporary files...")
+    """Remove temporary generated files.
+
+    Args:
+        wav_paths: List of temporary WAV file paths to remove.
+    """
+    logger.info("Cleaning up temporary files...")
     for path in wav_paths:
         try:
             os.remove(path)
-            print(f"  Removed: {path}")
+            logger.debug(f"  Removed: {path}")
         except Exception as e:
-            print(f"  Warning: Could not remove {path}: {e}")
+            logger.warning(f"Could not remove {path}: {e}")
+
 
 def main():
-    """Main execution flow"""
+    """Main execution flow."""
     json_path, output_dir, final_output_path, speaker_paths = get_user_input()
-    
+
     if json_path is None:
         return
-    
-    print(f"\n{'='*60}")
-    print(f"Configuration:")
-    print(f"  Input JSON: {json_path}")
-    print(f"  Output Directory: {output_dir}")
-    print(f"  Final Output: {final_output_path}")
-    print(f"{'='*60}\n")
-    
+
+    logger.info("=" * 60)
+    logger.info("Configuration:")
+    logger.info(f"  Input JSON: {json_path}")
+    logger.info(f"  Output Directory: {output_dir}")
+    logger.info(f"  Final Output: {final_output_path}")
+    logger.info("=" * 60)
+
     # Read JSON input
     with open(json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
-    
-    print(f"Processing {len(entries)} entries...\n")
-    
+
+    logger.info(f"Processing {len(entries)} entries...")
+
     wav_files = []
     # Synthesize each segment
     for idx, entry in enumerate(entries):
@@ -198,25 +242,26 @@ def main():
             wav_file = synthesize_entry(entry, idx, output_dir, speaker_paths)
             wav_files.append(wav_file)
         except Exception as e:
-            print(f"Error synthesizing entry {idx}: {e}")
+            logger.error(f"Error synthesizing entry {idx}: {e}")
             return
-    
+
     # Merge sequentially into one output file
     try:
         merge_wavs(wav_files, final_output_path)
     except Exception as e:
-        print(f"Error merging files: {e}")
+        logger.error(f"Error merging files: {e}")
         return
-    
+
     # Clean up temporary files
     cleanup_response = input("\nDelete temporary segment files? (y/n): ").strip().lower()
     if cleanup_response == 'y':
         cleanup_temp_files(wav_files)
-    
-    print(f"\n{'='*60}")
-    print("✓ Synthesis complete!")
-    print(f"Final output saved to: {final_output_path}")
-    print(f"{'='*60}")
+
+    logger.info("=" * 60)
+    logger.info("Synthesis complete!")
+    logger.info(f"Final output saved to: {final_output_path}")
+    logger.info("=" * 60)
+
 
 if __name__ == "__main__":
     main()
