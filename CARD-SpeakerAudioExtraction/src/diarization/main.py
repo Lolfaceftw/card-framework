@@ -1,73 +1,62 @@
-#!/usr/bin/env python3
-"""
-Main script to run speaker diarization with Whisper medium model.
-"""
-
-from pathlib import Path
+import os
+import argparse
+import subprocess
 import sys
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from src.diarization.diarization import SpeakerDiarization
-
-
 def main():
-    # Project paths
-    project_root = Path(__file__).parent.parent.parent
-    audio_file = project_root / "data" / "custom" / "PrimeagenLex.wav"
-    output_dir = project_root / "outputs"
-    
-    print("="*80)
-    print("Unsupervised Speaker Diarization Pipeline")
-    print("Using Whisper Large Model")
-    print("="*80)
-    print(f"Audio file: {audio_file}")
-    print(f"Output directory: {output_dir}")
-    print("="*80)
-    
-    # Check if audio file exists
-    if not audio_file.exists():
-        print(f"[ERROR] Audio file not found: {audio_file}")
-        return
-    
-    # Initialize diarizer with medium Whisper model
-    diarizer = SpeakerDiarization(
-        whisper_model="large",          # Using large
-        similarity_threshold=0.45,      # Lower = fewer unique speakers
-        ema_alpha=0.3,                  # Lower = more stable profiles
-        min_speakers=2,                 # Expected minimum speakers
-        max_speakers=2                  # Expected maximum speakers
-    )
-    
-    # Run diarization
-    results = diarizer.diarize(str(audio_file), output_dir=str(output_dir))
-    
-    # Print summary
-    print("\n" + "="*80)
-    print("DIARIZATION SUMMARY")
-    print("="*80)
-    
-    speakers = set(r['speaker'] for r in results if r['speaker'] != "SPEAKER_UNKNOWN")
-    print(f"Total segments: {len(results)}")
-    print(f"Unique speakers: {len(speakers)}")
-    if results:
-        print(f"Duration: {results[-1]['end']:.2f} seconds ({results[-1]['end']/60:.1f} minutes)")
-    
-    print("\n" + "="*80)
-    print("PREVIEW (First 10 segments)")
-    print("="*80)
-    
-    preview = diarizer.format_output(results[:10])
-    print(preview)
-    
-    if len(results) > 10:
-        print(f"\n... ({len(results) - 10} more segments)")
-    
-    print("\n" + "="*80)
-    print(f"Full results saved to: {output_dir}")
-    print("="*80)
+    parser = argparse.ArgumentParser(description="CARD Pipeline Wrapper")
+    parser.add_argument("--input", required=True, help="Path to the full podcast audio file")
+    parser.add_argument("--device", default="cuda", help="Device to run on (cuda/cpu)")
+    parser.add_argument("--batch-size", default="2", help="Reduce to 1 if crashing, increase if hardware is good")
+    args = parser.parse_args()
 
+    # 1. Path Handling
+    input_path = os.path.abspath(args.input)
+    if not os.path.exists(input_path):
+        print(f"[ERROR] Input file not found: {input_path}")
+        sys.exit(1)
+
+    print(f"--- STARTING CARD AUDIO PIPELINE ---")
+    print(f"Input: {input_path}")
+    print(f"Hardware Mode: {args.device} (Batch: {args.batch_size})")
+
+    # 2. DYNAMIC LIBRARY FIX (The "Crash Preventer")
+    # We prepare the environment variables BEFORE running the script
+    current_env = os.environ.copy()
+    try:
+        # Find site-packages
+        site_packages = next(p for p in sys.path if 'site-packages' in p)
+        nvidia_path = os.path.join(site_packages, 'nvidia')
+        
+        cudnn_lib = os.path.join(nvidia_path, 'cudnn', 'lib')
+        cublas_lib = os.path.join(nvidia_path, 'cublas', 'lib')
+        
+        if os.path.exists(cudnn_lib):
+            print(f"[INFO] Injecting cuDNN lib path: {cudnn_lib}")
+            # Add to LD_LIBRARY_PATH in the environment dict
+            current_ld = current_env.get('LD_LIBRARY_PATH', '')
+            current_env['LD_LIBRARY_PATH'] = f"{cudnn_lib}:{cublas_lib}:{current_ld}"
+    except Exception as e:
+        print(f"[WARN] Could not auto-detect NVIDIA libs: {e}")
+
+    # 3. Construct the command
+    cmd = [
+        sys.executable, "diarize.py",
+        "-a", input_path,
+        "--device", args.device,
+        "--batch-size", args.batch_size,
+        "--suppress_numerals"
+    ]
+
+    # 4. Execution
+    try:
+        # Pass 'env=current_env' so the child process sees the libraries immediately
+        subprocess.run(cmd, check=True, env=current_env)
+        print(f"\n[SUCCESS] Processing complete.")
+        print(f"Check the input folder for .txt and .srt outputs.")
+    except subprocess.CalledProcessError as e:
+        print(f"\n[FAILURE] The pipeline crashed with error code {e.returncode}.")
+        print("Tip: If it was an OOM (Out of Memory) error, try running with --batch-size 1")
 
 if __name__ == "__main__":
     main()
