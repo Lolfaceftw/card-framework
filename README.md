@@ -4,11 +4,11 @@
 </div>
 
 <div align="center">
-  <a href="#-abstract">Abstract</a> | 
-  <a href="#-system-architecture">Architecture</a> | 
-  <a href="#-installation">Installation</a> | 
-  <a href="#-usage-workflow">Usage</a> | 
-  <a href="#-testing">Testing</a>
+  <a href="#abstract">Abstract</a> | 
+  <a href="#system-architecture">Architecture</a> | 
+  <a href="#installation">Installation</a> | 
+  <a href="#usage-workflow">Usage</a> | 
+  <a href="#testing">Testing</a>
 </div>
 
 <br/>
@@ -24,7 +24,7 @@
 
 ---
 
-## 📖 Abstract
+## 📖Abstract
 
 The exponential growth of long-form podcasting creates a consumption bottleneck, as listeners lack efficient means to digest multi-speaker content within limited timeframes. Current summarization approaches, whether text-based or extractive audio clipping, fail to preserve the immersive, prosodic nature of conversational audio.
 
@@ -38,7 +38,7 @@ The outcome is a functional prototype that validates the feasibility of duration
 
 ---
 
-## 🏗️ System Architecture
+## 🏗️System Architecture
 
 The CARD paradigm shifts from extraction to resynthesis through a four-stage pipeline:
 
@@ -63,7 +63,7 @@ The CARD paradigm shifts from extraction to resynthesis through a four-stage pip
 
 ---
 
-## ⚙️ Installation
+## ⚙️Installation
 
 We use `uv` to manage the project's dependency environment.
 
@@ -98,7 +98,7 @@ We use `uv` to manage the project's dependency environment.
 
 ---
 
-## 🚀 Usage Workflow
+## 🚀Usage Workflow
 
 ### Phase 1: Speaker Audio Extraction
 Extract clean reference audio and speaker embeddings from your raw podcast file. This implements the **Targeted Separation** methodology described in Chapter 4.2.
@@ -173,7 +173,7 @@ The logger utility is located at `voice-cloner-and-interjector/tools/podcast/log
 
 ---
 
-## 🧪 Testing
+## 🧪Testing
 
 The CARD framework includes a comprehensive test suite using **pytest** to validate both the Speaker Extraction and Voice Cloning modules.
 
@@ -252,7 +252,7 @@ uv run python -m pytest tests/test_card_voice_integration.py -v -k "Integration"
 
 ---
 
-## 📂 Project Structure
+## 📂Project Structure
 
 *   `voice-cloner-and-interjector/` - Voice Cloning and Podcast Generation module.
     *   `indextts/` - Core IndexTTS2 inference engine (Voice Cloner).
@@ -263,7 +263,7 @@ uv run python -m pytest tests/test_card_voice_integration.py -v -k "Integration"
 
 ---
 
-## 📚 Citation
+## 📚Citation
 
 If you use the CARD framework or the IndexTTS2 engine in your research, please cite:
 
