@@ -1,22 +1,22 @@
 import json
 import os
 import argparse
-from typing import List, Literal
-from pydantic import BaseModel, Field
-from openai import OpenAI
+import typing
 import logging
+from typing import List
+import google.generativeai as genai
+from pydantic import BaseModel, Field
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
-# --- Data Structures for Strict JSON Output ---
+# --- Data Structures (FIXED for Gemini) ---
 class DialogueLine(BaseModel):
-    speaker: str = Field(..., description="The speaker label (e.g., SPEAKER_00, SPEAKER_01).")
-    text: str = Field(..., description="The summarized conversational line (10-15 seconds long).")
-    emo_text: str = Field(..., description="A short, natural-language description of the emotion (e.g., 'excited and fast-paced', 'thoughtful and slow').")
-    emo_alpha: float = Field(0.6, description="Intensity of the emotion (0.5 to 0.9).")
-    # voice_sample will be injected post-generation based on the speaker ID
+    speaker: str = Field(..., description="The speaker label (e.g., SPEAKER_00).")
+    text: str = Field(..., description="The summarized conversational line (10-15 seconds).")
+    emo_text: str = Field(..., description="Emotion description (e.g., 'Warm', 'Shocked').")
+    emo_alpha: float = Field(..., description="Intensity (0.5 to 0.9).") 
 
 class PodcastScript(BaseModel):
     dialogue: List[DialogueLine]
@@ -26,16 +26,11 @@ class PodcastScript(BaseModel):
 def load_transcript(input_data: str) -> str:
     """Loads JSON string OR file path and converts to text block."""
     if input_data.strip().startswith("{") or input_data.strip().startswith("["):
-        # It's a JSON string already
         data = json.loads(input_data)
     else:
-        # It's a file path
         with open(input_data, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-    # Handle the structure mismatch here or in the orchestrator
-    # If the orchestrator sent {"segments": [...]}, we use that.
-    # If it's a list, we wrap it.
     if isinstance(data, list):
         segments = data
     else:
@@ -49,54 +44,75 @@ def load_transcript(input_data: str) -> str:
 
     return full_text
 
-def generate_summary(transcript_text: str, api_key: str) -> PodcastScript:
-    """Sends transcript to LLM and forces structured JSON output."""
-    client = OpenAI(api_key=api_key)
+def generate_summary(transcript_text: str, api_key: str) -> dict:
+    """Sends transcript to Gemini 1.5 Flash and forces JSON output."""
+    
+    genai.configure(api_key=api_key)
+    
+    generation_config = {
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 64,
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json",
+        "response_schema": PodcastScript
+    }
 
-    system_prompt = """
-    You are an expert podcast editor and creative writer for the CARD (Constraint-aware Audio Resynthesis) project.
-
-    YOUR GOAL:
-    Take a raw transcript and rewrite it into a highly engaging, concise podcast summary that preserves the original "vibe" and information but reduces the length to roughly 1/5th of the original.
-
-    CONSTRAINTS:
-    1. **Format**: Output must be a strictly formatted JSON array.
-    2. **Dialogue**: Keep the conversation natural. Use short sentences. Avoid "summary language" (e.g., do not say "The speaker discusses..."). Instead, write the actual dialogue they would say.
-    3. **Emotions**: You must annotate every line with `emo_text`. Describe the tone, pace, and feeling (e.g., "Warm welcoming," "Shocked and high-pitched," "Skeptical").
-    4. **Speaker Consistency**: Use the exact speaker labels (SPEAKER_00, SPEAKER_01) found in the input.
-    5. **Duration**: Each line of dialogue should represent about 10-15 seconds of speech.
-    """
-
-    logger.info("Sending transcript to LLM for summarization and emotion annotation...")
-
-    completion = client.beta.chat.completions.parse(
-        model="gpt-4o-2024-08-06", # Or gpt-4-turbo. High intelligence required for emotion inference.
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Here is the raw transcript:\n\n{transcript_text}"},
-        ],
-        response_format=PodcastScript,
+    model = genai.GenerativeModel(
+        model_name="gemini-flash-latest",
+        generation_config=generation_config,
+        system_instruction="""
+        You are an expert podcast editor. 
+        Rewrite the transcript into a concise, engaging summary script (approx 1/5th length).
+        
+        CONSTRAINTS:
+        1. Keep it conversational and natural (short sentences).
+        2. Use exact speaker labels (SPEAKER_00, etc.) from the input.
+        3. Annotate every line with 'emo_text' describing the tone.
+        4. Each line should be ~10-15 seconds of speech.
+        5. 'emo_alpha' must be a float between 0.5 and 0.9.
+        """
     )
 
-    return completion.choices[0].message.parsed
+    logger.info("Sending transcript to Gemini 1.5 Flash...")
+    
+    try:
+        response = model.generate_content(f"Here is the raw transcript:\n\n{transcript_text}")
+        json_output = json.loads(response.text)
+        return json_output
+        
+    except Exception as e:
+        logger.error(f"Gemini generation failed: {e}")
+        raise e
 
-def post_process_script(script: PodcastScript, voice_sample_dir: str) -> List[dict]:
-    """Injects file paths and ensures final JSON schema compliance."""
+def post_process_script(script_data: dict, voice_sample_dir: str) -> List[dict]:
+    """Injects file paths."""
     final_output = []
+    
+    dialogue_list = script_data.get('dialogue', [])
 
-    for line in script.dialogue:
-        # Construct the path to the reference audio extracted in Phase 1
-        # Assumes file naming convention: output_dir/SPEAKER_XX.wav
-        voice_path = os.path.join(voice_sample_dir, f"{line.speaker}.wav")
+    for line in dialogue_list:
+        # Flexible handling if line is dict (JSON) or Pydantic object
+        if isinstance(line, dict):
+            spk = line.get('speaker')
+            txt = line.get('text')
+            emo = line.get('emo_text')
+            alpha = line.get('emo_alpha', 0.6) # We apply default here safely
+        else:
+            spk = line.speaker
+            txt = line.text
+            emo = line.emo_text
+            alpha = getattr(line, 'emo_alpha', 0.6)
 
-        # Build the final dict
+        voice_path = os.path.join(voice_sample_dir, f"{spk}.wav")
+
         entry = {
-            "speaker": line.speaker,
-            "voice_sample": voice_path.replace("\\", "/"), # Ensure forward slashes
+            "speaker": spk,
+            "voice_sample": voice_path.replace("\\", "/"),
             "use_emo_text": True,
-            "emo_text": line.emo_text,
-            "emo_alpha": line.emo_alpha,
-            "text": line.text
+            "emo_text": emo,
+            "emo_alpha": alpha,
+            "text": txt
         }
         final_output.append(entry)
 
@@ -105,37 +121,34 @@ def post_process_script(script: PodcastScript, voice_sample_dir: str) -> List[di
 # --- CLI Entry Point ---
 
 def main():
-    parser = argparse.ArgumentParser(description="CARD Script Summarizer & Emotion Annotator")
-    parser.add_argument("--transcript", required=True, help="Path to input WhisperX JSON transcript")
-    parser.add_argument("--voice-dir", required=True, help="Directory where separated speaker audios are stored")
-    parser.add_argument("--output", default="summarized_script.json", help="Path to save output JSON")
-    parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY"), help="OpenAI API Key")
+    parser = argparse.ArgumentParser(description="CARD Script Summarizer (Gemini Edition)")
+    parser.add_argument("--transcript", required=True, help="Path to input JSON transcript")
+    parser.add_argument("--voice-dir", required=True, help="Directory for voice samples")
+    parser.add_argument("--output", default="summarized_script.json", help="Output path")
+    parser.add_argument("--api-key", default=os.environ.get("GEMINI_API_KEY"), help="Google API Key")
 
     args = parser.parse_args()
 
     if not args.api_key:
-        logger.error("No API Key provided. Set OPENAI_API_KEY env var or pass --api-key.")
+        logger.error("No API Key found. Set GEMINI_API_KEY or pass --api-key.")
         return
 
-    # 1. Load
-    logger.info(f"Loading transcript from {args.transcript}")
+    logger.info(f"Loading: {args.transcript}")
     raw_text = load_transcript(args.transcript)
 
-    # 2. Generate (LLM)
     try:
-        structured_script = generate_summary(raw_text, args.api_key)
+        structured_data = generate_summary(raw_text, args.api_key)
+        final_json = post_process_script(structured_data, args.voice_dir)
+        
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(final_json, f, indent=2)
+            
+        logger.info(f"Success! Output: {args.output}")
+        
     except Exception as e:
-        logger.error(f"LLM Generation failed: {e}")
-        return
-
-    # 3. Post-Process (Add paths)
-    final_json = post_process_script(structured_script, args.voice_dir)
-
-    # 4. Save
-    with open(args.output, 'w', encoding='utf-8') as f:
-        json.dump(final_json, f, indent=2)
-
-    logger.info(f"Success! Summarized script saved to {args.output}")
+        logger.error(f"Pipeline Failed: {e}")
+        import sys
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

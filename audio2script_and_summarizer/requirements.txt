@@ -6,3 +6,5 @@ git+https://github.com/oliverguhr/deepmultilingualpunctuation.git
 git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
 openai
 pydantic
+google-generativeai
+pydub

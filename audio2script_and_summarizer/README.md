@@ -1,6 +1,6 @@
 # Audio2Script + Summarizer Integration Prototype
 
-An isolated, end-to-end pipeline that ingests raw podcast audio, performs speaker diarization, and outputs a duration-constrained, speaker-aware JSON summary.
+An isolated, end-to-end pipeline that ingests raw podcast audio, performs speaker diarization, splits audio by speaker, and outputs a duration-constrained, speaker-aware JSON summary.
 
 ## 🛠️ Prerequisites
 
@@ -37,14 +37,23 @@ An isolated, end-to-end pipeline that ingests raw podcast audio, performs speake
 
 ## 🚀 Usage
 
-You must provide an OpenAI API Key for the summarization stage.
+You must provide a Generative AI API Key (Gemini or OpenAI) for the summarization stage.
 
 **Run the Pipeline:**
 ```bash
-python run_pipeline.py --input "path/to/podcast.wav" --openai-key "sk-..."
+python run_pipeline.py --input "path/to/podcast.wav" --api-key "AIzaSy..."
+
+```
+
+**What Happens:**
+
+1. **Diarization:** Creates `podcast.json` (Speaker timestamps).
+2. **Splitting:** Creates `podcast_voices/` folder with 30s samples for each speaker.
+3. **Summarization:** Creates `podcast_summary.json` (The final script).
 
 **Options:**
 
 * `--input`: Path to `.wav`, `.mp3`, or `.m4a` file.
-* `--openai-key`: Your API key (can also be set via `OPENAI_API_KEY` env var).
+* `--api-key`: Your API key (can also be set via `LLM_API_KEY` env var).
 * `--device`: `cuda` (default) or `cpu`.
+* `--voice-dir`: (Optional) Custom folder output for voice samples.
