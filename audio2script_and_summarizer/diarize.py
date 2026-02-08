@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import json
+import subprocess
 
 import faster_whisper
 import torch
@@ -35,7 +36,7 @@ mtypes = {"cpu": "int8", "cuda": "float16"}
 
 pid = os.getpid()
 temp_outputs_dir = f"temp_outputs_{pid}"
-temp_path = os.path.join(os.getcwd(), "temp_outputs")
+temp_path = os.path.join(os.getcwd(), temp_outputs_dir)
 os.makedirs(temp_path, exist_ok=True)
 
 # Initialize parser
@@ -48,8 +49,7 @@ parser.add_argument(
     action="store_false",
     dest="stemming",
     default=True,
-    help="Disables source separation."
-    "This helps with long files that don't contain a lot of music.",
+    help="Disables source separation. Use this to skip Demucs processing.",
 )
 
 parser.add_argument(
@@ -57,8 +57,7 @@ parser.add_argument(
     action="store_true",
     dest="suppress_numerals",
     default=False,
-    help="Suppresses Numerical Digits."
-    "This helps the diarization accuracy but converts all digits into written text.",
+    help="Suppresses Numerical Digits.",
 )
 
 parser.add_argument(
@@ -73,8 +72,7 @@ parser.add_argument(
     type=int,
     dest="batch_size",
     default=8,
-    help="Batch size for batched inference, reduce if you run out of memory, "
-    "set to 0 for original whisper longform inference",
+    help="Batch size for batched inference",
 )
 
 parser.add_argument(
@@ -82,7 +80,7 @@ parser.add_argument(
     type=str,
     default=None,
     choices=whisper_langs,
-    help="Language spoken in the audio, specify None to perform language detection",
+    help="Language spoken in the audio",
 )
 
 parser.add_argument(
@@ -103,8 +101,8 @@ args = parser.parse_args()
 language = process_language_arg(args.language, args.model_name)
 
 if args.stemming:
-    # Isolate vocals from the rest of the audio
-
+    # Isolate vocals from the rest of the audio using Demucs
+    print("[INFO] Separating vocals with Demucs...")
     return_code = os.system(
         f'python -m demucs.separate -n htdemucs --two-stems=vocals --jobs 0 "{args.audio}" -o "{temp_outputs_dir}" --device "{args.device}"'
     )
@@ -123,11 +121,24 @@ if args.stemming:
             "vocals.wav",
         )
 else:
-    vocal_target = args.audio
+    # SKIP DEMUCS but ensure standard WAV format (16kHz mono)
+    # This prevents issues if the input is MP3 or has weird sample rates.
+    print("[INFO] Skipping Demucs. Converting input to standard 16kHz WAV...")
+    vocal_target = os.path.join(temp_outputs_dir, "processed_input.wav")
+    
+    # Use ffmpeg to convert: -ac 1 (mono), -ar 16000 (16kHz)
+    try:
+        subprocess.run([
+            "ffmpeg", "-y", "-i", args.audio,
+            "-ac", "1", "-ar", "16000",
+            vocal_target
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        print("[WARN] FFMPEG conversion failed. Attempting to use original file.")
+        vocal_target = args.audio
 
 
 # Transcribe the audio file
-
 whisper_model = faster_whisper.WhisperModel(
     args.model_name, device=args.device, compute_type=mtypes[args.device]
 )
@@ -156,13 +167,13 @@ else:
 
 full_transcript = "".join(segment.text for segment in transcript_segments)
 
-# --- MEMORY FLUSH (Required for preventing crashes on low-VRAM GPUs) ---
+# --- MEMORY FLUSH ---
 import gc
 print("[INFO] Clearing Whisper from VRAM...")
 del whisper_model, whisper_pipeline
-gc.collect()             # Force Python to free RAM immediately
-torch.cuda.empty_cache() # Force PyTorch to free VRAM immediately
-# ----------------------------------------------------------------------
+gc.collect()             
+torch.cuda.empty_cache() 
+# --------------------
 
 # Forced Alignment
 alignment_model, alignment_tokenizer = load_alignment_model(
@@ -209,17 +220,12 @@ torch.cuda.empty_cache()
 wsm = get_words_speaker_mapping(word_timestamps, speaker_ts, "start")
 
 if info.language in punct_model_langs:
-    # restoring punctuation in the transcript to help realign the sentences
     punct_model = PunctuationModel(model="kredor/punctuate-all")
-
     words_list = list(map(lambda x: x["word"], wsm))
-
     labled_words = punct_model.predict(words_list, chunk_size=230)
 
     ending_puncts = ".?!"
     model_puncts = ".,;:!?"
-
-    # We don't want to punctuate U.S.A. with a period. Right?
     is_acronym = lambda x: re.fullmatch(r"\b(?:[a-zA-Z]\.){2,}", x)
 
     for word_dict, labeled_tuple in zip(wsm, labled_words):
@@ -233,11 +239,9 @@ if info.language in punct_model_langs:
             if word.endswith(".."):
                 word = word.rstrip(".")
             word_dict["word"] = word
-
 else:
     logging.warning(
         f"Punctuation restoration is not available for {info.language} language."
-        " Using the original punctuation."
     )
 
 wsm = get_realigned_ws_mapping_with_punctuation(wsm)
@@ -251,7 +255,6 @@ with open(f"{os.path.splitext(args.audio)[0]}.srt", "w", encoding="utf-8-sig") a
 
 grouped_segments = []
 if ssm:
-    # Start with the first segment
     current_seg = {
         "speaker": ssm[0]["speaker"],
         "start_time": ssm[0]["start_time"],
@@ -261,11 +264,9 @@ if ssm:
     
     for next_seg in ssm[1:]:
         if next_seg["speaker"] == current_seg["speaker"]:
-            # SAME SPEAKER: Append text and extend end time
             current_seg["text"] = current_seg["text"].strip() + " " + next_seg["text"].strip()
             current_seg["end_time"] = next_seg["end_time"]
         else:
-            # NEW SPEAKER: Save current and start new
             grouped_segments.append(current_seg)
             current_seg = {
                 "speaker": next_seg["speaker"],
@@ -273,10 +274,8 @@ if ssm:
                 "end_time": next_seg["end_time"],
                 "text": next_seg["text"]
             }
-    # Don't forget the last one
     grouped_segments.append(current_seg)
 
-# Save the GROUPED list to JSON
 json_path = f"{os.path.splitext(args.audio)[0]}.json"
 print(f"[INFO] Saving grouped transcript to {json_path}...")
 

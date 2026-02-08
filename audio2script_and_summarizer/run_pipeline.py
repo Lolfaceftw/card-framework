@@ -3,15 +3,25 @@ import argparse
 import subprocess
 import sys
 import shutil
+import torch  # <--- Added to check for GPU
 
 def main():
+    # Detect hardware automatically
+    # If users have NVIDIA drivers but no GPU, this safely falls back to CPU
+    detected_device = "cuda" if torch.cuda.is_available() else "cpu"
+
     parser = argparse.ArgumentParser(description="CARD Audio2Script and Summarizer")
     parser.add_argument("--input", required=True, help="Path to input podcast audio")
-    parser.add_argument("--device", default="cuda", help="Device to run diarization on (cuda/cpu)")
+    
+    # [CHANGED] Now defaults to whatever torch detects, instead of hardcoded "cuda"
+    parser.add_argument("--device", default=detected_device, help=f"Device to run on (auto-detected: {detected_device})")
+    
     parser.add_argument("--api-key", help="LLM Provider API Key (Gemini, OpenAI, etc.)")
     parser.add_argument("--voice-dir", help="Optional override for voice directory")
     
     args = parser.parse_args()
+
+    print(f"[INFO] Running on device: {args.device.upper()}")
 
     # 1. API KEY CHECK
     api_key = args.api_key or os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -25,7 +35,7 @@ def main():
         print(f"[ERROR] Input file not found: {input_path}")
         return
 
-    # Env setup for WSL/Linux GPU support
+    # Env setup for WSL/Linux GPU support (Standard NVIDIA fix)
     current_env = os.environ.copy()
     try:
         site_packages = next(p for p in sys.path if 'site-packages' in p)
@@ -41,20 +51,14 @@ def main():
     # ==========================================
     # PATH SETUP
     # ==========================================
-    # Defines the base name (e.g., /path/to/inputs/podcast)
     base_name = os.path.splitext(input_path)[0]
-    
-    # 1. Diarization JSON Output (Same folder as input)
     diarization_json = f"{base_name}.json"
     
-    # 2. Voice Samples Directory (Same folder as input)
-    # If user didn't specify --voice-dir, create a folder named "[filename]_voices" next to the audio
     if args.voice_dir:
         voice_dir = args.voice_dir
     else:
         voice_dir = f"{base_name}_voices"
 
-    # 3. Summary Output (Same folder as input)
     summary_output = f"{base_name}_summary.json"
 
 
@@ -65,12 +69,16 @@ def main():
     print(f"🚀 STAGE 1: Diarization")
     print("="*50)
     
+    # Determine batch size based on device
+    # CPU cannot handle batching well, so we default to 1
+    batch_size = "2" if args.device == "cuda" else "1"
+    
     try:
         subprocess.run([
             sys.executable, "diarize.py",
             "-a", input_path,
             "--device", args.device,
-            "--batch-size", "2" 
+            "--batch-size", batch_size 
         ], check=True, env=current_env)
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Stage 1 crashed with code {e.returncode}")
