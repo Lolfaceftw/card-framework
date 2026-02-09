@@ -1,0 +1,170 @@
+[
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Determined",
+    "emo_alpha": 0.7,
+    "text": "Welcome. We're diving into the essential case for index funds today. It\u2019s a foundational topic, and having Dan and Mark here will bring new elements to the discussion."
+  },
+  {
+    "speaker": "SPEAKER_01",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_01.wav",
+    "use_emo_text": true,
+    "emo_text": "Reflective",
+    "emo_alpha": 0.6,
+    "text": "It\u2019s funny, we\u2019ve been making this argument for years, but the approach you took in your video was refreshing. The basic reality is, most of the public still doesn't know this."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Engaged",
+    "emo_alpha": 0.7,
+    "text": "Exactly. We thought everyone knew, but the viewership shows that people are actively searching for this information. It\u2019s vital to lay out the core facts."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Assertive",
+    "emo_alpha": 0.8,
+    "text": "Most investors should use low-cost index funds. Anyone who disagrees is either misinformed, conflicted, or simply wrong. This case relies on six simple but powerful points."
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Informative",
+    "emo_alpha": 0.7,
+    "text": "We need to clarify what an index fund is: typically a market capitalization-weighted fund replicating the total market. This is crucial because 80% of Canadian assets are still in active funds."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Analytical",
+    "emo_alpha": 0.8,
+    "text": "The first point is cost efficiency. The average index fund fee is 0.19%, compared to active funds often closer to 0.85% for F-class funds."
+  },
+  {
+    "speaker": "SPEAKER_01",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_01.wav",
+    "use_emo_text": true,
+    "emo_text": "Serious",
+    "emo_alpha": 0.8,
+    "text": "These higher fees translate directly to lower returns. As Sharpe proved, before costs, active and passive returns are equal. After costs, active must underperform. It\u2019s just arithmetic."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Concerned",
+    "emo_alpha": 0.7,
+    "text": "It's not just fees; active funds often have higher transaction costs. And shockingly, only 31% of Canadians know that index funds are cheaper."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Highlighted",
+    "emo_alpha": 0.8,
+    "text": "The second key point is broad diversification. Active funds hold fewer stocks, which is dangerous because stock returns are positively skewed."
+  },
+  {
+    "speaker": "SPEAKER_01",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_01.wav",
+    "use_emo_text": true,
+    "emo_text": "Shocked",
+    "emo_alpha": 0.9,
+    "text": "Bessembinder\u2019s data is mind-blowing: over 50% of US stocks historically delivered negative lifetime returns. If you start picking, your chances of choosing a loser are very high."
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Skeptical",
+    "emo_alpha": 0.7,
+    "text": "Index funds guarantee you hold the winners. Trying to pick the 31% of stocks that actually beat the market means you'll likely capture the losers, driving your whole portfolio down."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Empirical",
+    "emo_alpha": 0.8,
+    "text": "This leads to the third point: investment returns. Most active funds underperform the index, even before fees, due to this stock skewness."
+  },
+  {
+    "speaker": "SPEAKER_01",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_01.wav",
+    "use_emo_text": true,
+    "emo_text": "Explanatory",
+    "emo_alpha": 0.7,
+    "text": "Skill persistence is low. Managers who outperform often close their funds or their skill is absorbed by fees due to diseconomies of scale as assets pour in."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Calming",
+    "emo_alpha": 0.7,
+    "text": "Index funds also offer tax efficiency and simplicity. Investing is a 'loser's game,' as Charlie Ellis said; the goal is minimizing mistakes, not chasing huge wins."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Conclusive",
+    "emo_alpha": 0.8,
+    "text": "Finally, indexing is consistent with foundational finance theory, from Markowitz to Sharpe and Fama. The evidence and the theory both strongly support owning the total market."
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Warning",
+    "emo_alpha": 0.7,
+    "text": "We must distinguish true indexing from 'passive in name only.' Thematic index funds, like the cannabis or ARK examples, often launch at peak excitement and deliver staggeringly poor performance."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Finalizing",
+    "emo_alpha": 0.7,
+    "text": "That\u2019s the case: low fees, broad diversification, superior long-term returns, simplicity, and theoretical consistency. It\u2019s time for more Canadians to adopt this approach."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Grateful",
+    "emo_alpha": 0.6,
+    "text": "I want to thank everyone who reached out regarding my health. I received the pathology: it is early stage seminoma testicular cancer."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Reassuring",
+    "emo_alpha": 0.7,
+    "text": "While it sucks, it's the best type of bad news. It's highly treatable with an extremely high cure rate, often just with surgery. I\u2019m meeting the oncologist next week for staging."
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Emotional",
+    "emo_alpha": 0.8,
+    "text": "We also received a powerful listener note. A woman described how our podcast gave her the confidence to fight her husband to diversify their portfolio from 80% Tesla."
+  },
+  {
+    "speaker": "SPEAKER_01",
+    "voice_sample": "/mnt/c/Users/Johnbell/Desktop/firstsemm/196/whisper-diarization/diarize_split_summarize_tests/defense_audio_voices/SPEAKER_01.wav",
+    "use_emo_text": true,
+    "emo_text": "Awe",
+    "emo_alpha": 0.9,
+    "text": "That is remarkable. It\u2019s a sobering reminder that what we do truly changes people's lives fundamentally, far beyond just boosting returns by a few basis points."
+  }
+]

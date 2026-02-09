@@ -1,0 +1,4084 @@
+﻿1
+00:00:04,220 --> 00:00:10,440
+SPEAKER_00: This is the Rational Reminder Podcast, a weekly reality check on sensible investing and financial decision making from three Canadians.
+
+2
+00:00:10,500 --> 00:00:20,380
+SPEAKER_00: We're hosted by me, Benjamin Felix, Chief Investment Officer at PWL Capital, Dan Bortolotti, Portfolio Manager at PWL Capital and Mark McGrath, Associate Portfolio Manager at PWL Capital.
+
+3
+00:00:21,580 --> 00:00:23,980
+SPEAKER_02: Welcome to episode 347.
+
+4
+00:00:24,360 --> 00:00:24,700
+SPEAKER_00: Welcome.
+
+5
+00:00:25,480 --> 00:00:29,320
+SPEAKER_00: Today we're going to cover the case for index funds.
+
+6
+00:00:30,060 --> 00:00:33,260
+SPEAKER_00: That's a topic that I did cover my YouTube channel recently.
+
+7
+00:00:33,360 --> 00:00:40,620
+SPEAKER_00: So if you've already seen it, don't be discouraged because I think having Dan and Mark here are going to add new elements to the discussion as they always do.
+
+8
+00:00:41,660 --> 00:00:43,140
+SPEAKER_00: That's going to be the meat of the show.
+
+9
+00:00:43,200 --> 00:00:47,240
+SPEAKER_00: We do have some very nice listener mail in the after show.
+
+10
+00:00:47,760 --> 00:00:50,000
+SPEAKER_00: I'll give an update on my health for the people that are interested in that.
+
+11
+00:00:50,060 --> 00:00:51,820
+SPEAKER_00: So stick around till the end.
+
+12
+00:00:52,340 --> 00:01:00,840
+SPEAKER_00: Don't forget if you're a Canadian or now post one digital American financial advisor listening to this podcast who likes how we think.
+
+13
+00:01:01,500 --> 00:01:04,760
+SPEAKER_00: portfolios and about financial planning and about what wealth management is.
+
+14
+00:01:05,680 --> 00:01:11,500
+SPEAKER_00: You want to be part of something that's objectively awesome, which is what we are doing, something objectively awesome.
+
+15
+00:01:12,100 --> 00:01:12,820
+SPEAKER_00: We would love to talk to you.
+
+16
+00:01:12,860 --> 00:01:17,020
+SPEAKER_00: If you're an advisor listening, don't forget that we'd love to have you reach out or chat.
+
+17
+00:01:17,680 --> 00:01:18,780
+SPEAKER_00: Anything else for the intro guys?
+
+18
+00:01:18,820 --> 00:01:22,040
+SPEAKER_02: I'll just mention that a ton of advisors do reach out to me.
+
+19
+00:01:22,420 --> 00:01:23,980
+SPEAKER_02: I had a meeting today, I think I had two this week.
+
+20
+00:01:24,340 --> 00:01:25,280
+SPEAKER_02: Feel free to reach out anytime.
+
+21
+00:01:25,760 --> 00:01:27,520
+SPEAKER_02: I do spend a good amount of time talking to advisors.
+
+22
+00:01:27,980 --> 00:01:29,280
+SPEAKER_02: Usually when Ben makes that.
+
+23
+00:01:29,720 --> 00:01:30,640
+SPEAKER_02: call on the podcast.
+
+24
+00:01:30,680 --> 00:01:33,460
+SPEAKER_02: I usually get a bunch of people reaching out to me, so yeah, don't be shy.
+
+25
+00:01:33,640 --> 00:01:34,420
+SPEAKER_02: I'm always happy to chat.
+
+26
+00:01:34,640 --> 00:01:39,300
+SPEAKER_02: LinkedIn is usually where most advisors live these days, so that might be an easier place to find me and reach out, but yeah, don't be shy.
+
+27
+00:01:40,020 --> 00:01:41,120
+SPEAKER_00: Cameron's always happy to chat too.
+
+28
+00:01:41,520 --> 00:01:47,060
+SPEAKER_00: One of the reasons that he has stepped back from the podcast is that he is spending a ton of time having those conversations.
+
+29
+00:01:48,140 --> 00:01:50,960
+SPEAKER_00: If you want to talk to any of us, including Cameron, just reach out and let us know.
+
+30
+00:01:51,400 --> 00:01:52,700
+SPEAKER_00: All right, let's go ahead to the episode.
+
+31
+00:01:58,180 --> 00:02:01,600
+SPEAKER_00: Okay, we're going to make the case for index funds.
+
+32
+00:02:02,260 --> 00:02:04,280
+SPEAKER_00: which is a case I think all of us have been making for years.
+
+33
+00:02:04,500 --> 00:02:09,240
+SPEAKER_00: Dan, for maybe more years than Mark and I, but all of us collectively for quite a while.
+
+34
+00:02:09,800 --> 00:02:17,660
+SPEAKER_01: It's funny, when you posted the video, Ben, I thought, oh, this seems like a case we've been making for years, like you said, or in my case, more than a decade.
+
+35
+00:02:17,720 --> 00:02:20,800
+SPEAKER_01: But the approach that you took to it was refreshing.
+
+36
+00:02:21,060 --> 00:02:24,320
+SPEAKER_01: You didn't just go through the obvious stuff.
+
+37
+00:02:24,400 --> 00:02:32,640
+SPEAKER_01: that I think most of us know, and we'll talk a little bit about more is that even though we know this stuff, and most of our listeners know this stuff.
+
+38
+00:02:32,740 --> 00:02:36,820
+SPEAKER_01: It's pretty clear that most people in the general public still don't.
+
+39
+00:02:37,600 --> 00:02:40,860
+SPEAKER_00: Yeah, and like you said, we have some survey data related to that that we'll talk about.
+
+40
+00:02:41,500 --> 00:02:41,900
+SPEAKER_00: I agree with you.
+
+41
+00:02:42,200 --> 00:02:46,760
+SPEAKER_00: It's a video that I've always meant to make because it's so important.
+
+42
+00:02:46,800 --> 00:02:49,940
+SPEAKER_00: It's such important information and we kind of talk around it a lot.
+
+43
+00:02:50,180 --> 00:02:55,120
+SPEAKER_00: or use what we talk about in this video, the set of basic assumptions that support a lot of the other things that we talk about.
+
+44
+00:02:55,620 --> 00:02:59,340
+SPEAKER_00: But I never made one video that's like, here is the case for index funds.
+
+45
+00:02:59,520 --> 00:03:01,700
+SPEAKER_00: One of the reasons that I hadn't done it is what you said, Dan.
+
+46
+00:03:01,780 --> 00:03:03,520
+SPEAKER_00: We figured that people kind of know this stuff.
+
+47
+00:03:04,260 --> 00:03:15,960
+SPEAKER_00: But the crazy thing about this video is that I haven't checked recently, but the first three days after it was posted, it had the most views of any video that I've ever posted on my channel up to those first three days.
+
+48
+00:03:16,340 --> 00:03:18,220
+SPEAKER_00: Some of them like the 5% rule housing.
+
+49
+00:03:18,320 --> 00:03:21,440
+SPEAKER_00: one later on went viral and got a whole bunch more views.
+
+50
+00:03:21,520 --> 00:03:24,580
+SPEAKER_00: But for the first three days, I'll have to check how it's doing now.
+
+51
+00:03:24,860 --> 00:03:25,920
+SPEAKER_00: But I thought that was pretty interesting.
+
+52
+00:03:26,480 --> 00:03:29,500
+SPEAKER_01: Yeah, obviously people are Searching for those keywords.
+
+53
+00:03:30,120 --> 00:03:30,540
+SPEAKER_00: Seems like it.
+
+54
+00:03:31,200 --> 00:03:32,120
+SPEAKER_00: All right, so let's jump into it.
+
+55
+00:03:32,500 --> 00:03:33,060
+SPEAKER_00: Here's the case.
+
+56
+00:03:33,420 --> 00:03:38,420
+SPEAKER_00: With a few exceptions, most investors should be using low-cost index funds as their primary investment vehicle.
+
+57
+00:03:39,080 --> 00:03:39,740
+SPEAKER_00: I mean this when I say it.
+
+58
+00:03:39,800 --> 00:03:43,560
+SPEAKER_00: Anyone who disagrees with that is one of these things or some combination.
+
+59
+00:03:43,860 --> 00:03:46,260
+SPEAKER_00: Misinformed, they don't know the stuff that we're about to talk about.
+
+60
+00:03:46,780 --> 00:03:56,780
+SPEAKER_00: They're conflicted, meaning they have something to gain from you investing in something other than index funds or they're just wrong, which could be a different version of misinformed, I guess.
+
+61
+00:03:57,540 --> 00:04:03,440
+SPEAKER_00: Now like we were just saying, this is stuff that you've heard us say before and it's almost an underlying assumption to a lot of the stuff that we say.
+
+62
+00:04:03,800 --> 00:04:08,640
+SPEAKER_00: But I think it is important to have the case for low cost index funds laid out in one place.
+
+63
+00:04:08,840 --> 00:04:17,360
+SPEAKER_00: In this case, in one podcast episode that can be shared with people who are still investing in high fee, actively managed funds or people who are picking stocks.
+
+64
+00:04:17,640 --> 00:04:26,220
+SPEAKER_00: When you look at the distribution of fund assets in Canada, mutual funds and ETFs, the vast majority in Canada specifically are still in active funds.
+
+65
+00:04:26,600 --> 00:04:29,600
+SPEAKER_00: Like you said, Dan, this is information that a lot of people do still need to hear.
+
+66
+00:04:30,140 --> 00:04:31,220
+SPEAKER_02: I think it's 80%, isn't it?
+
+67
+00:04:31,460 --> 00:04:34,340
+SPEAKER_02: Roughly of assets or in active funds in Canada.
+
+68
+00:04:34,720 --> 00:04:35,400
+SPEAKER_00: It's around there, yeah.
+
+69
+00:04:36,080 --> 00:04:41,660
+SPEAKER_00: The case for index fund breaks down into six relatively simple but really important points.
+
+70
+00:04:42,060 --> 00:04:45,720
+SPEAKER_00: Each point that we're going to go through has supporting theory and evidence, which we'll also talk about.
+
+71
+00:04:46,540 --> 00:04:56,480
+SPEAKER_00: The six points are cost efficiency, diversification, investment returns, tax efficiency, simplicity and theoretical consistency.
+
+72
+00:04:57,240 --> 00:05:10,400
+SPEAKER_00: This background bit is going to be maybe too basic for many of our podcast listeners who tend to be a little bit nerdier than average but I think it's worth talking about because we do want this episode to be shared with people outside of our typical podcast audience.
+
+73
+00:05:11,060 --> 00:05:16,160
+SPEAKER_00: An index is a grouping of stocks that's been designed to represent a market or a market segment.
+
+74
+00:05:16,840 --> 00:05:19,300
+SPEAKER_00: I used to give this introduction to investing talk a lot.
+
+75
+00:05:20,160 --> 00:05:24,600
+SPEAKER_00: This stuff, just what is an index and the fact that you can invest in an index fund used to blow people's minds.
+
+76
+00:05:24,740 --> 00:05:32,360
+SPEAKER_00: It was the most satisfying thing to say this thing that I would repeat over and over, the same talk every time and people's minds would just be blown anyway.
+
+77
+00:05:33,060 --> 00:05:37,360
+SPEAKER_00: An index is a grouping of stocks that has been designed to represent a market or a market segment.
+
+78
+00:05:37,780 --> 00:05:43,820
+SPEAKER_00: The S&P TSX composite index is designed to be representative of the Canadian stock market.
+
+79
+00:05:44,780 --> 00:05:54,000
+SPEAKER_00: S&P, we talked to David Blitzer, I hope that's the right name from S&P, but he's someone who's been involved at S&P with designing.
+
+80
+00:05:54,140 --> 00:05:58,160
+SPEAKER_00: I think he maybe retired now, but he'd been involved with designing indexes forever.
+
+81
+00:05:58,600 --> 00:06:00,680
+SPEAKER_00: We interviewed him early on in the podcast.
+
+82
+00:06:00,720 --> 00:06:01,420
+SPEAKER_00: That was super cool.
+
+83
+00:06:02,080 --> 00:06:05,060
+SPEAKER_00: You can go back and listen to that one if you want to hear how that sausage is made.
+
+84
+00:06:05,580 --> 00:06:12,260
+SPEAKER_00: S&P comes up with a list of company names and weights based on the relative sizes of the companies in the market.
+
+85
+00:06:13,060 --> 00:06:15,740
+SPEAKER_00: That's called a market capitalization or cap weighted index.
+
+86
+00:06:16,520 --> 00:06:21,740
+SPEAKER_00: The S&P 500, Similar to the S&P TSX composite is a market capitalization weighted index.
+
+87
+00:06:22,020 --> 00:06:25,760
+SPEAKER_00: In the case of the S&P 500, it's representing 500 leading US companies.
+
+88
+00:06:26,460 --> 00:06:27,700
+SPEAKER_00: is how S&P describes it.
+
+89
+00:06:28,360 --> 00:06:34,700
+SPEAKER_00: A cap weighted index is always going to have more weight in larger companies like RBC and Shopify in Canada.
+
+90
+00:06:34,780 --> 00:06:40,680
+SPEAKER_00: Those are some of the biggest market cap companies in Canada or in the US, companies like Apple and Microsoft.
+
+91
+00:06:40,740 --> 00:06:46,100
+SPEAKER_00: They're going to have less weight in smaller companies that you probably wouldn't know the names of if I said them.
+
+92
+00:06:46,780 --> 00:06:50,700
+SPEAKER_00: Market cap weighting is super simple because it's just based on market prices.
+
+93
+00:06:50,760 --> 00:06:51,600
+SPEAKER_00: The information is there.
+
+94
+00:06:52,000 --> 00:07:01,240
+SPEAKER_00: It's easy to implement which likely explains its widespread use both in benchmarking which is evaluating the results of another investment strategy like an actively managed fund.
+
+95
+00:07:01,920 --> 00:07:07,920
+SPEAKER_00: It's also widely used in index investing for the same kind of reason which is obviously creating funds that track an index.
+
+96
+00:07:08,780 --> 00:07:09,520
+SPEAKER_00: That's what an index is.
+
+97
+00:07:10,040 --> 00:07:14,060
+SPEAKER_00: An index fund, I guess like I just said, is a mutual fund or ETF.
+
+98
+00:07:14,580 --> 00:07:15,620
+SPEAKER_00: or it could be something else.
+
+99
+00:07:15,720 --> 00:07:20,900
+SPEAKER_00: I guess, it could be like a direct index that tries to replicate the performance of an index.
+
+100
+00:07:21,440 --> 00:07:30,120
+SPEAKER_00: Usually, not always, there's some in Canada that use swap contracts for example, but usually they gain exposure to that index by investing in the stocks in the index.
+
+101
+00:07:30,820 --> 00:07:39,180
+SPEAKER_00: When we talk about index fund, when we say index fund throughout the rest of this episode, we're referring to cap weighted total market index funds.
+
+102
+00:07:39,880 --> 00:07:43,700
+SPEAKER_00: That's index funds that aim to capture the total returns of a stock market.
+
+103
+00:07:44,040 --> 00:07:48,340
+SPEAKER_00: We'll touch on near the end that the fact that not all index funds are created equal.
+
+104
+00:07:49,260 --> 00:07:52,900
+SPEAKER_00: Some index funds look a lot more like actively managed funds.
+
+105
+00:07:53,580 --> 00:07:54,820
+SPEAKER_01: That's definitely true Ben.
+
+106
+00:07:54,880 --> 00:08:08,840
+SPEAKER_01: Of course in the ETF space, there's still a lot of people who overlap this idea of ETFs and index funds because traditionally most ETFs, well traditionally all ETFs track indexes.
+
+107
+00:08:09,180 --> 00:08:26,280
+SPEAKER_01: They don't anymore and they haven't for a long time, but there is still an idea that ETF investing and index investing are almost synonymous, which has not really been true for a long time and can lead to some really poor decisions if you don't understand that distinction.
+
+108
+00:08:26,700 --> 00:08:27,120
+SPEAKER_00: That's right.
+
+109
+00:08:27,480 --> 00:08:32,020
+SPEAKER_02: Active ETF launches far outnumber new passive ETF launches as well.
+
+110
+00:08:32,100 --> 00:08:33,760
+SPEAKER_02: So it's only getting more and more active.
+
+111
+00:08:34,120 --> 00:08:40,020
+SPEAKER_01: Which makes sense because all of the index ETF space has been well covered for a decade or more.
+
+112
+00:08:40,700 --> 00:08:44,140
+SPEAKER_01: Nobody's going to create original new index.
+
+113
+00:08:44,680 --> 00:08:46,800
+SPEAKER_01: that is both useful and hasn't been done before.
+
+114
+00:08:46,840 --> 00:08:51,400
+SPEAKER_01: There are a lot of new index ETFs created but they're pretty fringe at this point.
+
+115
+00:08:51,940 --> 00:08:55,420
+SPEAKER_02: There's something like what, 7,000 indices out there all over the world?
+
+116
+00:08:55,640 --> 00:08:58,920
+SPEAKER_02: There's far more indices and ETFs and funds than there are stocks.
+
+117
+00:08:59,560 --> 00:09:00,480
+SPEAKER_00: It's a bigger number than that.
+
+118
+00:09:00,840 --> 00:09:07,460
+SPEAKER_00: Depends how you measure it but if I go into Morningstar and look at all of the available market indexes, it is a massive number.
+
+119
+00:09:08,160 --> 00:09:10,420
+SPEAKER_02: You get a lot of people who are saying, oh no, I'm just an index investor.
+
+120
+00:09:10,720 --> 00:09:11,180
+SPEAKER_02: which index?
+
+121
+00:09:11,440 --> 00:09:12,280
+SPEAKER_02: What do you mean by index?
+
+122
+00:09:12,380 --> 00:09:15,400
+SPEAKER_02: Because there's literally thousands or maybe even tens of thousands of them.
+
+123
+00:09:15,640 --> 00:09:21,380
+SPEAKER_02: Good to delineate between indexes and what you're referring to here Ben, which is market cap weighted total market funds.
+
+124
+00:09:21,980 --> 00:09:28,300
+SPEAKER_00: I remember giving one of those intro talks years ago and someone came up to me afterwards and was like, yeah, I've got index funds in my portfolio, can I show you?
+
+125
+00:09:29,160 --> 00:09:35,660
+SPEAKER_00: It was like an energy index and I can't remember a couple of other super concentrated indexes and I had to explain like that's not what I mean.
+
+126
+00:09:36,160 --> 00:09:37,100
+SPEAKER_02: That's not the spirit of it.
+
+127
+00:09:37,620 --> 00:09:39,700
+SPEAKER_01: Those are cap weighted indexes.
+
+128
+00:09:40,240 --> 00:09:47,100
+SPEAKER_01: usually but an index that tracks a really narrow market segment is not really what we're talking about here.
+
+129
+00:09:47,180 --> 00:10:00,300
+SPEAKER_01: Yeah, it's an index but when you speak about index investing, you're not talking about people who are picking individual sectors which is just an active strategy and it uses passive vehicles to implement.
+
+130
+00:10:00,340 --> 00:10:02,500
+SPEAKER_01: This is a pretty important distinction.
+
+131
+00:10:03,140 --> 00:10:03,440
+SPEAKER_00: I agree.
+
+132
+00:10:04,020 --> 00:10:11,100
+SPEAKER_00: Over the last 60 or so years, index funds have gone from being a pretty fringe idea, mostly in academic circles.
+
+133
+00:10:11,600 --> 00:10:15,360
+SPEAKER_00: It was an idea that the asset management industry really liked to criticize and laugh at.
+
+134
+00:10:15,560 --> 00:10:18,140
+SPEAKER_00: When Bogle first launched his fund, he got a lot of criticism.
+
+135
+00:10:18,880 --> 00:10:22,600
+SPEAKER_00: He's gone from that to becoming pretty mainstream.
+
+136
+00:10:23,040 --> 00:10:25,260
+SPEAKER_00: Not everybody, but a lot of people have heard of index funds.
+
+137
+00:10:25,320 --> 00:10:31,840
+SPEAKER_00: In the US market, index fund assets make up a huge portion of fund assets, unlike in Canada.
+
+138
+00:10:32,160 --> 00:10:32,700
+SPEAKER_00: They're mainstream.
+
+139
+00:10:32,740 --> 00:10:34,780
+SPEAKER_00: They're a thing that a lot of investors know about.
+
+140
+00:10:34,880 --> 00:10:36,500
+SPEAKER_00: Every financial professional knows about them.
+
+141
+00:10:37,080 --> 00:10:39,240
+SPEAKER_00: A lot of people understand their benefits.
+
+142
+00:10:39,800 --> 00:10:44,700
+SPEAKER_00: Now that shift from fringe idea to mainstream, it didn't happen by accident.
+
+143
+00:10:45,600 --> 00:10:47,720
+SPEAKER_00: Even the inception of the idea didn't happen by accident.
+
+144
+00:10:47,940 --> 00:10:55,840
+SPEAKER_00: There's this large body of academic research that started in 1968 with a paper looking at mutual fund performance and continues to this day.
+
+145
+00:10:55,900 --> 00:10:58,360
+SPEAKER_00: There's still research coming out on the performance of active funds.
+
+146
+00:10:59,000 --> 00:11:09,260
+SPEAKER_00: That research gets increasingly nuanced and interesting, but the general conclusions hold, which is that Actively managed funds don't add sufficient value to cover their relatively high fees on average.
+
+147
+00:11:09,800 --> 00:11:18,340
+SPEAKER_00: The majority of funds, if you take them by number instead of just saying the asset weighted average, the majority of funds underperform an index fund in the long run.
+
+148
+00:11:18,900 --> 00:11:25,360
+SPEAKER_00: That data that supports indexing brings me to the first point I want to make, which is that index funds have low fees.
+
+149
+00:11:25,840 --> 00:11:33,020
+SPEAKER_00: Pretty simple, but if you take the weighted average fee for index funds in Canada, which is probably higher than it is in the US, probably quite a bit higher actually.
+
+150
+00:11:33,540 --> 00:11:42,520
+SPEAKER_00: The weighted average fee for index funds in Canada is 0.19% and for actively managed funds that don't have the cost of advice built into them, that's an important little distinction.
+
+151
+00:11:42,680 --> 00:11:46,240
+SPEAKER_00: I gloss over that in the video that I posted on my YouTube channel.
+
+152
+00:11:46,300 --> 00:11:55,380
+SPEAKER_00: but the average mutual fund fee in Canada is closer to 2% and that's because a large portion of mutual funds have the cost of financial advice built into the fund fee.
+
+153
+00:11:56,220 --> 00:11:59,620
+SPEAKER_00: In that case, the fund company is paying a trailing commission to a financial advisor.
+
+154
+00:12:00,160 --> 00:12:05,520
+SPEAKER_00: the customer, the investor is paying both the advisor fee and the fund management fee as one thing.
+
+155
+00:12:05,700 --> 00:12:07,080
+SPEAKER_00: They're called commission based funds.
+
+156
+00:12:07,760 --> 00:12:20,520
+SPEAKER_00: Because those are so common, people in Canada often hear that the average mutual fund fee is close to 2%, which is true for commission based funds, but F class funds are funds that are designed to be used in a fee based account where the fee is separate.
+
+157
+00:12:20,580 --> 00:12:22,360
+SPEAKER_00: It's paid by the client directly to the advisor.
+
+158
+00:12:23,000 --> 00:12:25,620
+SPEAKER_00: Those funds have lower fees because the cost of advice is not built in.
+
+159
+00:12:26,240 --> 00:12:31,840
+SPEAKER_00: The average F class fee only fund active fee is 0.85%.
+
+160
+00:12:32,180 --> 00:12:36,980
+SPEAKER_00: So 0.19% for index funds, 0.85% for active funds.
+
+161
+00:12:37,020 --> 00:12:45,580
+SPEAKER_01: I think it's worth saying too that 19 basis points figure for Canadian ETFs is an average fee.
+
+162
+00:12:46,160 --> 00:12:53,220
+SPEAKER_01: It's in line with what you would pay for one of the asset allocation ETFs that we'll often recommend these one ticket solutions.
+
+163
+00:12:53,680 --> 00:13:03,320
+SPEAKER_01: But if you wanted to put the effort into building portfolio of ETFs using traditional cap weighted funds and traditional asset classes, it's probably half that.
+
+164
+00:13:03,920 --> 00:13:05,460
+SPEAKER_00: Oh yeah, 10 basis points easily.
+
+165
+00:13:06,120 --> 00:13:07,020
+SPEAKER_00: That is a good point.
+
+166
+00:13:07,640 --> 00:13:13,460
+SPEAKER_00: Those higher fees of active funds, in that case we're talking about 65, 66 basis points or to Dan's point, higher.
+
+167
+00:13:14,060 --> 00:13:20,580
+SPEAKER_00: Those higher fees on average are going to translate to lower investment returns and no other identifiable benefits.
+
+168
+00:13:20,940 --> 00:13:29,600
+SPEAKER_00: We'll talk more about why that's true in a minute, unless you really like supporting your fund manager and making sure that they can take their family to nice vacations and stuff, I guess.
+
+169
+00:13:30,120 --> 00:13:36,080
+SPEAKER_00: Some research from Morningstar has found that fees are one of the best predictors of future fund performance.
+
+170
+00:13:36,460 --> 00:13:40,620
+SPEAKER_00: If you take mutual funds and sort them on their fees, the ones with the highest fees will tend to perform the worst.
+
+171
+00:13:41,040 --> 00:13:43,580
+SPEAKER_00: They're pretty careful to say that it's not the only predictor.
+
+172
+00:13:43,880 --> 00:13:48,180
+SPEAKER_00: Some high fee funds can do well, but they have found in their research that it is one of the best predictors.
+
+173
+00:13:48,760 --> 00:13:54,000
+SPEAKER_00: Vanguard's late founder, John Bogle famously said that in investing, you get what you don't pay for.
+
+174
+00:13:54,540 --> 00:13:58,060
+SPEAKER_00: That's always an important point because this is one of the things.
+
+175
+00:13:58,140 --> 00:14:03,100
+SPEAKER_00: actually when I was on Coffeezilla's channel a couple of weeks ago, that's one of the things he asked me about.
+
+176
+00:14:03,220 --> 00:14:09,700
+SPEAKER_00: Why is it that in finance, you can't pay to get better results like you can in every other area of life?
+
+177
+00:14:10,400 --> 00:14:20,960
+SPEAKER_00: Bogle talked about that a lot but his point was that unlike other areas of life where paying more does come with the expectation of better results, paying higher investment fees typically results in lower returns, not higher.
+
+178
+00:14:21,780 --> 00:14:25,720
+SPEAKER_00: Vanguard also has research similar to Morningstar showing the same kind of thing is true.
+
+179
+00:14:26,400 --> 00:14:32,520
+SPEAKER_00: Bill Sharp in 1991 introduced this idea in an article of the arithmetic of active management.
+
+180
+00:14:33,180 --> 00:14:38,580
+SPEAKER_00: He basically just said, I mean it's simple when you think about it, but it took a Nobel Laureate to come up with it I guess.
+
+181
+00:14:39,240 --> 00:14:46,520
+SPEAKER_00: If active and passive management styles, so active is stock picking and market timing, passive is just owning the market, indexing.
+
+182
+00:14:46,880 --> 00:14:47,740
+SPEAKER_00: total market indexing.
+
+183
+00:14:48,460 --> 00:14:58,760
+SPEAKER_00: If active and passive management styles are defined in sensible ways, it must be the case that before costs, the return on the average actively managed dollar will equal the return on the average passively managed dollar.
+
+184
+00:14:59,420 --> 00:15:00,700
+SPEAKER_00: They're both investing in the market.
+
+185
+00:15:01,680 --> 00:15:03,200
+SPEAKER_00: In aggregate, active funds own the market.
+
+186
+00:15:03,460 --> 00:15:05,020
+SPEAKER_00: In aggregate, passive funds own the market.
+
+187
+00:15:05,840 --> 00:15:06,760
+SPEAKER_00: Before costs are the same.
+
+188
+00:15:07,420 --> 00:15:13,780
+SPEAKER_00: After costs, the return on the average actively managed dollar will be less than the return on the average passively managed dollar.
+
+189
+00:15:14,180 --> 00:15:14,920
+SPEAKER_00: It must be true.
+
+190
+00:15:15,600 --> 00:15:24,900
+SPEAKER_00: If that is true, It suggests that in simple terms, in aggregate, investors and active funds, they must underperform investors in total market index funds because of the higher fees and costs.
+
+191
+00:15:25,320 --> 00:15:27,580
+SPEAKER_00: It's pretty simple and pretty hard to argue with.
+
+192
+00:15:28,100 --> 00:15:29,040
+SPEAKER_02: It's a great little paper too.
+
+193
+00:15:29,400 --> 00:15:30,700
+SPEAKER_02: It's like two pages long or something.
+
+194
+00:15:31,120 --> 00:15:32,060
+SPEAKER_00: Yeah, it's a short little article.
+
+195
+00:15:32,200 --> 00:15:33,200
+SPEAKER_00: It's not an academic paper.
+
+196
+00:15:33,320 --> 00:15:36,340
+SPEAKER_00: It's in a journal, but I don't think it was posted in there as a peer reviewed.
+
+197
+00:15:36,860 --> 00:15:40,140
+SPEAKER_00: I don't know actually if it was peer reviewed, but it was a short little write up on.
+
+198
+00:15:40,220 --> 00:15:41,080
+SPEAKER_00: this must be true.
+
+199
+00:15:41,800 --> 00:15:43,300
+SPEAKER_01: On a dollar weighted basis, of course.
+
+200
+00:15:43,740 --> 00:15:51,080
+SPEAKER_01: It doesn't mean that All active investors must underperform all passive investors, but in aggregate.
+
+201
+00:15:51,380 --> 00:15:52,580
+SPEAKER_01: That's the key, I think.
+
+202
+00:15:53,020 --> 00:16:02,080
+SPEAKER_01: And a lot of people have picked on that point and said, it sounds like Sharpe is arguing that it's essentially impossible to outperform, but of course that's not what he said.
+
+203
+00:16:02,180 --> 00:16:06,260
+SPEAKER_01: And it's still been a fairly controversial argument over the years, hasn't it?
+
+204
+00:16:06,480 --> 00:16:14,140
+SPEAKER_01: There's been a lot of pushback against it, but at its very basic core, it is just arithmetic.
+
+205
+00:16:14,900 --> 00:16:15,200
+SPEAKER_00: It is.
+
+206
+00:16:15,700 --> 00:16:16,620
+SPEAKER_00: You're right, it's controversial.
+
+207
+00:16:16,680 --> 00:16:19,560
+SPEAKER_00: There's a paper called Sharpening Sharpe's Arithmetic that kind of argues with it.
+
+208
+00:16:19,920 --> 00:16:23,780
+SPEAKER_00: Mike Green brought that paper up when he was on our podcast and talked about what the flaws are.
+
+209
+00:16:24,180 --> 00:16:33,820
+SPEAKER_00: I think there may even be a footnote that Mike Green refers to about I think ignores flows, Sharpe's Arithmetic does and he's like, well, there are flows, so it's wrong.
+
+210
+00:16:34,600 --> 00:16:47,880
+SPEAKER_00: The thing about it is, we can argue about the assumptions or whatever, but multiple academic studies in top journals by top academics, found Sharpe's Arithmetic to be approximately, maybe not totally true, but close enough.
+
+211
+00:16:48,600 --> 00:16:54,540
+SPEAKER_00: Before fees, there is evidence in a lot of these studies that active funds do actually add a bit of value on average.
+
+212
+00:16:55,080 --> 00:17:02,220
+SPEAKER_00: But net of fees, which is obviously what matters to investors, all credible studies agree that the average active fund is not adding value.
+
+213
+00:17:02,780 --> 00:17:04,079
+SPEAKER_00: There may be room for pre-fee.
+
+214
+00:17:04,160 --> 00:17:06,540
+SPEAKER_00: Hey, there's some neat stuff going on in there, but net of fees.
+
+215
+00:17:07,859 --> 00:17:15,420
+SPEAKER_00: Burke and Green 2004 paper kind of argues that mutual fund managers are skilled, but all of their skill is absorbed by their fees.
+
+216
+00:17:16,000 --> 00:17:20,300
+SPEAKER_00: That's their theory of market efficiency in the market for manager skill.
+
+217
+00:17:20,640 --> 00:17:23,280
+SPEAKER_00: The other thing that's important here is that it's not just fees.
+
+218
+00:17:23,720 --> 00:17:26,540
+SPEAKER_00: Investors in a fund pay transaction costs.
+
+219
+00:17:27,079 --> 00:17:36,680
+SPEAKER_00: In Canada, funds have to report a portion of transaction costs, the explicit costs, not the implicit costs, which is another potentially important cost, but the explicit costs are reported.
+
+220
+00:17:37,460 --> 00:17:44,020
+SPEAKER_00: the trading expense ratio, the TER, which you can find in the MRFP and the manager report of fund performance for any fund.
+
+221
+00:17:44,480 --> 00:17:48,060
+SPEAKER_00: Index funds tend to have very low trading expense ratios, often rounding to 0%.
+
+222
+00:17:49,200 --> 00:17:53,540
+SPEAKER_00: When I wrote this video, I did go and check several index funds to make sure that what I was saying was true.
+
+223
+00:17:54,100 --> 00:17:55,860
+SPEAKER_00: I kind of knew that, but I wanted to be sure.
+
+224
+00:17:56,160 --> 00:17:58,980
+SPEAKER_00: They typically are very close or actually are 0%.
+
+225
+00:17:59,340 --> 00:18:03,060
+SPEAKER_00: Actively managed funds, because they trade more, they're going to tend to have higher trading costs.
+
+226
+00:18:03,660 --> 00:18:04,760
+SPEAKER_00: This is kind of a crazy stat.
+
+227
+00:18:05,240 --> 00:18:12,640
+SPEAKER_00: It's not uncommon for the trading cost of an actively managed fund to be higher than an index fund's fees and trading costs combined.
+
+228
+00:18:13,020 --> 00:18:14,800
+SPEAKER_01: I would think that's fairly common.
+
+229
+00:18:15,160 --> 00:18:15,460
+SPEAKER_00: It is.
+
+230
+00:18:15,880 --> 00:18:20,700
+SPEAKER_01: For a traditional index fund that might cost five or six basis points and that's it.
+
+231
+00:18:20,980 --> 00:18:21,720
+SPEAKER_01: That's the MER.
+
+232
+00:18:21,820 --> 00:18:24,380
+SPEAKER_01: There's virtually zero trading expense ratio.
+
+233
+00:18:24,940 --> 00:18:27,800
+SPEAKER_01: Many mutual funds are going to be much, much more than that.
+
+234
+00:18:28,280 --> 00:18:31,100
+SPEAKER_00: I always send my scripts to Ray who I work with at PWL.
+
+235
+00:18:31,700 --> 00:18:36,300
+SPEAKER_00: just because he's very smart and gives me a great second set of eyes before I start recording and stuff like that.
+
+236
+00:18:36,720 --> 00:18:41,300
+SPEAKER_00: That's one of the things that came back as a piece of feedback was, are you sure about that?
+
+237
+00:18:41,560 --> 00:18:42,640
+SPEAKER_00: Do you have data to back that up?
+
+238
+00:18:43,180 --> 00:18:44,980
+SPEAKER_00: So I was like, oh, all right, I better get some data.
+
+239
+00:18:45,060 --> 00:18:48,920
+SPEAKER_00: So I went and pulled a bunch of MRFPs for active funds to back up what I said.
+
+240
+00:18:49,460 --> 00:18:53,240
+SPEAKER_00: I did indeed find that it was not uncommon for that to be true, but it is crazy.
+
+241
+00:18:54,020 --> 00:18:58,280
+SPEAKER_02: It gets even crazier when you get into some of these niche funds that are using options strategies and stuff.
+
+242
+00:18:58,420 --> 00:19:02,920
+SPEAKER_02: I've seen TERs in the two to three percent range for some of the really, really niche stuff.
+
+243
+00:19:03,520 --> 00:19:10,020
+SPEAKER_02: It's not as well advertised as the MER management ratio, so a lot of investors don't even know they're paying those fees, and they can be very high.
+
+244
+00:19:10,600 --> 00:19:22,940
+SPEAKER_01: Yeah, you'll sometimes see that show up in things like the swap-based ETFs, for example, that they pay a fee and then that's not reflected in the MER, which is a little deceptive because it's known ahead of time what that fee's going to be.
+
+245
+00:19:23,800 --> 00:19:25,200
+SPEAKER_01: and it's buried as a TER.
+
+246
+00:19:25,680 --> 00:19:28,940
+SPEAKER_01: Currency hedging I think will show up as a TER as well.
+
+247
+00:19:29,620 --> 00:19:42,820
+SPEAKER_01: There's a lot of times where when you're looking at the MER, it looks superficially low but if you scratch the surface, you realize there are other costs there that are going to show up and are going to erode your returns the same way an MER will.
+
+248
+00:19:43,660 --> 00:19:49,800
+SPEAKER_00: Yeah, cost that show up in net returns but don't necessarily show up when you're trying to evaluate the costs, at least not in a way that's easy to see.
+
+249
+00:19:50,680 --> 00:19:52,380
+SPEAKER_00: You brought this up or you alluded to this earlier, Dan.
+
+250
+00:19:52,740 --> 00:19:59,960
+SPEAKER_00: As important as fees and costs are, which is really important, a lot of people are not aware that low cost are one of the benefits of index funds.
+
+251
+00:20:00,500 --> 00:20:11,780
+SPEAKER_00: There's a survey by the OSC that was done in 2022 and they found that only 31% of Canadian respondents were aware that index funds have lower fees and expenses than actively managed funds.
+
+252
+00:20:12,320 --> 00:20:12,480
+SPEAKER_00: Wow.
+
+253
+00:20:13,000 --> 00:20:13,540
+SPEAKER_01: It's pretty low.
+
+254
+00:20:14,260 --> 00:20:22,060
+SPEAKER_01: I will say too, if you go back, when I started doing my blog in 2010, it was significantly lower than that.
+
+255
+00:20:22,140 --> 00:20:25,640
+SPEAKER_01: I don't have data for that, but anecdotally, I'm pretty confident it was lower.
+
+256
+00:20:26,140 --> 00:20:33,500
+SPEAKER_01: I mean, at least we can celebrate that it's up to 31%, but hopefully we can get that to 91% at some point.
+
+257
+00:20:33,980 --> 00:20:40,420
+SPEAKER_01: Because make your choice, but if you're going to make a choice about what strategy to use, you need to know the basic information.
+
+258
+00:20:40,500 --> 00:20:50,220
+SPEAKER_01: And the fact that less than a third of people even understand that they're cheaper, let alone the enormous outperformance of index funds in aggregate over active funds.
+
+259
+00:20:50,580 --> 00:20:54,480
+SPEAKER_01: Just not even knowing that they're cheaper is pretty surprising.
+
+260
+00:20:54,540 --> 00:20:55,540
+SPEAKER_01: that the number is that low.
+
+261
+00:20:56,220 --> 00:20:58,800
+SPEAKER_02: Well, it probably only got to 31% because of your blog, Dan.
+
+262
+00:20:59,240 --> 00:21:01,840
+SPEAKER_02: You're probably responsible for at least half of those 31 respondents.
+
+263
+00:21:02,060 --> 00:21:02,840
+SPEAKER_00: That's probably true.
+
+264
+00:21:03,620 --> 00:21:04,560
+SPEAKER_01: I hope that's the case.
+
+265
+00:21:04,960 --> 00:21:14,160
+SPEAKER_01: I have certainly noticed it over the years that if I go back and read those old comments and even some of the old blogs, it's just pretty shocking how far we have come.
+
+266
+00:21:14,580 --> 00:21:16,400
+SPEAKER_01: We're moving in the right direction for sure.
+
+267
+00:21:17,120 --> 00:21:18,020
+SPEAKER_00: Fees are not the only reason.
+
+268
+00:21:18,260 --> 00:21:19,080
+SPEAKER_00: That's one big reason.
+
+269
+00:21:19,360 --> 00:21:20,600
+SPEAKER_00: It's one that people should be aware of.
+
+270
+00:21:21,220 --> 00:21:22,540
+SPEAKER_00: I like that point about just awareness.
+
+271
+00:21:23,020 --> 00:21:28,220
+SPEAKER_00: Mark, you were there and Dan, you listened to the Hendrik Bessembinder episode but he talked about how some people can have a preference for skewness.
+
+272
+00:21:28,740 --> 00:21:35,940
+SPEAKER_00: If someone has all the information and they understand that outcomes are skewed and they understand the fees are high or whatever and they still want to invest in an active fund, great.
+
+273
+00:21:36,420 --> 00:21:41,800
+SPEAKER_00: But they should make that decision understanding the stuff that we're talking about as opposed to not making it without understanding it.
+
+274
+00:21:42,680 --> 00:21:46,620
+SPEAKER_00: Fees are not the only reason that actively managed funds will tend to underperform.
+
+275
+00:21:47,100 --> 00:21:58,000
+SPEAKER_00: Their lack of diversification, and this is the Bessembinder stuff, also poses a challenge, which brings us to the next point in favor of index funds, which is that index funds are broadly diversified.
+
+276
+00:21:58,500 --> 00:22:04,340
+SPEAKER_00: By replicating the returns of a market index, index funds hold a huge portion of the stocks in the market.
+
+277
+00:22:04,920 --> 00:22:12,060
+SPEAKER_00: Now on the other hand, in their efforts to try and beat the market, actively managed funds will tend to hold fewer stocks, a lot fewer.
+
+278
+00:22:12,440 --> 00:22:13,400
+SPEAKER_00: I don't remember what the number is.
+
+279
+00:22:13,680 --> 00:22:18,600
+SPEAKER_00: Bessembinder has it in one of his papers, the average active mutual fund holdings, but it's low.
+
+280
+00:22:19,380 --> 00:22:30,100
+SPEAKER_00: Portfolio concentration, thinking back to Bessem Binder, can be a good thing if a fund manager knows how to pick winning stocks, but picking winning stocks consistently is really, really hard.
+
+281
+00:22:30,320 --> 00:22:38,660
+SPEAKER_00: We know that stock returns are positively skewed, which means that most stocks don't perform very well in the long run, while a relative few perform exceptionally well.
+
+282
+00:22:39,260 --> 00:22:42,920
+SPEAKER_00: The result is that well, The long-term return of the overall market is positive.
+
+283
+00:22:43,100 --> 00:22:45,900
+SPEAKER_00: The majority of individual stocks underperform.
+
+284
+00:22:46,600 --> 00:22:48,380
+SPEAKER_00: I'm going to recount some of the Besson Binder data.
+
+285
+00:22:48,520 --> 00:22:50,960
+SPEAKER_00: Anybody that listened last week has already heard this recently.
+
+286
+00:22:51,520 --> 00:23:00,900
+SPEAKER_00: In the sample from 1926 through 2016, 42.6% of US stocks had lifetime buy and hold returns that exceeded one month US treasury bills.
+
+287
+00:23:01,540 --> 00:23:02,700
+SPEAKER_00: Pretty crazy, less than half.
+
+288
+00:23:03,040 --> 00:23:06,400
+SPEAKER_00: Just over 50% of US stocks had negative lifetime returns.
+
+289
+00:23:06,980 --> 00:23:17,760
+SPEAKER_00: About 12% of US stocks lost 100% of their value over their lifetime and only 30.8% of stocks in the US market generate a lifetime buy and hold returns that beat the market.
+
+290
+00:23:18,480 --> 00:23:25,520
+SPEAKER_01: You blew through those numbers pretty fast Ben but I think it is worth taking a deep breath and thinking about them because they are mind blowing.
+
+291
+00:23:25,920 --> 00:23:36,100
+SPEAKER_01: This idea that barely half of stocks in the US had positive returns, not market beating returns, just not negative.
+
+292
+00:23:36,840 --> 00:23:41,660
+SPEAKER_01: What does that mean for the fortunes of people who are picking individual stocks?
+
+293
+00:23:42,180 --> 00:23:47,700
+SPEAKER_01: Let's take a minute to think about what happens if you instead own thousands of stocks.
+
+294
+00:23:48,280 --> 00:23:51,740
+SPEAKER_01: You're still going to see half of them deliver negative returns.
+
+295
+00:23:52,380 --> 00:23:57,300
+SPEAKER_01: But historically, you're still going to see market returns by holding the whole market surprise.
+
+296
+00:23:57,820 --> 00:24:04,780
+SPEAKER_01: But the point is, even with those 50% underperformers in there, long-term stock market returns have been outstanding.
+
+297
+00:24:04,920 --> 00:24:11,240
+SPEAKER_01: But once you start picking and choosing, the chances of you ending up with more negatives than positive is very high.
+
+298
+00:24:11,880 --> 00:24:16,080
+SPEAKER_01: To me, this is just a slam dunk argument for broad diversification.
+
+299
+00:24:16,760 --> 00:24:27,020
+SPEAKER_02: Picking from that 31% of stocks that generated positive buy and hold returns, the additional excess returns that they generate have to be enough to at least offset the ones that you picked from the bad pile, from the bad 50%.
+
+300
+00:24:27,540 --> 00:24:38,220
+SPEAKER_02: So even if you do capture a few of those great stocks, you're more likely to have captured the ones that drove negative returns and those negative returns can drive your entire portfolio down such that you earn less than market returns over time.
+
+301
+00:24:38,580 --> 00:24:46,360
+SPEAKER_02: I just don't understand why people go through the exercise of doing this when the data to me is just so obviously overwhelming in favor of not doing it.
+
+302
+00:24:46,940 --> 00:24:48,720
+SPEAKER_01: Because they prefer skewness.
+
+303
+00:24:49,440 --> 00:24:49,940
+SPEAKER_02: Absolutely.
+
+304
+00:24:51,180 --> 00:24:52,720
+SPEAKER_01: It's an interesting way of putting it.
+
+305
+00:24:53,020 --> 00:25:00,540
+SPEAKER_01: It's essentially saying people prefer a low probability activity with negative expected value.
+
+306
+00:25:00,860 --> 00:25:06,160
+SPEAKER_01: So great, I'm glad you had that preference but that's not a preference that I would promote to anybody.
+
+307
+00:25:07,040 --> 00:25:10,900
+SPEAKER_00: I'd also say that's an educated or a relatively educated way of doing it.
+
+308
+00:25:11,280 --> 00:25:13,240
+SPEAKER_00: We talked about this a bit with best reminder too.
+
+309
+00:25:13,900 --> 00:25:15,200
+SPEAKER_00: A lot of it is just overconfidence.
+
+310
+00:25:15,480 --> 00:25:17,100
+SPEAKER_00: They don't think that they've got a skewness preference.
+
+311
+00:25:17,140 --> 00:25:19,260
+SPEAKER_00: They think that they're for sure going to beat the market.
+
+312
+00:25:19,920 --> 00:25:21,020
+SPEAKER_00: The skewness preference is interesting.
+
+313
+00:25:21,480 --> 00:25:25,040
+SPEAKER_00: On the coffee's ill video that I did, I looked at some of the comments.
+
+314
+00:25:25,080 --> 00:25:34,300
+SPEAKER_00: I see this on my videos sometimes too where some people say, that's all great but don't have enough money for index funds to matter, I need one big win.
+
+315
+00:25:34,680 --> 00:25:40,020
+SPEAKER_00: They feel like they need to win the lottery to have any chance of financial success, which is a pretty scary proposition when you think about it.
+
+316
+00:25:40,660 --> 00:25:43,980
+SPEAKER_00: Most stocks don't beat the market and the data for global stocks are actually even worse.
+
+317
+00:25:44,420 --> 00:25:47,780
+SPEAKER_00: The skewness is even worse and that's again based on best in mind or stuff.
+
+318
+00:25:48,340 --> 00:26:00,040
+SPEAKER_00: Now, if a fund manager can identify there's relatively few winners ahead of time, they are obviously going to generate higher returns but as you were just saying Mark, they're much more likely to end up with losers than winners.
+
+319
+00:26:00,800 --> 00:26:03,240
+SPEAKER_00: Index funds are always going to hold the winners.
+
+320
+00:26:03,780 --> 00:26:06,020
+SPEAKER_00: That's why on average, they come out ahead.
+
+321
+00:26:06,360 --> 00:26:13,160
+SPEAKER_00: Free Bessem binder, there was a 2017 paper called Why Indexing Works, I covered in a video years ago.
+
+322
+00:26:13,820 --> 00:26:25,340
+SPEAKER_00: It does like a model of, okay, if we assume stock returns are skewed, it doesn't quantify them empirically the way a Bessem binder does, but it just kind of says, if stock returns are skewed, what does that mean for active versus passive performance?
+
+323
+00:26:25,480 --> 00:26:34,800
+SPEAKER_00: It shows in this relatively simple model why You have a small chance of outperforming by a lot, but you're much more likely to underperform with active because of that skewness.
+
+324
+00:26:35,380 --> 00:26:40,180
+SPEAKER_00: That brings us to the next point in favor of index funds, which is investment returns.
+
+325
+00:26:40,520 --> 00:26:44,540
+SPEAKER_00: Index funds beat the vast majority of active funds and the average active fund.
+
+326
+00:26:44,980 --> 00:26:47,860
+SPEAKER_00: In a 2023 study, this is again Bessembinder.
+
+327
+00:26:48,420 --> 00:26:56,440
+SPEAKER_00: You can listen last week if you want to hear him add more color to it, but he looks at long-term returns for US equity mutual funds from 1991 through 2020.
+
+328
+00:26:57,280 --> 00:27:03,880
+SPEAKER_00: They find that Most funds by number underperform an index fund, they use SPY, even before fees.
+
+329
+00:27:04,160 --> 00:27:05,520
+SPEAKER_00: That stat I find crazy.
+
+330
+00:27:05,760 --> 00:27:15,740
+SPEAKER_00: Before the mutual fund fees, most funds by count, not by asset weighted average, just by number of funds, most of them underperform SPY pre-fee.
+
+331
+00:27:16,240 --> 00:27:17,580
+SPEAKER_00: That shows the skewness.
+
+332
+00:27:17,700 --> 00:27:25,280
+SPEAKER_00: Again, multiple studies, as I mentioned earlier, including the best and better one, find that the average active fund does slightly outperform before fees.
+
+333
+00:27:25,900 --> 00:27:27,680
+SPEAKER_00: The average, the average dollar in funds.
+
+334
+00:27:28,240 --> 00:27:35,500
+SPEAKER_00: But this study is showing that most funds, 54.8% of them underperform an index fund even before their fees are considered.
+
+335
+00:27:36,360 --> 00:27:36,800
+SPEAKER_00: Pretty crazy.
+
+336
+00:27:37,460 --> 00:27:40,100
+SPEAKER_00: I think the explanation is probably skewness.
+
+337
+00:27:40,740 --> 00:27:42,600
+SPEAKER_00: We've got that crazy skewness in stock returns.
+
+338
+00:27:43,160 --> 00:27:46,560
+SPEAKER_00: It's just much more likely for an active fund to pick losers than winners.
+
+339
+00:27:47,560 --> 00:27:53,900
+SPEAKER_00: After fees, 30.3% of US equity mutual funds beat SPY over the full sample.
+
+340
+00:27:53,940 --> 00:27:56,900
+SPEAKER_00: That number is a lot higher than something like the SPIVA report.
+
+341
+00:27:57,480 --> 00:27:58,980
+SPEAKER_00: We did talk to Bessenbinder about that.
+
+342
+00:27:59,360 --> 00:28:03,280
+SPEAKER_00: He's comparing to SPY, which has a fees and costs, but pretty low.
+
+343
+00:28:03,700 --> 00:28:05,780
+SPEAKER_01: Well, three basis points or something like that.
+
+344
+00:28:06,240 --> 00:28:22,580
+SPEAKER_00: Maybe a bit higher going back to earlier in the sample, but Bessenbinder talked about the SPIVA methodology, the way that they're treating funds that close, but didn't necessarily perform poorly, maybe part of the reason, something like that, but it's just a methodological difference.
+
+345
+00:28:23,300 --> 00:28:25,700
+SPEAKER_01: That number seems a lot higher than I would have expected to.
+
+346
+00:28:26,540 --> 00:28:28,200
+SPEAKER_01: It does raise an interesting point too.
+
+347
+00:28:28,680 --> 00:28:34,120
+SPEAKER_01: You were saying earlier, Ben, that active funds will typically be less diversified than index funds.
+
+348
+00:28:34,460 --> 00:28:35,800
+SPEAKER_01: And that's really by design.
+
+349
+00:28:35,920 --> 00:28:39,080
+SPEAKER_01: It's not necessarily a flaw that they didn't notice.
+
+350
+00:28:39,160 --> 00:28:47,240
+SPEAKER_01: The whole point is if you want to achieve market returns, you need to build a portfolio that doesn't look exactly like the market.
+
+351
+00:28:47,840 --> 00:28:50,460
+SPEAKER_01: And the easiest way to do that is reduce the number of holdings.
+
+352
+00:28:51,060 --> 00:28:55,100
+SPEAKER_01: That is where you give yourself at least a chance about performance.
+
+353
+00:28:55,840 --> 00:29:07,580
+SPEAKER_01: As you know, one of the biggest challenges in mutual funds is so many of them are fearful of underperforming the benchmark too much, so they just hold more and more stocks.
+
+354
+00:29:07,620 --> 00:29:17,720
+SPEAKER_01: They look more and more like the index and it leads to what they call closet indexing, whereas it's masquerading as an actively managed fund, but it has a makeup very similar to the index.
+
+355
+00:29:17,840 --> 00:29:21,700
+SPEAKER_01: The only difference is instead of charging five basis points, it charges 90.
+
+356
+00:29:22,820 --> 00:29:24,280
+SPEAKER_01: Your chances of outperformance?
+
+357
+00:29:25,120 --> 00:29:27,180
+SPEAKER_01: a fund like that or effectively zero?
+
+358
+00:29:27,220 --> 00:29:29,860
+SPEAKER_02: Well, that's where active share comes from essentially, right?
+
+359
+00:29:29,900 --> 00:29:33,080
+SPEAKER_02: It's trying to measure that difference from the index, how active is the fund.
+
+360
+00:29:33,160 --> 00:29:39,680
+SPEAKER_00: The guy who came up with that, I've emailed with him about coming on, rash reminder, he's done some more recent research on factor funds.
+
+361
+00:29:40,200 --> 00:29:42,600
+SPEAKER_00: that was in progress when I talked to him, so he wanted to wait until that was done.
+
+362
+00:29:43,080 --> 00:29:46,560
+SPEAKER_00: Martin Cramer, I don't know how to say his last name but yeah, that would be a good guess.
+
+363
+00:29:47,020 --> 00:29:54,220
+SPEAKER_00: I have seen some stuff in Vanguard on more concentrated portfolios, not necessarily performing better but having much wider dispersion.
+
+364
+00:29:54,560 --> 00:30:02,840
+SPEAKER_00: If you sort funds by more concentrated versus more diversified, to your point Dan, more diversified funds just look like the index, pretty much all of them underperformed by their fees.
+
+365
+00:30:03,420 --> 00:30:08,320
+SPEAKER_00: When you go to the other end of the spectrum, more concentrated, you have some funds that do really well and some funds that do really poorly.
+
+366
+00:30:08,660 --> 00:30:10,380
+SPEAKER_00: On average, they still kind of suck.
+
+367
+00:30:10,980 --> 00:30:17,700
+SPEAKER_00: But if you want a shot at really good performance and you're willing to take on the risk of really bad performance, then yeah, more concentrated portfolio.
+
+368
+00:30:18,320 --> 00:30:19,040
+SPEAKER_01: I think you need to.
+
+369
+00:30:19,400 --> 00:30:27,840
+SPEAKER_01: If you're making an educated decision to be an active investor, You need to concentrate because if you don't, you're going to face all the problems we just talked about.
+
+370
+00:30:28,300 --> 00:30:35,100
+SPEAKER_01: All the research on the skewness, for example, really highlights the additional risk you're taking by concentrating.
+
+371
+00:30:36,180 --> 00:30:36,580
+SPEAKER_00: Exactly.
+
+372
+00:30:37,480 --> 00:30:51,420
+SPEAKER_00: The SPIVA data that we mentioned, just to put some context to that, for the 20 years ending June 2024, the SPIVA report finds that fewer than 6% of US equity mutual funds in their sample beat the S&P composite 1500 index.
+
+373
+00:30:52,340 --> 00:30:56,800
+SPEAKER_00: Lots of differences between that and the Bessenbinder finding but yeah, much worse in that case.
+
+374
+00:30:57,460 --> 00:31:07,880
+SPEAKER_00: Academic papers, the original, the OG 1968 paper that introduced the idea of evaluating mutual fund returns on a risk adjusted basis and this is the paper where we get the term alpha.
+
+375
+00:31:08,540 --> 00:31:10,640
+SPEAKER_00: It's Michael Jensen's paper, he calls it.
+
+376
+00:31:10,700 --> 00:31:11,640
+SPEAKER_00: It's called Jensen's Alpha.
+
+377
+00:31:12,100 --> 00:31:13,980
+SPEAKER_00: This is the paper that comes from which I think is pretty cool.
+
+378
+00:31:14,440 --> 00:31:15,320
+SPEAKER_00: Highly cited paper.
+
+379
+00:31:15,360 --> 00:31:18,260
+SPEAKER_00: I can't remember what the number is but it's like crazy number of citations.
+
+380
+00:31:18,740 --> 00:31:27,980
+SPEAKER_00: That paper found that 115 mutual fund managers in the period 1945 to 64 were on average not able to outperform the market.
+
+381
+00:31:28,540 --> 00:31:34,560
+SPEAKER_00: There was actually little evidence that any individual fund was able to do significantly better than what we would expect from random chance.
+
+382
+00:31:35,200 --> 00:31:42,880
+SPEAKER_00: Then Fama and French have a big paper, also highly cited one, where they find that net of fees, the average US equity active fund underperforms.
+
+383
+00:31:43,640 --> 00:31:52,880
+SPEAKER_00: again, the distribution of fund returns is in line with what we should expect by random chance before fees, but discouragingly worse when the higher fees of actively managed funds are taken into account.
+
+384
+00:31:53,640 --> 00:31:59,920
+SPEAKER_00: Then there's a 2014 paper that looks at global equity funds and it comes to similar conclusions to the past papers.
+
+385
+00:32:00,420 --> 00:32:11,660
+SPEAKER_00: Active management is basically a zero sum game before fees and it's a negative sum game after fees, maybe slightly before zero sum because a lot of these papers do find a little bit of pre-fee performance on average.
+
+386
+00:32:12,100 --> 00:32:15,160
+SPEAKER_00: even if most funds are underperforming as we see from the Bessenbinder paper.
+
+387
+00:32:15,620 --> 00:32:19,920
+SPEAKER_00: Together, all those data, there's the academic papers, there's industry data, there's lots of different ways.
+
+388
+00:32:19,960 --> 00:32:27,400
+SPEAKER_00: this has been sliced but they all kind of agree that you're much more likely to underperform than to outperform by investing in an actively managed fund.
+
+389
+00:32:28,060 --> 00:32:29,880
+SPEAKER_00: But there is a small chance of picking a big winner.
+
+390
+00:32:30,340 --> 00:32:34,780
+SPEAKER_00: That's one of the funny things that Bessenbinder talked about is how his research has been used on both sides.
+
+391
+00:32:35,080 --> 00:32:41,640
+SPEAKER_00: It's been used to support indexing but it's also been used to support active management because the active managers are like, hey look, We're going to be one of these ones.
+
+392
+00:32:42,140 --> 00:32:42,660
+SPEAKER_00: It's kind of funny.
+
+393
+00:32:43,320 --> 00:32:53,240
+SPEAKER_01: That's the argument I think that's been circulating forever because we all know that the chance of outperformance with active management is not zero.
+
+394
+00:32:53,540 --> 00:32:55,120
+SPEAKER_01: It's some smaller number.
+
+395
+00:32:55,820 --> 00:32:58,300
+SPEAKER_01: Everyone thinks they're part of that small number.
+
+396
+00:32:59,180 --> 00:33:05,920
+SPEAKER_01: Unless you can somehow prove that it's theoretically impossible to ever beat the market, there will always be something to hold on to.
+
+397
+00:33:06,720 --> 00:33:08,940
+SPEAKER_01: It's becoming increasingly tenuous, I think.
+
+398
+00:33:09,420 --> 00:33:10,180
+SPEAKER_00: Yeah, I think so too.
+
+399
+00:33:10,780 --> 00:33:11,400
+SPEAKER_02: What about Buffett?
+
+400
+00:33:11,820 --> 00:33:13,160
+SPEAKER_02: That's the excuse everyone gives, right?
+
+401
+00:33:13,580 --> 00:33:14,900
+SPEAKER_00: We already did an episode on that, Mark.
+
+402
+00:33:15,600 --> 00:33:15,780
+SPEAKER_02: I know.
+
+403
+00:33:16,260 --> 00:33:17,320
+SPEAKER_02: That's why I'm talking about that.
+
+404
+00:33:17,800 --> 00:33:18,820
+SPEAKER_02: We don't need to rehash that.
+
+405
+00:33:19,100 --> 00:33:19,920
+SPEAKER_01: That was a citation.
+
+406
+00:33:20,200 --> 00:33:20,640
+SPEAKER_02: Exactly.
+
+407
+00:33:21,220 --> 00:33:22,820
+SPEAKER_00: Oh, that's what you're saying.
+
+408
+00:33:23,060 --> 00:33:23,520
+SPEAKER_00: Wow, sorry.
+
+409
+00:33:24,020 --> 00:33:24,420
+SPEAKER_02: Keep up, man.
+
+410
+00:33:24,840 --> 00:33:26,120
+SPEAKER_00: You're referencing the episode title.
+
+411
+00:33:26,800 --> 00:33:29,160
+SPEAKER_00: I thought you were saying the thing that we named the episode after.
+
+412
+00:33:30,520 --> 00:33:30,920
+SPEAKER_02: It was both.
+
+413
+00:33:31,660 --> 00:33:31,960
+SPEAKER_00: Okay.
+
+414
+00:33:32,700 --> 00:33:34,160
+SPEAKER_00: Lubas Pastor has research on this.
+
+415
+00:33:34,580 --> 00:33:48,440
+SPEAKER_00: We had an episode of him years ago, but other academics have looked at it too, that in theory, the size of the active management industry matters, where if it gets too small, if indexing gets too big, in theory, there's a point where maybe active has a chance to come back.
+
+416
+00:33:49,020 --> 00:33:51,960
+SPEAKER_00: It is like an equilibrium and that's like Grossman Stiglitz paradox stuff.
+
+417
+00:33:52,000 --> 00:33:54,100
+SPEAKER_00: There's a point where there's not enough active.
+
+418
+00:33:54,520 --> 00:34:01,800
+SPEAKER_00: If we reach that point, in theory, active should start outperforming, which would then drive dollars back toward active and we'll get back to the equilibrium.
+
+419
+00:34:02,340 --> 00:34:09,880
+SPEAKER_01: Which is just a kind of extension of the way that saying indexing will always be average preferable.
+
+420
+00:34:10,260 --> 00:34:19,480
+SPEAKER_01: There can never be a point at least not for any period of time where there is so much indexing that active becomes advantageous.
+
+421
+00:34:19,699 --> 00:34:26,300
+SPEAKER_01: That might happen for some theoretical short period but there must always be an equilibrium that it returns to.
+
+422
+00:34:27,400 --> 00:34:28,500
+SPEAKER_00: I agree with that.
+
+423
+00:34:28,540 --> 00:34:34,580
+SPEAKER_00: The next obvious question I think, we're kind of dancing around it just now, is whether you can identify those big winners ahead of time.
+
+424
+00:34:35,040 --> 00:34:41,380
+SPEAKER_00: I think a lot of people look to active funds that have beaten the market in the past and think they're going to continue performing in the future.
+
+425
+00:34:41,420 --> 00:34:43,020
+SPEAKER_00: That's another episode I want to do.
+
+426
+00:34:43,159 --> 00:34:46,080
+SPEAKER_00: actually, is I've looked at some active funds that have long history.
+
+427
+00:34:46,199 --> 00:34:51,199
+SPEAKER_00: Someone sent me once, they were like, hey, I'm being pitched on these funds and they do have great performance histories, can you look at them?
+
+428
+00:34:51,880 --> 00:34:53,620
+SPEAKER_00: I looked at them, they're like, oh, they've actually done really well.
+
+429
+00:34:53,980 --> 00:34:57,100
+SPEAKER_00: They've got positive five factor alphas, wow, these are impressive funds.
+
+430
+00:34:57,160 --> 00:35:02,780
+SPEAKER_00: But then I started slicing the data up, they had a really good starting period.
+
+431
+00:35:03,220 --> 00:35:04,940
+SPEAKER_00: they had a really good period somewhere in the middle.
+
+432
+00:35:05,500 --> 00:35:07,520
+SPEAKER_00: But other than that, the fund has not done well.
+
+433
+00:35:08,100 --> 00:35:12,660
+SPEAKER_00: So if you take out those whatever, like eight really good years of performance, the rest of the history of the fund is not so great.
+
+434
+00:35:13,340 --> 00:35:14,620
+SPEAKER_00: I think that'd be an interesting thing to look at.
+
+435
+00:35:14,740 --> 00:35:19,720
+SPEAKER_00: Can we find active funds with really good long track records and then think about how many investors have actually benefited from that?
+
+436
+00:35:20,400 --> 00:35:20,900
+SPEAKER_02: That's just it.
+
+437
+00:35:21,340 --> 00:35:23,960
+SPEAKER_02: Most people didn't own the funds back then because there wasn't a track record.
+
+438
+00:35:24,020 --> 00:35:28,060
+SPEAKER_02: So to capture the outperformance, you're basically taking a bit of a leap of faith on these funds.
+
+439
+00:35:28,560 --> 00:35:32,620
+SPEAKER_02: And advisors are notorious for pretending they totally would have had your money in these funds right from the beginning.
+
+440
+00:35:32,860 --> 00:35:35,500
+SPEAKER_02: They'll pitch you these funds, look, this is how we invest and look how well they've done.
+
+441
+00:35:36,280 --> 00:35:44,140
+SPEAKER_02: But if you actually look at their client portfolios, it's highly unlikely that they've actually invested their client money in that exact same mix of funds for that length of period of time.
+
+442
+00:35:44,540 --> 00:35:51,740
+SPEAKER_02: Really what they're doing is just sorting a Morningstar filter by recent performance for the most part and being like, oh, for sure, this is how all of our clients have performed.
+
+443
+00:35:52,200 --> 00:35:53,880
+SPEAKER_02: Not everybody, but it's largely untrue.
+
+444
+00:35:54,420 --> 00:36:00,220
+SPEAKER_01: One of the nuances on that front two in terms of persistence of performance that I thought was really interesting.
+
+445
+00:36:00,320 --> 00:36:04,000
+SPEAKER_01: And I don't have the data in front of me, but there was some evidence.
+
+446
+00:36:04,080 --> 00:36:13,140
+SPEAKER_01: My understanding is if, for example, you look back at funds that outperformed over the last 10 years, would they continue to outperform over the next 10 years?
+
+447
+00:36:13,180 --> 00:36:15,000
+SPEAKER_01: And as we know, the answer is typically no.
+
+448
+00:36:15,820 --> 00:36:24,120
+SPEAKER_01: But funds in the lowest quartile or decile of worst performance, actually that was something of a predictor.
+
+449
+00:36:24,640 --> 00:36:25,580
+SPEAKER_01: of future performance.
+
+450
+00:36:25,620 --> 00:36:28,920
+SPEAKER_01: In other words, bad funds continued to be bad.
+
+451
+00:36:29,100 --> 00:36:34,560
+SPEAKER_01: There was no reversion to the mean like you would expect with an index fund, for example.
+
+452
+00:36:35,160 --> 00:36:38,480
+SPEAKER_01: You could have an unskilled manager who charges high fees.
+
+453
+00:36:38,520 --> 00:36:45,860
+SPEAKER_01: I think you can say with confidence that you are likely to experience persistent underperformance with that formula.
+
+454
+00:36:46,320 --> 00:36:48,840
+SPEAKER_01: It doesn't necessarily work equally both ways.
+
+455
+00:36:49,760 --> 00:36:50,600
+SPEAKER_00: I have not seen that one.
+
+456
+00:36:50,720 --> 00:36:56,520
+SPEAKER_00: I have seen a three-year study that looks at the past three-year winners, losers and neutral.
+
+457
+00:36:56,660 --> 00:37:02,040
+SPEAKER_00: I don't know what neutral was, but it was funds that outperformed, funds that underperformed and some middle group.
+
+458
+00:37:02,100 --> 00:37:07,620
+SPEAKER_00: and then they looked at how do they perform over the next three years and the losers outperformed the winners by quite a bit.
+
+459
+00:37:07,940 --> 00:37:11,320
+SPEAKER_00: I don't know if they make an argument for why they see that, but then there's another paper.
+
+460
+00:37:11,360 --> 00:37:15,360
+SPEAKER_00: I don't know what the time period is, but they look at valuations of fund holdings.
+
+461
+00:37:15,660 --> 00:37:21,920
+SPEAKER_00: If a fund has done well recently, it tends to have stocks with higher valuations and that explains why those funds.
+
+462
+00:37:22,340 --> 00:37:24,020
+SPEAKER_00: than have struggles in the future.
+
+463
+00:37:24,740 --> 00:37:29,940
+SPEAKER_01: Yeah, I think you'd really have to dig into the details of what was the explanation for the underperformance.
+
+464
+00:37:30,320 --> 00:37:36,560
+SPEAKER_01: If it was just poor stock picking and high fees, that would be something that would persist.
+
+465
+00:37:36,980 --> 00:37:47,860
+SPEAKER_01: But if it was just something like you had an excellent value manager during a period where value stocks underperformed, that wasn't necessarily lack of skill or high fees that caused underperformance.
+
+466
+00:37:48,480 --> 00:37:52,380
+SPEAKER_01: And when value stocks recover, presumably that manager would do better.
+
+467
+00:37:53,000 --> 00:37:53,700
+SPEAKER_01: It is interesting.
+
+468
+00:37:53,760 --> 00:38:03,940
+SPEAKER_01: It does kind of go back to the comment about Morningstar saying that if you sorted just on fees, that would be a pretty decent proxy for predicting returns going forward.
+
+469
+00:38:04,360 --> 00:38:05,680
+SPEAKER_00: Best in mind, it does look at fees.
+
+470
+00:38:05,740 --> 00:38:08,160
+SPEAKER_00: They say in the paper, they don't find a super strong relationship.
+
+471
+00:38:08,380 --> 00:38:11,920
+SPEAKER_00: when you visually inspect the chart that shows that analysis.
+
+472
+00:38:12,580 --> 00:38:14,040
+SPEAKER_00: There's some relationship like the higher fee.
+
+473
+00:38:14,100 --> 00:38:17,280
+SPEAKER_00: funds definitely do worse, but it's not a perfect monotonic relationship.
+
+474
+00:38:18,420 --> 00:38:20,080
+SPEAKER_00: Back to this idea of persistence.
+
+475
+00:38:20,120 --> 00:38:26,580
+SPEAKER_00: Can we find funds that are going to do well in the future based on how well they've done in the past.
+
+476
+00:38:27,480 --> 00:38:28,860
+SPEAKER_00: Not a lot of evidence that that's true.
+
+477
+00:38:29,320 --> 00:38:35,700
+SPEAKER_00: Funds that have done well in prior periods do not tend to continue doing well in future periods.
+
+478
+00:38:36,200 --> 00:38:38,580
+SPEAKER_00: There are two potential explanations for this.
+
+479
+00:38:39,260 --> 00:38:48,640
+SPEAKER_00: One is from the 1997 Mark Carhartt paper, which he says in the conclusion that the data do not support the existence of skilled or informed mutual fund portfolio managers.
+
+480
+00:38:49,340 --> 00:38:53,620
+SPEAKER_00: Basically, managers who were successful were just lucky in the past and then their luck runs out.
+
+481
+00:38:54,040 --> 00:38:58,540
+SPEAKER_00: That's one explanation that there's just no skill and it's all random.
+
+482
+00:38:59,300 --> 00:39:02,680
+SPEAKER_00: Because it's random, you can't bet on what happened in the past repeating in the future.
+
+483
+00:39:03,140 --> 00:39:10,140
+SPEAKER_00: The other possible explanation, which seems theoretically nicer because you can't imagine that there's just no skill.
+
+484
+00:39:10,440 --> 00:39:12,040
+SPEAKER_00: People in finance are really smart.
+
+485
+00:39:12,500 --> 00:39:17,460
+SPEAKER_00: Finance probably attracts too many smart people that should be doing other things that are productive for society.
+
+486
+00:39:18,400 --> 00:39:30,720
+SPEAKER_00: The other possible explanation is, and this is from Van Binsbergen, which you can listen to them explain this in episode 220 if you want to, is the mutual fund managers are indeed skilled, but their skill does not translate to higher returns for fund investors.
+
+487
+00:39:31,100 --> 00:39:39,880
+SPEAKER_00: Instead, assets flow into the funds of skilled managers right up to the point where the fund gets too big or just big enough where the manager can't keep outperforming.
+
+488
+00:39:39,920 --> 00:39:43,600
+SPEAKER_00: They can't keep generating alpha due to diseconomies of scale.
+
+489
+00:39:44,020 --> 00:39:45,040
+SPEAKER_00: It's an equilibrium result.
+
+490
+00:39:45,180 --> 00:39:55,480
+SPEAKER_00: The result is that The most skilled managers earn huge fees by having large funds because if you've got more skill, you can absorb more assets before you're not able to beat the market anymore.
+
+491
+00:39:56,000 --> 00:40:02,360
+SPEAKER_00: But the benefits of the manager's skill accrues to the manager because a more skilled manager can have a bigger fund, which means they're going to earn more fees.
+
+492
+00:40:02,940 --> 00:40:05,020
+SPEAKER_00: It does not accrue to the investors as alpha.
+
+493
+00:40:05,260 --> 00:40:12,320
+SPEAKER_00: The only way to find alpha is to pick a manager who has not yet been filled up with assets to the point where they can't outperform.
+
+494
+00:40:13,080 --> 00:40:15,000
+SPEAKER_00: It's just like identifying undervalued stock.
+
+495
+00:40:15,080 --> 00:40:18,400
+SPEAKER_00: You have to identify an undervalued manager if you want alpha.
+
+496
+00:40:18,760 --> 00:40:22,520
+SPEAKER_00: Otherwise, you just get returns in line with the risk of the assets of the manager invested.
+
+497
+00:40:23,040 --> 00:40:25,980
+SPEAKER_01: That's a really elegant explanation, I have to say.
+
+498
+00:40:26,340 --> 00:40:28,580
+SPEAKER_01: It makes perfect intuitive sense.
+
+499
+00:40:29,040 --> 00:40:30,340
+SPEAKER_01: In the real world, we've seen it.
+
+500
+00:40:30,460 --> 00:40:37,560
+SPEAKER_01: There's so many of the best funds that have had some period of significant outperformance.
+
+501
+00:40:37,720 --> 00:40:38,160
+SPEAKER_01: What do they do?
+
+502
+00:40:38,200 --> 00:40:40,460
+SPEAKER_01: They close the funds to new investors.
+
+503
+00:40:40,720 --> 00:40:41,240
+SPEAKER_01: They have to.
+
+504
+00:40:41,940 --> 00:40:44,920
+SPEAKER_01: It's related to what we talked about in terms of concentration.
+
+505
+00:40:45,520 --> 00:40:51,120
+SPEAKER_01: You don't create a fund with great outperformance by buying an index-like portfolio.
+
+506
+00:40:51,820 --> 00:40:53,720
+SPEAKER_01: It's one thing if you're managing $100 million.
+
+507
+00:40:54,200 --> 00:40:56,580
+SPEAKER_01: It's another thing if you're managing $200 billion.
+
+508
+00:40:57,620 --> 00:41:04,640
+SPEAKER_01: Obviously, you cannot possibly scale up your insights and your ideas at that level.
+
+509
+00:41:05,080 --> 00:41:06,380
+SPEAKER_01: Maybe even 100 million is too much.
+
+510
+00:41:06,460 --> 00:41:06,900
+SPEAKER_01: I don't know.
+
+511
+00:41:07,060 --> 00:41:20,340
+SPEAKER_01: But the point is that it makes perfect sense that any truly skilled manager with an expectation about performance must have a finite limit of how much money it can put into play.
+
+512
+00:41:21,000 --> 00:41:21,320
+SPEAKER_00: For sure.
+
+513
+00:41:21,700 --> 00:41:22,200
+SPEAKER_00: Look at Buffett.
+
+514
+00:41:22,360 --> 00:41:23,160
+SPEAKER_00: Buffett talks about this.
+
+515
+00:41:23,820 --> 00:41:25,540
+SPEAKER_00: He literally says, this is what has happened.
+
+516
+00:41:25,580 --> 00:41:27,680
+SPEAKER_00: This is why Berkshire is performing the way that it is.
+
+517
+00:41:28,000 --> 00:41:28,520
+SPEAKER_01: Exactly.
+
+518
+00:41:29,140 --> 00:41:30,180
+SPEAKER_01: Really interesting paper.
+
+519
+00:41:30,880 --> 00:41:31,800
+SPEAKER_00: Yeah, that's a cool one.
+
+520
+00:41:32,140 --> 00:41:43,720
+SPEAKER_00: In either case, whether it's luck or diseconomies of scale, the empirical reality and this comes from academic studies like the ones we talked about but The industry report we mentioned earlier, it also does a version of this where they look at persistence.
+
+521
+00:41:44,160 --> 00:41:49,160
+SPEAKER_00: Wherever you look, there's not a whole lot of evidence that funds that have done well in the past will continue to do well in the future.
+
+522
+00:41:49,340 --> 00:41:53,720
+SPEAKER_00: I think this is important because there are always going to be funds that have done well in the past.
+
+523
+00:41:54,140 --> 00:42:01,140
+SPEAKER_00: We could go look right now and find, I don't know how many, a bunch of mutual funds that have done incredibly well over the last 20, 25, even 30 years.
+
+524
+00:42:01,780 --> 00:42:09,040
+SPEAKER_00: That's always going to be the case, but that doesn't really matter because it doesn't tell us anything about how that fund is going to do in the future.
+
+525
+00:42:09,700 --> 00:42:14,760
+SPEAKER_00: I think it's a tool for investors to understand that just because a fund has done well in the past doesn't mean it's going to do well in the future.
+
+526
+00:42:14,800 --> 00:42:25,580
+SPEAKER_00: It's really, really valuable because you'll always be presented with look at this fund, it's beaten the market for the last whatever, five, 10 years but that does not give you a whole lot of information about how it's going to perform in the future.
+
+527
+00:42:26,220 --> 00:42:32,580
+SPEAKER_02: I think the other thing that people often don't realize is maybe there's luck in the actual stock picking but there's also luck in terms of sectors.
+
+528
+00:42:33,160 --> 00:42:38,360
+SPEAKER_02: Somebody sent me a comment this morning that they were presented with, their advisor got them something like 39%.
+
+529
+00:42:38,740 --> 00:42:40,600
+SPEAKER_02: last year, the last year before that, or whatever.
+
+530
+00:42:40,980 --> 00:42:41,680
+SPEAKER_02: They must be great.
+
+531
+00:42:41,740 --> 00:42:44,960
+SPEAKER_02: And it's like, well, no, they were basically invested in the equivalent of the NASDAQ.
+
+532
+00:42:45,000 --> 00:42:47,000
+SPEAKER_02: It's like a science and technology fund or something like that.
+
+533
+00:42:47,220 --> 00:42:49,780
+SPEAKER_02: So they're benefiting from the rise in that sector altogether.
+
+534
+00:42:50,280 --> 00:42:51,640
+SPEAKER_02: That beat the overall market, yes.
+
+535
+00:42:51,760 --> 00:43:00,320
+SPEAKER_02: But were they lucky in terms of the place in time that they were invested in those sectors, or were they lucky in the actual individual stock picking that was going on within the funds themselves?
+
+536
+00:43:00,580 --> 00:43:02,640
+SPEAKER_02: These days, you look at everyone, everyone's like, oh, 100% NASDAQ.
+
+537
+00:43:03,040 --> 00:43:03,340
+SPEAKER_01: Well, why?
+
+538
+00:43:03,540 --> 00:43:04,780
+SPEAKER_02: Well, because it went up a lot last year.
+
+539
+00:43:05,260 --> 00:43:08,640
+SPEAKER_02: People think they get market beating returns by just overexposing themselves to a particular sector.
+
+540
+00:43:08,680 --> 00:43:09,540
+SPEAKER_02: that's done really, really well.
+
+541
+00:43:10,080 --> 00:43:17,980
+SPEAKER_02: I think that those who are essentially trying to find skilled managers might think they found a skilled manager when it was actually just a mutual fund whose mandate was to invest in a particular sector.
+
+542
+00:43:18,040 --> 00:43:18,820
+SPEAKER_02: that did incredibly well.
+
+543
+00:43:19,100 --> 00:43:21,460
+SPEAKER_01: To play devil's advocate on that, that makes sense.
+
+544
+00:43:21,520 --> 00:43:30,140
+SPEAKER_01: if your mandate is you're a technology fund and you must invest in technology stocks because that's what your mandate is.
+
+545
+00:43:30,860 --> 00:43:38,120
+SPEAKER_01: Even if they fall out of favor, you still are compelled to invest in that sector because that's what people are buying your fund for.
+
+546
+00:43:38,780 --> 00:43:56,780
+SPEAKER_01: But to look at the other side, how would you respond if I said, maybe part of the skill of the active manager who has a much broader mandate, US equities period, knows when to move into technology and take advantage of that and knows when to get out before it reverts to the mean.
+
+547
+00:43:57,400 --> 00:44:10,180
+SPEAKER_01: Is there any evidence of persistent skill in terms of sector rotation or other sort of tactical asset allocation that isn't stock picking but moves in and out according to a much broader mandate.
+
+548
+00:44:10,760 --> 00:44:12,240
+SPEAKER_00: I don't think tactical funds do very well.
+
+549
+00:44:12,660 --> 00:44:30,840
+SPEAKER_00: The craziest stories of fund managers that do insanely well, multiple 100% returns in a year or even over a couple of years in some cases, followed by just an absolute crash where investors lose most of their capital, most of those are sector specific active managers.
+
+550
+00:44:31,300 --> 00:44:35,300
+SPEAKER_00: Internet dot com era managers like that, Kathy Wood was like that.
+
+551
+00:44:35,920 --> 00:44:37,280
+SPEAKER_00: One sector was doing really well.
+
+552
+00:44:37,700 --> 00:44:41,300
+SPEAKER_00: They were making the right bets in that sector, so the returns were just insane.
+
+553
+00:44:41,960 --> 00:44:46,200
+SPEAKER_00: But then the bottom often falls out because valuations were just out of control.
+
+554
+00:44:46,740 --> 00:44:47,740
+SPEAKER_00: So definitely stories like that.
+
+555
+00:44:48,280 --> 00:44:52,940
+SPEAKER_00: I remember when ARC was happening, that was a really hard one for investors to ignore.
+
+556
+00:44:53,380 --> 00:44:55,360
+SPEAKER_00: We forget about how, man, the psychology is crazy.
+
+557
+00:44:55,440 --> 00:45:01,440
+SPEAKER_00: Forget about how tempting it is when you see the returns of something like the ARC fund or funds.
+
+558
+00:45:02,120 --> 00:45:08,980
+SPEAKER_00: when they were going up and you hear the narrative from Cathie Wood about why basically indexing is stupid because you're investing in all this old crap.
+
+559
+00:45:09,020 --> 00:45:11,560
+SPEAKER_00: that's going to be totally irrelevant in the next five years.
+
+560
+00:45:12,060 --> 00:45:12,860
+SPEAKER_00: It's really hard to ignore.
+
+561
+00:45:13,200 --> 00:45:15,860
+SPEAKER_00: You can see why dollars flowed into that thing the way that they did.
+
+562
+00:45:16,640 --> 00:45:22,240
+SPEAKER_01: Of course, you also have all the new crap as well in the index fund, which is an important idea.
+
+563
+00:45:22,320 --> 00:45:23,240
+SPEAKER_01: We've talked about it before.
+
+564
+00:45:23,300 --> 00:45:31,300
+SPEAKER_01: It's like really the only way to ensure that you are going to have the next Google, the next Apple, whatever is to hold everything.
+
+565
+00:45:31,760 --> 00:45:43,760
+SPEAKER_01: It's not to pick and choose or, and it's certainly not to pick and choose a small number of stocks and hope that one of those 20 that you picked is going to be the next one that Bassenbinder writes about 20 years from now.
+
+566
+00:45:44,360 --> 00:45:48,500
+SPEAKER_01: Hold them all, and then you're pretty much guaranteed you take advantage of that skewness.
+
+567
+00:45:49,160 --> 00:45:50,160
+SPEAKER_01: Really all about skewness.
+
+568
+00:45:50,760 --> 00:45:53,420
+SPEAKER_01: It's just about saying that as much as possible and hoping it sinks in.
+
+569
+00:45:53,460 --> 00:45:54,740
+SPEAKER_02: I hope people understand it.
+
+570
+00:45:56,140 --> 00:46:03,160
+SPEAKER_02: I haven't looked at ARK in ages, and for whatever reason, I looked up Zoom, Peloton, and DocuSign stocks yesterday.
+
+571
+00:46:03,420 --> 00:46:06,980
+SPEAKER_02: Their performance, they just got absolutely obliterated and never came back at all.
+
+572
+00:46:07,340 --> 00:46:09,580
+SPEAKER_02: In the pandemic, these were the future of the industry.
+
+573
+00:46:09,960 --> 00:46:12,940
+SPEAKER_02: Everyone was just buying them up hand over fist into these insane valuations.
+
+574
+00:46:13,000 --> 00:46:16,500
+SPEAKER_02: But it made sense because the narrative at that time was this new global pandemic and work from home.
+
+575
+00:46:16,540 --> 00:46:20,420
+SPEAKER_02: So Zoom, DocuSign and Peloton, that's like the perfect home office setup.
+
+576
+00:46:20,600 --> 00:46:24,240
+SPEAKER_02: You get your bike, you get your Zoom meetings, you got paperwork, you sign it by DocuSign to the moon.
+
+577
+00:46:24,500 --> 00:46:27,620
+SPEAKER_02: And those things got absolutely wrecked and have never come back.
+
+578
+00:46:28,500 --> 00:46:30,040
+SPEAKER_00: Taking a look at ARK here now, let's see.
+
+579
+00:46:30,920 --> 00:46:33,160
+SPEAKER_00: Over the last three years, oh my.
+
+580
+00:46:34,060 --> 00:46:36,100
+SPEAKER_00: Just get some S&P 500 in there for good measure.
+
+581
+00:46:36,560 --> 00:46:37,980
+SPEAKER_02: I was going to say, get a benchmark in there.
+
+582
+00:46:38,500 --> 00:46:38,740
+SPEAKER_00: Wow.
+
+583
+00:46:39,400 --> 00:46:50,220
+SPEAKER_00: Over the last three years, ending February 26th, 2025, ARK's ARKK, the flagship ARK fund, annualized return, negative 5.92%.
+
+584
+00:46:51,700 --> 00:46:51,880
+SPEAKER_01: Wow.
+
+585
+00:46:52,220 --> 00:46:53,500
+SPEAKER_01: During a roaring bull market.
+
+586
+00:46:53,800 --> 00:46:58,520
+SPEAKER_00: Well, the S&P 500 is positive 12.37% annualized.
+
+587
+00:46:59,060 --> 00:46:59,420
+SPEAKER_02: Crazy.
+
+588
+00:46:59,980 --> 00:47:00,460
+SPEAKER_00: Yeah, it's rough.
+
+589
+00:47:01,080 --> 00:47:02,900
+SPEAKER_01: Would be interesting to look at what the flows were.
+
+590
+00:47:03,500 --> 00:47:14,920
+SPEAKER_01: When that fund was on its way up, there probably wasn't as much money in it as there was when it was on its way down because the money poured in after the wins.
+
+591
+00:47:15,360 --> 00:47:22,380
+SPEAKER_00: No, Morningstar did a study on this where they looked at what is the money weighted return on ARC and it was – I can't remember what the number was but it was horrendously negative.
+
+592
+00:47:23,020 --> 00:47:25,220
+SPEAKER_00: Since inception, since October 2014.
+
+593
+00:47:26,820 --> 00:47:33,360
+SPEAKER_00: ARC has trailed 11.43% annualized for ARC and 13.12% for S&P 500.
+
+594
+00:47:34,280 --> 00:47:36,080
+SPEAKER_00: It's not quite as horrendous as recent history.
+
+595
+00:47:36,860 --> 00:47:37,740
+SPEAKER_02: I'm looking at the five-year.
+
+596
+00:47:38,140 --> 00:47:41,540
+SPEAKER_02: If you look at the five-year, it takes you almost to the bottom of the pandemic now, does it not?
+
+597
+00:47:42,480 --> 00:47:43,520
+SPEAKER_00: Yeah, five years rough.
+
+598
+00:47:44,240 --> 00:47:49,380
+SPEAKER_00: I want to go since inception and I want to end it February 12th, 2021.
+
+599
+00:47:49,680 --> 00:47:50,400
+SPEAKER_02: That was the top, right?
+
+600
+00:47:50,440 --> 00:48:00,500
+SPEAKER_00: I don't know what the – number of years is there, but from October 2014 to February 12th, 2021, the annualized return on ARC was 40.3%.
+
+601
+00:48:02,580 --> 00:48:05,660
+SPEAKER_00: If you look at the chart, it's just straight up, a couple of little blips.
+
+602
+00:48:06,140 --> 00:48:07,480
+SPEAKER_00: How do you not get tempted by that?
+
+603
+00:48:08,140 --> 00:48:09,940
+SPEAKER_00: The S&P 500 over that period was 13.58%.
+
+604
+00:48:11,040 --> 00:48:11,880
+SPEAKER_00: It's insane.
+
+605
+00:48:12,280 --> 00:48:13,420
+SPEAKER_00: Anyway, that was a total digression.
+
+606
+00:48:13,480 --> 00:48:15,640
+SPEAKER_00: Didn't plan to talk about ARC, but here we are.
+
+607
+00:48:15,700 --> 00:48:16,840
+SPEAKER_00: I think it is important though.
+
+608
+00:48:17,420 --> 00:48:18,880
+SPEAKER_01: Well, we're talking about persistence.
+
+609
+00:48:19,200 --> 00:48:26,500
+SPEAKER_01: It's just a really easiest example of that and one of the most dramatic examples of that, that most of us will remember.
+
+610
+00:48:27,140 --> 00:48:27,380
+SPEAKER_00: True.
+
+611
+00:48:27,960 --> 00:48:30,880
+SPEAKER_00: I've heard people ask, and this is not a thing that I'm coming up with.
+
+612
+00:48:31,260 --> 00:48:35,540
+SPEAKER_00: Other people have said this before, but I've heard people ask why you would settle for average returns with index funds.
+
+613
+00:48:35,840 --> 00:48:37,880
+SPEAKER_00: Why would you want the market average when you could try and beat it?
+
+614
+00:48:38,320 --> 00:48:49,000
+SPEAKER_00: You look at the data on fund performance, even on investor performance, index funds are beating the vast majority of active funds and the vast majority of individual investors.
+
+615
+00:48:49,620 --> 00:48:50,940
+SPEAKER_00: Are they really average returns?
+
+616
+00:48:51,400 --> 00:48:52,320
+SPEAKER_00: They're market returns.
+
+617
+00:48:52,980 --> 00:48:53,080
+SPEAKER_01: Yeah.
+
+618
+00:48:53,160 --> 00:48:55,400
+SPEAKER_01: I think it's a misunderstanding of average.
+
+619
+00:48:55,700 --> 00:48:56,840
+SPEAKER_01: I made this point in my book.
+
+620
+00:48:57,100 --> 00:49:04,900
+SPEAKER_01: If you think as an indexer, if you use an indexing strategy throughout your investing lifetime, that your returns will be average.
+
+621
+00:49:05,280 --> 00:49:14,580
+SPEAKER_01: I mean, if you do it with discipline, you will likely outperform 80 to 90% of other investors and that's not average.
+
+622
+00:49:15,020 --> 00:49:15,720
+SPEAKER_01: You're a superstar.
+
+623
+00:49:16,320 --> 00:49:22,920
+SPEAKER_01: market average is not the same as you are just average in a large field of investors, right?
+
+624
+00:49:22,980 --> 00:49:24,100
+SPEAKER_01: It's exceptional.
+
+625
+00:49:24,700 --> 00:49:25,660
+SPEAKER_02: Well, they take it personally.
+
+626
+00:49:26,060 --> 00:49:28,040
+SPEAKER_02: Being average just feels underwhelming.
+
+627
+00:49:28,340 --> 00:49:30,080
+SPEAKER_02: That's to your point just absolutely not the case.
+
+628
+00:49:30,120 --> 00:49:34,120
+SPEAKER_02: We're not saying that you're an average person in terms of your skill set or anything.
+
+629
+00:49:34,360 --> 00:49:42,340
+SPEAKER_02: Your returns will be average on a gross basis and to your point, NHL quality superstar compared to your peers on a net of return basis.
+
+630
+00:49:43,160 --> 00:49:48,780
+SPEAKER_00: Maybe I have one cousin that gets 40% a year in ARK at least over one period of time and then you might feel bad.
+
+631
+00:49:49,640 --> 00:49:52,220
+SPEAKER_02: Once or twice but we'll never show you his statements.
+
+632
+00:49:53,080 --> 00:49:56,120
+SPEAKER_02: We'll never back it up with actual statements but we'll tell you about it.
+
+633
+00:49:56,760 --> 00:49:57,020
+SPEAKER_00: True.
+
+634
+00:49:57,460 --> 00:50:01,220
+SPEAKER_00: There's a study that I'm going to try and do a video on individual stock picking.
+
+635
+00:50:01,280 --> 00:50:03,740
+SPEAKER_00: I did one of those years ago, I want to do kind of an updated one.
+
+636
+00:50:04,420 --> 00:50:06,160
+SPEAKER_00: There's a study I found when I was researching that.
+
+637
+00:50:06,460 --> 00:50:11,540
+SPEAKER_00: I don't remember the statistics in there but the gap between how investors appraise their returns.
+
+638
+00:50:11,840 --> 00:50:13,620
+SPEAKER_00: If I say, Mark, what have your returns been?
+
+639
+00:50:14,180 --> 00:50:14,520
+SPEAKER_00: you tell me.
+
+640
+00:50:14,760 --> 00:50:16,680
+SPEAKER_00: Then I take your statements and I actually audit them.
+
+641
+00:50:17,140 --> 00:50:22,000
+SPEAKER_00: The gap between those two numbers is massive, where investors dramatically overestimate what their returns are.
+
+642
+00:50:22,500 --> 00:50:22,860
+SPEAKER_02: I believe it.
+
+643
+00:50:23,540 --> 00:50:26,260
+SPEAKER_00: Next point on index funds, they're tax efficient.
+
+644
+00:50:26,740 --> 00:50:34,820
+SPEAKER_00: More trading inside of an active fund tends to lead to more taxable distributions, which adds a pretty significant additional drag on long-term returns for taxable investors.
+
+645
+00:50:35,140 --> 00:50:40,040
+SPEAKER_00: We talked about transaction costs earlier, but all of those transactions can also lead to taxable distributions.
+
+646
+00:50:40,800 --> 00:50:47,340
+SPEAKER_00: less of an issue for US listed active ETFs but here in Canada, whether it's a mutual fund or an ETF, this is going to be a problem.
+
+647
+00:50:47,540 --> 00:50:50,500
+SPEAKER_00: We don't have the same mechanism that US ETFs have.
+
+648
+00:50:51,200 --> 00:51:05,860
+SPEAKER_00: There is a paper comparing before and after tax returns of actively managed funds and index funds and it finds that however bad things look for active before taxes, it gets a whole lot worse relatively speaking after taxes because index funds are more tax efficient.
+
+649
+00:51:06,360 --> 00:51:07,320
+SPEAKER_00: That's tax efficiency.
+
+650
+00:51:07,900 --> 00:51:12,260
+SPEAKER_00: Another one is simplicity and I think this is probably one of the most overlooked benefits.
+
+651
+00:51:12,660 --> 00:51:18,060
+SPEAKER_00: If you invest in active funds and this is even true for factor funds, not just traditional active.
+
+652
+00:51:18,640 --> 00:51:21,960
+SPEAKER_00: If you invest in active funds, it is hard to know how you're doing.
+
+653
+00:51:22,460 --> 00:51:25,440
+SPEAKER_00: I talked with this on Coffeezilla too because he was asking me about factor investing.
+
+654
+00:51:25,480 --> 00:51:28,940
+SPEAKER_00: It was supposed to be a podcast for beginners and he asked about factor investing.
+
+655
+00:51:29,020 --> 00:51:30,400
+SPEAKER_00: I don't know if that was the right thing to talk about.
+
+656
+00:51:30,700 --> 00:51:33,920
+SPEAKER_00: With active, traditional active, is the manager doing what they're supposed to be doing?
+
+657
+00:51:34,580 --> 00:51:35,880
+SPEAKER_00: Have they lost their edge?
+
+658
+00:51:35,920 --> 00:51:38,040
+SPEAKER_00: Has their fund gotten too big like we talked about earlier?
+
+659
+00:51:38,520 --> 00:51:41,840
+SPEAKER_00: But then with factors too, are these factors still relevant?
+
+660
+00:51:41,880 --> 00:51:42,660
+SPEAKER_00: Are these the right ones?
+
+661
+00:51:42,820 --> 00:51:45,180
+SPEAKER_00: Do we need to care about the new research that just came out?
+
+662
+00:51:45,360 --> 00:51:49,060
+SPEAKER_00: Do we need to care about Andrew Chen's research that says that there are no factor premiums after costs?
+
+663
+00:51:49,780 --> 00:51:54,500
+SPEAKER_00: That's all stuff that you have to think about and worry about and it makes it hard to stay invested and stay disciplined.
+
+664
+00:51:54,560 --> 00:51:58,320
+SPEAKER_00: I think at least on the factor investing side, there's a little bit more theory and evidence.
+
+665
+00:51:58,900 --> 00:52:03,560
+SPEAKER_00: I'll let indexing to back up what you're doing so it's maybe easier than traditional active to stick with.
+
+666
+00:52:04,020 --> 00:52:05,820
+SPEAKER_00: Still, it is something to think about.
+
+667
+00:52:06,380 --> 00:52:13,020
+SPEAKER_00: With index funds, you can be pretty confident that you're going to earn the return of the index, net of some predictably low fees.
+
+668
+00:52:13,640 --> 00:52:14,540
+SPEAKER_00: You know what you're going to get.
+
+669
+00:52:14,880 --> 00:52:16,640
+SPEAKER_00: That should be relatively easy to stick with.
+
+670
+00:52:17,080 --> 00:52:25,980
+SPEAKER_00: Now, there can be periods like the US last decade where US stocks return nothing for a US investor over a 10-year period.
+
+671
+00:52:26,440 --> 00:52:28,440
+SPEAKER_00: I'm sure that would be difficult to stick with.
+
+672
+00:52:28,480 --> 00:52:30,660
+SPEAKER_00: If you're globally diversified, maybe it's not so bad.
+
+673
+00:52:31,180 --> 00:52:38,220
+SPEAKER_00: I'll be interested to hear how all of the US investors who don't think you need international diversification feel if there's another US lost decade.
+
+674
+00:52:38,620 --> 00:52:39,420
+SPEAKER_00: We'll see how that goes.
+
+675
+00:52:39,980 --> 00:52:40,980
+SPEAKER_00: That's a big one, simplicity.
+
+676
+00:52:41,780 --> 00:52:47,980
+SPEAKER_00: Something else that's related to the other stuff, related to simplicity and the costs, you keep more of your returns by doing less stuff.
+
+677
+00:52:48,720 --> 00:52:50,060
+SPEAKER_00: I think this is Charlie Ellis' point.
+
+678
+00:52:50,400 --> 00:52:52,580
+SPEAKER_00: He was on an episode 244 if you want to check that out.
+
+679
+00:52:53,280 --> 00:53:00,400
+SPEAKER_00: He talks about winners games where the outcome is decided by the winner and losers games where the outcome is decided by the loser.
+
+680
+00:53:01,020 --> 00:53:06,580
+SPEAKER_00: He talks about tennis in his paper where professional tennis is a winner's game.
+
+681
+00:53:06,640 --> 00:53:08,300
+SPEAKER_00: The winner wins by being better.
+
+682
+00:53:09,340 --> 00:53:12,820
+SPEAKER_00: Amateur tennis is a loser's game where the winner wins by making fewer mistakes.
+
+683
+00:53:13,500 --> 00:53:14,500
+SPEAKER_00: That's the main idea.
+
+684
+00:53:14,640 --> 00:53:23,320
+SPEAKER_00: Winning a winner's game requires exerting effort being better to win while winning a loser's game requires basically minimizing your mistakes and doing less.
+
+685
+00:53:23,840 --> 00:53:26,080
+SPEAKER_00: He says that investing is a loser's game.
+
+686
+00:53:26,780 --> 00:53:34,180
+SPEAKER_00: One of his prescriptions is to make fewer mistakes is to keep things simple and index funds, they accomplish that better than really anything.
+
+687
+00:53:34,720 --> 00:53:40,820
+SPEAKER_01: That's one of my favorite insights in the index fund literature and that goes back to the 70s.
+
+688
+00:53:41,280 --> 00:53:52,200
+SPEAKER_01: It's so true and this is really hard I think for investors to understand on an intuitive level is that investment returns are not something that you have to go out and hunt and kill and drag home.
+
+689
+00:53:52,540 --> 00:53:57,780
+SPEAKER_01: Investment returns fall from the sky and it's up to you to capture them.
+
+690
+00:53:58,440 --> 00:54:04,620
+SPEAKER_01: It's not about doing more, it's about putting a great plan in place and then doing less.
+
+691
+00:54:04,840 --> 00:54:13,700
+SPEAKER_01: I think anybody who has either worked in the industry and kind of seen all of this come down or talked to a lot of investors eventually comes to this.
+
+692
+00:54:13,820 --> 00:54:18,640
+SPEAKER_01: But that is not an insight that you will get the first time you read Charlie Ellis' book.
+
+693
+00:54:19,100 --> 00:54:26,020
+SPEAKER_01: Probably your brain will resist the idea because so much of our culture portrays it.
+
+694
+00:54:26,060 --> 00:54:32,440
+SPEAKER_01: investing is something that you really need to go out and know a lot about in order to get those returns.
+
+695
+00:54:33,060 --> 00:54:45,740
+SPEAKER_01: We've all talked about when we look at people like employer plans, retirement plans, or people who just pick a target date fund, contribute biweekly for 15 years, never look at it, and retire wealthy.
+
+696
+00:54:45,780 --> 00:54:48,820
+SPEAKER_01: That's a great example of winning the losers game.
+
+697
+00:54:48,860 --> 00:54:51,260
+SPEAKER_01: You just didn't make any mistakes along the way.
+
+698
+00:54:51,700 --> 00:54:54,840
+SPEAKER_01: It wasn't that you had amazing investment skills.
+
+699
+00:54:54,980 --> 00:54:57,440
+SPEAKER_01: It was just, you didn't get in the way of yourself.
+
+700
+00:54:58,000 --> 00:55:02,640
+SPEAKER_00: Ellis says in there in that paper, if you can't beat the market, you certainly should consider joining it.
+
+701
+00:55:03,060 --> 00:55:07,220
+SPEAKER_00: An index fund is one way and he wrote, keeping in mind this is 1975.
+
+702
+00:55:07,840 --> 00:55:12,860
+SPEAKER_00: The data from the performance measurement firms show that an index fund would have outperformed most money managers.
+
+703
+00:55:13,320 --> 00:55:18,080
+SPEAKER_00: Obviously has not changed a whole lot, which is interesting to think about that.
+
+704
+00:55:18,460 --> 00:55:24,900
+SPEAKER_00: That's been pretty stable over time going back to 1945 when the 1968 Jensen paper looked at the data.
+
+705
+00:55:25,400 --> 00:55:32,260
+SPEAKER_00: The last point I want to make on the case for index funds is that index funds are consistent with foundational finance theory.
+
+706
+00:55:33,060 --> 00:55:34,320
+SPEAKER_00: I love this point personally.
+
+707
+00:55:34,520 --> 00:55:38,720
+SPEAKER_00: I think it just puts such a nice bow on everything, on all of the data that we've talked about.
+
+708
+00:55:38,760 --> 00:55:40,440
+SPEAKER_00: The data really support the theory.
+
+709
+00:55:40,940 --> 00:55:44,600
+SPEAKER_00: It's very nice that such strong theory does back this approach to investing.
+
+710
+00:55:45,220 --> 00:55:57,140
+SPEAKER_00: So Harry Markowitz developed modern portfolio theory in the 1950s on the basis that optimal portfolios minimize variance for a given level of expected return or maximize expected return for a given level of variance, two sides of the same coin.
+
+711
+00:55:57,820 --> 00:55:59,720
+SPEAKER_00: That's accomplished through diversification.
+
+712
+00:56:00,460 --> 00:56:05,720
+SPEAKER_00: Markowitz basically showed mathematically why diversification is so important, which was a big step forward in investing.
+
+713
+00:56:06,280 --> 00:56:15,900
+SPEAKER_00: Then Bill Sharp's 1964 capital asset pricing model or the CAPM, turned Markowitz theory into a testable prediction about the relationship between risk and expected return.
+
+714
+00:56:16,420 --> 00:56:21,580
+SPEAKER_00: In the CAPM, each asset's price is based on its contribution to the risk and expected return of the overall market.
+
+715
+00:56:22,220 --> 00:56:26,440
+SPEAKER_00: I gave us a model to think about expected returns which did not previously exist.
+
+716
+00:56:26,960 --> 00:56:36,760
+SPEAKER_00: One of the big insights from the CAPM is that in an efficient market, the market capitalization weighted total market portfolio is the portfolio with the optimal risk and expected return trade off.
+
+717
+00:56:37,380 --> 00:56:42,260
+SPEAKER_00: That must be true because each asset is priced such that that is true in an efficient market.
+
+718
+00:56:42,780 --> 00:56:43,740
+SPEAKER_00: That's obviously a big question.
+
+719
+00:56:43,860 --> 00:56:44,700
+SPEAKER_00: Are markets efficient?
+
+720
+00:56:45,300 --> 00:56:48,300
+SPEAKER_00: That's not something that's answerable because of the joint hypothesis problem.
+
+721
+00:56:48,900 --> 00:56:50,240
+SPEAKER_00: It's always going to be an ongoing debate.
+
+722
+00:56:50,660 --> 00:57:02,120
+SPEAKER_00: But Eugene Fama's work on market efficiency, which started in 1960s and continues to today, suggests that markets are efficient enough that most investors should act as if they are, even if perfect market efficiency is an unrealistic ideal.
+
+723
+00:57:02,760 --> 00:57:06,400
+SPEAKER_00: To be clear here, perfect market efficiency is not something that even Fama believes it.
+
+724
+00:57:06,700 --> 00:57:10,980
+SPEAKER_00: He'll laugh if you ask them if markets are efficient and they'll say, well, they can't be perfectly efficient.
+
+725
+00:57:11,640 --> 00:57:24,280
+SPEAKER_00: On this podcast, when we had Fama on, we asked what the best test for market efficiency is and he said that from the perspective of investors, the fact that the pre-fee active mutual fund returns look roughly like what we would expect by random chance.
+
+726
+00:57:24,460 --> 00:57:28,140
+SPEAKER_00: Well, net of fee active fund returns are a negative sum game, they're underperforming.
+
+727
+00:57:28,820 --> 00:57:30,580
+SPEAKER_00: That's the strongest and most relevant evidence.
+
+728
+00:57:31,120 --> 00:57:36,040
+SPEAKER_00: Kind of all the stuff that we talked about on active fund performance, lots of different ways to measure market efficiency.
+
+729
+00:57:36,720 --> 00:57:37,640
+SPEAKER_00: many, many different ways.
+
+730
+00:57:38,240 --> 00:57:44,860
+SPEAKER_00: But Fama is kind of saying from the perspective of investors, if active funds aren't being in the market, markets are efficient enough that you should just believe that they're efficient.
+
+731
+00:57:45,400 --> 00:57:51,580
+SPEAKER_00: So you take all that together, Markowitz, Sharpe, Fama, all of whom are recipients of the Nobel Memorial Prize in economic sciences.
+
+732
+00:57:51,620 --> 00:58:06,000
+SPEAKER_00: Their works suggest theoretically that most investors should just own the market through low cost index funds rather than paying high fees trying to beat the market, which of course is an assertion supported by the evidence that we went through earlier in the episode.
+
+733
+00:58:06,580 --> 00:58:07,940
+SPEAKER_00: Now I do want to offer a word of caution.
+
+734
+00:58:08,260 --> 00:58:10,700
+SPEAKER_00: We mentioned this when we first started the topic.
+
+735
+00:58:10,920 --> 00:58:13,140
+SPEAKER_00: We've been talking about total market index funds.
+
+736
+00:58:13,800 --> 00:58:19,000
+SPEAKER_00: As we mentioned earlier, today there are more indexes than there are stocks, which is crazy to think about.
+
+737
+00:58:19,520 --> 00:58:30,020
+SPEAKER_00: A lot of those indexes and the funds tracking them look more like actively managed funds in the way that we've been talking about active funds, like concentrated high turnover, tax inefficient, higher fees.
+
+738
+00:58:30,080 --> 00:58:34,020
+SPEAKER_00: They look more like that than they look like a total market, low cost index fund.
+
+739
+00:58:34,440 --> 00:58:46,800
+SPEAKER_00: This was detailed by Adrianna Robertson, who you can listen to, talk about the research in episode 133 in her 2019 paper, passive in name only, delegated management and index investing.
+
+740
+00:58:47,260 --> 00:58:53,160
+SPEAKER_00: In that paper, she talks about how a lot of fund managers will go and create an index that they can then go and track.
+
+741
+00:58:53,620 --> 00:58:54,560
+SPEAKER_00: Yes, it's an index fund.
+
+742
+00:58:55,100 --> 00:58:57,460
+SPEAKER_00: They just built an active fund as an index, now they're tracking it.
+
+743
+00:58:58,020 --> 00:58:59,000
+SPEAKER_01: Kind of gets it backwards.
+
+744
+00:58:59,300 --> 00:59:00,160
+SPEAKER_00: Yeah, exactly.
+
+745
+00:59:00,880 --> 00:59:03,020
+SPEAKER_00: The most predatory example is Thematic.
+
+746
+00:59:03,720 --> 00:59:07,480
+SPEAKER_00: index funds and we had Sahid Ben-David on to talk about that in episode 268.
+
+747
+00:59:08,440 --> 00:59:16,700
+SPEAKER_00: He gave us some crazy stats on the relative size by assets compared to the relative contribution of revenue to the ETF space.
+
+748
+00:59:17,140 --> 00:59:24,180
+SPEAKER_00: It was thematic funds and sector funds and stuff like that, relatively small assets, relatively large contribution to revenues because they have higher fees.
+
+749
+00:59:24,420 --> 00:59:26,760
+SPEAKER_00: You can see why the fund companies want to create these products.
+
+750
+00:59:27,340 --> 00:59:32,400
+SPEAKER_00: Thematic funds aim to capture the performance of hot investment themes like crypto, AI, electric vehicles.
+
+751
+00:59:33,120 --> 00:59:40,680
+SPEAKER_00: They tend to launch at the peak of investor excitement for the theme and then they also tend to go on to deliver staggeringly poor performance.
+
+752
+00:59:41,220 --> 00:59:42,120
+SPEAKER_00: Cannabis is another one.
+
+753
+00:59:42,480 --> 00:59:44,220
+SPEAKER_00: I remember the early days of cannabis hype.
+
+754
+00:59:44,800 --> 00:59:45,160
+SPEAKER_02: I owned one.
+
+755
+00:59:45,640 --> 00:59:46,860
+SPEAKER_00: You look back and it's like, wow.
+
+756
+00:59:47,680 --> 00:59:48,400
+SPEAKER_02: Was it Horizons?
+
+757
+00:59:48,440 --> 00:59:49,460
+SPEAKER_02: There's a cannabis ETF.
+
+758
+00:59:50,240 --> 00:59:50,580
+SPEAKER_00: HMMJ.
+
+759
+00:59:51,380 --> 00:59:52,120
+SPEAKER_02: I own that one for a bet.
+
+760
+00:59:52,560 --> 00:59:53,080
+SPEAKER_00: Of course you do.
+
+761
+00:59:54,560 --> 00:59:55,820
+SPEAKER_01: Ripple leveraged in your RESP?
+
+762
+00:59:56,620 --> 00:59:57,380
+SPEAKER_02: No, no, this is all me.
+
+763
+00:59:57,860 --> 00:59:59,540
+SPEAKER_02: I think I put like $2,000 into it.
+
+764
+01:00:00,060 --> 01:00:00,900
+SPEAKER_00: All right, hold on, hold on.
+
+765
+01:00:01,000 --> 01:00:02,220
+SPEAKER_00: I got to look up HMMJ now.
+
+766
+01:00:03,800 --> 01:00:04,540
+SPEAKER_02: I don't own it anymore.
+
+767
+01:00:04,620 --> 01:00:06,180
+SPEAKER_02: I think I held it for like a year or something.
+
+768
+01:00:06,380 --> 01:00:07,160
+SPEAKER_02: This is all by memory.
+
+769
+01:00:07,720 --> 01:00:15,840
+SPEAKER_02: I think I took a 30% haircut on it and I think I held it from like $2,000 down to like $1,300 or $1,400 or something like that and I want to say this was around 2017.
+
+770
+01:00:17,900 --> 01:00:18,460
+SPEAKER_00: This is rough.
+
+771
+01:00:18,940 --> 01:00:19,560
+SPEAKER_02: Tell me if I'm right.
+
+772
+01:00:19,580 --> 01:00:21,140
+SPEAKER_02: 30% draw down around there?
+
+773
+01:00:21,900 --> 01:00:26,620
+SPEAKER_00: So HMMJ, I have data going back to 2017.
+
+774
+01:00:26,660 --> 01:00:30,260
+SPEAKER_00: So from 2017 until now, annualized negative 14.64%.
+
+775
+01:00:32,320 --> 01:00:32,880
+SPEAKER_00: That's pretty rough.
+
+776
+01:00:33,720 --> 01:00:34,480
+SPEAKER_01: That's disappointing.
+
+777
+01:00:35,060 --> 01:00:35,620
+SPEAKER_02: That's special.
+
+778
+01:00:36,600 --> 01:00:38,920
+SPEAKER_01: I think the term you used was staggeringly poor.
+
+779
+01:00:39,140 --> 01:00:39,340
+SPEAKER_01: Yes.
+
+780
+01:00:40,840 --> 01:00:42,260
+SPEAKER_01: Seems entirely appropriate.
+
+781
+01:00:42,780 --> 01:00:46,960
+SPEAKER_00: You look in the name, Global X Marijuana Life Sciences Index ETF.
+
+782
+01:00:47,260 --> 01:00:50,500
+SPEAKER_00: It's an index fund, but it doesn't do any of the good things we were talking about earlier.
+
+783
+01:00:51,060 --> 01:00:51,840
+SPEAKER_00: I'm using Y charts.
+
+784
+01:00:52,240 --> 01:00:59,540
+SPEAKER_00: It reports returns in the base currency of the fund but I just want to see because there is a USD version of HMMJ.
+
+785
+01:01:00,460 --> 01:01:03,880
+SPEAKER_00: I just want to see if I can chart that against ARK.
+
+786
+01:01:04,520 --> 01:01:11,460
+SPEAKER_01: Did it change its mandate because you'd said life sciences as opposed to cannabis producers or?
+
+787
+01:01:12,020 --> 01:01:13,320
+SPEAKER_00: I don't know if the name changed.
+
+788
+01:01:13,840 --> 01:01:14,540
+SPEAKER_00: That's a good question.
+
+789
+01:01:14,880 --> 01:01:16,140
+SPEAKER_02: I feel like it was always called that.
+
+790
+01:01:16,600 --> 01:01:17,120
+SPEAKER_00: Yeah, I'm not sure.
+
+791
+01:01:17,160 --> 01:01:20,380
+SPEAKER_00: I haven't looked at it in any detail other than remembering the ticker.
+
+792
+01:01:21,240 --> 01:01:22,800
+SPEAKER_00: Depends on the time horizon, that makes sense.
+
+793
+01:01:23,240 --> 01:01:27,120
+SPEAKER_00: If I go back to 2017, ARC has outperformed HMMJ by quite a lot.
+
+794
+01:01:27,580 --> 01:01:33,040
+SPEAKER_00: If we go to the peak, which isn't really fair, but the peak of ARC, let's see how we look as a starting point.
+
+795
+01:01:33,460 --> 01:01:38,900
+SPEAKER_00: They're both about negative 22 and negative 24% annualized since February 2021.
+
+796
+01:01:40,820 --> 01:01:53,580
+SPEAKER_00: Anyway, all that to say that thematic index funds, although that's not what ARC is, but still thematic index funds are not low cost total market index funds that you can kind of reliably expect to deliver positive long term returns, they're very different.
+
+797
+01:01:54,280 --> 01:01:59,660
+SPEAKER_00: I would make a similar point about industry index funds or sector index funds, same kind of idea.
+
+798
+01:02:00,260 --> 01:02:08,300
+SPEAKER_00: You're taking a lot of industry specific risk which maybe it pays off, maybe if you have some kind of insider knowledge or something, maybe you want to take that bet.
+
+799
+01:02:08,440 --> 01:02:11,900
+SPEAKER_00: but I think for most people most of the time, it's not the kind of bet that you want to take.
+
+800
+01:02:12,480 --> 01:02:20,420
+SPEAKER_00: We're really talking about as we said earlier, total market, low cost index funds, that's what's supported by the theory and the evidence presented in this video.
+
+801
+01:02:21,020 --> 01:02:24,900
+SPEAKER_00: Another important point, it's not the same point as the sector funds but it's related.
+
+802
+01:02:25,380 --> 01:02:28,960
+SPEAKER_00: A lot of times people take index funds to mean S&P 500 index funds.
+
+803
+01:02:29,420 --> 01:02:32,320
+SPEAKER_00: Yeah, I'm an index investor and they only own S&P 500 index funds.
+
+804
+01:02:32,940 --> 01:02:37,560
+SPEAKER_00: The S&P 500 represents a large portion of the US market and it's performed incredibly well.
+
+805
+01:02:37,940 --> 01:02:40,000
+SPEAKER_00: No question about that, especially in recent history.
+
+806
+01:02:40,720 --> 01:02:44,220
+SPEAKER_00: It's probably not the only index that you want to invest in, at least in my opinion.
+
+807
+01:02:44,340 --> 01:02:45,760
+SPEAKER_00: We've talked about this in past episodes.
+
+808
+01:02:46,240 --> 01:02:49,520
+SPEAKER_00: If someone said they only want to invest in one country, is the US the right one?
+
+809
+01:02:49,680 --> 01:02:50,080
+SPEAKER_00: Probably.
+
+810
+01:02:50,360 --> 01:02:52,560
+SPEAKER_00: because it's the largest, most diversified market.
+
+811
+01:02:52,960 --> 01:02:58,480
+SPEAKER_00: I think adding international exposure and Canadian exposure for Canadians, I think makes a lot of sense.
+
+812
+01:02:58,980 --> 01:03:02,640
+SPEAKER_00: In Canada, we have ETFs that give you that.
+
+813
+01:03:02,740 --> 01:03:08,420
+SPEAKER_00: They give you a globally diversified, low cost, rebalanced portfolio for a pretty low fee and you don't have to think about it, you have to do anything.
+
+814
+01:03:08,800 --> 01:03:13,220
+SPEAKER_00: It's pretty easy today to do all the good things that we're talking about index funds doing.
+
+815
+01:03:14,580 --> 01:03:17,100
+SPEAKER_02: International stocks are absolutely ripping right now.
+
+816
+01:03:17,280 --> 01:03:21,580
+SPEAKER_02: It feels very vindicating talking for years about international diversification.
+
+817
+01:03:21,780 --> 01:03:24,840
+SPEAKER_02: I pulled up a year-to-date chart yesterday and posted it on Twitter, and the U.S.
+
+818
+01:03:24,900 --> 01:03:26,840
+SPEAKER_02: is the worst performing of all the developed markets.
+
+819
+01:03:26,920 --> 01:03:29,260
+SPEAKER_02: Of course, it's been eight weeks, bro, relax.
+
+820
+01:03:29,340 --> 01:03:29,940
+SPEAKER_02: I'm like, I don't care.
+
+821
+01:03:30,500 --> 01:03:31,340
+SPEAKER_02: This is my time to shine.
+
+822
+01:03:31,560 --> 01:03:32,440
+SPEAKER_00: It's finally happened.
+
+823
+01:03:33,020 --> 01:03:37,540
+SPEAKER_01: Yeah, international diversification has been a hard sell for a few years for sure.
+
+824
+01:03:37,720 --> 01:03:42,740
+SPEAKER_01: There's no question it has reduced your returns compared to investing in the U.S.
+
+825
+01:03:42,880 --> 01:03:43,100
+SPEAKER_01: only.
+
+826
+01:03:43,780 --> 01:03:45,480
+SPEAKER_01: As you know, you really have to look at.
+
+827
+01:03:46,020 --> 01:03:47,300
+SPEAKER_01: decades at a time.
+
+828
+01:03:47,340 --> 01:03:54,800
+SPEAKER_01: There's always going to be periods of not even two, three years, but eight to 10 years where one asset class is going to outperform.
+
+829
+01:03:55,500 --> 01:04:03,180
+SPEAKER_01: If you're going to invest for your lifetime, I think it's probably a good bet that you're not going to be able to just pick the best performing country for several decades.
+
+830
+01:04:03,840 --> 01:04:04,520
+SPEAKER_02: No one to switch.
+
+831
+01:04:05,140 --> 01:04:05,980
+SPEAKER_00: Yeah, we'll see what happens.
+
+832
+01:04:06,400 --> 01:04:14,580
+SPEAKER_00: It would be nice to have at least a year where international outperforms and people will stop thinking it's a foregone conclusion that the US always outperforms.
+
+833
+01:04:15,260 --> 01:04:16,160
+SPEAKER_00: That concludes the topic.
+
+834
+01:04:16,500 --> 01:04:18,500
+SPEAKER_00: So index funds have low fees.
+
+835
+01:04:19,040 --> 01:04:28,240
+SPEAKER_00: They are broadly diversified and largely due to those characteristics, they beat the vast majority of actively managed funds most of the time and especially at long horizons.
+
+836
+01:04:28,920 --> 01:04:29,980
+SPEAKER_00: They're also tax efficient.
+
+837
+01:04:30,260 --> 01:04:38,420
+SPEAKER_00: They're simple to understand and to implement, especially with the products we have in Canada right now and maybe not most importantly, but I like this point a lot.
+
+838
+01:04:38,740 --> 01:04:40,880
+SPEAKER_00: They're consistent with financial theory.
+
+839
+01:04:41,440 --> 01:04:46,940
+SPEAKER_00: Canadians have been particularly slow at least relative to our American neighbors to adopt index funds.
+
+840
+01:04:47,120 --> 01:04:49,260
+SPEAKER_00: So I hope this episode helps to change that.
+
+841
+01:04:49,740 --> 01:04:50,280
+SPEAKER_01: Nicely done Ben.
+
+842
+01:04:50,720 --> 01:04:51,280
+SPEAKER_02: Yeah, well done Ben.
+
+843
+01:04:51,560 --> 01:04:55,400
+SPEAKER_02: It's funny that you think that's the most important point that they're like theoretically consistent.
+
+844
+01:04:55,520 --> 01:04:59,520
+SPEAKER_02: for me and I don't mean to speak on Dan's behalf or at least for me, that's probably the least important point.
+
+845
+01:05:00,360 --> 01:05:02,260
+SPEAKER_01: It is on brand though Mark, you have to admit.
+
+846
+01:05:02,960 --> 01:05:03,840
+SPEAKER_02: Totally, exactly.
+
+847
+01:05:04,120 --> 01:05:05,220
+SPEAKER_02: Yeah, I just find that hilarious.
+
+848
+01:05:05,780 --> 01:05:08,840
+SPEAKER_00: It puts such a nice – I said bow earlier and I think that's right.
+
+849
+01:05:09,280 --> 01:05:11,680
+SPEAKER_00: We can have all the data and the data is Cool.
+
+850
+01:05:11,820 --> 01:05:19,060
+SPEAKER_00: But kind of like we've been talking about, even if you have a lot of data, if there's no reason to believe that that's going to persist in the future, then it's harder.
+
+851
+01:05:19,380 --> 01:05:24,060
+SPEAKER_00: But we have the theory that says this is what should be happening in theory.
+
+852
+01:05:24,640 --> 01:05:28,480
+SPEAKER_00: There's still exceptions if active gets too small, like we talked about earlier.
+
+853
+01:05:28,660 --> 01:05:35,120
+SPEAKER_00: But I think the theory is pretty strong that what has happened should continue to happen in the future.
+
+854
+01:05:35,640 --> 01:05:35,960
+SPEAKER_00: I like that.
+
+855
+01:05:36,160 --> 01:05:36,740
+SPEAKER_00: I think it's important.
+
+856
+01:05:36,960 --> 01:05:37,180
+SPEAKER_02: Nice.
+
+857
+01:05:37,860 --> 01:05:38,240
+SPEAKER_01: All right.
+
+858
+01:05:39,000 --> 01:05:39,380
+SPEAKER_00: After show.
+
+859
+01:05:39,960 --> 01:05:40,260
+SPEAKER_01: Let's go.
+
+860
+01:05:40,360 --> 01:05:46,820
+SPEAKER_00: I did want to give a testicle update.
+
+861
+01:05:47,680 --> 01:05:49,140
+SPEAKER_02: I'm sorry Ben, I'm trying not to laugh.
+
+862
+01:05:49,340 --> 01:05:52,940
+SPEAKER_00: I mean it's funny talking about testicles.
+
+863
+01:05:52,980 --> 01:05:55,340
+SPEAKER_00: I mean it's not, but it also is.
+
+864
+01:05:56,160 --> 01:05:58,200
+SPEAKER_00: I do want to say thanks to all the people who have written and checked in.
+
+865
+01:05:58,240 --> 01:06:01,040
+SPEAKER_00: A lot of people have reached out, which is very thoughtful.
+
+866
+01:06:01,740 --> 01:06:08,580
+SPEAKER_00: In our last episode where we gave a testicle update, I had not gotten the pathology back yet and so I think people were wanting to know.
+
+867
+01:06:08,720 --> 01:06:14,260
+SPEAKER_00: I did post about it in the rational minder community because people were asking, but I'll talk about it now for people who don't go in there.
+
+868
+01:06:14,640 --> 01:06:18,940
+SPEAKER_00: So I did get the pathology back and I do have cancer, which kind of sucks.
+
+869
+01:06:19,580 --> 01:06:23,340
+SPEAKER_00: But of the bad news I could have gotten, it was the best type of bad news.
+
+870
+01:06:23,900 --> 01:06:28,380
+SPEAKER_00: It was diagnosed as a very early stage seminoma testicular cancer.
+
+871
+01:06:28,680 --> 01:06:32,760
+SPEAKER_00: I had spent a lot of time reading about testicular cancer, so I knew this was what I wanted to hear.
+
+872
+01:06:33,420 --> 01:06:39,640
+SPEAKER_00: Seminoma is a much better diagnosis than non-seminoma, which are the two main types of testicular cancer.
+
+873
+01:06:40,300 --> 01:06:41,340
+SPEAKER_00: At least that's my understanding.
+
+874
+01:06:41,520 --> 01:06:47,420
+SPEAKER_00: Non-seminoma is more likely to spread and the treatment tends to be a little bit more involved because of that propensity to spread.
+
+875
+01:06:47,980 --> 01:06:55,940
+SPEAKER_00: The pathology findings had indicated that it's early stage seminoma PT1A for people who understand what that means.
+
+876
+01:06:55,980 --> 01:07:00,380
+SPEAKER_00: Apparently that's a really good PT1A, but it's highly treatable and curable.
+
+877
+01:07:01,040 --> 01:07:02,760
+SPEAKER_00: It's not just like, yeah, we can keep this at bay.
+
+878
+01:07:02,820 --> 01:07:05,820
+SPEAKER_00: It's like, yeah, this is often completely cured where it's non-recurring.
+
+879
+01:07:06,680 --> 01:07:12,840
+SPEAKER_00: There are no signs of spread to nearby structures or blood slash lymphatic vessels, which is a very good prognostic sign.
+
+880
+01:07:13,560 --> 01:07:17,480
+SPEAKER_00: From my understanding, the cure rate for early stage seminoma is extremely high.
+
+881
+01:07:18,360 --> 01:07:26,380
+SPEAKER_00: From what I understand, it's 99 to 100% cure rate and often with just surgery, so without further treatments, which would be great obviously.
+
+882
+01:07:27,660 --> 01:07:35,080
+SPEAKER_00: As we're recording this on Thursday, I'm booked to see an oncologist Monday the following week, so the week that the episode is released.
+
+883
+01:07:35,820 --> 01:07:38,020
+SPEAKER_00: I have a staging CT scan later that week.
+
+884
+01:07:38,160 --> 01:07:43,180
+SPEAKER_00: Staging CT scan is where they scan your whole body to check for signs of spread in other areas.
+
+885
+01:07:44,000 --> 01:07:49,700
+SPEAKER_00: By the time this episode is out, I will have met the oncologist to hear their opinion on whether I need radiation or chemo.
+
+886
+01:07:50,280 --> 01:07:53,460
+SPEAKER_00: Both of which seem unlikely, but obviously I'm prepared for the worst.
+
+887
+01:07:54,020 --> 01:07:58,220
+SPEAKER_00: I'll get my CT scans after that, which will conclusively say what the next steps are.
+
+888
+01:07:58,580 --> 01:07:59,660
+SPEAKER_00: Anyway, that's where that is.
+
+889
+01:08:00,540 --> 01:08:01,580
+SPEAKER_01: Well, thanks for sharing that Ben.
+
+890
+01:08:01,740 --> 01:08:11,360
+SPEAKER_01: Obviously not the ideal news that you could have got but as you say, in the scheme of things, if you had to hear that word, it sounds like they caught it early.
+
+891
+01:08:11,840 --> 01:08:16,439
+SPEAKER_01: Good on you for paying attention to your body and your symptoms and taking action.
+
+892
+01:08:17,500 --> 01:08:19,000
+SPEAKER_01: Obviously, we all wish you the best.
+
+893
+01:08:20,080 --> 01:08:20,399
+SPEAKER_00: Thanks, Dan.
+
+894
+01:08:20,979 --> 01:08:21,460
+SPEAKER_00: It's been crazy.
+
+895
+01:08:21,600 --> 01:08:27,000
+SPEAKER_00: I started telling more people other than on the podcast because a lot of people that I know in real life don't listen to the podcast.
+
+896
+01:08:27,800 --> 01:08:31,800
+SPEAKER_00: Some of the volunteer work that I do, I've started telling people I need to scale this back at least until I'm done dealing with this.
+
+897
+01:08:32,120 --> 01:08:34,140
+SPEAKER_00: It does take time to go to appointments and stuff like that.
+
+898
+01:08:34,680 --> 01:08:38,800
+SPEAKER_00: Just through having those conversations, a ton of people have been affected by cancer.
+
+899
+01:08:39,240 --> 01:08:42,020
+SPEAKER_00: I've had multiple people where I've told, hey, I've got this going on.
+
+900
+01:08:42,779 --> 01:08:44,520
+SPEAKER_00: Come back and say, oh, I dealt with that five years ago.
+
+901
+01:08:44,660 --> 01:08:45,640
+SPEAKER_00: I'm sorry, you're going through that.
+
+902
+01:08:45,740 --> 01:08:47,080
+SPEAKER_00: Or my family member or whatever.
+
+903
+01:08:47,420 --> 01:08:48,500
+SPEAKER_00: It's something that affects a lot of people.
+
+904
+01:08:48,800 --> 01:08:51,880
+SPEAKER_00: I knew that already because my mom had been affected by it when I was a kid.
+
+905
+01:08:51,920 --> 01:08:55,160
+SPEAKER_00: But it really is, I don't know what the word is, interesting.
+
+906
+01:08:55,279 --> 01:08:55,979
+SPEAKER_00: It's not the right word.
+
+907
+01:08:56,260 --> 01:09:00,140
+SPEAKER_00: But it's something to observe how when you start telling people, I am going through this.
+
+908
+01:09:00,340 --> 01:09:02,100
+SPEAKER_00: How many other people have gone through something similar?
+
+909
+01:09:03,060 --> 01:09:05,160
+SPEAKER_00: We've got this note from Patricia.
+
+910
+01:09:05,540 --> 01:09:08,340
+SPEAKER_00: This was in the AMA questions that we've been receiving.
+
+911
+01:09:08,740 --> 01:09:13,479
+SPEAKER_00: While we're on that topic, actually the AMA form is up on the rationalreminder.ca site.
+
+912
+01:09:13,979 --> 01:09:19,819
+SPEAKER_00: We're up to 60, I think, AMA questions and we still have a backlog from the last time we asked for questions.
+
+913
+01:09:20,880 --> 01:09:26,340
+SPEAKER_00: People are sending them in, which is great, but if you want to submit a question, you can probably find it in the community or you can go to the rational reminder.
+
+914
+01:09:27,279 --> 01:09:30,319
+SPEAKER_00: website and you'll find the form to submit a question, so keep those coming.
+
+915
+01:09:30,960 --> 01:09:35,220
+SPEAKER_00: I was just looking through those for our next AMA episode and this one was not a question.
+
+916
+01:09:35,380 --> 01:09:40,020
+SPEAKER_00: It was more of like a review email type thing, but they just sent it in through that form.
+
+917
+01:09:40,620 --> 01:09:41,600
+SPEAKER_00: I just wanted to read that out.
+
+918
+01:09:42,180 --> 01:09:45,220
+SPEAKER_00: From Patricia, she says, this is not a question but a comment.
+
+919
+01:09:46,000 --> 01:09:49,180
+SPEAKER_00: I've meant to send it ever since Ben announced his health challenges on the podcast.
+
+920
+01:09:50,240 --> 01:09:52,560
+SPEAKER_00: I want to thank Ben for his incredible work and integrity on the R.R.
+
+921
+01:09:52,660 --> 01:09:53,060
+SPEAKER_00: podcast.
+
+922
+01:09:53,120 --> 01:09:59,280
+SPEAKER_00: A few years ago, my brother-in-law, accountant suggested that I become more aware of how my husband managed our investments.
+
+923
+01:10:00,120 --> 01:10:04,600
+SPEAKER_00: In his opinion, my husband was taking on big unnecessary risks with our retirement portfolio.
+
+924
+01:10:05,480 --> 01:10:18,000
+SPEAKER_00: About the same time, our retirement planner began cautioning that we needed to diversify, but my husband had always handled the big investing while I managed the household budget, which is a very common arrangement in married heterosexual couples.
+
+925
+01:10:18,980 --> 01:10:21,140
+SPEAKER_00: I'd never had any reason not to trust him.
+
+926
+01:10:21,580 --> 01:10:24,840
+SPEAKER_00: Eventually, I decided to heed the cautions I had been hearing.
+
+927
+01:10:25,120 --> 01:10:29,840
+SPEAKER_00: I asked our retirement planner to recommend some books or other resources so that I can learn about investing.
+
+928
+01:10:30,120 --> 01:10:33,080
+SPEAKER_00: Knowing I like podcasts, he recommended yours and yours alone.
+
+929
+01:10:33,900 --> 01:10:43,300
+SPEAKER_00: It took me a couple of years of listening to get to a place where I realized not only that we did indeed need to make some changes, but where I had enough courage and confidence to fight my husband to make them.
+
+930
+01:10:43,340 --> 01:10:45,200
+SPEAKER_00: I thought that was just such a powerful point.
+
+931
+01:10:45,580 --> 01:10:54,760
+SPEAKER_00: There is research on this that even in cases where female spouse is more financially literate, the male spouse tends to dominate household financial decisions.
+
+932
+01:10:55,280 --> 01:10:56,980
+SPEAKER_00: Confidence is probably a lot of that explanation.
+
+933
+01:10:57,540 --> 01:11:01,540
+SPEAKER_00: She goes on, I will be forever grateful that we made the changes before disaster struck.
+
+934
+01:11:02,060 --> 01:11:07,040
+SPEAKER_00: My husband had invested 80% of our portfolio in Tesla and the rest in other high tech stocks.
+
+935
+01:11:07,360 --> 01:11:14,560
+SPEAKER_00: Our money is now far more diversified through index funds and our retirement planner and my brother-in-law tell me we are unlikely to outlive our savings.
+
+936
+01:11:15,160 --> 01:11:15,900
+SPEAKER_00: The story is just.
+
+937
+01:11:15,980 --> 01:11:16,260
+SPEAKER_00: Wild.
+
+938
+01:11:16,520 --> 01:11:25,180
+SPEAKER_00: In January of this year, my husband was diagnosed with a rare and aggressive form of dementia, one that in hindsight has been affecting his decision making, personality and judgment for years.
+
+939
+01:11:25,960 --> 01:11:32,620
+SPEAKER_00: We've talked about research on that as well, where unexpected cognitive decline can have significant negative impacts on financial decision making.
+
+940
+01:11:33,420 --> 01:11:39,660
+SPEAKER_00: So she says, thank you for being the calm, reassuring and friendly voice in my ears for the past several years, coaching and teaching me the way that we should go.
+
+941
+01:11:40,140 --> 01:11:44,580
+SPEAKER_00: Thankful for all I have learned as a result of your efforts and I wish you and your family.
+
+942
+01:11:45,260 --> 01:11:47,120
+SPEAKER_00: Always and only the very best, you will be in my prayers.
+
+943
+01:11:48,220 --> 01:11:51,020
+SPEAKER_00: I thought that was a very nice note, but it was also very relevant.
+
+944
+01:11:51,460 --> 01:11:58,340
+SPEAKER_00: What she describes her situation being and how she dealt with it and how she gained the confidence to do it, I think is probably pretty common.
+
+945
+01:11:59,160 --> 01:12:00,160
+SPEAKER_01: It's pretty remarkable.
+
+946
+01:12:00,200 --> 01:12:08,300
+SPEAKER_01: We've been doing this for a long time, creating a lot of content for people and based on the feedback we've received, we all know we have helped people.
+
+947
+01:12:08,940 --> 01:12:10,080
+SPEAKER_01: They have learned a lot.
+
+948
+01:12:10,160 --> 01:12:12,180
+SPEAKER_01: They have changed the way they've invested, et cetera.
+
+949
+01:12:12,880 --> 01:12:14,760
+SPEAKER_01: From time to time, you get a note like this.
+
+950
+01:12:15,520 --> 01:12:17,020
+SPEAKER_01: I changed somebody's life here.
+
+951
+01:12:17,080 --> 01:12:20,400
+SPEAKER_01: This wasn't just like, oh, I boosted your return by 12 basis points.
+
+952
+01:12:20,480 --> 01:12:24,520
+SPEAKER_01: This was something that really truly affected this person's life.
+
+953
+01:12:24,560 --> 01:12:33,340
+SPEAKER_01: And had they not encountered the podcast and the advice at the time that they did, her outlook could be pretty different.
+
+954
+01:12:33,820 --> 01:12:34,620
+SPEAKER_01: It's pretty sobering.
+
+955
+01:12:35,100 --> 01:12:40,940
+SPEAKER_01: This is why we have to take what we do pretty seriously because it does really affect people in a profound way.
+
+956
+01:12:41,820 --> 01:12:44,160
+SPEAKER_02: That's nothing to say for all the people that don't reach out.
+
+957
+01:12:44,460 --> 01:12:52,460
+SPEAKER_02: There's thousands and thousands of people potentially out there that you're helping in some way when you create content or when you educate people this way that don't end up contacting you about it.
+
+958
+01:12:52,500 --> 01:12:55,960
+SPEAKER_02: Last year and the year before, I was posting a lot of content on LinkedIn in article form.
+
+959
+01:12:56,940 --> 01:13:02,900
+SPEAKER_02: I had someone reach out and they basically attributed them passing their CFP exams largely to me and a few other people.
+
+960
+01:13:03,220 --> 01:13:06,880
+SPEAKER_02: I hadn't really considered that the content I was creating might help an advisor with an exam.
+
+961
+01:13:06,980 --> 01:13:08,660
+SPEAKER_02: I was writing more towards like a general audience.
+
+962
+01:13:09,040 --> 01:13:10,780
+SPEAKER_02: You never really know when you're putting stuff out there.
+
+963
+01:13:11,080 --> 01:13:16,880
+SPEAKER_02: who it's affecting and how and even if you don't get those kind messages sometimes, you're probably doing good work in helping someone.
+
+964
+01:13:17,780 --> 01:13:19,020
+SPEAKER_00: It also puts a lot of pressure on man.
+
+965
+01:13:19,420 --> 01:13:20,220
+SPEAKER_00: I think about that a lot.
+
+966
+01:13:20,740 --> 01:13:22,160
+SPEAKER_00: People really listen to what we say.
+
+967
+01:13:22,620 --> 01:13:25,980
+SPEAKER_00: I notice that just from interacting with people and seeing comments and seeing things like this.
+
+968
+01:13:26,200 --> 01:13:28,080
+SPEAKER_00: People really, really listen to what we say.
+
+969
+01:13:28,420 --> 01:13:31,040
+SPEAKER_00: I take that very seriously as I think people can appreciate.
+
+970
+01:13:31,860 --> 01:13:32,880
+SPEAKER_00: All of us take that very seriously.
+
+971
+01:13:33,260 --> 01:13:33,940
+SPEAKER_00: It's no joke man.
+
+972
+01:13:34,200 --> 01:13:38,300
+SPEAKER_00: People are hearing what we say, taking that information, using it to change their lives.
+
+973
+01:13:38,760 --> 01:13:42,020
+SPEAKER_00: That's on one hand profound like you said Dan, but it's also The pressure's on, man.
+
+974
+01:13:42,100 --> 01:13:42,840
+SPEAKER_01: It's intimidating.
+
+975
+01:13:44,220 --> 01:13:45,340
+SPEAKER_02: A lot of responsibility there.
+
+976
+01:13:46,040 --> 01:13:48,640
+SPEAKER_01: Because it's not a trivial subject that we're talking about.
+
+977
+01:13:49,000 --> 01:13:53,980
+SPEAKER_01: People's personal finances are fundamental to their success and their happiness in life.
+
+978
+01:13:54,700 --> 01:14:00,720
+SPEAKER_01: If we give people poor advice or incorrect information to act on, we can truly harm them.
+
+979
+01:14:01,260 --> 01:14:06,200
+SPEAKER_01: I would say that that's, of course, even more important as an advisor because now you're working with people directly.
+
+980
+01:14:07,220 --> 01:14:11,420
+SPEAKER_01: any conscientious advisor that I know, it's something that does keep us up at night.
+
+981
+01:14:11,480 --> 01:14:19,440
+SPEAKER_01: Like we need to make sure that the advice we're giving to people is sound or the consequences can be pretty great.
+
+982
+01:14:19,840 --> 01:14:32,040
+SPEAKER_01: But we have enough experience and confidence and we work hard enough over time to be pretty comfortable saying that most of the people whose lives we touch and change, I think will be for the better.
+
+983
+01:14:32,120 --> 01:14:34,600
+SPEAKER_01: I hope that doesn't sound conceited.
+
+984
+01:14:35,180 --> 01:14:36,500
+SPEAKER_01: That's certainly what we're aiming for.
+
+985
+01:14:36,580 --> 01:14:40,180
+SPEAKER_01: I don't have any data to prove it, but I think that's what we're all striving for.
+
+986
+01:14:40,920 --> 01:14:41,400
+SPEAKER_00: I think it's true.
+
+987
+01:14:41,960 --> 01:14:42,600
+SPEAKER_00: It's not always true.
+
+988
+01:14:42,680 --> 01:14:45,540
+SPEAKER_00: I think there are a lot of people that give financial advice and provide financial information.
+
+989
+01:14:46,200 --> 01:14:53,320
+SPEAKER_00: If someone's pumping meme coins, I listened to Coffeezilla interview the guy that was behind the Melania coin and behind the Libra coin.
+
+990
+01:14:54,040 --> 01:14:54,660
+SPEAKER_00: It's crazy, man.
+
+991
+01:14:55,080 --> 01:14:59,160
+SPEAKER_00: They manufactured these situations where they can extract value from the system.
+
+992
+01:14:59,460 --> 01:15:00,900
+SPEAKER_00: They're literally just taking money from people.
+
+993
+01:15:01,560 --> 01:15:04,140
+SPEAKER_00: That's obviously the opposite of what we're doing.
+
+994
+01:15:04,540 --> 01:15:06,280
+SPEAKER_00: but there are people out there who are willing to do that stuff.
+
+995
+01:15:06,640 --> 01:15:07,220
+SPEAKER_00: That's pretty scary.
+
+996
+01:15:08,040 --> 01:15:12,860
+SPEAKER_02: That's not even that illegal in the sense that you kind of know what the risks are because you're buying this.
+
+997
+01:15:13,280 --> 01:15:18,120
+SPEAKER_02: It's not a security, it's a security, but PumpFund, the site that launches meme coins, they do like.
+
+998
+01:15:18,140 --> 01:15:20,620
+SPEAKER_02: 60,000 new coins are launched every single day.
+
+999
+01:15:20,640 --> 01:15:30,020
+SPEAKER_02: 99.9% of them are designed to separate you from your money, but people are still buying them because of skewness, of course, then because of these lottery potential returns.
+
+1000
+01:15:30,440 --> 01:15:37,260
+SPEAKER_02: It's terrifying that people are out there doing that and it all accrues to The people who are launching the coins, legalized grift.
+
+1001
+01:15:37,300 --> 01:15:39,780
+SPEAKER_00: There are laws against that in stocks.
+
+1002
+01:15:40,140 --> 01:15:41,440
+SPEAKER_00: Coffee's kind of grilled them on that too.
+
+1003
+01:15:41,660 --> 01:15:44,280
+SPEAKER_00: This would be illegal in stocks and the guy's like, yeah, not in crypto.
+
+1004
+01:15:44,740 --> 01:15:45,020
+SPEAKER_02: Totally.
+
+1005
+01:15:45,060 --> 01:15:45,620
+SPEAKER_02: It's a pump and dump.
+
+1006
+01:15:46,060 --> 01:15:46,780
+SPEAKER_02: It's exactly what I mean.
+
+1007
+01:15:47,080 --> 01:15:49,360
+SPEAKER_02: It's one thing to get scammed by a Nigerian prince in your inbox.
+
+1008
+01:15:49,460 --> 01:15:56,460
+SPEAKER_02: It's another thing to willingly participate in these things that otherwise would be illegal if they were classified as stocks or securities or anything else.
+
+1009
+01:15:56,760 --> 01:15:57,240
+SPEAKER_02: Crazy stuff.
+
+1010
+01:15:57,900 --> 01:16:00,340
+SPEAKER_00: All that to say, I'm very glad that we're not doing that.
+
+1011
+01:16:00,800 --> 01:16:00,940
+SPEAKER_02: Yeah.
+
+1012
+01:16:01,200 --> 01:16:02,600
+SPEAKER_00: I would not sleep very well.
+
+1013
+01:16:02,860 --> 01:16:04,040
+SPEAKER_01: At least not on the air, yeah.
+
+1014
+01:16:05,220 --> 01:16:05,620
+SPEAKER_02: Exactly.
+
+1015
+01:16:06,280 --> 01:16:06,560
+SPEAKER_00: All right.
+
+1016
+01:16:06,840 --> 01:16:07,840
+SPEAKER_00: I think that's the end of the episode.
+
+1017
+01:16:07,940 --> 01:16:08,620
+SPEAKER_00: Anything else from you guys?
+
+1018
+01:16:09,000 --> 01:16:09,720
+SPEAKER_01: No, that was great.
+
+1019
+01:16:09,920 --> 01:16:10,200
+SPEAKER_01: Thanks.
+
+1020
+01:16:11,120 --> 01:16:11,480
+SPEAKER_02: Good job, man.
+
+1021
+01:16:11,560 --> 01:16:21,640
+SPEAKER_02: Thanks.
+
