@@ -179,3 +179,9 @@ desktop.ini
 wandb/
 .cache/
 transformers_cache/
+
+# =============================================================================
+# Exceptions (Allow specific test data)
+# =============================================================================
+!audio2script_and_summarizer/diarize_split_summarize_tests/
+!audio2script_and_summarizer/diarize_split_summarize_tests/**

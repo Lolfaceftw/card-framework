@@ -8,10 +8,11 @@ If you are on Windows, you must run this pipeline inside WSL 2 (Windows Subsyste
 
 1. Open PowerShell or Command Prompt as Administrator.
 2. Run this command:
-   ```powershell
-   wsl --install
+```powershell
+wsl --install
 
 ```
+
 
 3. Restart your computer.
 4. After restarting, a terminal window will open to set up your Ubuntu username and password.
@@ -30,10 +31,12 @@ swap=16GB
 
 ```
 
+
 > `swap` acts as "emergency RAM" stored on the disk. It’s much slower than real RAM, but it prevents WSL from crashing when memory runs out.
 
 
 *Note: Set `memory` to roughly 70-80% of your total system RAM. Leave at least 4GB for Windows.*
+
 4. Restart WSL by running `wsl --shutdown` in PowerShell.
 
 ## Prerequisites
@@ -55,7 +58,7 @@ sudo apt update && sudo apt install ffmpeg -y
 
 1. **Clone & Switch Branch**
 ```bash
-git clone [https://github.com/Lolfaceftw/card-framework.git](https://github.com/Lolfaceftw/card-framework.git)
+git clone https://github.com/Lolfaceftw/card-framework.git
 cd card-framework
 git checkout feature/audio-pipeline
 cd audio2script_and_summarizer

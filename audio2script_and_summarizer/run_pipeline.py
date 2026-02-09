@@ -3,21 +3,20 @@ import argparse
 import subprocess
 import sys
 import shutil
-import torch  # <--- Added to check for GPU
+import torch
 
 def main():
     # Detect hardware automatically
-    # If users have NVIDIA drivers but no GPU, this safely falls back to CPU
     detected_device = "cuda" if torch.cuda.is_available() else "cpu"
 
     parser = argparse.ArgumentParser(description="CARD Audio2Script and Summarizer")
     parser.add_argument("--input", required=True, help="Path to input podcast audio")
-    
-    # [CHANGED] Now defaults to whatever torch detects, instead of hardcoded "cuda"
     parser.add_argument("--device", default=detected_device, help=f"Device to run on (auto-detected: {detected_device})")
-    
     parser.add_argument("--api-key", help="LLM Provider API Key (Gemini, OpenAI, etc.)")
     parser.add_argument("--voice-dir", help="Optional override for voice directory")
+    
+    # [NEW] Add the flag here so run_pipeline recognizes it
+    parser.add_argument("--no-stem", action="store_true", help="Skip Demucs vocal separation (faster, but may include background music)")
     
     args = parser.parse_args()
 
@@ -35,7 +34,7 @@ def main():
         print(f"[ERROR] Input file not found: {input_path}")
         return
 
-    # Env setup for WSL/Linux GPU support (Standard NVIDIA fix)
+    # Env setup for WSL/Linux GPU support
     current_env = os.environ.copy()
     try:
         site_packages = next(p for p in sys.path if 'site-packages' in p)
@@ -69,17 +68,22 @@ def main():
     print(f"🚀 STAGE 1: Diarization")
     print("="*50)
     
-    # Determine batch size based on device
-    # CPU cannot handle batching well, so we default to 1
     batch_size = "2" if args.device == "cuda" else "1"
     
+    # [NEW] Build command list dynamically
+    stage1_cmd = [
+        sys.executable, "diarize.py",
+        "-a", input_path,
+        "--device", args.device,
+        "--batch-size", batch_size
+    ]
+
+    # [NEW] Pass the flag down to diarize.py if present
+    if args.no_stem:
+        stage1_cmd.append("--no-stem")
+
     try:
-        subprocess.run([
-            sys.executable, "diarize.py",
-            "-a", input_path,
-            "--device", args.device,
-            "--batch-size", batch_size 
-        ], check=True, env=current_env)
+        subprocess.run(stage1_cmd, check=True, env=current_env)
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Stage 1 crashed with code {e.returncode}")
         return
