@@ -57,7 +57,7 @@ DEFAULT_DEVICE: Final[str] = (
     if torch_module is not None and torch_module.cuda.is_available()
     else "cpu"
 )
-PIPELINE_TOTAL_STAGES: Final[int] = 2
+PIPELINE_TOTAL_STAGES: Final[int] = 3
 LOG_PANEL_MAX_LINES: Final[int] = 18
 
 
@@ -337,16 +337,41 @@ def _run_stage_command(
         raise subprocess.CalledProcessError(return_code, cmd)
 
 
+def _count_wav_files(directory: str) -> int:
+    """Count ``.wav`` files in a directory.
+
+    Args:
+        directory: Directory path.
+
+    Returns:
+        Number of ``.wav`` files in ``directory``.
+    """
+    directory_path = Path(directory)
+    if not directory_path.exists():
+        return 0
+    return sum(1 for _ in directory_path.glob("*.wav"))
+
+
 def main() -> int:
     """Run the Audio2Script + Deepseek summarization pipeline."""
     parser = argparse.ArgumentParser(description="CARD Audio2Script and Summarizer (Deepseek)")
     parser.add_argument("--input", required=True, help="Path to input podcast audio")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help=f"Device to run on (cuda/cpu, default: {DEFAULT_DEVICE})")
     parser.add_argument("--deepseek-key", help="Deepseek API Key")
-    parser.add_argument("--voice-dir", default="stage2_voices", help="Directory for speaker samples")
+    parser.add_argument(
+        "--voice-dir",
+        default=None,
+        help="Directory for speaker samples (default: <input_basename>_voices)",
+    )
     parser.add_argument("--model", default="deepseek-chat", help="Deepseek model to use (default: deepseek-chat)")
     parser.add_argument("--whisper-model", default="medium.en", help="Whisper model to use (default: medium.en)")
     parser.add_argument("--language", default=None, help="Language of the audio (default: auto)")
+    parser.add_argument(
+        "--no-stem",
+        action="store_true",
+        default=False,
+        help="Skip Demucs source separation in diarization stage.",
+    )
     parser.add_argument(
         "--max-completion-tokens",
         type=int,
@@ -456,6 +481,8 @@ def main() -> int:
             # Only add language if it was explicitly provided
             if args.language:
                 diarize_cmd.extend(["--language", args.language])
+            if args.no_stem:
+                diarize_cmd.append("--no-stem")
             if args.show_deprecation_warnings:
                 diarize_cmd.append("--show-deprecation-warnings")
             if args.no_progress or dashboard.enabled:
@@ -482,6 +509,7 @@ def main() -> int:
 
         base_name = os.path.splitext(input_path)[0]
         diarization_json = f"{base_name}.json"
+        voice_dir = args.voice_dir or f"{base_name}_voices"
 
         if not os.path.exists(diarization_json):
             _print_error(f"[ERROR] Expected output not found: {diarization_json}", use_rich=use_rich)
@@ -490,6 +518,48 @@ def main() -> int:
 
         _print_success(
             f"[SUCCESS] Stage 1 Complete. Output: {diarization_json}",
+            use_rich=use_rich,
+        )
+
+        # ==========================================
+        # STAGE 1.5: Audio Splitting
+        # ==========================================
+        _print_stage_banner("[START] STAGE 1.5: Audio Splitting", use_rich=use_rich)
+
+        try:
+            splitter_cmd = [
+                sys.executable,
+                "-m",
+                "audio2script_and_summarizer.audio_splitter",
+                "--audio",
+                input_path,
+                "--json",
+                diarization_json,
+                "--output-dir",
+                voice_dir,
+            ]
+            _run_stage_command(
+                cmd=splitter_cmd,
+                current_env=current_env,
+                use_dashboard=dashboard.enabled,
+            )
+        except subprocess.CalledProcessError as e:
+            _print_error(
+                f"[ERROR] Stage 1.5 crashed with code {e.returncode}",
+                use_rich=use_rich,
+            )
+            return 1
+        dashboard.complete_stage("Stage 1.5 complete")
+
+        voice_sample_count = _count_wav_files(voice_dir)
+        if voice_sample_count <= 0:
+            _print_error(
+                f"[ERROR] No speaker samples were generated in: {voice_dir}",
+                use_rich=use_rich,
+            )
+            return 1
+        _print_success(
+            f"[SUCCESS] Stage 1.5 Complete. Generated {voice_sample_count} speaker sample(s) in {voice_dir}",
             use_rich=use_rich,
         )
 
@@ -504,7 +574,7 @@ def main() -> int:
             summarize_cmd = [
                 sys.executable, "-m", "audio2script_and_summarizer.summarizer_deepseek",
                 "--transcript", diarization_json,
-                "--voice-dir", args.voice_dir,
+                "--voice-dir", voice_dir,
                 "--output", summary_output,
                 "--api-key", api_key,
                 "--model", args.model,
