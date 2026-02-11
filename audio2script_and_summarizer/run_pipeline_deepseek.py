@@ -1,5 +1,12 @@
-import argparse
+"""
+CARD Audio2Script and Summarizer Pipeline - Deepseek Version
+
+Uses Deepseek API for LLM summarization instead of OpenAI.
+Requires DEEPSEEK_API_KEY environment variable or --deepseek-key argument.
+"""
+
 import os
+import argparse
 import subprocess
 import sys
 from collections import deque
@@ -331,12 +338,39 @@ def _run_stage_command(
 
 
 def main() -> int:
-    """Run the two-stage Audio2Script and summarizer pipeline."""
-    parser = argparse.ArgumentParser(description="CARD Audio2Script and Summarizer")
+    """Run the Audio2Script + Deepseek summarization pipeline."""
+    parser = argparse.ArgumentParser(description="CARD Audio2Script and Summarizer (Deepseek)")
     parser.add_argument("--input", required=True, help="Path to input podcast audio")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help=f"Device to run on (cuda/cpu, default: {DEFAULT_DEVICE})")
-    parser.add_argument("--openai-key", help="OpenAI API Key")
+    parser.add_argument("--deepseek-key", help="Deepseek API Key")
     parser.add_argument("--voice-dir", default="stage2_voices", help="Directory for speaker samples")
+    parser.add_argument("--model", default="deepseek-chat", help="Deepseek model to use (default: deepseek-chat)")
+    parser.add_argument("--whisper-model", default="medium.en", help="Whisper model to use (default: medium.en)")
+    parser.add_argument("--language", default=None, help="Language of the audio (default: auto)")
+    parser.add_argument(
+        "--max-completion-tokens",
+        type=int,
+        default=8192,
+        help="Max output tokens for Deepseek summarizer (default: 8192)",
+    )
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Request timeout for Deepseek summarizer in seconds (default: 120)",
+    )
+    parser.add_argument(
+        "--http-retries",
+        type=int,
+        default=1,
+        help="HTTP retries per Deepseek request (default: 1)",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.2,
+        help="Generation temperature for Deepseek summarizer (default: 0.2)",
+    )
     parser.add_argument(
         "--show-deprecation-warnings",
         action="store_true",
@@ -373,9 +407,12 @@ def main() -> int:
         runtime_device = _resolve_device(args.device)
 
         # 1. API KEY CHECK
-        api_key = args.openai_key or os.environ.get("OPENAI_API_KEY")
+        api_key = args.deepseek_key or os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
-            _print_error("[ERROR] No OpenAI API Key found. Use --openai-key", use_rich=use_rich)
+            _print_error(
+                "[ERROR] No Deepseek API Key found. Use --deepseek-key or set DEEPSEEK_API_KEY env var",
+                use_rich=use_rich,
+            )
             return 1
 
         input_path = os.path.abspath(args.input)
@@ -411,10 +448,14 @@ def main() -> int:
         try:
             diarize_cmd = [
                 sys.executable, "-m", "audio2script_and_summarizer.diarize",
-                "-a", input_path,
+                "--audio", input_path,
                 "--device", runtime_device,
-                "--batch-size", "2"
+                "--whisper-model", args.whisper_model
             ]
+
+            # Only add language if it was explicitly provided
+            if args.language:
+                diarize_cmd.extend(["--language", args.language])
             if args.show_deprecation_warnings:
                 diarize_cmd.append("--show-deprecation-warnings")
             if args.no_progress or dashboard.enabled:
@@ -453,20 +494,26 @@ def main() -> int:
         )
 
         # ==========================================
-        # STAGE 2: Summarizer
+        # STAGE 2: Summarizer (Deepseek)
         # ==========================================
-        _print_stage_banner("[START] STAGE 2: Summarizer", use_rich=use_rich)
+        _print_stage_banner("[START] STAGE 2: Summarizer (Deepseek)", use_rich=use_rich)
 
         summary_output = f"{base_name}_summary.json"
 
         try:
             summarize_cmd = [
-                sys.executable, "-m", "audio2script_and_summarizer.summarizer",
+                sys.executable, "-m", "audio2script_and_summarizer.summarizer_deepseek",
                 "--transcript", diarization_json,
                 "--voice-dir", args.voice_dir,
                 "--output", summary_output,
-                "--api-key", api_key
+                "--api-key", api_key,
+                "--model", args.model,
+                "--max-completion-tokens", str(args.max_completion_tokens),
+                "--request-timeout-seconds", str(args.request_timeout_seconds),
+                "--http-retries", str(args.http_retries),
+                "--temperature", str(args.temperature),
             ]
+
             _run_stage_command(
                 cmd=summarize_cmd,
                 current_env=current_env,
@@ -483,6 +530,7 @@ def main() -> int:
     finally:
         dashboard.stop()
         _ACTIVE_DASHBOARD = None
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

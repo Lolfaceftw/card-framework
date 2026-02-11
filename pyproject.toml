@@ -100,6 +100,33 @@ speaker-extraction = [
   "pyloudnorm>=0.1.1",
   "rich>=14.0.0",
 ]
+# Audio2Script + Summarizer pipeline (audio2script_and_summarizer module)
+# NOTE: This uses pyannote.audio for diarization (compatible with core deps)
+# The original NeMo MSDD diarizer (nemo-toolkit[asr]) has protobuf conflicts
+# with descript-audiotools. Use a separate venv if NeMo is required.
+audio2script = [
+  # Diarization (using pyannote instead of NeMo for compatibility)
+  "pyannote.audio>=3.3.0",
+  "pyannote.core>=5.0.0",
+  "pyannote.database>=5.1.3",
+  "pyannote.metrics>=3.2.1",
+  "pyannote.pipeline>=3.0.1",
+  # NLP and tokenization
+  "nltk>=3.8.1",
+  # CLI UI
+  "rich>=14.0.0",
+  # LLM summarization
+  "openai>=1.0.0",
+  "pydantic>=2.0.0",
+  # Git-based dependencies for audio processing
+  "demucs @ git+https://github.com/MahmoudAshraf97/demucs.git",
+  "deepmultilingualpunctuation @ git+https://github.com/oliverguhr/deepmultilingualpunctuation.git",
+  "ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git",
+  # Faster Whisper for transcription
+  "faster-whisper>=1.1.0",
+  # Pin ctranslate2 to avoid ROCm SDK detection issue on Windows (4.7.x tries to find AMD libs)
+  "ctranslate2==4.5.0",
+]
 # Development and testing dependencies
 dev = [
   "pytest>=9.0.0",
@@ -119,6 +146,10 @@ indextts = "indextts.cli:main"
 # NOTE: Use `uv tool install -e .` to install the package as a CLI tool.
 requires = ["hatchling >= 1.27.0"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# Allow git-based dependencies in optional-dependencies (e.g., audio2script extras)
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 # The indextts package is inside voice-cloner-and-interjector subdirectory

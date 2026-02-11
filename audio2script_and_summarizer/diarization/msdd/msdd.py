@@ -1,33 +1,50 @@
 import json
 import os
 import tempfile
-
-from typing import Union
+from typing import TypeAlias, Union, cast
 
 import torch
-import torchaudio
 
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from nemo.collections.asr.parts.utils.speaker_utils import rttm_to_labels
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
+
+from ...audio_io import write_mono_wav_pcm16
+
+SpeakerLabel: TypeAlias = tuple[int, int, int]
 
 
 class MSDDDiarizer:
-    def __init__(self, device: Union[str, torch.device]):
+    """Speaker diarizer backed by NeMo's MSDD model."""
+
+    def __init__(self, device: Union[str, torch.device]) -> None:
+        """Initialize MSDD diarizer model.
+
+        Args:
+            device: Runtime device identifier.
+        """
         self.model: NeuralDiarizer = NeuralDiarizer(cfg=create_config()).to(device)
 
-    def diarize(self, audio: torch.Tensor):
+    def diarize(self, audio: torch.Tensor) -> list[SpeakerLabel]:
+        """Run diarization and return sorted speaker labels.
+
+        Args:
+            audio: Audio tensor of shape ``(1, samples)`` at 16kHz.
+
+        Returns:
+            A list of ``(start_ms, end_ms, speaker_id)`` tuples.
+        """
         with tempfile.TemporaryDirectory() as temp_path:
-            torchaudio.save(
-                os.path.join(temp_path, "mono_file.wav"),
-                audio,
-                16000,
-                channels_first=True,
+            mono_file_path = os.path.join(temp_path, "mono_file.wav")
+            write_mono_wav_pcm16(
+                output_path=mono_file_path,
+                audio=audio,
+                sample_rate_hz=16000,
             )
 
             manifest_path = os.path.join(temp_path, "manifest.json")
             meta = {
-                "audio_filepath": os.path.join(temp_path, "mono_file.wav"),
+                "audio_filepath": mono_file_path,
                 "offset": 0,
                 "duration": None,
                 "label": "infer",
@@ -73,10 +90,12 @@ class MSDDDiarizer:
         return labels
 
 
-def create_config():
+def create_config() -> DictConfig:
+    """Create diarization inference configuration for NeMo MSDD."""
     config = OmegaConf.load(
         os.path.join(os.path.dirname(__file__), "diar_infer_telephonic.yaml")
     )
+    config = cast(DictConfig, config)
     pretrained_vad = "vad_multilingual_marblenet"
     pretrained_speaker_model = "titanet_large"
 

@@ -1,8 +1,7 @@
-nemo_toolkit[asr]>=2.3.0
-nltk
-faster-whisper>=1.1.0
-git+https://github.com/MahmoudAshraf97/demucs.git
-git+https://github.com/oliverguhr/deepmultilingualpunctuation.git
-git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
-openai
-pydantic
+# Dependencies are managed from the repository root with `uv`.
+#
+# Install this pipeline's dependencies with:
+#   uv sync --extra audio2script
+#
+# Run it with:
+#   uv run --extra audio2script python -m audio2script_and_summarizer --input <audio-file>

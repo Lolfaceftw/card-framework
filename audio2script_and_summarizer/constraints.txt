@@ -1,2 +1,2 @@
-numpy<2
-indic-numtowords @ git+https://github.com/AI4Bharat/indic-numtowords.git
+# Constraints are centrally resolved in `pyproject.toml` + `uv.lock`.
+# Use `uv lock` / `uv sync` from the repository root instead of this file.
