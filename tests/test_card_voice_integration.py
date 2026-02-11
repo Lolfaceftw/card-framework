@@ -9,10 +9,9 @@ Run with: uv run pytest tests/test_card_voice_integration.py -v
 """
 
 import json
-import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -539,8 +538,6 @@ class TestPodcastInput:
         assert len(test_podcast_data) > 0
 
         required_fields = ["speaker", "voice_sample", "text"]
-        optional_fields = ["use_emo_text", "emo_text", "emo_alpha"]
-
         for entry in test_podcast_data:
             for field in required_fields:
                 assert field in entry, f"Missing required field: {field}"
@@ -554,7 +551,7 @@ class TestPodcastInput:
         self, test_podcast_data: List[Dict[str, Any]]
     ) -> None:
         """Test speaker to voice sample mapping."""
-        speakers = {}
+        speakers: dict[str, set[str]] = {}
         for entry in test_podcast_data:
             speaker = entry["speaker"]
             sample = entry["voice_sample"]
@@ -590,7 +587,7 @@ class TestIntegration:
         total_duration = max(seg["end"] for seg in segments)
         assert total_duration > 0
 
-        print(f"\n✓ Workflow test:")
+        print("\n✓ Workflow test:")
         print(f"  Segments: {len(segments)}")
         print(f"  Speakers: {speakers}")
         print(f"  Duration: {total_duration:.2f}s")
@@ -609,7 +606,7 @@ class TestIntegration:
         sample_path = TEST_DIR / "sample_prompt.wav"
         sample_exists = sample_path.exists()
 
-        print(f"\n✓ Podcast workflow test:")
+        print("\n✓ Podcast workflow test:")
         print(f"  Entries: {len(test_podcast_data)}")
         print(f"  Sample prompt exists: {sample_exists}")
 

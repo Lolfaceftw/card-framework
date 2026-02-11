@@ -121,6 +121,11 @@ gen_*.wav
 interjection_*.wav
 calibration_*.wav
 repomix-output.md
+audio_samples/
+stage2_voices/
+temp_outputs/
+temp_outputs_*/
+output_integrated/
 
 # =============================================================================
 # Logs
@@ -179,3 +184,5 @@ desktop.ini
 wandb/
 .cache/
 transformers_cache/
+
+temp_outputs
