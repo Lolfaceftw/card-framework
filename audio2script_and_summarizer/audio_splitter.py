@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -132,7 +133,9 @@ def load_speaker_intervals(
         if not isinstance(speaker_raw, str) or not speaker_raw.strip():
             logger.warning("Skipping segment %d: invalid speaker label.", index)
             continue
-        if not isinstance(start_raw, (int, float)) or not isinstance(end_raw, (int, float)):
+        if not isinstance(start_raw, (int, float)) or not isinstance(
+            end_raw, (int, float)
+        ):
             logger.warning("Skipping segment %d: invalid timestamps.", index)
             continue
 
@@ -175,7 +178,9 @@ def _extract_sample_for_speaker(
             return audio[start_ms : start_ms + target_duration_ms]
 
     combined_audio = AudioSegment.empty()
-    for start_ms, end_ms in sorted(intervals, key=lambda item: item[1] - item[0], reverse=True):
+    for start_ms, end_ms in sorted(
+        intervals, key=lambda item: item[1] - item[0], reverse=True
+    ):
         combined_audio += audio[start_ms:end_ms]
         if len(combined_audio) >= target_duration_ms:
             break
@@ -213,7 +218,9 @@ def extract_speaker_samples(
         valid_end = min(interval.end_ms, safe_end)
         if valid_end <= valid_start:
             continue
-        per_speaker_intervals.setdefault(interval.speaker, []).append((valid_start, valid_end))
+        per_speaker_intervals.setdefault(interval.speaker, []).append(
+            (valid_start, valid_end)
+        )
 
     target_duration_ms = max(1, int(round(target_duration_seconds * 1000.0)))
     outputs: dict[str, str] = {}
@@ -246,7 +253,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="CARD Audio Splitter")
     parser.add_argument("--audio", required=True, help="Path to source audio file")
     parser.add_argument("--json", required=True, help="Path to diarization JSON")
-    parser.add_argument("--output-dir", required=True, help="Directory for speaker samples")
+    parser.add_argument(
+        "--output-dir", required=True, help="Directory for speaker samples"
+    )
     parser.add_argument(
         "--target-duration-seconds",
         type=float,
@@ -258,7 +267,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    configure_logging()
+    configure_logging(
+        level=os.getenv("AUDIO2SCRIPT_LOG_LEVEL", "INFO"),
+        component="audio_splitter",
+    )
     try:
         audio = load_audio(args.audio)
         intervals = load_speaker_intervals(args.json, audio_len_ms=len(audio))

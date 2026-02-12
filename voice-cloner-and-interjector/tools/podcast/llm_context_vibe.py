@@ -1,14 +1,14 @@
 import json
 import os
 import random
-import subprocess
 from pathlib import Path
 from tkinter import Tk, filedialog, messagebox
 
-import requests
+import torch
 from pydub import AudioSegment
 
 from indextts.infer_v2 import IndexTTS2
+from tools.podcast.hf_backchannel import MODEL_ID, ensure_model, extract_first_json, generate_text
 from tools.podcast.logger import get_logger
 
 # Initialize logger
@@ -20,54 +20,23 @@ _PROJECT_DIR = _SCRIPT_DIR.parent.parent  # voice-cloner-and-interjector/
 _CHECKPOINTS_DIR = _PROJECT_DIR / "checkpoints"
 
 # Initialize Index-TTS-2
+_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 tts = IndexTTS2(
     cfg_path=str(_CHECKPOINTS_DIR / "config.yaml"),
     model_dir=str(_CHECKPOINTS_DIR),
-    device="cuda:0",
-    use_fp16=True,
-    use_cuda_kernel=True
+    device=_DEVICE,
+    use_fp16=_DEVICE.startswith("cuda"),
+    use_cuda_kernel=_DEVICE.startswith("cuda"),
 )
 
-# OLLAMA CONFIGURATION
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "mistral:7b-instruct-q4_0"
-OLLAMA_CHECK_URL = "http://localhost:11434/api/tags"
-
-def check_ollama_running():
-    """Verify Ollama service is running"""
-    try:
-        response = requests.get(OLLAMA_CHECK_URL, timeout=2)
-        return response.status_code == 200
-    except:
-        return False
 
 def ensure_mistral_loaded():
-    """Download Mistral 7B 4-bit if not already present"""
-    if not check_ollama_running():
-        logger.error("Ollama is not running!")
-        logger.info("Start Ollama with: ollama serve")
-        logger.info("Then run this script again.")
-        return False
-    
-    try:
-        response = requests.get(OLLAMA_CHECK_URL, timeout=5)
-        models = response.json().get("models", [])
-        model_names = [m["name"] for m in models]
-        
-        if OLLAMA_MODEL not in model_names:
-            logger.info(f"Downloading {OLLAMA_MODEL}... (one-time setup, ~2-3 minutes)")
-            subprocess.run(["ollama", "pull", OLLAMA_MODEL], check=True)
-            logger.info("Mistral 7B loaded!")
-        else:
-            logger.info(f"{OLLAMA_MODEL} already loaded")
-        return True
-    except Exception as e:
-        logger.error(f"Error checking Ollama models: {e}")
-        return False
+    """Ensure HF Mistral 8B is available."""
+    return ensure_model()
 
 def detect_trigger_with_llm(text):
     """
-    Use Mistral 7B to identify the most natural conversational trigger phrase.
+    Use Mistral 8B (HF) to identify the most natural conversational trigger phrase.
     IMPROVED: No fixed categories. Detects context dynamically.
     """
     prompt = f"""
@@ -118,41 +87,32 @@ Analyze the provided text and give your JSON response.
 """
 
     try:
-        response = requests.post(
-            OLLAMA_API_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json"
-            },
-            timeout=30
+        result_text = generate_text(
+            [
+                {"role": "system", "content": "You are an expert conversation analyst."},
+                {"role": "user", "content": prompt},
+            ],
+            max_new_tokens=80,
+            temperature=0.3,
+            top_p=0.9,
         )
-
-        if response.status_code == 200:
-            result_text = response.json().get("response", "")
+        if result_text:
             logger.debug(f"LLM trigger response: {result_text}")
-            trigger_data = json.loads(result_text)
+            trigger_data = extract_first_json(result_text)
+            if trigger_data and "trigger_phrase" in trigger_data:
+                phrase = str(trigger_data["trigger_phrase"])
 
-            if "trigger_phrase" in trigger_data:
-                phrase = trigger_data["trigger_phrase"]
-                
                 # Find phrase in original text (case-insensitive)
                 start_index = text.lower().find(phrase.lower())
-                
                 if start_index != -1:
                     end_index = start_index + len(phrase)
                     trigger_data["pos_percent"] = end_index / len(text)
                     trigger_data["char_pos"] = end_index
                     return [trigger_data]
-                else:
-                    logger.warning(f"LLM phrase '{phrase}' not found in text.")
-                    return []
-        else:
-            logger.warning(f"LLM status {response.status_code}")
-
+                logger.warning("LLM phrase '%s' not found in text.", phrase)
+                return []
     except Exception as e:
-        logger.warning(f"LLM error: {e}")
+        logger.warning("LLM error: %s", e)
 
     return []
 
@@ -235,32 +195,25 @@ Make it sound natural, not robotic. Examples: "Yeah, totally!", "That's wild!", 
 Respond with ONLY the interjection phrase, nothing else."""
     
     try:
-        response = requests.post(
-            OLLAMA_API_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "num_predict": 20
-            },
-            timeout=30
+        result_text = generate_text(
+            [
+                {"role": "system", "content": "You generate short conversational interjections."},
+                {"role": "user", "content": prompt},
+            ],
+            max_new_tokens=20,
+            temperature=0.7,
+            top_p=0.9,
         )
-        
-        if response.status_code == 200:
-            result = response.json()
-            interjection = result.get("response", "").strip()
-            interjection = interjection.replace('"', '').replace("*", '')
+        if result_text:
+            interjection = result_text.replace('"', "").replace("*", "").strip()
             return interjection[:50]
-        
     except Exception as e:
         logger.info(f"   Warning: LLM error {e}, using fallback")
     
     return get_fallback_interjection(main_speaker_text)
 
 def get_fallback_interjection(main_speaker_text):
-    """Fast fallback interjection pool if Ollama is down"""
+    """Fast fallback interjection pool if HF model is unavailable."""
     keywords = main_speaker_text.lower().split()
     
     if any(w in keywords for w in ["problem", "issue", "concerned", "worried"]):
@@ -299,45 +252,63 @@ def get_user_input():
     with open(json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
     
-    speaker_files_required = set()
-    for entry in entries:
-        speaker_files_required.add(entry["voice_sample"])
+    speaker_files_required = set(entry["voice_sample"] for entry in entries)
     
-    logger.info(f"\nRequired speaker WAV files from JSON:")
+    logger.info("\nRequired speaker WAV files from JSON:")
     for spk in sorted(speaker_files_required):
         logger.info(f"  - {spk}")
     
-    logger.info(f"\nSelect directory containing speaker WAV files...")
-    speaker_dir = filedialog.askdirectory(
-        title="Select directory containing speaker WAV files",
-        initialdir=os.getcwd()
-    )
-    
-    if not speaker_dir:
-        logger.info("Error: No speaker directory selected.")
-        root.destroy()
-        return None, None, None, None
-    
-    logger.info(f"Selected speaker directory: {speaker_dir}")
-    
     speaker_paths = {}
     missing_files = []
+    json_dir = os.path.dirname(json_path)
     
+    # Resolve absolute or JSON-relative paths first
     for spk_file in speaker_files_required:
-        full_path = os.path.join(speaker_dir, spk_file)
-        if os.path.exists(full_path):
-            speaker_paths[spk_file] = full_path
-            logger.info(f"  ✓ Found: {spk_file}")
-        else:
-            missing_files.append(spk_file)
-            logger.info(f"  ✗ Missing: {spk_file}")
+        if os.path.isabs(spk_file) and os.path.exists(spk_file):
+            speaker_paths[spk_file] = spk_file
+            logger.info(f"  ✓ Found (absolute): {spk_file}")
+            continue
+        
+        json_relative = os.path.join(json_dir, spk_file)
+        if os.path.exists(json_relative):
+            speaker_paths[spk_file] = json_relative
+            logger.info(f"  ✓ Found (json-relative): {spk_file}")
+            continue
+        
+        missing_files.append(spk_file)
     
     if missing_files:
-        logger.info(f"\nError: {len(missing_files)} speaker WAV file(s) not found:")
-        messagebox.showerror("Missing Files", 
-            f"The following speaker files are missing:\n" + "\n".join(missing_files))
-        root.destroy()
-        return None, None, None, None
+        logger.info("\nSelect directory containing speaker WAV files...")
+        speaker_dir = filedialog.askdirectory(
+            title="Select directory containing speaker WAV files",
+            initialdir=os.getcwd()
+        )
+        
+        if not speaker_dir:
+            logger.info("Error: No speaker directory selected.")
+            root.destroy()
+            return None, None, None, None
+        
+        logger.info(f"Selected speaker directory: {speaker_dir}")
+        
+        still_missing = []
+        for spk_file in missing_files:
+            full_path = os.path.join(speaker_dir, spk_file)
+            if os.path.exists(full_path):
+                speaker_paths[spk_file] = full_path
+                logger.info(f"  ✓ Found: {spk_file}")
+            else:
+                still_missing.append(spk_file)
+                logger.info(f"  ✗ Missing: {spk_file}")
+        
+        if still_missing:
+            logger.info(f"\nError: {len(still_missing)} speaker WAV file(s) not found:")
+            messagebox.showerror(
+                "Missing Files",
+                "The following speaker files are missing:\n" + "\n".join(still_missing),
+            )
+            root.destroy()
+            return None, None, None, None
     
     logger.info(f"\n✓ All {len(speaker_files_required)} required speaker files found!")
     
@@ -558,7 +529,7 @@ def main():
     """Main execution flow"""
     
     logger.info("\n" + "="*60)
-    logger.info("Checking Ollama + Mistral 7B Setup...")
+    logger.info("Checking HF Mistral 8B Setup...")
     logger.info("="*60)
     
     if not ensure_mistral_loaded():
@@ -574,7 +545,7 @@ def main():
     logger.info(f"  Input JSON: {json_path}")
     logger.info(f"  Output Directory: {output_dir}")
     logger.info(f"  Final Output: {final_output_path}")
-    logger.info(f"  Interjection Model: Mistral 7B (4-bit via Ollama)")
+    logger.info(f"  Interjection Model: {MODEL_ID} (HF 4-bit)")
     logger.info(f"  Calibration: On-demand (only for segments with interjections)")
     logger.info(f"  Timing: Actual audio measurement + trigger word detection")
     logger.info(f"  Audio Levels: Preserved (no normalization)")
