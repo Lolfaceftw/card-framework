@@ -3,26 +3,33 @@
   "budget_status": "in_range",
   "validation_status": "valid",
   "degraded_success": false,
-  "attempts": 1,
+  "attempts": 2,
   "max_attempts": 3,
   "endpoint_mode": "beta",
   "model": "deepseek-reasoner",
-  "tool_rounds": 8,
-  "total_words": 166,
+  "tool_rounds": 10,
+  "total_words": 167,
   "target_words": 168,
   "lower_bound": 159,
   "upper_bound": 176,
   "tool_calls_by_name": {
-    "read_transcript_lines": 4,
-    "count_words": 2,
-    "evaluate_script_constraints": 1
+    "count_words": 3,
+    "evaluate_script_constraints": 1,
+    "write_output_segment": 6
   },
+  "tool_loop_exhausted": true,
+  "tool_loop_exhaustion_reason": "max_tool_rounds_reached",
+  "tool_round_limit": 10,
+  "repeated_overwrite_count": 2,
+  "staged_output_present": true,
+  "staged_output_valid_json": true,
+  "last_validation_issues": [],
   "model_path_selected": "beta:deepseek-reasoner",
   "naturalness_metrics": {
-    "avg_words_per_line": 16.6,
+    "avg_words_per_line": 13.916666666666666,
     "short_question_ratio": 0.0,
     "disfluency_count": 0,
-    "line_count": 10
+    "line_count": 12
   },
   "issues": [],
   "output_path": "C:\\Users\\chris\\card-framework-merged\\audio_summary.json"

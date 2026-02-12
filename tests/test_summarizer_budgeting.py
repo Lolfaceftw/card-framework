@@ -84,3 +84,52 @@ def test_model_token_ceiling_for_reasoner_and_chat() -> None:
         summarizer_deepseek._model_completion_token_ceiling("deepseek-chat")  # noqa: SLF001
         == 8192
     )
+
+
+def test_clamp_completion_tokens_for_model_caps_chat() -> None:
+    """Cap chat model output tokens when configured limit is higher."""
+    assert (
+        summarizer_deepseek._clamp_completion_tokens_for_model(  # noqa: SLF001
+            configured_max_tokens=64000,
+            model="deepseek-chat",
+        )
+        == 8192
+    )
+
+
+def test_reasoning_replay_policy_forces_reasoner_tool_loop() -> None:
+    """Force reasoning replay for reasoner tool loops even when toggle is off."""
+    settings = summarizer_deepseek.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+        agent_tool_loop=True,
+        agent_tool_mode="constraints_only",
+        agent_persist_reasoning_content=False,
+    )
+    assert summarizer_deepseek._should_persist_reasoning_for_replay(  # noqa: SLF001
+        settings,
+        tool_mode="constraints_only",
+    )
+
+
+def test_reasoning_replay_policy_respects_toggle_without_tool_loop() -> None:
+    """Keep replay disabled when no tool loop is active and toggle is off."""
+    settings = summarizer_deepseek.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+        agent_tool_loop=False,
+        agent_tool_mode="off",
+        agent_persist_reasoning_content=False,
+    )
+    assert not summarizer_deepseek._should_persist_reasoning_for_replay(  # noqa: SLF001
+        settings,
+        tool_mode="off",
+    )

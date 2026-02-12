@@ -1,0 +1,36 @@
+{
+  "summary_outcome": "success",
+  "budget_status": "not_configured",
+  "validation_status": "valid",
+  "degraded_success": false,
+  "attempts": 1,
+  "max_attempts": 1,
+  "endpoint_mode": "beta",
+  "model": "deepseek-chat",
+  "tool_rounds": 8,
+  "total_words": 96,
+  "target_words": null,
+  "lower_bound": null,
+  "upper_bound": null,
+  "tool_calls_by_name": {
+    "read_transcript_lines": 3,
+    "count_words": 2,
+    "write_output_segment": 3
+  },
+  "tool_loop_exhausted": true,
+  "tool_loop_exhaustion_reason": "max_tool_rounds_reached",
+  "tool_round_limit": 8,
+  "repeated_overwrite_count": 1,
+  "staged_output_present": true,
+  "staged_output_valid_json": true,
+  "last_validation_issues": [],
+  "model_path_selected": "beta:deepseek-chat",
+  "naturalness_metrics": {
+    "avg_words_per_line": 12.0,
+    "short_question_ratio": 0.0,
+    "disfluency_count": 0,
+    "line_count": 8
+  },
+  "issues": [],
+  "output_path": "tmp/live_api_summary.json"
+}

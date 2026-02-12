@@ -1,0 +1,60 @@
+{
+ "dialogue": [
+ {
+   "speaker": "SPEAKER_00",
+   "text": "Hello there, how are you doing today?",
+   "emo_text": "Friendly greeting",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_000"]
+ },
+ {
+   "speaker": "SPEAKER_01",
+   "text": "Hi, nice to meet you! I'm doing great, thanks for asking.",
+   "emo_text": "Warm enthusiastic",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_0001"]
+ },
+ {
+   "speaker": "SPEAKER_00",
+   "text": "That's wonderful to hear. I'm really glad you're doing well.",
+   "emo_text": "Sincere pleasure",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_0002"]
+ },
+ {
+   "speaker": "SPEAKER_01",
+   "text": "Thanks, I really appreciate you checking in like this.",
+   "emo_text": "Grateful tone",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_0003"]
+ },
+ {
+   "speaker": "SPEAKER_00",
+   "text": "Of course! So, let me tell you about this interesting project I've been working on.",
+   "emo_text": "Engaging transition",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_0004"]
+ },
+ {
+   "speaker": "SPEAKER_01",
+   "text": "Oh, I'd love to hear about it! What kind of project is it?",
+   "emo_text": "Curious interest",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_0001", "seg_0003"]
+ },
+ {
+   "speaker": "SPEAKER_00",
+   "text": "Well, it's something I think you'll find really fascinating. It involves some innovative approaches to audio processing.",
+   "emo_text": "Excited explanation",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_0004"]
+ },
+ {
+   "speaker": "SPEAKER_01",
+   "text": "Audio processing? That sounds intriguing! Tell me more about what makes it so interesting.",
+   "emo_text": "Eager curiosity",
+   "emo_alpha": 0.6,
+   "source_segment_ids": ["seg_0001", "seg_0003"]
+ }
+ ]
+}

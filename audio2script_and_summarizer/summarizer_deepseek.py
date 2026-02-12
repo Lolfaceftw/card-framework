@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import time
-from dataclasses import dataclass
+from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Any, Callable, Literal, TypedDict, cast
+from typing import Any, Callable, Literal, TextIO, TypedDict, cast
 
 from openai import OpenAI
 from openai import APIError as OpenAIAPIError
@@ -57,6 +59,10 @@ DEFAULT_AGENT_MAX_TOOL_ROUNDS = 10
 DEFAULT_AGENT_READ_MAX_LINES = 120
 DEFAULT_AGENT_WRITE_MAX_CHARS = 12000
 DEFAULT_AGENT_WRITE_MAX_FILE_CHARS = 400000
+DEFAULT_AGENT_LOOP_EXHAUSTION_POLICY = "auto_salvage"
+DEFAULT_AGENT_MAX_REPEATED_WRITE_OVERWRITES = 2
+DEFAULT_AGENT_PERSIST_REASONING_CONTENT = False
+DEFAULT_AGENT_ALLOW_MODEL_FALLBACK = False
 EVALUATE_SCRIPT_TOOL_NAME = "evaluate_script_constraints"
 READ_TRANSCRIPT_LINES_TOOL_NAME = "read_transcript_lines"
 COUNT_WORDS_TOOL_NAME = "count_words"
@@ -65,8 +71,14 @@ STAGED_OUTPUT_READY_MARKER = "STAGED_OUTPUT_READY"
 DEFAULT_BUDGET_FAILURE_POLICY = "degraded_success"
 DEFAULT_AGENT_TOOL_MODE = "full_agentic"
 CONTEXT_WINDOW_ROLLOVER_LEFT_RATIO = 0.30
+CONTEXT_USAGE_UPDATE_INTERVAL_SECONDS = 1.0
 CONTEXT_SUMMARY_MAX_TOKENS = 1024
 CONTEXT_SUMMARY_MAX_CHARS = 12000
+DEEPSEEK_CHAT_LOG_ROOT_DIR = "deepseek_chat_logs"
+DEEPSEEK_CHAT_LOG_FILE = "trace.ndjson"
+DEEPSEEK_CHAT_LOG_META_FILE = "run_meta.json"
+DEEPSEEK_CHAT_LOG_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+DEEPSEEK_CHAT_LOG_STREAM_FLUSH_INTERVAL_SECONDS = 10.0
 DISFLUENCY_PATTERN = re.compile(r"\b(?:um+|uh+|ah+)\b", re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
@@ -79,10 +91,204 @@ ErrorType = Literal[
     "truncated_output",
     "schema_validation",
     "empty_response",
+    "tool_loop_exhausted",
 ]
 EndpointMode = Literal["beta", "stable"]
 BudgetFailurePolicy = Literal["degraded_success", "strict_fail"]
 AgentToolMode = Literal["off", "constraints_only", "full_agentic"]
+AgentLoopExhaustionPolicy = Literal["auto_salvage", "fail_fast"]
+
+
+@dataclass(slots=True)
+class DeepSeekChatLogWriter:
+    """Persist per-call and global DeepSeek trace events as line-delimited JSON."""
+
+    run_directory: Path
+    log_path: Path
+    _log_handle: TextIO
+    _open_call_ids: set[str]
+    stream_flush_interval_seconds: float = (
+        DEEPSEEK_CHAT_LOG_STREAM_FLUSH_INTERVAL_SECONDS
+    )
+    _next_call_index: int = 0
+
+    @classmethod
+    def create(
+        cls,
+        root_dir: str | Path,
+        *,
+        stream_flush_interval_seconds: float = (
+            DEEPSEEK_CHAT_LOG_STREAM_FLUSH_INTERVAL_SECONDS
+        ),
+    ) -> DeepSeekChatLogWriter:
+        """Create a timestamped DeepSeek chat-log run directory.
+
+        Args:
+            root_dir: Base directory where run folders are created.
+            stream_flush_interval_seconds: Interval used to batch streamed
+                token text into periodic call-log events.
+
+        Returns:
+            Initialized writer with open append handles.
+        """
+        if (
+            not math.isfinite(stream_flush_interval_seconds)
+            or stream_flush_interval_seconds <= 0
+        ):
+            raise ValueError("stream_flush_interval_seconds must be positive and finite.")
+        resolved_root = Path(root_dir).resolve()
+        resolved_root.mkdir(parents=True, exist_ok=True)
+        run_directory = _build_unique_chat_log_run_directory(resolved_root)
+        run_directory.mkdir(parents=True, exist_ok=False)
+        log_path = run_directory / DEEPSEEK_CHAT_LOG_FILE
+        log_handle = log_path.open("a", encoding="utf-8")
+        writer = cls(
+            run_directory=run_directory,
+            log_path=log_path,
+            _log_handle=log_handle,
+            _open_call_ids=set(),
+            stream_flush_interval_seconds=stream_flush_interval_seconds,
+        )
+        writer._write_run_metadata()
+        writer.write_global_event(
+            {
+                "event": "run_start",
+                "run_directory": str(run_directory),
+            }
+        )
+        return writer
+
+    def write_global_event(self, payload: dict[str, object]) -> None:
+        """Append one event to the single run NDJSON trace log."""
+        record = {
+            "ts_utc": _utc_now_iso(),
+            **payload,
+        }
+        self._write_json_line(self._log_handle, record)
+
+    def start_call(
+        self,
+        *,
+        call_type: str,
+        endpoint_mode: EndpointMode,
+        model: str,
+        metadata: dict[str, object] | None = None,
+    ) -> str:
+        """Register one call and write a call-start event.
+
+        Args:
+            call_type: Logical call category (tool loop, single completion, rollover).
+            endpoint_mode: Active endpoint mode for this request.
+            model: Model name used for this request.
+            metadata: Optional extra call metadata fields.
+
+        Returns:
+            Stable call identifier such as ``call_0001``.
+        """
+        self._next_call_index += 1
+        call_id = f"call_{self._next_call_index:04d}"
+        self._open_call_ids.add(call_id)
+        start_payload: dict[str, object] = {
+            "event": "call_start",
+            "call_id": call_id,
+            "call_type": call_type,
+            "endpoint_mode": endpoint_mode,
+            "model": model,
+        }
+        if metadata:
+            start_payload["metadata"] = metadata
+        self.write_call_event(call_id, start_payload)
+        return call_id
+
+    def write_call_event(self, call_id: str, payload: dict[str, object]) -> None:
+        """Append one call-scoped event to the single run NDJSON trace log."""
+        record = {
+            "ts_utc": _utc_now_iso(),
+            "call_id": call_id,
+            **payload,
+        }
+        self._write_json_line(self._log_handle, record)
+
+    def finish_call(
+        self,
+        call_id: str,
+        *,
+        status: Literal["ok", "error"],
+        finish_reason: str | None = None,
+        usage_total_tokens: int | None = None,
+        error: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        """Mark one call closed with a final completion event."""
+        done_payload: dict[str, object] = {
+            "event": "call_done",
+            "status": status,
+        }
+        if finish_reason is not None:
+            done_payload["finish_reason"] = finish_reason
+        if usage_total_tokens is not None:
+            done_payload["usage_total_tokens"] = usage_total_tokens
+        if error is not None:
+            done_payload["error"] = error
+        if metadata:
+            done_payload["metadata"] = metadata
+        self.write_call_event(call_id, done_payload)
+        self._open_call_ids.discard(call_id)
+
+    def close(self) -> None:
+        """Flush and close the run log file handle."""
+        self.write_global_event({"event": "run_done"})
+        for call_id in list(self._open_call_ids):
+            self.write_call_event(
+                call_id,
+                {
+                    "event": "call_done",
+                    "status": "error",
+                    "error": "call closed without explicit finish_call",
+                },
+            )
+            self._open_call_ids.discard(call_id)
+        self._log_handle.close()
+
+    def _write_run_metadata(self) -> None:
+        """Persist static run metadata once per execution run."""
+        metadata_path = self.run_directory / DEEPSEEK_CHAT_LOG_META_FILE
+        metadata_payload = {
+            "run_started_at_utc": _utc_now_iso(),
+            "run_directory": str(self.run_directory),
+            "log_path": str(self.log_path),
+            "stream_flush_interval_seconds": self.stream_flush_interval_seconds,
+        }
+        with metadata_path.open("w", encoding="utf-8") as metadata_file:
+            json.dump(metadata_payload, metadata_file, indent=2, ensure_ascii=True)
+            metadata_file.write("\n")
+
+    @staticmethod
+    def _write_json_line(handle: TextIO, payload: dict[str, object]) -> None:
+        """Write one JSON line and flush immediately for continuous visibility."""
+        handle.write(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
+        handle.flush()
+
+
+def _build_unique_chat_log_run_directory(root_dir: Path) -> Path:
+    """Return a unique timestamped chat-log run directory path."""
+    timestamp = datetime.now(timezone.utc).strftime(DEEPSEEK_CHAT_LOG_TIMESTAMP_FORMAT)
+    candidate = root_dir / timestamp
+    if not candidate.exists():
+        return candidate
+    suffix = 1
+    while True:
+        suffixed = root_dir / f"{timestamp}_{suffix}"
+        if not suffixed.exists():
+            return suffixed
+        suffix += 1
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class ToolDialogueLine(TypedDict):
@@ -211,10 +417,30 @@ class SummaryReport(TypedDict):
     lower_bound: int | None
     upper_bound: int | None
     tool_calls_by_name: dict[str, int]
+    tool_loop_exhausted: bool
+    tool_loop_exhaustion_reason: str
+    tool_round_limit: int
+    repeated_overwrite_count: int
+    staged_output_present: bool
+    staged_output_valid_json: bool
+    last_validation_issues: list[str]
     model_path_selected: str
     naturalness_metrics: dict[str, float | int]
     issues: list[str]
     output_path: str
+
+
+class ToolLoopDiagnostics(TypedDict):
+    """Represent tool-loop termination and salvage diagnostics."""
+
+    tool_loop_exhausted: bool
+    tool_loop_exhaustion_reason: str
+    tool_round_limit: int
+    tool_rounds_used: int
+    repeated_overwrite_count: int
+    staged_output_present: bool
+    staged_output_valid_json: bool
+    last_validation_issues: list[str]
 
 
 class DialogueLine(BaseModel):
@@ -258,6 +484,19 @@ class FinalScriptLine(TypedDict):
 
 
 @dataclass(slots=True, frozen=True)
+class RetryContinuationState:
+    """Represent compact state used to resume corrective retry attempts."""
+
+    read_ranges: list[tuple[int, int]]
+    max_read_index: int | None
+    write_tool_succeeded: bool
+    latest_constraints_status: Literal["pass", "fail", "unknown"]
+    last_validation_issues: list[str]
+    staged_output_present: bool
+    staged_output_valid_json: bool
+
+
+@dataclass(slots=True, frozen=True)
 class RetryContext:
     """Represent context from the previous failed generation attempt."""
 
@@ -265,6 +504,7 @@ class RetryContext:
     endpoint_mode: EndpointMode
     error_type: ErrorType
     error_digest: str
+    continuation: RetryContinuationState | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -281,6 +521,14 @@ class DeepSeekRequestSettings:
     agent_tool_mode: AgentToolMode = DEFAULT_AGENT_TOOL_MODE
     agent_max_tool_rounds: int = DEFAULT_AGENT_MAX_TOOL_ROUNDS
     agent_read_max_lines: int = DEFAULT_AGENT_READ_MAX_LINES
+    agent_loop_exhaustion_policy: AgentLoopExhaustionPolicy = (
+        DEFAULT_AGENT_LOOP_EXHAUSTION_POLICY
+    )
+    agent_max_repeated_write_overwrites: int = (
+        DEFAULT_AGENT_MAX_REPEATED_WRITE_OVERWRITES
+    )
+    agent_persist_reasoning_content: bool = DEFAULT_AGENT_PERSIST_REASONING_CONTENT
+    agent_allow_model_fallback: bool = DEFAULT_AGENT_ALLOW_MODEL_FALLBACK
 
 
 @dataclass(slots=True)
@@ -291,6 +539,7 @@ class ConversationState:
     rollover_count: int = 0
     context_tokens_used: int | None = None
     context_tokens_limit: int | None = None
+    last_tool_loop_diagnostics: ToolLoopDiagnostics | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -324,6 +573,7 @@ class GenerationSuccess:
     model: str
     tool_rounds: int = 0
     tool_call_counts: dict[str, int] | None = None
+    tool_loop_diagnostics: ToolLoopDiagnostics | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -338,6 +588,23 @@ class OutputTruncatedError(ValueError):
     """Represent model output truncation due to output token limits."""
 
 
+class ToolLoopExhaustedError(RuntimeError):
+    """Represent failure after hitting the configured tool-loop round limit."""
+
+    def __init__(
+        self,
+        message: str,
+        diagnostics: ToolLoopDiagnostics,
+        *,
+        continuation_state: RetryContinuationState | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics: ToolLoopDiagnostics
+        self.diagnostics = diagnostics
+        self.continuation_state: RetryContinuationState | None
+        self.continuation_state = continuation_state
+
+
 def _error_digest(error: Exception) -> str:
     """Create a compact, single-line error digest for logs and retry prompts."""
     digest = " ".join(str(error).split())
@@ -348,6 +615,15 @@ def _emit_deepseek_stream_event(payload: dict[str, object]) -> None:
     """Emit a structured stream event for the parent pipeline dashboard."""
     marker = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     print(f"{DEEPSEEK_STREAM_EVENT_PREFIX}{marker}", flush=True)
+
+
+def _should_persist_stream_event(payload: dict[str, object]) -> bool:
+    """Return True when a stream event should be written to persistent trace logs."""
+    event_value = payload.get("event")
+    if event_value != "token":
+        return True
+    # Keep high-signal status updates but skip high-volume token streams.
+    return payload.get("phase") == "status"
 
 
 def _emit_stream_token_event(
@@ -493,98 +769,186 @@ def _normalize_stream_text_piece(piece: object) -> str:
     return _normalize_assistant_content(piece)
 
 
+@dataclass(slots=True)
+class _StreamCallLogBuffer:
+    """Batch streamed text into interval-based call-log events."""
+
+    write_event: Callable[[dict[str, object]], None]
+    interval_seconds: float
+    _reasoning_parts: list[str] = field(default_factory=list)
+    _answer_parts: list[str] = field(default_factory=list)
+    _last_flush_monotonic: float = field(default_factory=time.monotonic)
+
+    def append(self, *, phase: Literal["reasoning", "answer"], text: str) -> None:
+        """Buffer one streamed text fragment and flush when interval expires."""
+        if not text:
+            return
+        if phase == "reasoning":
+            self._reasoning_parts.append(text)
+        else:
+            self._answer_parts.append(text)
+        self.flush_if_due()
+
+    def flush_if_due(self) -> None:
+        """Flush buffered text when interval has elapsed."""
+        elapsed = time.monotonic() - self._last_flush_monotonic
+        if elapsed < self.interval_seconds:
+            return
+        self.flush(force=False, trigger="interval")
+
+    def flush(self, *, force: bool, trigger: Literal["interval", "stream_end"]) -> None:
+        """Flush buffered text into one event per phase."""
+        if not force:
+            elapsed = time.monotonic() - self._last_flush_monotonic
+            if elapsed < self.interval_seconds:
+                return
+        wrote = False
+        if self._reasoning_parts:
+            self.write_event(
+                {
+                    "event": "stream_flush",
+                    "phase": "reasoning",
+                    "text": "".join(self._reasoning_parts),
+                    "trigger": trigger,
+                }
+            )
+            self._reasoning_parts.clear()
+            wrote = True
+        if self._answer_parts:
+            self.write_event(
+                {
+                    "event": "stream_flush",
+                    "phase": "answer",
+                    "text": "".join(self._answer_parts),
+                    "trigger": trigger,
+                }
+            )
+            self._answer_parts.clear()
+            wrote = True
+        if wrote:
+            self._last_flush_monotonic = time.monotonic()
+
+
 def _stream_assistant_turn(
     client: OpenAI,
     request_payload: dict[str, Any],
     stream_event_callback: Callable[[dict[str, object]], None] | None,
+    chat_log_writer: DeepSeekChatLogWriter | None = None,
+    call_log_id: str | None = None,
+    on_chunk_callback: Callable[[], None] | None = None,
 ) -> StreamedAssistantTurn:
     """Stream one assistant turn and aggregate text and tool deltas."""
+
+    def _write_call_event(payload: dict[str, object]) -> None:
+        """Write one call-scoped event when call logging is enabled."""
+        if chat_log_writer is None or call_log_id is None:
+            return
+        chat_log_writer.write_call_event(call_log_id, payload)
+
     finish_reason: str | None = None
     reasoning_parts: list[str] = []
     answer_parts: list[str] = []
     tool_call_accumulator: dict[int, dict[str, Any]] = {}
     usage_total_tokens: int | None = None
+    stream_log_buffer: _StreamCallLogBuffer | None = None
+    if chat_log_writer is not None and call_log_id is not None:
+        stream_log_buffer = _StreamCallLogBuffer(
+            write_event=_write_call_event,
+            interval_seconds=chat_log_writer.stream_flush_interval_seconds,
+        )
     stream_response = client.chat.completions.create(**cast(Any, request_payload))
-    for chunk in stream_response:
-        chunk_total_tokens = _extract_total_tokens_from_usage(
-            getattr(chunk, "usage", None)
-        )
-        if chunk_total_tokens is not None:
-            usage_total_tokens = chunk_total_tokens
-        choices = getattr(chunk, "choices", None)
-        if not choices:
-            continue
-        choice = choices[0]
-        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
-        delta = getattr(choice, "delta", None)
-        if delta is None:
-            continue
-
-        reasoning_piece = _normalize_stream_text_piece(
-            getattr(delta, "reasoning_content", None)
-        )
-        if reasoning_piece:
-            reasoning_parts.append(reasoning_piece)
-            _emit_stream_token_event(
-                stream_event_callback,
-                phase="reasoning",
-                text=reasoning_piece,
+    try:
+        for chunk in stream_response:
+            if on_chunk_callback is not None:
+                on_chunk_callback()
+            chunk_total_tokens = _extract_total_tokens_from_usage(
+                getattr(chunk, "usage", None)
             )
-
-        answer_piece = _normalize_stream_text_piece(getattr(delta, "content", None))
-        if answer_piece:
-            answer_parts.append(answer_piece)
-            _emit_stream_token_event(
-                stream_event_callback,
-                phase="answer",
-                text=answer_piece,
-            )
-
-        delta_tool_calls = getattr(delta, "tool_calls", None)
-        if not delta_tool_calls:
-            continue
-        for fallback_index, delta_tool_call in enumerate(delta_tool_calls):
-            tool_call_index_raw = getattr(delta_tool_call, "index", None)
-            tool_call_index = (
-                int(tool_call_index_raw)
-                if isinstance(tool_call_index_raw, int)
-                else fallback_index
-            )
-            tool_call_entry = tool_call_accumulator.setdefault(
-                tool_call_index,
-                {
-                    "id": "",
-                    "type": "function",
-                    "function": {"name": "", "arguments": ""},
-                },
-            )
-            tool_call_id = getattr(delta_tool_call, "id", None)
-            if isinstance(tool_call_id, str) and tool_call_id:
-                tool_call_entry["id"] = tool_call_id
-
-            tool_call_type = getattr(delta_tool_call, "type", None)
-            if isinstance(tool_call_type, str) and tool_call_type:
-                tool_call_entry["type"] = tool_call_type
-
-            function_obj = getattr(delta_tool_call, "function", None)
-            if function_obj is None:
+            if chunk_total_tokens is not None:
+                usage_total_tokens = chunk_total_tokens
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            choice = choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = getattr(choice, "delta", None)
+            if delta is None:
                 continue
 
-            function_name_piece = getattr(function_obj, "name", None)
-            if isinstance(function_name_piece, str) and function_name_piece:
-                existing_function_name = str(tool_call_entry["function"]["name"])
-                tool_call_entry["function"]["name"] = _merge_stream_fragment(
-                    existing_function_name,
-                    function_name_piece,
+            reasoning_piece = _normalize_stream_text_piece(
+                getattr(delta, "reasoning_content", None)
+            )
+            if reasoning_piece:
+                reasoning_parts.append(reasoning_piece)
+                if stream_log_buffer is not None:
+                    stream_log_buffer.append(phase="reasoning", text=reasoning_piece)
+                _emit_stream_token_event(
+                    stream_event_callback,
+                    phase="reasoning",
+                    text=reasoning_piece,
                 )
 
-            function_args_piece = getattr(function_obj, "arguments", None)
-            if isinstance(function_args_piece, str) and function_args_piece:
-                existing_function_args = str(tool_call_entry["function"]["arguments"])
-                tool_call_entry["function"]["arguments"] = _merge_stream_fragment(
-                    existing_function_args,
-                    function_args_piece,
+            answer_piece = _normalize_stream_text_piece(getattr(delta, "content", None))
+            if answer_piece:
+                answer_parts.append(answer_piece)
+                if stream_log_buffer is not None:
+                    stream_log_buffer.append(phase="answer", text=answer_piece)
+                _emit_stream_token_event(
+                    stream_event_callback,
+                    phase="answer",
+                    text=answer_piece,
                 )
+
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if not delta_tool_calls:
+                continue
+            for fallback_index, delta_tool_call in enumerate(delta_tool_calls):
+                tool_call_index_raw = getattr(delta_tool_call, "index", None)
+                tool_call_index = (
+                    int(tool_call_index_raw)
+                    if isinstance(tool_call_index_raw, int)
+                    else fallback_index
+                )
+                tool_call_entry = tool_call_accumulator.setdefault(
+                    tool_call_index,
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    },
+                )
+                tool_call_id = getattr(delta_tool_call, "id", None)
+                if isinstance(tool_call_id, str) and tool_call_id:
+                    tool_call_entry["id"] = tool_call_id
+
+                tool_call_type = getattr(delta_tool_call, "type", None)
+                if isinstance(tool_call_type, str) and tool_call_type:
+                    tool_call_entry["type"] = tool_call_type
+
+                function_obj = getattr(delta_tool_call, "function", None)
+                if function_obj is None:
+                    continue
+
+                function_name_piece = getattr(function_obj, "name", None)
+                if isinstance(function_name_piece, str) and function_name_piece:
+                    existing_function_name = str(tool_call_entry["function"]["name"])
+                    tool_call_entry["function"]["name"] = _merge_stream_fragment(
+                        existing_function_name,
+                        function_name_piece,
+                    )
+
+                function_args_piece = getattr(function_obj, "arguments", None)
+                if isinstance(function_args_piece, str) and function_args_piece:
+                    existing_function_args = str(
+                        tool_call_entry["function"]["arguments"]
+                    )
+                    tool_call_entry["function"]["arguments"] = _merge_stream_fragment(
+                        existing_function_args,
+                        function_args_piece,
+                    )
+    finally:
+        if stream_log_buffer is not None:
+            stream_log_buffer.flush(force=True, trigger="stream_end")
 
     normalized_tool_calls: list[dict[str, Any]] = []
     for tool_call_index in sorted(tool_call_accumulator):
@@ -610,6 +974,14 @@ def _stream_assistant_turn(
                     "name": function_name,
                     "arguments": function_arguments or "{}",
                 },
+            }
+        )
+
+    if normalized_tool_calls:
+        _write_call_event(
+            {
+                "event": "assistant_tool_calls",
+                "tool_calls": cast(object, normalized_tool_calls),
             }
         )
 
@@ -652,11 +1024,51 @@ def _model_completion_token_ceiling(model: str) -> int:
     return DEFAULT_MAX_COMPLETION_TOKENS
 
 
+def _clamp_completion_tokens_for_model(
+    configured_max_tokens: int,
+    model: str,
+) -> int:
+    """Clamp completion tokens to the selected model ceiling.
+
+    Args:
+        configured_max_tokens: User/configured output-token limit.
+        model: Target DeepSeek model.
+
+    Returns:
+        Token cap bounded by model-specific limits.
+    """
+    return max(1, min(configured_max_tokens, _model_completion_token_ceiling(model)))
+
+
 def _effective_agent_tool_mode(settings: DeepSeekRequestSettings) -> AgentToolMode:
     """Resolve the active tool mode from loop toggle plus mode selection."""
     if not settings.agent_tool_loop:
         return "off"
     return settings.agent_tool_mode
+
+
+def _should_persist_reasoning_for_replay(
+    settings: DeepSeekRequestSettings,
+    *,
+    tool_mode: AgentToolMode,
+) -> bool:
+    """Return whether assistant reasoning should be replayed in history.
+
+    DeepSeek reasoning-tool loops require replaying assistant ``reasoning_content``
+    within the same question turn. We therefore force-enable replay for
+    ``deepseek-reasoner`` when tool mode is active.
+
+    Args:
+        settings: Runtime request settings.
+        tool_mode: Effective tool mode for the current request.
+
+    Returns:
+        True when reasoning content should be included in replayed assistant
+        messages for subsequent sub-requests.
+    """
+    if settings.agent_persist_reasoning_content:
+        return True
+    return _is_reasoner_model(settings.model) and tool_mode != "off"
 
 
 def _build_transcript_manifest(transcript_segments: list[TranscriptSegment]) -> str:
@@ -720,6 +1132,7 @@ def _build_system_prompt(
     word_budget_tolerance: float,
     require_tool_call: bool,
     tool_mode: AgentToolMode,
+    max_repeated_write_overwrites: int,
 ) -> str:
     """Build a constrained prompt with explicit objective and acceptance checks.
 
@@ -764,8 +1177,9 @@ def _build_system_prompt(
             tool_loop_clause = (
                 f"- {tool_mode_note}\n"
                 f"- Read transcript slices with `{READ_TRANSCRIPT_LINES_TOOL_NAME}` before drafting.\n"
-                f"- Use `{COUNT_WORDS_TOOL_NAME}` for counting candidate wording; do not rely on self-counting.\n"
+                f"- Use `{COUNT_WORDS_TOOL_NAME}` with batched `lines` payloads for counting; do not self-count.\n"
                 f"- Stage output JSON with `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` in chunks (overwrite first, append next).\n"
+                f"- Do not repeat identical overwrite writes more than {max_repeated_write_overwrites} times in a row; revise then re-evaluate.\n"
                 f"- You must call `{EVALUATE_SCRIPT_TOOL_NAME}` before finalizing JSON.\n"
                 f"- If `{EVALUATE_SCRIPT_TOOL_NAME}` returns status=fail, revise and call it again.\n"
                 f"- Return final response as strict JSON or `STAGED_OUTPUT_READY` after staged output is complete.\n"
@@ -774,7 +1188,7 @@ def _build_system_prompt(
         else:
             tool_loop_clause = (
                 f"- {tool_mode_note}\n"
-                f"- Use `{COUNT_WORDS_TOOL_NAME}` for any word-count checks; do not self-count.\n"
+                f"- Use `{COUNT_WORDS_TOOL_NAME}` with batched `lines` payloads for word-count checks; do not self-count.\n"
                 f"- Stage output JSON with `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` in chunks (overwrite first, append next).\n"
                 f"- You must call `{EVALUATE_SCRIPT_TOOL_NAME}` before finalizing JSON.\n"
                 f"- If `{EVALUATE_SCRIPT_TOOL_NAME}` returns status=fail, revise and call it again.\n"
@@ -798,16 +1212,16 @@ def _build_system_prompt(
     )
     completion_checklist_tail = (
         (
-            f"  5) If replying `{STAGED_OUTPUT_READY_MARKER}`, staged file contains a full valid JSON object.\n"
-            "  6) Spoken style feels conversational, not bulletized.\n"
-            f"  7) Latest `{EVALUATE_SCRIPT_TOOL_NAME}` result is status=pass.\n"
-            f"  8) `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` wrote staged output successfully.\n"
+            f"  6) If replying `{STAGED_OUTPUT_READY_MARKER}`, staged file contains a full valid JSON object.\n"
+            "  7) Spoken style feels conversational, not bulletized.\n"
+            f"  8) Latest `{EVALUATE_SCRIPT_TOOL_NAME}` result is status=pass.\n"
+            f"  9) `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` wrote staged output successfully.\n"
         )
         if require_tool_call
         else (
-            "  5) Output is only JSON and is complete (not truncated).\n"
-            "  6) Spoken style feels conversational, not bulletized.\n"
-            "  7) If tools are enabled, the latest "
+            "  6) Output is only JSON and is complete (not truncated).\n"
+            "  7) Spoken style feels conversational, not bulletized.\n"
+            "  8) If tools are enabled, the latest "
             f"`{EVALUATE_SCRIPT_TOOL_NAME}` result is status=pass.\n"
         )
     )
@@ -852,11 +1266,13 @@ Rules:
 - Never invent, rename, or merge speaker labels.
 - speaker must be exactly one of the allowed speakers.
 - Every source_segment_id must come from the input transcript.
+- Preserve segment ID formatting exactly, including zero padding (example: seg_00004).
 - All source_segment_ids for a single line must belong to the same speaker.
 - Avoid meta-summary phrases like "the speaker discusses".
 - Preserve key claims and tone.
 - Keep spoken cadence natural; occasional disfluencies like "um" or "uh" are allowed when they fit.
 - Avoid robotic stubs, one-word question chains, or telegraphic phrasing.
+- Never perform more than {max_repeated_write_overwrites} identical overwrite writes in a row; revise, evaluate, then write.
 
 Examples:
 - Input excerpt:
@@ -881,13 +1297,14 @@ Evaluation:
   2) Each line has non-empty source_segment_ids.
   3) Each line uses only allowed speakers.
   4) Each line's source_segment_ids belong to one speaker only.
+  5) Segment IDs match exact transcript formatting, including leading zeros.
 {completion_checklist_tail.rstrip()}
 """
 
 
 def _build_retry_instruction(context: RetryContext) -> str:
     """Build retry guidance that explains the previous failure."""
-    return (
+    message = (
         "Retry correction request:\n"
         f"- Previous attempt: {context.attempt_index}\n"
         f"- Previous endpoint: {context.endpoint_mode}\n"
@@ -895,6 +1312,54 @@ def _build_retry_instruction(context: RetryContext) -> str:
         f"- Failure detail: {context.error_digest}\n"
         "- Fix the exact issue and regenerate a complete STRICT JSON object only.\n"
         "- Do not include markdown, explanations, or trailing text.\n"
+    )
+    continuation = context.continuation
+    if continuation is None:
+        return message
+    read_ranges_text = _format_retry_read_ranges(continuation.read_ranges)
+    max_read_index_text = (
+        str(continuation.max_read_index)
+        if continuation.max_read_index is not None
+        else "unknown"
+    )
+    return (
+        f"{message}"
+        "- Resume from prior progress instead of restarting from scratch.\n"
+        f"- Prior transcript coverage: ranges={read_ranges_text} "
+        f"max_read_index={max_read_index_text}.\n"
+        "- Reuse staged output or partial draft if available; revise incrementally.\n"
+        "- Do not reread transcript lines from index 0 unless unresolved validation "
+        "issues require it.\n"
+        "- Stage JSON with write_output_segment before extensive redrafting.\n"
+    )
+
+
+def _format_retry_read_ranges(read_ranges: list[tuple[int, int]]) -> str:
+    """Format compact read-range telemetry for retry guidance text."""
+    if not read_ranges:
+        return "none"
+    preview = read_ranges[:4]
+    rendered_preview = ", ".join(f"[{start},{end}]" for start, end in preview)
+    if len(read_ranges) <= len(preview):
+        return rendered_preview
+    return f"{rendered_preview}, ... (+{len(read_ranges) - len(preview)} more)"
+
+
+def _build_retry_resume_guard_message(continuation: RetryContinuationState) -> str:
+    """Build an explicit guardrail to avoid unnecessary transcript rereads."""
+    read_ranges_text = _format_retry_read_ranges(continuation.read_ranges)
+    max_read_index_text = (
+        str(continuation.max_read_index)
+        if continuation.max_read_index is not None
+        else "unknown"
+    )
+    return (
+        "Retry resume guard:\n"
+        f"- Prior read coverage: {read_ranges_text} (max_read_index={max_read_index_text}).\n"
+        "- Continue from uncovered transcript ranges first.\n"
+        "- Do not reread transcript lines from index 0 unless there is a specific "
+        "unresolved validation issue that requires it.\n"
+        "- Call write_output_segment early to preserve iterative progress.\n"
     )
 
 
@@ -1370,6 +1835,260 @@ def _read_staged_output_text(staging_path: str) -> str:
         return ""
 
 
+def _copy_tool_loop_diagnostics(
+    diagnostics: ToolLoopDiagnostics,
+) -> ToolLoopDiagnostics:
+    """Return a defensive copy of tool-loop diagnostics."""
+    return {
+        "tool_loop_exhausted": diagnostics["tool_loop_exhausted"],
+        "tool_loop_exhaustion_reason": diagnostics["tool_loop_exhaustion_reason"],
+        "tool_round_limit": diagnostics["tool_round_limit"],
+        "tool_rounds_used": diagnostics["tool_rounds_used"],
+        "repeated_overwrite_count": diagnostics["repeated_overwrite_count"],
+        "staged_output_present": diagnostics["staged_output_present"],
+        "staged_output_valid_json": diagnostics["staged_output_valid_json"],
+        "last_validation_issues": list(diagnostics["last_validation_issues"]),
+    }
+
+
+def _merge_tool_loop_diagnostics(
+    target: ToolLoopDiagnostics,
+    source: ToolLoopDiagnostics,
+) -> None:
+    """Copy diagnostic values from source into target in place."""
+    target["tool_loop_exhausted"] = source["tool_loop_exhausted"]
+    target["tool_loop_exhaustion_reason"] = source["tool_loop_exhaustion_reason"]
+    target["tool_round_limit"] = source["tool_round_limit"]
+    target["tool_rounds_used"] = source["tool_rounds_used"]
+    target["repeated_overwrite_count"] = source["repeated_overwrite_count"]
+    target["staged_output_present"] = source["staged_output_present"]
+    target["staged_output_valid_json"] = source["staged_output_valid_json"]
+    target["last_validation_issues"] = source["last_validation_issues"][:]
+
+
+def _new_tool_loop_diagnostics(tool_round_limit: int) -> ToolLoopDiagnostics:
+    """Create empty diagnostics for one tool-loop run."""
+    return {
+        "tool_loop_exhausted": False,
+        "tool_loop_exhaustion_reason": "",
+        "tool_round_limit": max(1, int(tool_round_limit)),
+        "tool_rounds_used": 0,
+        "repeated_overwrite_count": 0,
+        "staged_output_present": False,
+        "staged_output_valid_json": False,
+        "last_validation_issues": [],
+    }
+
+
+def _hash_text(text: str) -> str:
+    """Return a deterministic digest for short overwrite-repeat detection."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _tool_dialogue_payload_from_script(script: PodcastScript) -> list[DialogueLinePayload]:
+    """Convert script model payload into tool-evaluation dialogue payload lines."""
+    return [cast(DialogueLinePayload, line.model_dump()) for line in script.dialogue]
+
+
+def _podcast_script_from_tool_dialogue(
+    repaired_dialogue: list[ToolDialogueLine],
+) -> PodcastScript:
+    """Build a strict script model from tool-repaired dialogue payload."""
+    dialogue_lines = [
+        DialogueLine(
+            speaker=line["speaker"],
+            text=line["text"],
+            emo_text=line["emo_text"],
+            emo_alpha=float(line["emo_alpha"]),
+            source_segment_ids=list(line["source_segment_ids"]),
+        )
+        for line in repaired_dialogue
+    ]
+    return PodcastScript(dialogue=dialogue_lines)
+
+
+def _build_tool_loop_exhaustion_error(
+    *,
+    diagnostics: ToolLoopDiagnostics,
+    reason: str,
+    issues: list[str],
+    continuation_state: RetryContinuationState | None = None,
+) -> ToolLoopExhaustedError:
+    """Build a typed exhaustion error with normalized diagnostics payload."""
+    updated = _copy_tool_loop_diagnostics(diagnostics)
+    updated["tool_loop_exhausted"] = True
+    updated["tool_loop_exhaustion_reason"] = reason
+    updated["last_validation_issues"] = issues[:]
+    return ToolLoopExhaustedError(
+        f"Tool loop exhausted: {reason}",
+        diagnostics=updated,
+        continuation_state=continuation_state,
+    )
+
+
+def _handle_tool_loop_exhaustion(
+    *,
+    settings: DeepSeekRequestSettings,
+    tool_output_staging_path: str,
+    diagnostics: ToolLoopDiagnostics,
+    allowed_speakers: set[str],
+    segment_speaker_map: dict[str, str],
+    word_budget: int | None,
+    word_budget_tolerance: float,
+    source_word_count: int,
+    stream_event_callback: Callable[[dict[str, object]], None] | None,
+    continuation_state: RetryContinuationState | None = None,
+) -> tuple[PodcastScript, bool]:
+    """Attempt final salvage when the bounded tool loop reaches round limit."""
+    round_limit = max(1, settings.agent_max_tool_rounds)
+    rounds_used = diagnostics["tool_rounds_used"]
+    status_text = (
+        f"Tool loop reached max rounds ({rounds_used}/{round_limit}). "
+        "Attempting local staged-output salvage."
+    )
+    _emit_stream_token_event(stream_event_callback, phase="status", text=status_text)
+
+    staged_candidate = _read_staged_output_text(tool_output_staging_path)
+    staged_present = bool(staged_candidate.strip())
+    diagnostics["staged_output_present"] = staged_present
+    diagnostics["tool_loop_exhausted"] = True
+    diagnostics["tool_loop_exhaustion_reason"] = "max_tool_rounds_reached"
+    continuation_for_error = (
+        replace(
+            continuation_state,
+            staged_output_present=staged_present,
+            staged_output_valid_json=False,
+        )
+        if continuation_state is not None
+        else None
+    )
+
+    if not staged_present:
+        error = _build_tool_loop_exhaustion_error(
+            diagnostics=diagnostics,
+            reason="max_tool_rounds_reached_no_staged_output",
+            issues=[
+                "No staged JSON was available after tool-loop round exhaustion.",
+                (
+                    "Call write_output_segment to stage final JSON before finalization."
+                ),
+            ],
+            continuation_state=continuation_for_error,
+        )
+        if stream_event_callback is not None:
+            stream_event_callback(
+                {
+                    "event": "tool_loop_exhausted",
+                    "diagnostics": cast(object, error.diagnostics),
+                    "next_action_hint": (
+                        "Stage valid JSON with write_output_segment, then call "
+                        "evaluate_script_constraints."
+                    ),
+                }
+            )
+        _merge_tool_loop_diagnostics(diagnostics, error.diagnostics)
+        raise error
+
+    try:
+        parsed_script, used_repair = _decode_podcast_script_with_fallback(staged_candidate)
+        diagnostics["staged_output_valid_json"] = True
+        if continuation_for_error is not None:
+            continuation_for_error = replace(
+                continuation_for_error,
+                staged_output_valid_json=True,
+            )
+    except (JSONDecodeError, ValidationError, ValueError) as decode_error:
+        diagnostics["staged_output_valid_json"] = False
+        error = _build_tool_loop_exhaustion_error(
+            diagnostics=diagnostics,
+            reason="max_tool_rounds_reached_staged_json_invalid",
+            issues=[
+                "Staged output is not valid JSON matching the script schema.",
+                _error_digest(decode_error),
+            ],
+            continuation_state=continuation_for_error,
+        )
+        if stream_event_callback is not None:
+            stream_event_callback(
+                {
+                    "event": "tool_loop_exhausted",
+                    "diagnostics": cast(object, error.diagnostics),
+                    "next_action_hint": (
+                        "Fix JSON structure in staged output and rerun constraint "
+                        "evaluation before finalizing."
+                    ),
+                }
+            )
+        _merge_tool_loop_diagnostics(diagnostics, error.diagnostics)
+        raise error
+
+    local_constraints = _evaluate_script_constraints_tool(
+        dialogue_payload=_tool_dialogue_payload_from_script(parsed_script),
+        allowed_speakers=allowed_speakers,
+        segment_speaker_map=segment_speaker_map,
+        word_budget=word_budget,
+        word_budget_tolerance=word_budget_tolerance,
+        source_word_count=source_word_count,
+    )
+    if local_constraints["status"] == "pass":
+        _emit_stream_token_event(
+            stream_event_callback,
+            phase="status",
+            text=(
+                "Tool loop exhausted but local salvage passed. "
+                "Accepting staged JSON output."
+            ),
+        )
+        return (
+            _podcast_script_from_tool_dialogue(local_constraints["repaired_dialogue"]),
+            used_repair,
+        )
+
+    budget_info = local_constraints["word_budget"]
+    budget_issue = ""
+    if budget_info["enabled"] and budget_info["in_range"] is False:
+        budget_issue = (
+            "Word budget out of range: "
+            f"total={budget_info['total_words']} "
+            f"target={budget_info['target_words']} "
+            f"range=[{budget_info['lower_bound']},{budget_info['upper_bound']}]."
+        )
+    issues: list[str] = []
+    issues.extend(local_constraints["validation"]["issues"])
+    issues.extend(local_constraints["naturalness"]["issues"])
+    if budget_issue:
+        issues.append(budget_issue)
+    if not issues:
+        issues.extend(local_constraints["hints"][:2])
+
+    error = _build_tool_loop_exhaustion_error(
+        diagnostics=diagnostics,
+        reason="max_tool_rounds_reached_constraints_failed",
+        issues=issues,
+        continuation_state=(
+            replace(
+                continuation_for_error,
+                last_validation_issues=issues[:],
+            )
+            if continuation_for_error is not None
+            else None
+        ),
+    )
+    if stream_event_callback is not None:
+        stream_event_callback(
+            {
+                "event": "tool_loop_exhausted",
+                "diagnostics": cast(object, error.diagnostics),
+                "next_action_hint": (
+                    "Reduce repeat overwrites and call evaluate_script_constraints "
+                    "after each material revision."
+                ),
+            }
+        )
+    _merge_tool_loop_diagnostics(diagnostics, error.diagnostics)
+    raise error
+
+
 def _deepseek_tool_schemas(tool_mode: AgentToolMode) -> list[dict[str, object]]:
     """Build DeepSeek tool schema definitions for local agentic evaluation."""
     tool_schemas: list[dict[str, object]] = []
@@ -1731,6 +2450,7 @@ def _summarize_conversation_context_via_deepseek(
     conversation_messages: list[dict[str, Any]],
     tokens_limit: int,
     endpoint_mode: EndpointMode,
+    chat_log_writer: DeepSeekChatLogWriter | None = None,
 ) -> str:
     """Generate a compact summary of prior conversation for context rollover."""
     if not conversation_messages:
@@ -1756,29 +2476,71 @@ def _summarize_conversation_context_via_deepseek(
             },
         ]
     )
-    response = client.chat.completions.create(
-        **cast(
-            Any,
-            {
-                "model": DEEPSEEK_CHAT_MODEL,
-                "messages": summary_messages,
+    call_log_id: str | None = None
+    response: object | None = None
+    if chat_log_writer is not None:
+        call_log_id = chat_log_writer.start_call(
+            call_type="context_rollover_summary",
+            endpoint_mode=endpoint_mode,
+            model=DEEPSEEK_CHAT_MODEL,
+            metadata={
+                "messages_count": len(summary_messages),
                 "max_tokens": min(tokens_limit, CONTEXT_SUMMARY_MAX_TOKENS),
-                "temperature": 0.0,
             },
         )
-    )
-    summary_choice = response.choices[0]
-    summary_text = _normalize_assistant_content(summary_choice.message.content).strip()
-    if not summary_text:
-        raise ValueError("DeepSeek context summary was empty.")
-    if len(summary_text) > CONTEXT_SUMMARY_MAX_CHARS:
-        return summary_text[:CONTEXT_SUMMARY_MAX_CHARS]
-    logger.info(
-        "Generated context rollover summary endpoint=%s chars=%d",
-        endpoint_mode,
-        len(summary_text),
-    )
-    return summary_text
+    try:
+        response = client.chat.completions.create(
+            **cast(
+                Any,
+                {
+                    "model": DEEPSEEK_CHAT_MODEL,
+                    "messages": summary_messages,
+                    "max_tokens": min(tokens_limit, CONTEXT_SUMMARY_MAX_TOKENS),
+                    "temperature": 0.0,
+                },
+            )
+        )
+        summary_choice = response.choices[0]
+        summary_text = _normalize_assistant_content(summary_choice.message.content).strip()
+        if not summary_text:
+            raise ValueError("DeepSeek context summary was empty.")
+        if call_log_id is not None and chat_log_writer is not None:
+            chat_log_writer.write_call_event(
+                call_log_id,
+                {
+                    "event": "message",
+                    "phase": "answer",
+                    "text": summary_text,
+                },
+            )
+        if len(summary_text) > CONTEXT_SUMMARY_MAX_CHARS:
+            return summary_text[:CONTEXT_SUMMARY_MAX_CHARS]
+        logger.info(
+            "Generated context rollover summary endpoint=%s chars=%d",
+            endpoint_mode,
+            len(summary_text),
+        )
+        return summary_text
+    except Exception as error:  # noqa: BLE001
+        if call_log_id is not None and chat_log_writer is not None:
+            chat_log_writer.finish_call(
+                call_log_id,
+                status="error",
+                error=_error_digest(error),
+            )
+            call_log_id = None
+        raise
+    finally:
+        if call_log_id is not None and chat_log_writer is not None:
+            total_tokens = _extract_total_tokens_from_usage(
+                getattr(response, "usage", None)
+            )
+            chat_log_writer.finish_call(
+                call_log_id,
+                status="ok",
+                finish_reason="stop",
+                usage_total_tokens=total_tokens,
+            )
 
 
 def _reset_conversation_with_summary(
@@ -1825,6 +2587,7 @@ def _request_deepseek_completion(
     tool_output_path: str | None = None,
     stream_event_callback: Callable[[dict[str, object]], None] | None = None,
     conversation_state: ConversationState | None = None,
+    chat_log_writer: DeepSeekChatLogWriter | None = None,
 ) -> tuple[PodcastScript, bool, int, dict[str, int]]:
     """Request completion from a specific endpoint and parse JSON output.
 
@@ -1845,15 +2608,35 @@ def _request_deepseek_completion(
         tool_output_path: Optional output path used to derive a tool-write buffer file.
         stream_event_callback: Optional callback for dashboard stream events.
         conversation_state: Mutable conversation context reused across calls.
+        chat_log_writer: Optional writer used for continuous per-call trace logs.
 
     Returns:
         Tuple of parsed script, local JSON-repair flag, tool-loop rounds used,
         and per-tool invocation counts.
     """
     tool_mode = _effective_agent_tool_mode(settings)
-    tokens_limit = max(1, settings.max_completion_tokens)
+    tokens_limit = _clamp_completion_tokens_for_model(
+        settings.max_completion_tokens,
+        settings.model,
+    )
+    persist_reasoning_for_replay = _should_persist_reasoning_for_replay(
+        settings,
+        tool_mode=tool_mode,
+    )
+    if (
+        _is_reasoner_model(settings.model)
+        and tool_mode != "off"
+        and not settings.agent_persist_reasoning_content
+    ):
+        logger.info(
+            "Enabling reasoning_content replay for DeepSeek reasoner tool loop compatibility."
+        )
+    tool_loop_diagnostics = _new_tool_loop_diagnostics(settings.agent_max_tool_rounds)
     if conversation_state is not None:
         conversation_state.context_tokens_limit = tokens_limit
+        conversation_state.last_tool_loop_diagnostics = _copy_tool_loop_diagnostics(
+            tool_loop_diagnostics
+        )
 
     if conversation_state is not None and conversation_state.messages:
         messages = _clone_messages(conversation_state.messages)
@@ -1894,6 +2677,15 @@ def _request_deepseek_completion(
                 ),
             }
         )
+        if retry_context.continuation is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": _build_retry_resume_guard_message(
+                        retry_context.continuation
+                    ),
+                }
+            )
 
     latest_context_snapshot: ContextUsageSnapshot | None = None
     if (
@@ -1905,6 +2697,51 @@ def _request_deepseek_completion(
             tokens_used=conversation_state.context_tokens_used,
             tokens_limit=prior_limit,
         )
+    else:
+        latest_context_snapshot = _build_context_usage_snapshot(
+            tokens_used=0,
+            tokens_limit=tokens_limit,
+        )
+    last_context_usage_emit_monotonic = 0.0
+
+    def _write_call_event(call_id: str | None, payload: dict[str, object]) -> None:
+        """Append one call-scoped event when chat tracing is enabled."""
+        if chat_log_writer is None or call_id is None:
+            return
+        chat_log_writer.write_call_event(call_id, payload)
+
+    def _persist_tool_loop_diagnostics() -> None:
+        """Persist latest loop diagnostics in shared conversation state."""
+        if conversation_state is None:
+            return
+        conversation_state.last_tool_loop_diagnostics = _copy_tool_loop_diagnostics(
+            tool_loop_diagnostics
+        )
+
+    def _emit_context_usage_heartbeat(*, force: bool = False) -> None:
+        """Emit context usage updates at most once per heartbeat interval."""
+        nonlocal last_context_usage_emit_monotonic
+        if latest_context_snapshot is None:
+            return
+        if stream_event_callback is None:
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and now - last_context_usage_emit_monotonic
+            < CONTEXT_USAGE_UPDATE_INTERVAL_SECONDS
+        ):
+            return
+        rollover_count = (
+            conversation_state.rollover_count if conversation_state is not None else 0
+        )
+        _emit_context_usage_event(
+            stream_event_callback,
+            snapshot=latest_context_snapshot,
+            rollover_triggered=False,
+            rollover_count=rollover_count,
+        )
+        last_context_usage_emit_monotonic = now
 
     def _record_context_usage(total_tokens: int | None) -> None:
         """Persist and emit usage telemetry when available."""
@@ -1916,17 +2753,10 @@ def _request_deepseek_completion(
             tokens_limit=tokens_limit,
         )
         latest_context_snapshot = snapshot
-        rollover_count = 0
         if conversation_state is not None:
             conversation_state.context_tokens_used = snapshot.tokens_used
             conversation_state.context_tokens_limit = snapshot.tokens_limit
-            rollover_count = conversation_state.rollover_count
-        _emit_context_usage_event(
-            stream_event_callback,
-            snapshot=snapshot,
-            rollover_triggered=False,
-            rollover_count=rollover_count,
-        )
+        _emit_context_usage_heartbeat(force=True)
 
     def _rollover_conversation_if_needed() -> None:
         """Compress context and reset chat history when remaining budget is low."""
@@ -1950,6 +2780,7 @@ def _request_deepseek_completion(
             conversation_messages=messages,
             tokens_limit=tokens_limit,
             endpoint_mode=endpoint_mode,
+            chat_log_writer=chat_log_writer,
         )
         _reset_conversation_with_summary(
             messages=messages,
@@ -1981,12 +2812,14 @@ def _request_deepseek_completion(
             rollover_triggered=True,
             rollover_count=rollover_count,
         )
+        last_context_usage_emit_monotonic = time.monotonic()
         _emit_stream_token_event(
             stream_event_callback,
             phase="status",
             text="Context rollover complete. Continuing in new chat window.",
         )
 
+    _emit_context_usage_heartbeat(force=True)
     _rollover_conversation_if_needed()
 
     base_request_payload: dict[str, Any] = {
@@ -2037,25 +2870,125 @@ def _request_deepseek_completion(
         latest_tool_status: Literal["pass", "fail"] | None = None
         tool_call_counts: dict[str, int] = {}
         write_tool_succeeded = False
+        read_ranges: list[tuple[int, int]] = []
+        max_read_index: int | None = None
+        retry_resume_used = (
+            retry_context is not None and retry_context.continuation is not None
+        )
+        retry_max_read_index_prior = (
+            retry_context.continuation.max_read_index
+            if retry_context is not None and retry_context.continuation is not None
+            else None
+        )
+        retry_read_from_start_detected = False
+        max_tool_rounds = max(1, settings.agent_max_tool_rounds)
         rounds_used = 0
+        repeated_overwrite_count = 0
+        last_overwrite_hash: str | None = None
+
+        def _snapshot_retry_continuation_state(
+            *,
+            validation_issues: list[str] | None = None,
+            staged_output_present: bool | None = None,
+            staged_output_valid_json: bool | None = None,
+        ) -> RetryContinuationState:
+            """Capture compact retry-resume context for downstream attempts."""
+            latest_constraints_status: Literal["pass", "fail", "unknown"] = (
+                latest_tool_status if latest_tool_status is not None else "unknown"
+            )
+            normalized_ranges = [
+                (int(start), int(end))
+                for start, end in read_ranges
+            ]
+            return RetryContinuationState(
+                read_ranges=normalized_ranges,
+                max_read_index=max_read_index,
+                write_tool_succeeded=write_tool_succeeded,
+                latest_constraints_status=latest_constraints_status,
+                last_validation_issues=(
+                    validation_issues[:]
+                    if validation_issues is not None
+                    else tool_loop_diagnostics["last_validation_issues"][:]
+                ),
+                staged_output_present=(
+                    staged_output_present
+                    if staged_output_present is not None
+                    else tool_loop_diagnostics["staged_output_present"]
+                ),
+                staged_output_valid_json=(
+                    staged_output_valid_json
+                    if staged_output_valid_json is not None
+                    else tool_loop_diagnostics["staged_output_valid_json"]
+                ),
+            )
+
+        if retry_resume_used and stream_event_callback is not None:
+            stream_event_callback(
+                {
+                    "event": "retry_resume_telemetry",
+                    "retry_resume_used": True,
+                    "retry_max_read_index_prior": retry_max_read_index_prior,
+                    "retry_read_from_start_detected": False,
+                }
+            )
         try:
-            while True:
+            while rounds_used < max_tool_rounds:
                 _rollover_conversation_if_needed()
                 tool_payload["messages"] = cast(Any, messages)
                 rounds_used += 1
+                tool_loop_diagnostics["tool_rounds_used"] = rounds_used
+                tool_loop_diagnostics["repeated_overwrite_count"] = (
+                    repeated_overwrite_count
+                )
+                _persist_tool_loop_diagnostics()
                 logger.info(
-                    "Tool loop iteration endpoint=%s model=%s (unbounded).",
+                    "Tool loop iteration endpoint=%s model=%s round=%d/%d",
                     endpoint_mode,
                     settings.model,
+                    rounds_used,
+                    max_tool_rounds,
                 )
-                turn = _stream_assistant_turn(
-                    client=client,
-                    request_payload=tool_payload,
-                    stream_event_callback=stream_event_callback,
-                )
+                call_log_id: str | None = None
+                turn: StreamedAssistantTurn | None = None
+                if chat_log_writer is not None:
+                    call_log_id = chat_log_writer.start_call(
+                        call_type="tool_loop_round",
+                        endpoint_mode=endpoint_mode,
+                        model=settings.model,
+                        metadata={
+                            "round": rounds_used,
+                            "tool_mode": tool_mode,
+                            "messages_count": len(messages),
+                        },
+                    )
+                try:
+                    turn = _stream_assistant_turn(
+                        client=client,
+                        request_payload=tool_payload,
+                        stream_event_callback=stream_event_callback,
+                        chat_log_writer=chat_log_writer,
+                        call_log_id=call_log_id,
+                        on_chunk_callback=_emit_context_usage_heartbeat,
+                    )
+                except Exception as call_error:  # noqa: BLE001
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="error",
+                            error=_error_digest(call_error),
+                        )
+                    raise
                 _record_context_usage(turn.usage_total_tokens)
                 finish_reason = turn.finish_reason
                 if finish_reason == "length":
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="error",
+                            finish_reason=finish_reason,
+                            usage_total_tokens=turn.usage_total_tokens,
+                            error="DeepSeek response truncated by max_tokens.",
+                        )
                     raise OutputTruncatedError(
                         "DeepSeek response truncated by max_tokens (finish_reason=length)."
                     )
@@ -2063,15 +2996,25 @@ def _request_deepseek_completion(
                 assistant_message: dict[str, Any] = {"role": "assistant"}
                 if turn.content:
                     assistant_message["content"] = turn.content
-                if turn.reasoning_content:
+                if turn.reasoning_content and persist_reasoning_for_replay:
                     assistant_message["reasoning_content"] = turn.reasoning_content
                 if turn.tool_calls:
                     assistant_message["tool_calls"] = turn.tool_calls
                 messages.append(assistant_message)
                 tool_payload["messages"] = cast(Any, messages)
 
+                _write_call_event(
+                    call_log_id,
+                    {
+                        "event": "assistant_message",
+                        "has_content": bool(turn.content),
+                        "has_reasoning_content": bool(turn.reasoning_content),
+                        "tool_call_count": len(turn.tool_calls),
+                    },
+                )
                 tool_calls = turn.tool_calls
                 if tool_calls:
+                    repeated_overwrite_blocked = False
                     for raw_tool_call in tool_calls:
                         tool_call_id = str(raw_tool_call.get("id", "")).strip()
                         function_obj = raw_tool_call.get("function", {})
@@ -2106,6 +3049,14 @@ def _request_deepseek_completion(
                                     "Provide valid JSON arguments for the requested tool."
                                 ],
                             }
+                        _write_call_event(
+                            call_log_id,
+                            {
+                                "event": "tool_invocation",
+                                "tool_name": tool_name_display,
+                                "arguments": args_text,
+                            },
+                        )
                         _emit_stream_token_event(
                             stream_event_callback,
                             phase="tool_call",
@@ -2140,6 +3091,64 @@ def _request_deepseek_completion(
                                         end_index=end_index,
                                         max_lines=settings.agent_read_max_lines,
                                     )
+                                    if read_result["status"] == "ok":
+                                        returned_start = read_result[
+                                            "returned_start_index"
+                                        ]
+                                        returned_end = read_result["returned_end_index"]
+                                        if (
+                                            returned_start is not None
+                                            and returned_end is not None
+                                            and read_result["returned_count"] > 0
+                                        ):
+                                            normalized_start = min(
+                                                int(returned_start),
+                                                int(returned_end),
+                                            )
+                                            normalized_end = max(
+                                                int(returned_start),
+                                                int(returned_end),
+                                            )
+                                            read_ranges.append(
+                                                (normalized_start, normalized_end)
+                                            )
+                                            max_read_index = (
+                                                normalized_end
+                                                if max_read_index is None
+                                                else max(max_read_index, normalized_end)
+                                            )
+                                            if (
+                                                retry_resume_used
+                                                and retry_max_read_index_prior is not None
+                                                and retry_max_read_index_prior > 0
+                                                and normalized_start <= 0
+                                                and not retry_read_from_start_detected
+                                            ):
+                                                retry_read_from_start_detected = True
+                                                _emit_stream_token_event(
+                                                    stream_event_callback,
+                                                    phase="status",
+                                                    text=(
+                                                        "Retry resumed but read_transcript_lines "
+                                                        "requested index 0 despite prior coverage. "
+                                                        "Continue from later ranges unless required."
+                                                    ),
+                                                )
+                                                if stream_event_callback is not None:
+                                                    stream_event_callback(
+                                                        {
+                                                            "event": (
+                                                                "retry_resume_telemetry"
+                                                            ),
+                                                            "retry_resume_used": True,
+                                                            "retry_max_read_index_prior": (
+                                                                retry_max_read_index_prior
+                                                            ),
+                                                            "retry_read_from_start_detected": True,
+                                                            "read_start_index": normalized_start,
+                                                            "read_end_index": normalized_end,
+                                                        }
+                                                    )
                                     tool_result = cast(dict[str, object], read_result)
                         elif function_name == COUNT_WORDS_TOOL_NAME:
                             if not isinstance(decoded_args, dict):
@@ -2176,19 +3185,63 @@ def _request_deepseek_completion(
                                 content = (
                                     str(content_arg) if content_arg is not None else ""
                                 )
-                                write_result = _write_output_segment_tool(
-                                    staging_path=tool_output_staging_path,
-                                    mode=mode,
-                                    content=content,
-                                    max_chunk_chars=DEFAULT_AGENT_WRITE_MAX_CHARS,
-                                    max_file_chars=DEFAULT_AGENT_WRITE_MAX_FILE_CHARS,
-                                )
-                                if write_result["status"] == "ok":
-                                    write_tool_succeeded = True
-                                tool_result = cast(
-                                    dict[str, object],
-                                    write_result,
-                                )
+                                normalized_mode = mode.strip().lower()
+                                if normalized_mode == "overwrite":
+                                    overwrite_hash = _hash_text(content)
+                                    same_as_previous = overwrite_hash == last_overwrite_hash
+                                    next_repeated_count = (
+                                        repeated_overwrite_count + 1
+                                        if same_as_previous
+                                        else 1
+                                    )
+                                    repeated_limit = max(
+                                        1,
+                                        int(settings.agent_max_repeated_write_overwrites),
+                                    )
+                                    if (
+                                        same_as_previous
+                                        and repeated_overwrite_count >= repeated_limit
+                                    ):
+                                        repeated_overwrite_count = next_repeated_count
+                                        repeated_overwrite_blocked = True
+                                        tool_result = {
+                                            "status": "fail",
+                                            "mode": normalized_mode,
+                                            "path": tool_output_staging_path,
+                                            "chunk_chars": len(content),
+                                            "total_chars": len(content),
+                                            "hints": [
+                                                (
+                                                    "Repeated overwrite detected for identical JSON "
+                                                    "payload. Revise content, then call "
+                                                    f"{EVALUATE_SCRIPT_TOOL_NAME} before writing again."
+                                                )
+                                            ],
+                                        }
+                                    else:
+                                        write_result = _write_output_segment_tool(
+                                            staging_path=tool_output_staging_path,
+                                            mode=mode,
+                                            content=content,
+                                            max_chunk_chars=DEFAULT_AGENT_WRITE_MAX_CHARS,
+                                            max_file_chars=DEFAULT_AGENT_WRITE_MAX_FILE_CHARS,
+                                        )
+                                        if write_result["status"] == "ok":
+                                            write_tool_succeeded = True
+                                            repeated_overwrite_count = next_repeated_count
+                                            last_overwrite_hash = overwrite_hash
+                                        tool_result = cast(dict[str, object], write_result)
+                                else:
+                                    write_result = _write_output_segment_tool(
+                                        staging_path=tool_output_staging_path,
+                                        mode=mode,
+                                        content=content,
+                                        max_chunk_chars=DEFAULT_AGENT_WRITE_MAX_CHARS,
+                                        max_file_chars=DEFAULT_AGENT_WRITE_MAX_FILE_CHARS,
+                                    )
+                                    if write_result["status"] == "ok":
+                                        write_tool_succeeded = True
+                                    tool_result = cast(dict[str, object], write_result)
                         elif function_name == EVALUATE_SCRIPT_TOOL_NAME:
                             dialogue_payload = _coerce_tool_dialogue_lines(
                                 decoded_args.get("dialogue", [])
@@ -2238,6 +3291,15 @@ def _request_deepseek_completion(
                                 f"details={_format_tool_event_details(tool_result)}"
                             ),
                         )
+                        _write_call_event(
+                            call_log_id,
+                            {
+                                "event": "tool_result",
+                                "tool_name": tool_name_display,
+                                "status": str(tool_result.get("status", "unknown")),
+                                "details": _format_tool_event_details(tool_result),
+                            },
+                        )
 
                         messages.append(
                             {
@@ -2251,6 +3313,30 @@ def _request_deepseek_completion(
                             }
                         )
                         tool_payload["messages"] = cast(Any, messages)
+                    if repeated_overwrite_blocked:
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Detected repeated identical overwrite writes. "
+                                    f"Call {EVALUATE_SCRIPT_TOOL_NAME} on your current "
+                                    "dialogue draft, revise materially, then write again."
+                                ),
+                            }
+                        )
+                        tool_payload["messages"] = cast(Any, messages)
+                    tool_loop_diagnostics["repeated_overwrite_count"] = (
+                        repeated_overwrite_count
+                    )
+                    _persist_tool_loop_diagnostics()
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="ok",
+                            finish_reason=finish_reason,
+                            usage_total_tokens=turn.usage_total_tokens,
+                            metadata={"assistant_tool_call_count": len(turn.tool_calls)},
+                        )
                     continue
 
                 if (
@@ -2276,6 +3362,14 @@ def _request_deepseek_completion(
                         }
                     )
                     tool_payload["messages"] = cast(Any, messages)
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="ok",
+                            finish_reason=finish_reason,
+                            usage_total_tokens=turn.usage_total_tokens,
+                            metadata={"assistant_tool_call_count": len(turn.tool_calls)},
+                        )
                     continue
 
                 if latest_tool_status != "pass":
@@ -2297,6 +3391,14 @@ def _request_deepseek_completion(
                         }
                     )
                     tool_payload["messages"] = cast(Any, messages)
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="ok",
+                            finish_reason=finish_reason,
+                            usage_total_tokens=turn.usage_total_tokens,
+                            metadata={"assistant_tool_call_count": len(turn.tool_calls)},
+                        )
                     continue
 
                 if not write_tool_succeeded:
@@ -2319,6 +3421,14 @@ def _request_deepseek_completion(
                         }
                     )
                     tool_payload["messages"] = cast(Any, messages)
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="ok",
+                            finish_reason=finish_reason,
+                            usage_total_tokens=turn.usage_total_tokens,
+                            metadata={"assistant_tool_call_count": len(turn.tool_calls)},
+                        )
                     continue
 
                 normalized_content = turn.content.strip()
@@ -2360,6 +3470,14 @@ def _request_deepseek_completion(
                         }
                     )
                     tool_payload["messages"] = cast(Any, messages)
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="ok",
+                            finish_reason=finish_reason,
+                            usage_total_tokens=turn.usage_total_tokens,
+                            metadata={"assistant_tool_call_count": len(turn.tool_calls)},
+                        )
                     continue
 
                 try:
@@ -2386,6 +3504,14 @@ def _request_deepseek_completion(
                         }
                     )
                     tool_payload["messages"] = cast(Any, messages)
+                    if call_log_id is not None and chat_log_writer is not None:
+                        chat_log_writer.finish_call(
+                            call_log_id,
+                            status="ok",
+                            finish_reason=finish_reason,
+                            usage_total_tokens=turn.usage_total_tokens,
+                            metadata={"assistant_tool_call_count": len(turn.tool_calls)},
+                        )
                     continue
                 if used_repair:
                     logger.warning(
@@ -2398,9 +3524,84 @@ def _request_deepseek_completion(
                     phase="status",
                     text="Tool loop satisfied constraints. Final JSON accepted.",
                 )
+                if call_log_id is not None and chat_log_writer is not None:
+                    chat_log_writer.finish_call(
+                        call_log_id,
+                        status="ok",
+                        finish_reason=finish_reason,
+                        usage_total_tokens=turn.usage_total_tokens,
+                        metadata={"assistant_tool_call_count": len(turn.tool_calls)},
+                    )
+                tool_loop_diagnostics["tool_rounds_used"] = rounds_used
+                tool_loop_diagnostics["repeated_overwrite_count"] = (
+                    repeated_overwrite_count
+                )
+                tool_loop_diagnostics["tool_loop_exhausted"] = False
+                tool_loop_diagnostics["tool_loop_exhaustion_reason"] = ""
+                tool_loop_diagnostics["staged_output_present"] = bool(
+                    staged_candidate.strip()
+                )
+                tool_loop_diagnostics["staged_output_valid_json"] = True
+                tool_loop_diagnostics["last_validation_issues"] = []
+                _persist_tool_loop_diagnostics()
                 if conversation_state is not None:
                     conversation_state.messages = _clone_messages(messages)
                 return parsed_script, used_repair, rounds_used, tool_call_counts
+            tool_loop_diagnostics["tool_rounds_used"] = rounds_used
+            tool_loop_diagnostics["repeated_overwrite_count"] = repeated_overwrite_count
+            _persist_tool_loop_diagnostics()
+            continuation_state = _snapshot_retry_continuation_state()
+            if settings.agent_loop_exhaustion_policy == "auto_salvage":
+                try:
+                    parsed_script, used_repair = _handle_tool_loop_exhaustion(
+                        settings=settings,
+                        tool_output_staging_path=tool_output_staging_path,
+                        diagnostics=tool_loop_diagnostics,
+                        allowed_speakers=allowed_speakers,
+                        segment_speaker_map=segment_speaker_map,
+                        word_budget=word_budget,
+                        word_budget_tolerance=word_budget_tolerance,
+                        source_word_count=source_word_count,
+                        stream_event_callback=stream_event_callback,
+                        continuation_state=continuation_state,
+                    )
+                finally:
+                    _persist_tool_loop_diagnostics()
+                    if conversation_state is not None:
+                        conversation_state.messages = _clone_messages(messages)
+                if conversation_state is not None:
+                    conversation_state.messages = _clone_messages(messages)
+                return parsed_script, used_repair, rounds_used, tool_call_counts
+
+            exhaustion_error = _build_tool_loop_exhaustion_error(
+                diagnostics=tool_loop_diagnostics,
+                reason="max_tool_rounds_reached_fail_fast",
+                issues=[
+                    (
+                        "Tool loop reached max rounds and fail-fast policy is active. "
+                        "Enable auto_salvage to validate staged output locally."
+                    )
+                ],
+                continuation_state=continuation_state,
+            )
+            if stream_event_callback is not None:
+                stream_event_callback(
+                    {
+                        "event": "tool_loop_exhausted",
+                        "diagnostics": cast(object, exhaustion_error.diagnostics),
+                        "next_action_hint": (
+                            "Switch policy to auto_salvage, or reduce loop churn by "
+                            "calling evaluate_script_constraints earlier."
+                        ),
+                    }
+                )
+            _merge_tool_loop_diagnostics(
+                tool_loop_diagnostics, exhaustion_error.diagnostics
+            )
+            _persist_tool_loop_diagnostics()
+            if conversation_state is not None:
+                conversation_state.messages = _clone_messages(messages)
+            raise exhaustion_error
         finally:
             if cleanup_staging_output:
                 try:
@@ -2422,6 +3623,14 @@ def _request_deepseek_completion(
         request_payload["messages"] = cast(Any, messages)
         request_payload["stream"] = True
         request_payload["stream_options"] = cast(Any, {"include_usage": True})
+        reasoner_call_log_id: str | None = None
+        if chat_log_writer is not None:
+            reasoner_call_log_id = chat_log_writer.start_call(
+                call_type="single_stream_completion",
+                endpoint_mode=endpoint_mode,
+                model=settings.model,
+                metadata={"messages_count": len(messages)},
+            )
         if stream_event_callback is not None:
             stream_event_callback(
                 {
@@ -2434,9 +3643,22 @@ def _request_deepseek_completion(
         streamed_reasoning_parts: list[str] = []
         finish_reason: str | None = None
         usage_total_tokens: int | None = None
+        stream_call_status: Literal["ok", "error"] = "ok"
+        stream_call_error: str | None = None
+        stream_log_buffer: _StreamCallLogBuffer | None = None
+        if chat_log_writer is not None and reasoner_call_log_id is not None:
+            def _write_reasoner_call_event(payload: dict[str, object]) -> None:
+                """Write one call-scoped event for reasoner stream traces."""
+                _write_call_event(reasoner_call_log_id, payload)
+
+            stream_log_buffer = _StreamCallLogBuffer(
+                write_event=_write_reasoner_call_event,
+                interval_seconds=chat_log_writer.stream_flush_interval_seconds,
+            )
         try:
             stream_response = client.chat.completions.create(**cast(Any, request_payload))
             for chunk in stream_response:
+                _emit_context_usage_heartbeat()
                 chunk_total_tokens = _extract_total_tokens_from_usage(
                     getattr(chunk, "usage", None)
                 )
@@ -2450,9 +3672,13 @@ def _request_deepseek_completion(
                 delta = getattr(choice, "delta", None)
                 if delta is None:
                     continue
-                reasoning_piece = getattr(delta, "reasoning_content", None)
-                if isinstance(reasoning_piece, str) and reasoning_piece:
+                reasoning_piece = _normalize_stream_text_piece(
+                    getattr(delta, "reasoning_content", None)
+                )
+                if reasoning_piece:
                     streamed_reasoning_parts.append(reasoning_piece)
+                    if stream_log_buffer is not None:
+                        stream_log_buffer.append(phase="reasoning", text=reasoning_piece)
                     if stream_event_callback is not None:
                         stream_event_callback(
                             {
@@ -2461,9 +3687,11 @@ def _request_deepseek_completion(
                                 "text": reasoning_piece,
                             }
                         )
-                answer_piece = getattr(delta, "content", None)
-                if isinstance(answer_piece, str) and answer_piece:
+                answer_piece = _normalize_stream_text_piece(getattr(delta, "content", None))
+                if answer_piece:
                     streamed_answer_parts.append(answer_piece)
+                    if stream_log_buffer is not None:
+                        stream_log_buffer.append(phase="answer", text=answer_piece)
                     if stream_event_callback is not None:
                         stream_event_callback(
                             {
@@ -2472,11 +3700,38 @@ def _request_deepseek_completion(
                                 "text": answer_piece,
                             }
                         )
+        except Exception as stream_error:  # noqa: BLE001
+            stream_call_status = "error"
+            stream_call_error = _error_digest(stream_error)
+            raise
         finally:
             if stream_event_callback is not None:
                 stream_event_callback({"event": "done"})
+            if stream_log_buffer is not None:
+                stream_log_buffer.flush(force=True, trigger="stream_end")
+            if (
+                stream_call_status == "error"
+                and reasoner_call_log_id is not None
+                and chat_log_writer is not None
+            ):
+                chat_log_writer.finish_call(
+                    reasoner_call_log_id,
+                    status=stream_call_status,
+                    finish_reason=finish_reason,
+                    usage_total_tokens=usage_total_tokens,
+                    error=stream_call_error,
+                    metadata={"assistant_tool_call_count": 0},
+                )
         _record_context_usage(usage_total_tokens)
         if finish_reason == "length":
+            if reasoner_call_log_id is not None and chat_log_writer is not None:
+                chat_log_writer.finish_call(
+                    reasoner_call_log_id,
+                    status="error",
+                    finish_reason=finish_reason,
+                    usage_total_tokens=usage_total_tokens,
+                    error="DeepSeek response truncated by max_tokens.",
+                )
             raise OutputTruncatedError(
                 "DeepSeek response truncated by max_tokens (finish_reason=length)."
             )
@@ -2484,25 +3739,86 @@ def _request_deepseek_completion(
         assistant_message: dict[str, Any] = {"role": "assistant"}
         if content:
             assistant_message["content"] = content
-        if streamed_reasoning_parts:
+        if streamed_reasoning_parts and persist_reasoning_for_replay:
             assistant_message["reasoning_content"] = "".join(streamed_reasoning_parts)
         messages.append(assistant_message)
+        _write_call_event(
+            reasoner_call_log_id,
+            {
+                "event": "message",
+                "phase": "answer",
+                "text": content,
+            },
+        )
+        if reasoner_call_log_id is not None and chat_log_writer is not None:
+            chat_log_writer.finish_call(
+                reasoner_call_log_id,
+                status="ok",
+                finish_reason=finish_reason,
+                usage_total_tokens=usage_total_tokens,
+                metadata={"assistant_tool_call_count": 0},
+            )
     else:
         _rollover_conversation_if_needed()
         request_payload["messages"] = cast(Any, messages)
+        chat_call_log_id: str | None = None
+        if chat_log_writer is not None:
+            chat_call_log_id = chat_log_writer.start_call(
+                call_type="single_completion",
+                endpoint_mode=endpoint_mode,
+                model=settings.model,
+                metadata={"messages_count": len(messages)},
+            )
         # DeepSeek's OpenAI-compatible endpoint accepts these parameters at runtime.
         # The upstream OpenAI SDK type stubs are stricter than the provider surface,
         # so we cast request payload fields for static typing compatibility.
-        response = client.chat.completions.create(**cast(Any, request_payload))
+        try:
+            response = client.chat.completions.create(**cast(Any, request_payload))
+        except Exception as call_error:  # noqa: BLE001
+            if chat_call_log_id is not None and chat_log_writer is not None:
+                chat_log_writer.finish_call(
+                    chat_call_log_id,
+                    status="error",
+                    error=_error_digest(call_error),
+                )
+            raise
         _record_context_usage(_extract_total_tokens_from_usage(getattr(response, "usage", None)))
         choice = response.choices[0]
         finish_reason = getattr(choice, "finish_reason", None)
         if finish_reason == "length":
+            if chat_call_log_id is not None and chat_log_writer is not None:
+                chat_log_writer.finish_call(
+                    chat_call_log_id,
+                    status="error",
+                    finish_reason=finish_reason,
+                    usage_total_tokens=_extract_total_tokens_from_usage(
+                        getattr(response, "usage", None)
+                    ),
+                    error="DeepSeek response truncated by max_tokens.",
+                )
             raise OutputTruncatedError(
                 "DeepSeek response truncated by max_tokens (finish_reason=length)."
             )
         content = _normalize_assistant_content(choice.message.content)
         messages.append({"role": "assistant", "content": content})
+        _write_call_event(
+            chat_call_log_id,
+            {
+                "event": "message",
+                "phase": "answer",
+                "text": content,
+            },
+        )
+        if chat_call_log_id is not None and chat_log_writer is not None:
+            chat_log_writer.finish_call(
+                chat_call_log_id,
+                status="ok",
+                finish_reason=finish_reason,
+                usage_total_tokens=_extract_total_tokens_from_usage(
+                    getattr(response, "usage", None)
+                ),
+                metadata={"assistant_tool_call_count": 0},
+            )
 
     if not isinstance(content, str) or not content.strip():
         raise ValueError("DeepSeek returned empty response.")
@@ -2513,6 +3829,14 @@ def _request_deepseek_completion(
             "Used balanced local JSON recovery for endpoint=%s.",
             endpoint_mode,
         )
+    tool_loop_diagnostics["tool_rounds_used"] = 0
+    tool_loop_diagnostics["repeated_overwrite_count"] = 0
+    tool_loop_diagnostics["tool_loop_exhausted"] = False
+    tool_loop_diagnostics["tool_loop_exhaustion_reason"] = ""
+    tool_loop_diagnostics["staged_output_present"] = False
+    tool_loop_diagnostics["staged_output_valid_json"] = False
+    tool_loop_diagnostics["last_validation_issues"] = []
+    _persist_tool_loop_diagnostics()
     if conversation_state is not None:
         conversation_state.messages = _clone_messages(messages)
     return parsed_script, used_repair, 0, {}
@@ -2553,6 +3877,7 @@ def generate_summary_deepseek(
     tool_output_path: str | None = None,
     stream_event_callback: Callable[[dict[str, object]], None] | None = None,
     conversation_state: ConversationState | None = None,
+    chat_log_writer: DeepSeekChatLogWriter | None = None,
 ) -> GenerationSuccess:
     """Generate a structured summary from transcript text via DeepSeek.
 
@@ -2573,6 +3898,7 @@ def generate_summary_deepseek(
         tool_output_path: Optional file path used as staging target for tool writes.
         stream_event_callback: Optional callback for dashboard stream updates.
         conversation_state: Mutable conversation state reused across attempts.
+        chat_log_writer: Optional writer used for continuous per-call trace logs.
 
     Returns:
         Structured generation result and endpoint metadata.
@@ -2595,6 +3921,7 @@ def generate_summary_deepseek(
         word_budget_tolerance=word_budget_tolerance,
         require_tool_call=effective_tool_mode != "off",
         tool_mode=effective_tool_mode,
+        max_repeated_write_overwrites=settings.agent_max_repeated_write_overwrites,
     )
     transcript_manifest = _build_transcript_manifest(transcript_segments)
 
@@ -2613,7 +3940,10 @@ def generate_summary_deepseek(
             http_retries=endpoint_settings.http_retries,
         )
         model_candidates: list[str] = [endpoint_settings.model]
-        if effective_tool_mode != "off":
+        if (
+            effective_tool_mode != "off"
+            and endpoint_settings.agent_allow_model_fallback
+        ):
             for candidate in (DEEPSEEK_CHAT_MODEL, DEEPSEEK_REASONER_MODEL):
                 if _normalized_model_name(candidate) not in {
                     _normalized_model_name(model_name)
@@ -2626,9 +3956,21 @@ def generate_summary_deepseek(
             if _is_reasoner_model(candidate_model):
                 candidate_temperature = None
 
+            candidate_max_completion_tokens = _clamp_completion_tokens_for_model(
+                endpoint_settings.max_completion_tokens,
+                candidate_model,
+            )
+            if candidate_max_completion_tokens < endpoint_settings.max_completion_tokens:
+                logger.info(
+                    "Clamping max_tokens for model=%s from %d to %d based on model ceiling.",
+                    candidate_model,
+                    endpoint_settings.max_completion_tokens,
+                    candidate_max_completion_tokens,
+                )
+
             candidate_settings = DeepSeekRequestSettings(
                 model=candidate_model,
-                max_completion_tokens=endpoint_settings.max_completion_tokens,
+                max_completion_tokens=candidate_max_completion_tokens,
                 request_timeout_seconds=endpoint_settings.request_timeout_seconds,
                 http_retries=endpoint_settings.http_retries,
                 temperature=candidate_temperature,
@@ -2637,14 +3979,30 @@ def generate_summary_deepseek(
                 agent_tool_mode=endpoint_settings.agent_tool_mode,
                 agent_max_tool_rounds=endpoint_settings.agent_max_tool_rounds,
                 agent_read_max_lines=endpoint_settings.agent_read_max_lines,
+                agent_loop_exhaustion_policy=(
+                    endpoint_settings.agent_loop_exhaustion_policy
+                ),
+                agent_max_repeated_write_overwrites=(
+                    endpoint_settings.agent_max_repeated_write_overwrites
+                ),
+                agent_persist_reasoning_content=(
+                    endpoint_settings.agent_persist_reasoning_content
+                ),
+                agent_allow_model_fallback=(
+                    endpoint_settings.agent_allow_model_fallback
+                ),
             )
             temperature_label = (
                 f"{candidate_settings.temperature:.2f}"
                 if candidate_settings.temperature is not None
                 else "ignored(reasoner)"
             )
+            effective_reasoning_replay = _should_persist_reasoning_for_replay(
+                candidate_settings,
+                tool_mode=effective_tool_mode,
+            )
             logger.info(
-                "Sending transcript to DeepSeek endpoint=%s model=%s max_tokens=%d temperature=%s timeout=%.1fs retries=%d tool_loop=%s tool_mode=%s max_tool_rounds=%d read_max_lines=%d",
+                "Sending transcript to DeepSeek endpoint=%s model=%s max_tokens=%d temperature=%s timeout=%.1fs retries=%d tool_loop=%s tool_mode=%s max_tool_rounds=%d read_max_lines=%d exhaustion_policy=%s max_repeated_overwrites=%d persist_reasoning=%s effective_reasoning_replay=%s",
                 endpoint_mode,
                 candidate_settings.model,
                 candidate_settings.max_completion_tokens,
@@ -2655,6 +4013,10 @@ def generate_summary_deepseek(
                 candidate_settings.agent_tool_mode,
                 candidate_settings.agent_max_tool_rounds,
                 candidate_settings.agent_read_max_lines,
+                candidate_settings.agent_loop_exhaustion_policy,
+                candidate_settings.agent_max_repeated_write_overwrites,
+                candidate_settings.agent_persist_reasoning_content,
+                effective_reasoning_replay,
             )
 
             try:
@@ -2675,6 +4037,7 @@ def generate_summary_deepseek(
                     tool_output_path=tool_output_path,
                     stream_event_callback=stream_event_callback,
                     conversation_state=conversation_state,
+                    chat_log_writer=chat_log_writer,
                 )
                 return GenerationSuccess(
                     script=script,
@@ -2683,6 +4046,16 @@ def generate_summary_deepseek(
                     model=candidate_settings.model,
                     tool_rounds=tool_rounds,
                     tool_call_counts=tool_call_counts,
+                    tool_loop_diagnostics=(
+                        _copy_tool_loop_diagnostics(
+                            conversation_state.last_tool_loop_diagnostics
+                        )
+                        if (
+                            conversation_state is not None
+                            and conversation_state.last_tool_loop_diagnostics is not None
+                        )
+                        else None
+                    ),
                 )
             except Exception as error:  # noqa: BLE001
                 last_error = error
@@ -2829,6 +4202,8 @@ def _budget_bounds(word_budget: int, tolerance: float) -> tuple[int, int]:
 
 def _classify_generation_error(error: Exception) -> ErrorType:
     """Classify generation/parsing exception into retry-guidance categories."""
+    if isinstance(error, ToolLoopExhaustedError):
+        return "tool_loop_exhausted"
     if isinstance(error, OutputTruncatedError):
         return "truncated_output"
     if isinstance(error, JSONDecodeError):
@@ -2971,9 +4346,47 @@ def main() -> int:
         type=int,
         default=DEFAULT_AGENT_MAX_TOOL_ROUNDS,
         help=(
-            "Deprecated compatibility flag. Tool loop now runs until constraints "
-            "pass or request failure/cancellation. Value is logged only "
+            "Maximum tool-loop rounds before exhaustion handling is applied "
             f"(default: {DEFAULT_AGENT_MAX_TOOL_ROUNDS})."
+        ),
+    )
+    parser.add_argument(
+        "--agent-loop-exhaustion-policy",
+        choices=["auto_salvage", "fail_fast"],
+        default=DEFAULT_AGENT_LOOP_EXHAUSTION_POLICY,
+        help=(
+            "Behavior when max tool rounds are reached: attempt local staged-output "
+            "salvage or fail immediately "
+            f"(default: {DEFAULT_AGENT_LOOP_EXHAUSTION_POLICY})."
+        ),
+    )
+    parser.add_argument(
+        "--agent-max-repeated-write-overwrites",
+        type=int,
+        default=DEFAULT_AGENT_MAX_REPEATED_WRITE_OVERWRITES,
+        help=(
+            "Maximum identical overwrite writes allowed before forcing revision "
+            f"(default: {DEFAULT_AGENT_MAX_REPEATED_WRITE_OVERWRITES})."
+        ),
+    )
+    parser.add_argument(
+        "--agent-persist-reasoning-content",
+        choices=["on", "off"],
+        default=(
+            "on" if DEFAULT_AGENT_PERSIST_REASONING_CONTENT else "off"
+        ),
+        help=(
+            "Persist assistant reasoning_content in replay messages "
+            "(default: off)."
+        ),
+    )
+    parser.add_argument(
+        "--agent-allow-model-fallback",
+        choices=["on", "off"],
+        default=("on" if DEFAULT_AGENT_ALLOW_MODEL_FALLBACK else "off"),
+        help=(
+            "Allow fallback between deepseek-reasoner and deepseek-chat when "
+            "tool-protocol errors occur (default: off)."
         ),
     )
     parser.add_argument(
@@ -2998,6 +4411,14 @@ def main() -> int:
         "--summary-report",
         default=None,
         help="Optional path for sidecar summary diagnostics JSON.",
+    )
+    parser.add_argument(
+        "--deepseek-chat-log-root",
+        default=DEEPSEEK_CHAT_LOG_ROOT_DIR,
+        help=(
+            "Directory where timestamped per-call DeepSeek trace logs are written "
+            f"(default: {DEEPSEEK_CHAT_LOG_ROOT_DIR})."
+        ),
     )
     args = parser.parse_args()
     configure_logging(
@@ -3037,6 +4458,14 @@ def main() -> int:
         if agent_tool_loop_enabled
         else "off"
     )
+    agent_loop_exhaustion_policy: AgentLoopExhaustionPolicy = cast(
+        AgentLoopExhaustionPolicy,
+        args.agent_loop_exhaustion_policy,
+    )
+    agent_persist_reasoning_content = _parse_on_off_flag(
+        args.agent_persist_reasoning_content
+    )
+    agent_allow_model_fallback = _parse_on_off_flag(args.agent_allow_model_fallback)
     budget_failure_policy: BudgetFailurePolicy = cast(
         BudgetFailurePolicy, args.budget_failure_policy
     )
@@ -3055,21 +4484,20 @@ def main() -> int:
         agent_tool_mode=agent_tool_mode,
         agent_max_tool_rounds=max(1, int(args.agent_max_tool_rounds)),
         agent_read_max_lines=max(1, int(args.agent_read_max_lines)),
+        agent_loop_exhaustion_policy=agent_loop_exhaustion_policy,
+        agent_max_repeated_write_overwrites=max(
+            1, int(args.agent_max_repeated_write_overwrites)
+        ),
+        agent_persist_reasoning_content=agent_persist_reasoning_content,
+        agent_allow_model_fallback=agent_allow_model_fallback,
     )
-    if settings.agent_tool_loop:
-        logger.warning(
-            "--agent-max-tool-rounds is deprecated and no longer used as a stop condition. "
-            "Tool loop runs until constraints pass, request fails, or execution is cancelled "
-            "(configured value=%d).",
-            settings.agent_max_tool_rounds,
-        )
     temperature_label = (
         f"{settings.temperature:.2f}"
         if settings.temperature is not None
         else "ignored(reasoner)"
     )
     logger.info(
-        "DeepSeek settings: model=%s max_tokens=%d timeout=%.1fs http_retries=%d temperature=%s endpoint_mode=auto_beta tool_loop=%s tool_mode=%s max_tool_rounds=%d read_max_lines=%d budget_failure_policy=%s",
+        "DeepSeek settings: model=%s max_tokens=%d timeout=%.1fs http_retries=%d temperature=%s endpoint_mode=auto_beta tool_loop=%s tool_mode=%s max_tool_rounds=%d read_max_lines=%d exhaustion_policy=%s max_repeated_overwrites=%d persist_reasoning=%s allow_model_fallback=%s budget_failure_policy=%s",
         settings.model,
         settings.max_completion_tokens,
         settings.request_timeout_seconds,
@@ -3079,6 +4507,10 @@ def main() -> int:
         settings.agent_tool_mode,
         settings.agent_max_tool_rounds,
         settings.agent_read_max_lines,
+        settings.agent_loop_exhaustion_policy,
+        settings.agent_max_repeated_write_overwrites,
+        settings.agent_persist_reasoning_content,
+        settings.agent_allow_model_fallback,
         budget_failure_policy,
     )
     logger.info(
@@ -3138,6 +4570,13 @@ def main() -> int:
     selected_lower_bound: int | None = None
     selected_upper_bound: int | None = None
     selected_tool_calls_by_name: dict[str, int] = {}
+    selected_tool_loop_exhausted = False
+    selected_tool_loop_exhaustion_reason = ""
+    selected_tool_round_limit = settings.agent_max_tool_rounds
+    selected_repeated_overwrite_count = 0
+    selected_staged_output_present = False
+    selected_staged_output_valid_json = False
+    selected_last_validation_issues: list[str] = []
     selected_model_path = "unknown"
     selected_naturalness_metrics: dict[str, float | int] = {
         "avg_words_per_line": 0.0,
@@ -3152,6 +4591,17 @@ def main() -> int:
         "unknown"
     )
     validation_status: Literal["valid", "invalid", "unknown"] = "unknown"
+    chat_log_writer = DeepSeekChatLogWriter.create(args.deepseek_chat_log_root)
+    logger.info(
+        "DeepSeek chat tracing enabled: run_directory=%s",
+        chat_log_writer.run_directory,
+    )
+
+    def _emit_and_record_deepseek_stream_event(payload: dict[str, object]) -> None:
+        """Forward stream events to UI marker output and persistent event logs."""
+        _emit_deepseek_stream_event(payload)
+        if _should_persist_stream_event(payload):
+            chat_log_writer.write_global_event({"event": "stream_event", "payload": payload})
 
     for attempt in range(1, max_attempts + 1):
         attempts_executed = attempt
@@ -3172,8 +4622,9 @@ def main() -> int:
                 avg_wpm=args.avg_wpm,
                 word_budget_tolerance=args.word_budget_tolerance,
                 tool_output_path=args.output,
-                stream_event_callback=_emit_deepseek_stream_event,
+                stream_event_callback=_emit_and_record_deepseek_stream_event,
                 conversation_state=conversation_state,
+                chat_log_writer=chat_log_writer,
             )
             structured_script = generation_result.script
         except Exception as exc:  # noqa: BLE001
@@ -3189,8 +4640,32 @@ def main() -> int:
                 endpoint_mode=failure_endpoint,
                 error_type=classified_error,
                 error_digest=_error_digest(root_error),
+                continuation=(
+                    root_error.continuation_state
+                    if isinstance(root_error, ToolLoopExhaustedError)
+                    else None
+                ),
             )
+            if isinstance(root_error, ToolLoopExhaustedError):
+                diagnostics = root_error.diagnostics
+                selected_tool_loop_exhausted = diagnostics["tool_loop_exhausted"]
+                selected_tool_loop_exhaustion_reason = diagnostics[
+                    "tool_loop_exhaustion_reason"
+                ]
+                selected_tool_round_limit = diagnostics["tool_round_limit"]
+                selected_repeated_overwrite_count = diagnostics[
+                    "repeated_overwrite_count"
+                ]
+                selected_staged_output_present = diagnostics["staged_output_present"]
+                selected_staged_output_valid_json = diagnostics[
+                    "staged_output_valid_json"
+                ]
+                selected_last_validation_issues = diagnostics[
+                    "last_validation_issues"
+                ][:]
             selected_issues = [retry_context.error_digest]
+            if selected_last_validation_issues:
+                selected_issues.extend(selected_last_validation_issues[:3])
             if attempt < max_attempts:
                 logger.warning(
                     "Generation failed on attempt %d: type=%s detail=%s",
@@ -3237,6 +4712,31 @@ def main() -> int:
             )
             selected_tool_rounds = generation_result.tool_rounds
             selected_tool_calls_by_name = generation_result.tool_call_counts or {}
+            diagnostics = generation_result.tool_loop_diagnostics
+            if diagnostics is not None:
+                selected_tool_loop_exhausted = diagnostics["tool_loop_exhausted"]
+                selected_tool_loop_exhaustion_reason = diagnostics[
+                    "tool_loop_exhaustion_reason"
+                ]
+                selected_tool_round_limit = diagnostics["tool_round_limit"]
+                selected_repeated_overwrite_count = diagnostics[
+                    "repeated_overwrite_count"
+                ]
+                selected_staged_output_present = diagnostics["staged_output_present"]
+                selected_staged_output_valid_json = diagnostics[
+                    "staged_output_valid_json"
+                ]
+                selected_last_validation_issues = diagnostics[
+                    "last_validation_issues"
+                ][:]
+            else:
+                selected_tool_loop_exhausted = False
+                selected_tool_loop_exhaustion_reason = ""
+                selected_tool_round_limit = settings.agent_max_tool_rounds
+                selected_repeated_overwrite_count = 0
+                selected_staged_output_present = False
+                selected_staged_output_valid_json = False
+                selected_last_validation_issues = []
             if args.word_budget is not None:
                 total_words = _count_words(validation_report.lines)
                 lower, upper = _budget_bounds(
@@ -3466,6 +4966,13 @@ def main() -> int:
             "lower_bound": selected_lower_bound,
             "upper_bound": selected_upper_bound,
             "tool_calls_by_name": selected_tool_calls_by_name,
+            "tool_loop_exhausted": selected_tool_loop_exhausted,
+            "tool_loop_exhaustion_reason": selected_tool_loop_exhaustion_reason,
+            "tool_round_limit": selected_tool_round_limit,
+            "repeated_overwrite_count": selected_repeated_overwrite_count,
+            "staged_output_present": selected_staged_output_present,
+            "staged_output_valid_json": selected_staged_output_valid_json,
+            "last_validation_issues": selected_last_validation_issues,
             "model_path_selected": selected_model_path,
             "naturalness_metrics": selected_naturalness_metrics,
             "issues": selected_issues,
@@ -3476,13 +4983,16 @@ def main() -> int:
             "No validated dialogue was produced. summary_outcome=failure report=%s",
             summary_report_path,
         )
+        chat_log_writer.close()
         return 1
 
     final_json = post_process_script(validated_lines, args.voice_dir)
     with open(args.output, "w", encoding="utf-8") as output_file:
         json.dump(final_json, output_file, indent=2)
     if settings.agent_tool_loop or _is_reasoner_model(selected_model):
-        _emit_deepseek_stream_event({"event": "summary_json_ready", "path": args.output})
+        _emit_and_record_deepseek_stream_event(
+            {"event": "summary_json_ready", "path": args.output}
+        )
 
     summary_outcome: Literal["success", "degraded_success", "failure"] = (
         "degraded_success" if degraded_success else "success"
@@ -3502,6 +5012,13 @@ def main() -> int:
         lower_bound=selected_lower_bound,
         upper_bound=selected_upper_bound,
         tool_calls_by_name=selected_tool_calls_by_name,
+        tool_loop_exhausted=selected_tool_loop_exhausted,
+        tool_loop_exhaustion_reason=selected_tool_loop_exhaustion_reason,
+        tool_round_limit=selected_tool_round_limit,
+        repeated_overwrite_count=selected_repeated_overwrite_count,
+        staged_output_present=selected_staged_output_present,
+        staged_output_valid_json=selected_staged_output_valid_json,
+        last_validation_issues=selected_last_validation_issues,
         model_path_selected=selected_model_path,
         naturalness_metrics=selected_naturalness_metrics,
         issues=selected_issues,
@@ -3521,6 +5038,7 @@ def main() -> int:
             args.output,
             summary_report_path,
         )
+    chat_log_writer.close()
     return 0
 
 

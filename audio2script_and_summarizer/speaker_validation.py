@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 ValidationStatus = Literal["valid", "repaired"]
+SEGMENT_ID_NUMERIC_PATTERN: re.Pattern[str] = re.compile(r"^seg_(\d{1,5})$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -174,6 +176,35 @@ def collect_allowed_speakers(segments: list[TranscriptSegment]) -> set[str]:
     return {segment.speaker for segment in segments if segment.speaker}
 
 
+def _normalize_source_segment_id(
+    source_segment_id: str, segment_speaker_map: dict[str, str]
+) -> str:
+    """Normalize recoverable source segment-ID formatting mismatches.
+
+    Args:
+        source_segment_id: Raw source segment ID emitted by the model.
+        segment_speaker_map: Canonical transcript segment-ID lookup.
+
+    Returns:
+        Canonical segment ID when a zero-padding repair maps to known transcript
+        evidence; otherwise the stripped original identifier.
+    """
+    stripped_id = source_segment_id.strip()
+    if not stripped_id:
+        return ""
+    if stripped_id in segment_speaker_map:
+        return stripped_id
+
+    matched = SEGMENT_ID_NUMERIC_PATTERN.fullmatch(stripped_id)
+    if matched is None:
+        return stripped_id
+
+    padded_id = f"seg_{int(matched.group(1)):05d}"
+    if padded_id in segment_speaker_map:
+        return padded_id
+    return stripped_id
+
+
 def _canonical_speaker_for_ids(
     source_ids: list[str], segment_speaker_map: dict[str, str]
 ) -> tuple[str | None, str | None]:
@@ -220,7 +251,14 @@ def validate_and_repair_dialogue(
     repaired_lines = 0
 
     for idx, line in enumerate(lines):
-        source_ids = [str(source_id).strip() for source_id in line.get("source_segment_ids", []) if str(source_id).strip()]
+        source_ids: list[str] = []
+        for source_id in line.get("source_segment_ids", []):
+            normalized_source_id = _normalize_source_segment_id(
+                str(source_id),
+                segment_speaker_map,
+            )
+            if normalized_source_id:
+                source_ids.append(normalized_source_id)
         canonical_speaker, canonical_error = _canonical_speaker_for_ids(source_ids, segment_speaker_map)
         line_speaker = str(line.get("speaker", "")).strip()
 

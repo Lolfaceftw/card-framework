@@ -125,6 +125,77 @@ def test_evaluate_script_constraints_tool_fails_on_budget_overrun() -> None:
     assert result["validation"]["is_valid"] is True
 
 
+def test_evaluate_script_constraints_tool_normalizes_recoverable_segment_ids() -> None:
+    """Normalize recoverable short source IDs before speaker validation."""
+    result = deepseek_summary._evaluate_script_constraints_tool(  # noqa: SLF001
+        dialogue_payload=[_tool_line("hello world", source_ids=["seg_0004"])],
+        allowed_speakers={"Speaker 0"},
+        segment_speaker_map={"seg_00004": "Speaker 0"},
+        word_budget=None,
+        word_budget_tolerance=0.0,
+        source_word_count=20,
+    )
+
+    assert result["validation"]["is_valid"] is True
+    assert result["validation"]["issues"] == []
+    assert result["repaired_dialogue"][0]["source_segment_ids"] == ["seg_00004"]
+
+
+def test_build_system_prompt_enforces_zero_padded_segment_ids() -> None:
+    """Include explicit zero-padding segment-ID rule in prompt contract."""
+    prompt = deepseek_summary._build_system_prompt(  # noqa: SLF001
+        allowed_speakers={"Speaker 0"},
+        target_min_lines=8,
+        target_max_lines=12,
+        word_budget=120,
+        target_minutes=None,
+        avg_wpm=None,
+        word_budget_tolerance=0.05,
+        require_tool_call=True,
+        tool_mode="full_agentic",
+        max_repeated_write_overwrites=2,
+    )
+
+    assert "example: seg_00004" in prompt
+    assert "never seg_0004" not in prompt
+    assert "batched `lines` payloads" in prompt
+
+
+def test_stream_assistant_turn_invokes_chunk_callback() -> None:
+    """Invoke per-chunk callback for heartbeat-style side-channel updates."""
+
+    class _FakeCompletions:
+        def create(self, **kwargs: object) -> object:
+            del kwargs
+            return [
+                _stream_chunk(reasoning="r1"),
+                _stream_chunk(content='{"dialogue":'),
+                _stream_chunk(finish_reason="stop", content="[]}"),
+            ]
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    chunk_ticks = 0
+
+    def _tick() -> None:
+        nonlocal chunk_ticks
+        chunk_ticks += 1
+
+    turn = deepseek_summary._stream_assistant_turn(  # noqa: SLF001
+        client=cast(object, fake_client),
+        request_payload={
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+        stream_event_callback=None,
+        on_chunk_callback=_tick,
+    )
+
+    assert chunk_ticks == 3
+    assert turn.finish_reason == "stop"
+    assert turn.content == '{"dialogue":[]}'
+
+
 def test_request_completion_tool_loop_runs_until_pass() -> None:
     """Execute multi-round tool loop and accept JSON only after pass result."""
 
@@ -285,8 +356,6 @@ def test_request_completion_tool_loop_requires_pass_before_final_json() -> None:
 
         def create(self, **kwargs: object) -> object:
             self.call_count += 1
-            if self.call_count >= 3:
-                raise RuntimeError("stop test loop")
             return [
                 _stream_chunk(reasoning="skip tool"),
                 _stream_chunk(
@@ -310,7 +379,7 @@ def test_request_completion_tool_loop_requires_pass_before_final_json() -> None:
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     stream_events: list[dict[str, object]] = []
 
-    with pytest.raises(RuntimeError, match="stop test loop"):
+    with pytest.raises(deepseek_summary.ToolLoopExhaustedError):
         deepseek_summary._request_deepseek_completion(  # noqa: SLF001
             client=cast(object, fake_client),
             settings=settings,
@@ -327,7 +396,7 @@ def test_request_completion_tool_loop_requires_pass_before_final_json() -> None:
             source_word_count=20,
             stream_event_callback=stream_events.append,
         )
-    assert completions.call_count == 3
+    assert completions.call_count == 1
     status_messages = [
         str(event.get("text", ""))
         for event in stream_events
@@ -345,8 +414,6 @@ def test_request_completion_full_agentic_requires_read_tool() -> None:
 
         def create(self, **kwargs: object) -> object:
             self.call_count += 1
-            if self.call_count >= 3:
-                raise RuntimeError("stop test loop")
             return [
                 _stream_chunk(reasoning="skip read tool"),
                 _stream_chunk(
@@ -371,7 +438,7 @@ def test_request_completion_full_agentic_requires_read_tool() -> None:
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     stream_events: list[dict[str, object]] = []
 
-    with pytest.raises(RuntimeError, match="stop test loop"):
+    with pytest.raises(deepseek_summary.ToolLoopExhaustedError):
         deepseek_summary._request_deepseek_completion(  # noqa: SLF001
             client=cast(object, fake_client),
             settings=settings,
@@ -388,7 +455,7 @@ def test_request_completion_full_agentic_requires_read_tool() -> None:
             source_word_count=20,
             stream_event_callback=stream_events.append,
         )
-    assert completions.call_count == 3
+    assert completions.call_count == 1
     status_messages = [
         str(event.get("text", ""))
         for event in stream_events
@@ -406,8 +473,6 @@ def test_request_completion_requires_write_tool_before_final_json() -> None:
 
         def create(self, **kwargs: object) -> object:
             self.call_count += 1
-            if self.call_count >= 4:
-                raise RuntimeError("stop test loop")
             if self.call_count == 1:
                 tool_arguments = json.dumps(
                     {
@@ -456,13 +521,13 @@ def test_request_completion_requires_write_tool_before_final_json() -> None:
         auto_beta=False,
         agent_tool_loop=True,
         agent_tool_mode="constraints_only",
-        agent_max_tool_rounds=1,
+        agent_max_tool_rounds=2,
     )
     completions = _FakeCompletions()
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     stream_events: list[dict[str, object]] = []
 
-    with pytest.raises(RuntimeError, match="stop test loop"):
+    with pytest.raises(deepseek_summary.ToolLoopExhaustedError):
         deepseek_summary._request_deepseek_completion(  # noqa: SLF001
             client=cast(object, fake_client),
             settings=settings,
@@ -479,7 +544,7 @@ def test_request_completion_requires_write_tool_before_final_json() -> None:
             source_word_count=20,
             stream_event_callback=stream_events.append,
         )
-    assert completions.call_count == 4
+    assert completions.call_count == 2
     status_messages = [
         str(event.get("text", ""))
         for event in stream_events
@@ -489,6 +554,289 @@ def test_request_completion_requires_write_tool_before_final_json() -> None:
         "write_output_segment has no successful writes yet" in message
         for message in status_messages
     )
+
+
+def test_request_completion_auto_salvages_staged_output_on_round_exhaustion() -> None:
+    """Accept staged JSON when round limit is reached and local checks pass."""
+
+    class _FakeCompletions:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def create(self, **kwargs: object) -> object:
+            self.call_count += 1
+            payload = {
+                "dialogue": [
+                    {
+                        "speaker": "Speaker 0",
+                        "text": "hello world this sentence has natural spoken pacing today",
+                        "emo_text": "Neutral",
+                        "emo_alpha": 0.6,
+                        "source_segment_ids": ["seg_00000"],
+                    }
+                ]
+            }
+            write_arguments = json.dumps(
+                {
+                    "mode": "overwrite",
+                    "content": json.dumps(payload),
+                }
+            )
+            split_at = max(1, len(write_arguments) // 2)
+            return [
+                _stream_chunk(reasoning="stage output"),
+                _stream_chunk(
+                    tool_calls=[
+                        _tool_call_delta(
+                            index=0,
+                            tool_name=deepseek_summary.WRITE_OUTPUT_SEGMENT_TOOL_NAME,
+                            arguments=write_arguments[:split_at],
+                            tool_call_id="call_write",
+                        )
+                    ],
+                ),
+                _stream_chunk(
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        _tool_call_delta(
+                            index=0,
+                            arguments=write_arguments[split_at:],
+                        )
+                    ],
+                ),
+            ]
+
+    completions = _FakeCompletions()
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    settings = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+        agent_tool_loop=True,
+        agent_tool_mode="constraints_only",
+        agent_max_tool_rounds=1,
+    )
+
+    parsed_script, used_repair, tool_rounds, tool_call_counts = deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+        client=cast(object, fake_client),
+        settings=settings,
+        transcript_text="[seg_00000|Speaker 0]: hello world",
+        transcript_segments=_segments(),
+        transcript_manifest="segment_count=2",
+        system_prompt="test prompt",
+        retry_context=None,
+        endpoint_mode="stable",
+        allowed_speakers={"Speaker 0"},
+        segment_speaker_map={"seg_00000": "Speaker 0", "seg_00001": "Speaker 0"},
+        word_budget=None,
+        word_budget_tolerance=0.0,
+        source_word_count=20,
+    )
+
+    assert completions.call_count == 1
+    assert tool_rounds == 1
+    assert tool_call_counts[deepseek_summary.WRITE_OUTPUT_SEGMENT_TOOL_NAME] == 1
+    assert used_repair is False
+    assert parsed_script.dialogue[0].text.startswith("hello world this sentence")
+
+
+def test_request_completion_retry_resume_detects_reread_from_start() -> None:
+    """Emit retry-resume telemetry when a resumed retry rereads index zero."""
+
+    class _FakeCompletions:
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.last_messages: list[dict[str, object]] = []
+
+        def create(self, **kwargs: object) -> object:
+            self.call_count += 1
+            self.last_messages = cast(list[dict[str, object]], kwargs["messages"])
+            read_arguments = json.dumps({"start_index": 0, "end_index": 1})
+            split_at = max(1, len(read_arguments) // 2)
+            return [
+                _stream_chunk(reasoning="resume retry"),
+                _stream_chunk(
+                    tool_calls=[
+                        _tool_call_delta(
+                            index=0,
+                            tool_name=deepseek_summary.READ_TRANSCRIPT_LINES_TOOL_NAME,
+                            arguments=read_arguments[:split_at],
+                            tool_call_id="call_read",
+                        )
+                    ],
+                ),
+                _stream_chunk(
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        _tool_call_delta(
+                            index=0,
+                            arguments=read_arguments[split_at:],
+                        )
+                    ],
+                ),
+            ]
+
+    continuation = deepseek_summary.RetryContinuationState(
+        read_ranges=[(0, 20), (21, 40)],
+        max_read_index=40,
+        write_tool_succeeded=False,
+        latest_constraints_status="fail",
+        last_validation_issues=["No staged JSON was available after tool-loop round exhaustion."],
+        staged_output_present=False,
+        staged_output_valid_json=False,
+    )
+    retry_context = deepseek_summary.RetryContext(
+        attempt_index=1,
+        endpoint_mode="stable",
+        error_type="tool_loop_exhausted",
+        error_digest="Tool loop exhausted: max_tool_rounds_reached_no_staged_output",
+        continuation=continuation,
+    )
+    settings = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-chat",
+        max_completion_tokens=8192,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=0.2,
+        auto_beta=False,
+        agent_tool_loop=True,
+        agent_tool_mode="full_agentic",
+        agent_max_tool_rounds=1,
+        agent_loop_exhaustion_policy="fail_fast",
+    )
+    completions = _FakeCompletions()
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    stream_events: list[dict[str, object]] = []
+
+    with pytest.raises(deepseek_summary.ToolLoopExhaustedError):
+        deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+            client=cast(object, fake_client),
+            settings=settings,
+            transcript_text="[seg_00000|Speaker 0]: hello world",
+            transcript_segments=_segments(),
+            transcript_manifest="segment_count=2",
+            system_prompt="test prompt",
+            retry_context=retry_context,
+            endpoint_mode="stable",
+            allowed_speakers={"Speaker 0"},
+            segment_speaker_map={"seg_00000": "Speaker 0", "seg_00001": "Speaker 0"},
+            word_budget=None,
+            word_budget_tolerance=0.05,
+            source_word_count=20,
+            stream_event_callback=stream_events.append,
+        )
+
+    system_messages = [
+        cast(str, message.get("content", ""))
+        for message in completions.last_messages
+        if message.get("role") == "system"
+    ]
+    assert any("Retry resume guard" in message for message in system_messages)
+    retry_events = [
+        event for event in stream_events if event.get("event") == "retry_resume_telemetry"
+    ]
+    assert any(event.get("retry_resume_used") is True for event in retry_events)
+    assert any(
+        event.get("retry_read_from_start_detected") is True for event in retry_events
+    )
+
+
+def test_request_completion_blocks_repeated_identical_overwrite_writes() -> None:
+    """Reject repeated identical overwrite writes and emit a revision hint."""
+
+    class _FakeCompletions:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def create(self, **kwargs: object) -> object:
+            self.call_count += 1
+            payload = {
+                "dialogue": [
+                    {
+                        "speaker": "Speaker 0",
+                        "text": "hello world this sentence has natural spoken pacing today",
+                        "emo_text": "Neutral",
+                        "emo_alpha": 0.6,
+                        "source_segment_ids": ["seg_00000"],
+                    }
+                ]
+            }
+            write_arguments = json.dumps(
+                {
+                    "mode": "overwrite",
+                    "content": json.dumps(payload),
+                }
+            )
+            split_at = max(1, len(write_arguments) // 2)
+            return [
+                _stream_chunk(reasoning="stage output repeatedly"),
+                _stream_chunk(
+                    tool_calls=[
+                        _tool_call_delta(
+                            index=0,
+                            tool_name=deepseek_summary.WRITE_OUTPUT_SEGMENT_TOOL_NAME,
+                            arguments=write_arguments[:split_at],
+                            tool_call_id=f"call_write_{self.call_count}",
+                        )
+                    ],
+                ),
+                _stream_chunk(
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        _tool_call_delta(
+                            index=0,
+                            arguments=write_arguments[split_at:],
+                        )
+                    ],
+                ),
+            ]
+
+    completions = _FakeCompletions()
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    stream_events: list[dict[str, object]] = []
+    settings = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+        agent_tool_loop=True,
+        agent_tool_mode="constraints_only",
+        agent_max_tool_rounds=2,
+        agent_max_repeated_write_overwrites=1,
+    )
+
+    parsed_script, _, tool_rounds, tool_call_counts = deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+        client=cast(object, fake_client),
+        settings=settings,
+        transcript_text="[seg_00000|Speaker 0]: hello world",
+        transcript_segments=_segments(),
+        transcript_manifest="segment_count=2",
+        system_prompt="test prompt",
+        retry_context=None,
+        endpoint_mode="stable",
+        allowed_speakers={"Speaker 0"},
+        segment_speaker_map={"seg_00000": "Speaker 0", "seg_00001": "Speaker 0"},
+        word_budget=None,
+        word_budget_tolerance=0.0,
+        source_word_count=20,
+        stream_event_callback=stream_events.append,
+    )
+
+    assert completions.call_count == 2
+    assert tool_rounds == 2
+    assert tool_call_counts[deepseek_summary.WRITE_OUTPUT_SEGMENT_TOOL_NAME] == 2
+    assert parsed_script.dialogue[0].speaker == "Speaker 0"
+    tool_result_text = [
+        str(event.get("text", ""))
+        for event in stream_events
+        if event.get("event") == "token" and event.get("phase") == "tool_result"
+    ]
+    assert any("Repeated overwrite detected" in text for text in tool_result_text)
 
 
 def test_read_transcript_lines_tool_clamps_to_bounds() -> None:
@@ -521,6 +869,7 @@ def test_generate_summary_deepseek_falls_back_model_on_tool_protocol_error(
 ) -> None:
     """Fallback from reasoner to chat when tool protocol is rejected."""
     seen_models: list[str] = []
+    seen_max_tokens: list[int] = []
     stream_events: list[dict[str, object]] = []
 
     def fake_build_client(**kwargs: object) -> object:
@@ -531,6 +880,7 @@ def test_generate_summary_deepseek_falls_back_model_on_tool_protocol_error(
     ) -> tuple[deepseek_summary.PodcastScript, bool, int, dict[str, int]]:
         settings = cast(deepseek_summary.DeepSeekRequestSettings, kwargs["settings"])
         seen_models.append(settings.model)
+        seen_max_tokens.append(settings.max_completion_tokens)
         if settings.model == "deepseek-reasoner":
             raise _api_status_error(400, "tool_choice is unsupported")
         return (
@@ -570,6 +920,7 @@ def test_generate_summary_deepseek_falls_back_model_on_tool_protocol_error(
             agent_tool_loop=True,
             agent_tool_mode="constraints_only",
             agent_max_tool_rounds=10,
+            agent_allow_model_fallback=True,
         ),
         segment_count=1,
         retry_context=None,
@@ -581,6 +932,7 @@ def test_generate_summary_deepseek_falls_back_model_on_tool_protocol_error(
     )
 
     assert seen_models == ["deepseek-reasoner", "deepseek-chat"]
+    assert seen_max_tokens == [64000, 8192]
     assert result.model == "deepseek-chat"
     fallback_messages = [
         str(event.get("text", ""))
@@ -588,6 +940,57 @@ def test_generate_summary_deepseek_falls_back_model_on_tool_protocol_error(
         if event.get("event") == "token" and event.get("phase") == "status"
     ]
     assert any("retrying with deepseek-chat" in message for message in fallback_messages)
+
+
+def test_generate_summary_deepseek_does_not_fallback_model_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep reasoner-only model path unless fallback is explicitly enabled."""
+    seen_models: list[str] = []
+
+    def fake_build_client(**kwargs: object) -> object:
+        return kwargs["base_url"]
+
+    def fake_request(
+        **kwargs: object,
+    ) -> tuple[deepseek_summary.PodcastScript, bool, int, dict[str, int]]:
+        settings = cast(deepseek_summary.DeepSeekRequestSettings, kwargs["settings"])
+        seen_models.append(settings.model)
+        raise _api_status_error(400, "tool_choice is unsupported")
+
+    monkeypatch.setattr(deepseek_summary, "_build_deepseek_client", fake_build_client)
+    monkeypatch.setattr(deepseek_summary, "_request_deepseek_completion", fake_request)
+
+    with pytest.raises(deepseek_summary.GenerationAttemptError) as wrapped_error:
+        deepseek_summary.generate_summary_deepseek(
+            transcript_text="[seg_00000|Speaker 0]: hello world",
+            transcript_segments=_segments(),
+            api_key="test-key",
+            allowed_speakers={"Speaker 0"},
+            segment_speaker_map={"seg_00000": "Speaker 0"},
+            source_word_count=2,
+            settings=deepseek_summary.DeepSeekRequestSettings(
+                model="deepseek-reasoner",
+                max_completion_tokens=64000,
+                request_timeout_seconds=30.0,
+                http_retries=1,
+                temperature=None,
+                auto_beta=False,
+                agent_tool_loop=True,
+                agent_tool_mode="constraints_only",
+                agent_max_tool_rounds=10,
+            ),
+            segment_count=1,
+            retry_context=None,
+            word_budget=2,
+            target_minutes=None,
+            avg_wpm=None,
+            word_budget_tolerance=0.0,
+            stream_event_callback=None,
+        )
+
+    assert seen_models == ["deepseek-reasoner"]
+    assert isinstance(wrapped_error.value.cause, APIStatusError)
 
 
 def test_resolve_summary_report_path_defaults_to_output_sidecar() -> None:
@@ -662,6 +1065,91 @@ def test_request_completion_reuses_existing_conversation_messages() -> None:
     assert any(
         message.get("role") == "assistant" for message in conversation_state.messages
     )
+
+
+def test_request_completion_reasoning_persistence_toggle() -> None:
+    """Persist reasoning_content only when explicitly enabled in settings."""
+
+    class _FakeCompletions:
+        def create(self, **kwargs: object) -> object:
+            return [
+                _stream_chunk(reasoning="thinking"),
+                _stream_chunk(
+                    finish_reason="stop",
+                    content=json.dumps(_sample_payload()),
+                ),
+            ]
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    base_state = deepseek_summary.ConversationState(
+        messages=[
+            {"role": "system", "content": "persisted system"},
+            {"role": "user", "content": "persisted context"},
+        ]
+    )
+    settings_default = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+        agent_tool_loop=False,
+        agent_tool_mode="off",
+    )
+
+    deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+        client=cast(object, fake_client),
+        settings=settings_default,
+        transcript_text="[seg_00000|Speaker 0]: ignored",
+        transcript_segments=_segments(),
+        transcript_manifest="segment_count=2",
+        system_prompt="test prompt",
+        retry_context=None,
+        endpoint_mode="stable",
+        allowed_speakers={"Speaker 0"},
+        segment_speaker_map={"seg_00000": "Speaker 0"},
+        word_budget=None,
+        word_budget_tolerance=0.0,
+        source_word_count=20,
+        conversation_state=base_state,
+    )
+    assert not any("reasoning_content" in message for message in base_state.messages)
+
+    second_state = deepseek_summary.ConversationState(
+        messages=[
+            {"role": "system", "content": "persisted system"},
+            {"role": "user", "content": "persisted context"},
+        ]
+    )
+    settings_persist = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+        agent_tool_loop=False,
+        agent_tool_mode="off",
+        agent_persist_reasoning_content=True,
+    )
+    deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+        client=cast(object, fake_client),
+        settings=settings_persist,
+        transcript_text="[seg_00000|Speaker 0]: ignored",
+        transcript_segments=_segments(),
+        transcript_manifest="segment_count=2",
+        system_prompt="test prompt",
+        retry_context=None,
+        endpoint_mode="stable",
+        allowed_speakers={"Speaker 0"},
+        segment_speaker_map={"seg_00000": "Speaker 0"},
+        word_budget=None,
+        word_budget_tolerance=0.0,
+        source_word_count=20,
+        conversation_state=second_state,
+    )
+    assert any("reasoning_content" in message for message in second_state.messages)
 
 
 def test_request_completion_rolls_over_context_when_low(

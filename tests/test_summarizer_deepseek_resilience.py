@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -191,11 +193,21 @@ def test_generate_summary_deepseek_wraps_endpoint_error(
 
 def test_build_retry_instruction_includes_previous_attempt_context() -> None:
     """Include endpoint and error context in corrective retry instruction."""
+    continuation = deepseek_summary.RetryContinuationState(
+        read_ranges=[(0, 20), (21, 40)],
+        max_read_index=40,
+        write_tool_succeeded=False,
+        latest_constraints_status="fail",
+        last_validation_issues=["No staged JSON available."],
+        staged_output_present=False,
+        staged_output_valid_json=False,
+    )
     context = deepseek_summary.RetryContext(
         attempt_index=2,
         endpoint_mode="stable",
         error_type="truncated_json",
         error_digest="Unterminated string near char 1024",
+        continuation=continuation,
     )
 
     instruction = deepseek_summary._build_retry_instruction(context)  # noqa: SLF001
@@ -203,12 +215,30 @@ def test_build_retry_instruction_includes_previous_attempt_context() -> None:
     assert "Previous attempt: 2" in instruction
     assert "Previous endpoint: stable" in instruction
     assert "Failure type: truncated_json" in instruction
+    assert "Resume from prior progress" in instruction
+    assert "max_read_index=40" in instruction
 
 
 def test_default_model_constant_uses_reasoner() -> None:
     """Default model should be reasoner for larger output headroom."""
     assert deepseek_summary.DEEPSEEK_MODEL == "deepseek-reasoner"
     assert deepseek_summary.DEFAULT_MAX_COMPLETION_TOKENS == 64000
+
+
+def test_should_persist_stream_event_filters_high_volume_tokens() -> None:
+    """Persist non-token and status-token events while dropping token spam."""
+    assert deepseek_summary._should_persist_stream_event(  # noqa: SLF001
+        {"event": "start"}
+    )
+    assert deepseek_summary._should_persist_stream_event(  # noqa: SLF001
+        {"event": "token", "phase": "status", "text": "ready"}
+    )
+    assert not deepseek_summary._should_persist_stream_event(  # noqa: SLF001
+        {"event": "token", "phase": "reasoning", "text": "x"}
+    )
+    assert not deepseek_summary._should_persist_stream_event(  # noqa: SLF001
+        {"event": "token", "phase": "tool_result", "text": "y"}
+    )
 
 
 def test_request_completion_omits_temperature_for_reasoner() -> None:
@@ -272,3 +302,108 @@ def test_request_completion_omits_temperature_for_reasoner() -> None:
     assert tool_call_counts == {}
     assert "temperature" not in completions.last_kwargs
     assert completions.last_kwargs["stream"] is True
+
+
+def test_deepseek_chat_log_writer_creates_timestamped_run_dir(
+    tmp_path: Path,
+) -> None:
+    """Create a run folder with timestamp naming and expected log files."""
+    writer = deepseek_summary.DeepSeekChatLogWriter.create(tmp_path)
+    try:
+        assert writer.run_directory.parent == tmp_path.resolve()
+        assert re.fullmatch(r"\d{8}T\d{6}Z(?:_\d+)?", writer.run_directory.name)
+        assert writer.log_path.exists()
+        assert (writer.run_directory / deepseek_summary.DEEPSEEK_CHAT_LOG_META_FILE).exists()
+    finally:
+        writer.close()
+
+
+def test_request_completion_writes_per_call_trace_logs(
+    tmp_path: Path,
+) -> None:
+    """Write streamed flush and final message events to one run log file."""
+
+    class _FakeCompletions:
+        def create(self, **kwargs: object) -> object:
+            del kwargs
+            return [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason=None,
+                            delta=SimpleNamespace(reasoning_content="Thinking..."),
+                        )
+                    ]
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            delta=SimpleNamespace(content=json.dumps(_sample_payload())),
+                        )
+                    ],
+                    usage=SimpleNamespace(total_tokens=64),
+                ),
+            ]
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    settings = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+    )
+    writer = deepseek_summary.DeepSeekChatLogWriter.create(tmp_path)
+    try:
+        parsed_script, _, _, _ = deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+            client=cast(object, fake_client),
+            settings=settings,
+            transcript_text="[seg_00000|Speaker 0]: Hello everyone.",
+            transcript_segments=_segments(),
+            transcript_manifest="segment_count=1",
+            system_prompt="test prompt",
+            retry_context=None,
+            endpoint_mode="stable",
+            allowed_speakers={"Speaker 0"},
+            segment_speaker_map={"seg_00000": "Speaker 0"},
+            word_budget=None,
+            word_budget_tolerance=0.05,
+            source_word_count=2,
+            chat_log_writer=writer,
+        )
+    finally:
+        writer.close()
+
+    assert parsed_script.dialogue[0].speaker == "Speaker 0"
+    all_records = [
+        json.loads(line)
+        for line in writer.log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    call_records = [
+        record
+        for record in all_records
+        if record.get("call_id") == "call_0001"
+    ]
+    call_records = [
+        record
+        for record in call_records
+        if record.get("event") != "run_done"
+    ]
+    assert any(record.get("event") == "call_start" for record in call_records)
+    assert any(
+        record.get("event") == "stream_flush" and record.get("phase") == "reasoning"
+        for record in call_records
+    )
+    assert any(
+        record.get("event") == "stream_flush" and record.get("phase") == "answer"
+        for record in call_records
+    )
+    assert not any(record.get("event") == "token" for record in call_records)
+    assert any(
+        record.get("event") == "message" and record.get("phase") == "answer"
+        for record in call_records
+    )
+    assert any(record.get("event") == "call_done" for record in call_records)
