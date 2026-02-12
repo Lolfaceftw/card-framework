@@ -1,0 +1,37 @@
+{
+  "summary_outcome": "failure",
+  "budget_status": "unknown",
+  "validation_status": "unknown",
+  "degraded_success": false,
+  "attempts": 1,
+  "max_attempts": 1,
+  "endpoint_mode": "unknown",
+  "model": "deepseek-reasoner",
+  "tool_rounds": 0,
+  "total_words": null,
+  "target_words": null,
+  "lower_bound": null,
+  "upper_bound": null,
+  "tool_calls_by_name": {},
+  "tool_loop_exhausted": true,
+  "tool_loop_exhaustion_reason": "max_tool_rounds_reached_constraints_failed",
+  "tool_round_limit": 6,
+  "repeated_overwrite_count": 1,
+  "staged_output_present": true,
+  "staged_output_valid_json": true,
+  "last_validation_issues": [
+    "Average words per line is too low for natural cadence."
+  ],
+  "model_path_selected": "unknown",
+  "naturalness_metrics": {
+    "avg_words_per_line": 0.0,
+    "short_question_ratio": 0.0,
+    "disfluency_count": 0,
+    "line_count": 0
+  },
+  "issues": [
+    "Tool loop exhausted: max_tool_rounds_reached_constraints_failed",
+    "Average words per line is too low for natural cadence."
+  ],
+  "output_path": "tmp/live_api_summary_reasoner.json"
+}

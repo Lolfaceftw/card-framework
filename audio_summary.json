@@ -3,9 +3,9 @@
     "speaker": "SPEAKER_00",
     "voice_sample": "./audio_voices/SPEAKER_00.wav",
     "use_emo_text": true,
-    "emo_text": "Welcoming",
+    "emo_text": "Engaging",
     "emo_alpha": 0.6,
-    "text": "Welcome to the Rational Reminder Podcast. We're joined by Dr. Charles Chafin to discuss the psychology of financial planning and risk profiling.",
+    "text": "Welcome. We're joined by Dr. Charles Chafin, whose work bridges psychology and financial planning.",
     "source_segment_ids": [
       "seg_00000",
       "seg_00004"
@@ -14,12 +14,25 @@
     "repair_reason": null
   },
   {
+    "speaker": "SPEAKER_01",
+    "voice_sample": "./audio_voices/SPEAKER_01.wav",
+    "use_emo_text": true,
+    "emo_text": "Enthusiastic",
+    "emo_alpha": 0.6,
+    "text": "We're making a public version of their risk questionnaire available to listeners.",
+    "source_segment_ids": [
+      "seg_00001"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
     "speaker": "SPEAKER_02",
     "voice_sample": "./audio_voices/SPEAKER_02.wav",
     "use_emo_text": true,
-    "emo_text": "Explanatory",
+    "emo_text": "Thoughtful",
     "emo_alpha": 0.6,
-    "text": "Psychology explains why and how clients behave with money, bridging the gap between technical advice and real-world behavior.",
+    "text": "Psychology plays a huge role\u2014it explains client behavior and bridges technical advice with real-world actions.",
     "source_segment_ids": [
       "seg_00007"
     ],
@@ -30,24 +43,11 @@
     "speaker": "SPEAKER_02",
     "voice_sample": "./audio_voices/SPEAKER_02.wav",
     "use_emo_text": true,
-    "emo_text": "Analytical",
+    "emo_text": "Explanatory",
     "emo_alpha": 0.6,
-    "text": "Cognitive biases are shortcuts that create systematic errors like overconfidence or loss aversion, getting in the way of rational thinking.",
+    "text": "Cognitive biases are shortcuts that create errors like overconfidence, loss aversion, and FOMO.",
     "source_segment_ids": [
       "seg_00015"
-    ],
-    "validation_status": "valid",
-    "repair_reason": null
-  },
-  {
-    "speaker": "SPEAKER_01",
-    "voice_sample": "./audio_voices/SPEAKER_01.wav",
-    "use_emo_text": true,
-    "emo_text": "Inquisitive",
-    "emo_alpha": 0.6,
-    "text": "So how does our environment shape our financial psychology?",
-    "source_segment_ids": [
-      "seg_00022"
     ],
     "validation_status": "valid",
     "repair_reason": null
@@ -58,7 +58,20 @@
     "use_emo_text": true,
     "emo_text": "Insightful",
     "emo_alpha": 0.6,
-    "text": "Our environment shapes our financial psychology. We can create friction for unwanted behaviors and eliminate friction for goals.",
+    "text": "That's where the advisor's coaching role becomes critical\u2014bringing rationality to irrational behaviors.",
+    "source_segment_ids": [
+      "seg_00045"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Practical",
+    "emo_alpha": 0.6,
+    "text": "Our environment shapes financial psychology. Create friction for unwanted behaviors, eliminate it for goal-aligned ones.",
     "source_segment_ids": [
       "seg_00023"
     ],
@@ -69,9 +82,9 @@
     "speaker": "SPEAKER_02",
     "voice_sample": "./audio_voices/SPEAKER_02.wav",
     "use_emo_text": true,
-    "emo_text": "Descriptive",
+    "emo_text": "Educational",
     "emo_alpha": 0.6,
-    "text": "Money scripts are unconscious beliefs about money, like being money avoidant or money status, that impact our decisions.",
+    "text": "Money scripts are unconscious beliefs about money that form early in life.",
     "source_segment_ids": [
       "seg_00035"
     ],
@@ -82,23 +95,9 @@
     "speaker": "SPEAKER_02",
     "voice_sample": "./audio_voices/SPEAKER_02.wav",
     "use_emo_text": true,
-    "emo_text": "Motivational",
+    "emo_text": "Clear",
     "emo_alpha": 0.6,
-    "text": "Setting goals aligns our behavior and motivates us. We're neurologically wired for progress, which gives us dopamine.",
-    "source_segment_ids": [
-      "seg_00051",
-      "seg_00053"
-    ],
-    "validation_status": "valid",
-    "repair_reason": null
-  },
-  {
-    "speaker": "SPEAKER_02",
-    "voice_sample": "./audio_voices/SPEAKER_02.wav",
-    "use_emo_text": true,
-    "emo_text": "Defining",
-    "emo_alpha": 0.6,
-    "text": "Risk tolerance is our emotional response to uncertainty: willingness to endure short-term loss for potential long-term gain.",
+    "text": "Financial risk tolerance is our emotional response to uncertainty\u2014willingness to endure volatility for long-term gain.",
     "source_segment_ids": [
       "seg_00059"
     ],
@@ -106,27 +105,53 @@
     "repair_reason": null
   },
   {
-    "speaker": "SPEAKER_02",
-    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "speaker": "SPEAKER_01",
+    "voice_sample": "./audio_voices/SPEAKER_01.wav",
     "use_emo_text": true,
-    "emo_text": "Critical",
+    "emo_text": "Curious",
     "emo_alpha": 0.6,
-    "text": "Common risk assessments fall short by ignoring emotions and beliefs. MRI provides a holistic view of comfort with risk.",
+    "text": "How do we combine risk profiles for a couple with different tolerances?",
     "source_segment_ids": [
-      "seg_00077"
+      "seg_00068"
     ],
     "validation_status": "valid",
     "repair_reason": null
   },
   {
-    "speaker": "SPEAKER_00",
-    "voice_sample": "./audio_voices/SPEAKER_00.wav",
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
     "use_emo_text": true,
-    "emo_text": "Grateful",
+    "emo_text": "Practical",
     "emo_alpha": 0.6,
-    "text": "Thanks Charles, this has been a great conversation.",
+    "text": "Dialogue and shared frameworks are critical. Making the abstract concrete helps manage differences.",
     "source_segment_ids": [
-      "seg_00084"
+      "seg_00069"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Authoritative",
+    "emo_alpha": 0.6,
+    "text": "Psychometric tools assess attitudes, while revealed preference infers from past behaviors. Psychometrics give a more complete picture.",
+    "source_segment_ids": [
+      "seg_00071"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Reflective",
+    "emo_alpha": 0.6,
+    "text": "Success is about alignment and impact. Money's a tool, but meaning comes from people relying on you.",
+    "source_segment_ids": [
+      "seg_00083"
     ],
     "validation_status": "valid",
     "repair_reason": null

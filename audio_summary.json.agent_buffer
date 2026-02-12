@@ -1,32 +1,88 @@
 {
  "dialogue": [
-   {
-     "speaker": "SPEAKER_00",
-     "text": "We're joined by Dr. Charles Chafin, whose work bridges psychology and financial planning. Welcome to the Rational Reminder Podcast.",
-     "emo_text": "Warm and engaging",
-     "emo_alpha": 0.6,
-     "source_segment_ids": ["seg_000", "seg_0004"]
-   },
-   {
-     "speaker": "SPEAKER_02",
-     "text": "Thanks for having me.",
-     "emo_text": "Grateful and polite",
-     "emo_alpha": 0.6,
-     "source_segment_ids": ["seg_0005"]
-   },
-   {
-     "speaker": "SPEAKER_00",
-     "text": "Can you talk about what role psychology plays in the financial planning process?",
-     "emo_text": "Curious and focused",
-     "emo_alpha": 0.6,
-     "source_segment_ids": ["seg_0006"]
-   },
-   {
-     "speaker": "SPEAKER_02",
-     "text": "Psychology explains why and how clients behave with money, bridging technical advice and real-world behavior.",
-     "emo_text": "Explanatory and insightful",
-     "emo_alpha": 0.6,
-     "source_segment_ids": ["seg_0007"]
-   }
+ {
+  "speaker": "SPEAKER_00",
+  "text": "Welcome. We're joined by Dr. Charles Chafin, whose work bridges psychology and financial planning.",
+  "emo_text": "Engaging",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_000", "seg_0004"]
+ },
+ {
+  "speaker": "SPEAKER_01",
+  "text": "We're making a public version of their risk questionnaire available to listeners.",
+  "emo_text": "Enthusiastic",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_0001"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Psychology plays a huge role—it explains client behavior and bridges technical advice with real-world actions.",
+  "emo_text": "Thoughtful",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_0007"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Cognitive biases are shortcuts that create errors like overconfidence, loss aversion, and FOMO.",
+  "emo_text": "Explanatory",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00015"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "That's where the advisor's coaching role becomes critical—bringing rationality to irrational behaviors.",
+  "emo_text": "Insightful",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00045"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Our environment shapes financial psychology. Create friction for unwanted behaviors, eliminate it for goal-aligned ones.",
+  "emo_text": "Practical",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00023"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Money scripts are unconscious beliefs about money that form early in life.",
+  "emo_text": "Educational",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00035"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Financial risk tolerance is our emotional response to uncertainty—willingness to endure volatility for long-term gain.",
+  "emo_text": "Clear",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00059"]
+ },
+ {
+  "speaker": "SPEAKER_01",
+  "text": "How do we combine risk profiles for a couple with different tolerances?",
+  "emo_text": "Curious",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00068"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Dialogue and shared frameworks are critical. Making the abstract concrete helps manage differences.",
+  "emo_text": "Practical",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00069"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Psychometric tools assess attitudes, while revealed preference infers from past behaviors. Psychometrics give a more complete picture.",
+  "emo_text": "Authoritative",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00071"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Success is about alignment and impact. Money's a tool, but meaning comes from people relying on you.",
+  "emo_text": "Reflective",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00083"]
+ }
  ]
 }

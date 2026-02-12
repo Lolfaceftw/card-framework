@@ -65,6 +65,62 @@ def test_validate_and_repair_fixes_speaker_mismatch() -> None:
     assert report.lines[0].repair_reason is not None
 
 
+def test_validate_and_repair_normalizes_short_segment_ids() -> None:
+    """Normalize short zero-padded source IDs when canonical IDs exist."""
+    payload = """
+    {
+      "segments": [
+        {"speaker": "SPEAKER_00", "text": "Welcome back"}
+      ]
+    }
+    """
+    segments = load_transcript_segments(payload)
+    report = validate_and_repair_dialogue(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "text": "Welcome back.",
+                "emo_text": "Neutral",
+                "emo_alpha": 0.6,
+                "source_segment_ids": ["seg_000"],
+            }
+        ],
+        allowed_speakers=collect_allowed_speakers(segments),
+        segment_speaker_map=build_segment_speaker_map(segments),
+    )
+
+    assert report.is_valid
+    assert report.lines[0].source_segment_ids == ["seg_00000"]
+
+
+def test_validate_and_repair_keeps_existing_noncanonical_segment_id() -> None:
+    """Keep transcript IDs unchanged when they already exist in source data."""
+    payload = """
+    {
+      "segments": [
+        {"segment_id": "seg_0004", "speaker": "SPEAKER_00", "text": "Welcome back"}
+      ]
+    }
+    """
+    segments = load_transcript_segments(payload)
+    report = validate_and_repair_dialogue(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "text": "Welcome back.",
+                "emo_text": "Neutral",
+                "emo_alpha": 0.6,
+                "source_segment_ids": ["seg_0004"],
+            }
+        ],
+        allowed_speakers=collect_allowed_speakers(segments),
+        segment_speaker_map=build_segment_speaker_map(segments),
+    )
+
+    assert report.is_valid
+    assert report.lines[0].source_segment_ids == ["seg_0004"]
+
+
 def test_validate_and_repair_fails_on_unknown_source_segment() -> None:
     """Reject lines that cite segment IDs not present in transcript."""
     payload = """
