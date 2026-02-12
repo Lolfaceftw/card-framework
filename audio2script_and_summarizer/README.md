@@ -42,9 +42,9 @@ You must provide:
 - **HuggingFace Token** for pyannote diarization models
 - **Target summary duration** in minutes (prompted if not passed)
 
-By default, the pipeline runs a short IndexTTS2 calibration pass on extracted
-speaker samples to estimate WPM, then converts your target minutes into a strict
-word budget for the summarizer.
+By default, the pipeline runs an emotion-aware IndexTTS2 preflight calibration
+pass on extracted speaker samples to estimate WPM, then converts your target
+minutes into a strict word budget for the summarizer.
 You can optionally derive WPM directly from transcript timestamps with
 `--wpm-source transcript`.
 
@@ -81,10 +81,16 @@ uv run --extra audio2script python -m audio2script_and_summarizer \
 # DeepSeek defaults to model deepseek-reasoner with a larger output token budget.
 # Override with --model only if you need a specific model behavior.
 
-# Use transcript-derived WPM instead of IndexTTS calibration
+# Use transcript-derived WPM instead of TTS preflight calibration
 uv run --extra audio2script python -m audio2script_and_summarizer \
     --input "path/to/podcast.wav" \
     --wpm-source transcript
+
+# One-shot emotion-aware WPM calibration export (per emotion, per speaker)
+uv run --extra audio2script python -m audio2script_and_summarizer.calibrate_wpm \
+    --voice-dir "path/to/<audio>_voices" \
+    --transcript-json "path/to/<audio>.json" \
+    --output "calibrated_wpm.json"
 ```
 
 ### Alternate Entry Point (still via uv)
@@ -102,8 +108,11 @@ uv run --extra audio2script python -m audio2script_and_summarizer.run_pipeline \
 | `--openai-key` | Your OpenAI API key | `$OPENAI_API_KEY` |
 | `--device` | Processing device | `cuda` (if available) |
 | `--voice-dir` | Directory for speaker samples | `stage2_voices` |
-| `--wpm-source` | WPM source (`indextts` or `transcript`) | `indextts` |
+| `--wpm-source` | WPM source (`tts_preflight`, `transcript`, or alias `indextts`) | `tts_preflight` |
 | `--target-minutes` | Target summary duration in minutes | Prompted |
+| `--duration-tolerance-seconds` | Allowed Stage 3 duration delta in seconds | `3.0` |
+| `--max-duration-correction-passes` | Number of closed-loop Stage 2/3 correction passes | `1` |
+| `--calibration-presets-path` | Emotion preset config JSON for TTS preflight | `audio2script_and_summarizer/emotion_pacing_presets.json` |
 | `--llm-provider` | `openai` or `deepseek` | Prompted |
 | `--word-budget-tolerance` | Allowed deviation ratio (e.g. 0.05 = +/-5%) | `0.05` |
 | `--skip-a2s` | Skip Stage 1/1.5 and choose an existing transcript JSON for direct DeepSeek summarization | `false` |

@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import io
+import json
 import logging
 import os
 import queue
@@ -15,6 +16,7 @@ from typing import Any, Callable, Final, Iterator, Literal, cast
 
 if __package__:
     from .deepseek.stream_events import (
+        DEEPSEEK_STREAM_EVENT_PREFIX,  # noqa: F401
         parse_deepseek_stream_event_line as _parse_deepseek_stream_event_line,
         route_deepseek_stream_event as _route_deepseek_stream_event,
     )
@@ -25,6 +27,7 @@ else:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from audio2script_and_summarizer.deepseek.stream_events import (
+        DEEPSEEK_STREAM_EVENT_PREFIX,  # noqa: F401
         parse_deepseek_stream_event_line as _parse_deepseek_stream_event_line,
         route_deepseek_stream_event as _route_deepseek_stream_event,
     )
@@ -76,6 +79,8 @@ LOG_HISTORY_MAX_LINES: Final[int] = 5000
 PROGRESS_PANEL_HEIGHT: Final[int] = 5
 CONTROLS_PANEL_HEIGHT: Final[int] = 9
 DEFAULT_HEARTBEAT_SECONDS: Final[float] = 5.0
+DEFAULT_DURATION_TOLERANCE_SECONDS: Final[float] = 3.0
+DEFAULT_MAX_DURATION_CORRECTION_PASSES: Final[int] = 1
 KEYBOARD_POLL_SECONDS: Final[float] = 0.05
 STATUS_REFRESH_SECONDS: Final[float] = 1.0
 DEFAULT_DEEPSEEK_HARD_CEILING_TOKENS: Final[int] = 64000
@@ -1792,6 +1797,118 @@ def _prompt_for_transcript_json(search_root: Path, use_rich: bool) -> Path:
         print(f"Please enter a number between 1 and {len(candidates)}.")
 
 
+def _calculate_corrected_word_budget(
+    *,
+    current_word_budget: int,
+    target_duration_seconds: float,
+    measured_duration_seconds: float,
+) -> int:
+    """Scale word budget toward the target/actual duration ratio.
+
+    Args:
+        current_word_budget: Current Stage 2 target word budget.
+        target_duration_seconds: Desired final duration in seconds.
+        measured_duration_seconds: Measured Stage 3 duration in seconds.
+
+    Returns:
+        Corrected positive integer word budget.
+    """
+    if current_word_budget <= 0:
+        return 1
+    if target_duration_seconds <= 0.0 or measured_duration_seconds <= 0.0:
+        return max(1, current_word_budget)
+    correction_factor = target_duration_seconds / measured_duration_seconds
+    corrected = int(round(current_word_budget * correction_factor))
+    return max(1, corrected)
+
+
+def _summary_report_path_for_output(summary_output_path: str) -> Path:
+    """Resolve default summary report path for a summary JSON output path."""
+    summary_output = Path(summary_output_path)
+    return summary_output.with_name(f"{summary_output.name}.report.json")
+
+
+def _update_summary_report_duration_metrics(
+    *,
+    summary_output_path: str,
+    target_duration_seconds: float | None,
+    measured_duration_seconds: float | None,
+    duration_tolerance_seconds: float,
+    duration_correction_passes: int,
+) -> None:
+    """Patch summary report JSON with Stage 3 duration metrics when available.
+
+    Args:
+        summary_output_path: Stage 2 summary JSON path.
+        target_duration_seconds: Requested output duration in seconds.
+        measured_duration_seconds: Actual measured Stage 3 duration in seconds.
+        duration_tolerance_seconds: Absolute allowed duration delta.
+        duration_correction_passes: Number of correction passes executed.
+    """
+    report_path = _summary_report_path_for_output(summary_output_path)
+    if not report_path.exists():
+        logger.info(
+            "Summary report not found for duration metrics update: %s",
+            report_path,
+        )
+        return
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Failed to parse summary report %s for duration update: %s",
+            report_path,
+            exc,
+        )
+        return
+    if not isinstance(payload, dict):
+        logger.warning(
+            "Summary report payload at %s is not an object; skipping duration update.",
+            report_path,
+        )
+        return
+
+    duration_delta_seconds: float | None = None
+    duration_within_tolerance: bool | None = None
+    if (
+        target_duration_seconds is not None
+        and measured_duration_seconds is not None
+        and target_duration_seconds > 0.0
+        and measured_duration_seconds >= 0.0
+    ):
+        duration_delta_seconds = measured_duration_seconds - target_duration_seconds
+        duration_within_tolerance = (
+            abs(duration_delta_seconds) <= max(0.0, duration_tolerance_seconds)
+        )
+
+    payload["target_duration_seconds"] = (
+        round(target_duration_seconds, 3)
+        if target_duration_seconds is not None
+        else None
+    )
+    payload["measured_duration_seconds"] = (
+        round(measured_duration_seconds, 3)
+        if measured_duration_seconds is not None
+        else None
+    )
+    payload["duration_delta_seconds"] = (
+        round(duration_delta_seconds, 3)
+        if duration_delta_seconds is not None
+        else None
+    )
+    payload["duration_within_tolerance"] = duration_within_tolerance
+    payload["duration_correction_passes"] = max(0, int(duration_correction_passes))
+
+    try:
+        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning(
+            "Failed to write duration metrics to summary report %s: %s",
+            report_path,
+            exc,
+        )
+
+
 def _run_stage3_from_summary(
     *,
     summary_json_path: Path,
@@ -1800,7 +1917,7 @@ def _run_stage3_from_summary(
     interjection_max_ratio: float,
     mistral_model_id: str,
     mistral_max_new_tokens: int,
-) -> tuple[Path, Path, bool]:
+) -> tuple[Path, Path, bool, float]:
     """Run Stage 3 voice cloning and interjection pipeline.
 
     Args:
@@ -1812,8 +1929,8 @@ def _run_stage3_from_summary(
         mistral_max_new_tokens: Max generation tokens for planner.
 
     Returns:
-        Tuple of final output WAV path, interjection log path, and Mistral
-        availability flag.
+        Tuple of final output WAV path, interjection log path, Mistral
+        availability flag, and measured output duration in seconds.
     """
     from audio2script_and_summarizer.stage3_voice import run_stage3_pipeline
 
@@ -1837,6 +1954,7 @@ def _run_stage3_from_summary(
         stage3_result.output_wav_path,
         stage3_result.interjection_log_path,
         stage3_result.mistral_enabled,
+        stage3_result.output_duration_ms / 1000.0,
     )
 
 
@@ -1866,6 +1984,24 @@ def main() -> int:
         type=float,
         default=None,
         help="Target summary duration in minutes (prompted if omitted).",
+    )
+    parser.add_argument(
+        "--duration-tolerance-seconds",
+        type=float,
+        default=DEFAULT_DURATION_TOLERANCE_SECONDS,
+        help=(
+            "Allowed absolute delta between target and measured Stage 3 duration "
+            f"in seconds (default: {DEFAULT_DURATION_TOLERANCE_SECONDS})."
+        ),
+    )
+    parser.add_argument(
+        "--max-duration-correction-passes",
+        type=int,
+        default=DEFAULT_MAX_DURATION_CORRECTION_PASSES,
+        help=(
+            "Maximum closed-loop duration correction passes that re-run Stage 2/3 "
+            f"(default: {DEFAULT_MAX_DURATION_CORRECTION_PASSES})."
+        ),
     )
     parser.add_argument(
         "--word-budget-tolerance",
@@ -1969,12 +2105,23 @@ def main() -> int:
     )
     parser.add_argument(
         "--wpm-source",
-        choices=["indextts", "transcript"],
-        default="indextts",
+        choices=["tts_preflight", "indextts", "transcript"],
+        default="tts_preflight",
         help=(
             "Source for Stage 1.75 word-rate estimation: "
-            "'indextts' runs voice-cloner calibration (default), "
-            "'transcript' computes from diarized transcript timestamps."
+            "'tts_preflight' runs emotion-aware IndexTTS preflight calibration "
+            "(default), 'transcript' computes from diarized transcript timestamps. "
+            "'indextts' is kept as a compatibility alias for 'tts_preflight'."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-presets-path",
+        default=str(
+            Path(__file__).resolve().with_name("emotion_pacing_presets.json")
+        ),
+        help=(
+            "Path to emotion pacing presets JSON used by --wpm-source "
+            "tts_preflight."
         ),
     )
     parser.add_argument(
@@ -2040,6 +2187,18 @@ def main() -> int:
             use_rich=use_rich,
         )
         return 1
+    if args.duration_tolerance_seconds < 0:
+        _print_error(
+            "[ERROR] --duration-tolerance-seconds must be >= 0.",
+            use_rich=use_rich,
+        )
+        return 1
+    if args.max_duration_correction_passes < 0:
+        _print_error(
+            "[ERROR] --max-duration-correction-passes must be >= 0.",
+            use_rich=use_rich,
+        )
+        return 1
     if args.interjection_max_ratio < 0 or args.interjection_max_ratio > 1:
         _print_error(
             "[ERROR] --interjection-max-ratio must be within [0, 1].",
@@ -2099,6 +2258,14 @@ def main() -> int:
         _print_checkpoint(
             f"Runtime device resolved: {runtime_device}", use_rich=use_rich
         )
+        normalized_wpm_source = (
+            "tts_preflight" if args.wpm_source == "indextts" else args.wpm_source
+        )
+        if args.wpm_source == "indextts":
+            _print_info(
+                "[INFO] --wpm-source indextts is treated as alias of tts_preflight.",
+                use_rich=use_rich,
+            )
 
         if args.skip_a2s:
             llm_provider = "deepseek"
@@ -2223,15 +2390,18 @@ def main() -> int:
                 Path(args.stage3_output).resolve() if args.stage3_output else None
             )
             try:
-                final_wav_path, interjection_log_path, mistral_enabled = (
-                    _run_stage3_from_summary(
-                        summary_json_path=selected_summary,
-                        output_wav_path=stage3_output_override,
-                        runtime_device=runtime_device,
-                        interjection_max_ratio=args.interjection_max_ratio,
-                        mistral_model_id=args.mistral_model_id,
-                        mistral_max_new_tokens=args.mistral_max_new_tokens,
-                    )
+                (
+                    final_wav_path,
+                    interjection_log_path,
+                    mistral_enabled,
+                    measured_duration_seconds,
+                ) = _run_stage3_from_summary(
+                    summary_json_path=selected_summary,
+                    output_wav_path=stage3_output_override,
+                    runtime_device=runtime_device,
+                    interjection_max_ratio=args.interjection_max_ratio,
+                    mistral_model_id=args.mistral_model_id,
+                    mistral_max_new_tokens=args.mistral_max_new_tokens,
                 )
             except Exception as exc:  # noqa: BLE001
                 _print_error(f"[ERROR] Stage 3 failed: {exc}", use_rich=use_rich)
@@ -2245,6 +2415,10 @@ def main() -> int:
             _print_stage_banner("[DONE] PIPELINE COMPLETE", use_rich=use_rich)
             _print_success(f"Summary input: {selected_summary}", use_rich=use_rich)
             _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
+            _print_success(
+                f"Final duration: {measured_duration_seconds:.2f}s",
+                use_rich=use_rich,
+            )
             _print_success(
                 f"Interjection log: {interjection_log_path}", use_rich=use_rich
             )
@@ -2296,29 +2470,69 @@ def main() -> int:
                 return 1
 
             _print_stage_banner(
-                "[START] STAGE 1.75: Transcript WPM Derivation",
+                "[START] STAGE 1.75: WPM Calibration",
                 use_rich=use_rich,
             )
-            _print_checkpoint(
-                "Stage 1.75: deriving WPM from selected transcript JSON.",
-                use_rich=use_rich,
-            )
-            try:
-                from audio2script_and_summarizer.transcript_wpm import (
-                    compute_wpm_from_transcript,
+            if normalized_wpm_source == "tts_preflight":
+                _print_checkpoint(
+                    "Stage 1.75: running emotion-aware TTS preflight pacing calibration.",
+                    use_rich=use_rich,
+                )
+            else:
+                _print_checkpoint(
+                    "Stage 1.75: deriving WPM from selected transcript JSON.",
+                    use_rich=use_rich,
                 )
 
-                avg_wpm, per_speaker_wpm = compute_wpm_from_transcript(diarization_json)
+            tts_pacing_calibration: object | None = None
+            try:
+                if normalized_wpm_source == "tts_preflight":
+                    from audio2script_and_summarizer.tts_pacing_calibration import (
+                        calibrate_tts_pacing_profiles,
+                        estimate_weighted_wpm_from_transcript,
+                    )
+
+                    repo_root = Path(__file__).resolve().parent.parent
+                    cfg_path = (
+                        repo_root
+                        / "voice-cloner-and-interjector"
+                        / "checkpoints"
+                        / "config.yaml"
+                    )
+                    model_dir = (
+                        repo_root / "voice-cloner-and-interjector" / "checkpoints"
+                    )
+                    _, _, tts_pacing = calibrate_tts_pacing_profiles(
+                        voice_dir=voice_dir,
+                        device=runtime_device,
+                        cfg_path=str(cfg_path),
+                        model_dir=str(model_dir),
+                        presets_path=args.calibration_presets_path,
+                        progress_cb=None,
+                    )
+                    avg_wpm, per_speaker_wpm = estimate_weighted_wpm_from_transcript(
+                        transcript_json_path=diarization_json,
+                        calibration=tts_pacing,
+                    )
+                    tts_pacing_calibration = tts_pacing
+                else:
+                    from audio2script_and_summarizer.transcript_wpm import (
+                        compute_wpm_from_transcript,
+                    )
+
+                    avg_wpm, per_speaker_wpm = compute_wpm_from_transcript(
+                        diarization_json
+                    )
             except Exception as exc:  # noqa: BLE001
                 _print_error(
-                    f"[ERROR] Transcript WPM derivation failed: {exc}",
+                    f"[ERROR] WPM derivation failed: {exc}",
                     use_rich=use_rich,
                 )
                 return 1
             dashboard.complete_stage("Stage 1.75 complete")
 
             _print_info(
-                f"[INFO] Stage 1.75 source=transcript; per-speaker WPM: "
+                f"[INFO] Stage 1.75 source={normalized_wpm_source}; per-speaker WPM: "
                 f"{_format_speaker_wpm_summary(per_speaker_wpm)}",
                 use_rich=use_rich,
             )
@@ -2330,7 +2544,7 @@ def main() -> int:
                 return 1
             word_budget = max(1, int(round(avg_wpm * target_minutes)))
             _print_success(
-                f"[SUCCESS] WPM source=transcript; calibrated WPM={avg_wpm:.2f}; "
+                f"[SUCCESS] WPM source={normalized_wpm_source}; calibrated WPM={avg_wpm:.2f}; "
                 f"target_minutes={target_minutes:.2f}; word_budget={word_budget}",
                 use_rich=use_rich,
             )
@@ -2349,55 +2563,80 @@ def main() -> int:
                 )
                 return 1
 
-            summarize_cmd = [
-                sys.executable,
-                "-m",
-                "audio2script_and_summarizer.summarizer_deepseek",
-                "--transcript",
-                diarization_json,
-                "--voice-dir",
-                voice_dir,
-                "--output",
-                summary_output,
-                "--api-key",
-                api_key,
-                "--max-completion-tokens",
-                str(args.deepseek_max_completion_tokens),
-                "--target-minutes",
-                str(target_minutes),
-                "--avg-wpm",
-                f"{avg_wpm:.2f}",
-                "--word-budget",
-                str(word_budget),
-                "--word-budget-tolerance",
-                str(args.word_budget_tolerance),
-                "--agent-tool-mode",
-                args.deepseek_agent_tool_mode,
-                "--agent-read-max-lines",
-                str(args.deepseek_agent_read_max_lines),
-            ]
-            try:
-                _run_stage_command(
-                    cmd=summarize_cmd,
-                    current_env=current_env,
-                    use_dashboard=dashboard.enabled,
-                    stage_name="Stage 2 (Summarizer)",
-                    heartbeat_seconds=args.heartbeat_seconds,
-                    model_info=(
-                        "Provider: deepseek | Model: auto(reasoner/chat) "
-                        f"| Max output tokens: {args.deepseek_max_completion_tokens}"
-                    ),
-                )
-            except subprocess.CalledProcessError as e:
-                _print_error(
-                    f"[ERROR] Stage 2 crashed with code {e.returncode}",
-                    use_rich=use_rich,
-                )
-                return 1
+            target_duration_seconds = target_minutes * 60.0
+            current_word_budget = word_budget
+            correction_passes_used = 0
+            max_correction_passes = args.max_duration_correction_passes
+            measured_duration_seconds: float | None = None
+            final_wav_path: Path | None = None
+            interjection_log_path: Path | None = None
+            final_mistral_enabled = True
 
-            dashboard.complete_stage("Stage 2 complete")
-            _print_success(f"Summary saved to: {summary_output}", use_rich=use_rich)
-            if not args.skip_stage3:
+            while True:
+                pass_label = correction_passes_used + 1
+                summarize_cmd = [
+                    sys.executable,
+                    "-m",
+                    "audio2script_and_summarizer.summarizer_deepseek",
+                    "--transcript",
+                    diarization_json,
+                    "--voice-dir",
+                    voice_dir,
+                    "--output",
+                    summary_output,
+                    "--api-key",
+                    api_key,
+                    "--max-completion-tokens",
+                    str(args.deepseek_max_completion_tokens),
+                    "--target-minutes",
+                    str(target_minutes),
+                    "--avg-wpm",
+                    f"{avg_wpm:.2f}",
+                    "--word-budget",
+                    str(current_word_budget),
+                    "--word-budget-tolerance",
+                    str(args.word_budget_tolerance),
+                    "--agent-tool-mode",
+                    args.deepseek_agent_tool_mode,
+                    "--agent-read-max-lines",
+                    str(args.deepseek_agent_read_max_lines),
+                ]
+                try:
+                    _run_stage_command(
+                        cmd=summarize_cmd,
+                        current_env=current_env,
+                        use_dashboard=dashboard.enabled,
+                        stage_name="Stage 2 (Summarizer)",
+                        heartbeat_seconds=args.heartbeat_seconds,
+                        model_info=(
+                            "Provider: deepseek | Model: auto(reasoner/chat) "
+                            f"| Max output tokens: {args.deepseek_max_completion_tokens}"
+                        ),
+                    )
+                except subprocess.CalledProcessError as e:
+                    _print_error(
+                        f"[ERROR] Stage 2 crashed with code {e.returncode}",
+                        use_rich=use_rich,
+                    )
+                    return 1
+
+                if args.skip_stage3:
+                    break
+
+                if tts_pacing_calibration is not None:
+                    from audio2script_and_summarizer.tts_pacing_calibration import (
+                        estimate_summary_duration_seconds,
+                    )
+
+                    estimated_seconds = estimate_summary_duration_seconds(
+                        summary_json_path=summary_output,
+                        calibration=tts_pacing_calibration,
+                    )
+                    _print_info(
+                        f"[INFO] Stage 3 preflight estimate={estimated_seconds:.2f}s for pass {pass_label}.",
+                        use_rich=use_rich,
+                    )
+
                 _print_stage_banner(
                     "[START] STAGE 3: Voice Cloning + Interjections",
                     use_rich=use_rich,
@@ -2410,31 +2649,104 @@ def main() -> int:
                     Path(args.stage3_output).resolve() if args.stage3_output else None
                 )
                 try:
-                    final_wav_path, interjection_log_path, mistral_enabled = (
-                        _run_stage3_from_summary(
-                            summary_json_path=Path(summary_output).resolve(),
-                            output_wav_path=stage3_output_override,
-                            runtime_device=runtime_device,
-                            interjection_max_ratio=args.interjection_max_ratio,
-                            mistral_model_id=args.mistral_model_id,
-                            mistral_max_new_tokens=args.mistral_max_new_tokens,
-                        )
+                    (
+                        final_wav_path,
+                        interjection_log_path,
+                        final_mistral_enabled,
+                        measured_duration_seconds,
+                    ) = _run_stage3_from_summary(
+                        summary_json_path=Path(summary_output).resolve(),
+                        output_wav_path=stage3_output_override,
+                        runtime_device=runtime_device,
+                        interjection_max_ratio=args.interjection_max_ratio,
+                        mistral_model_id=args.mistral_model_id,
+                        mistral_max_new_tokens=args.mistral_max_new_tokens,
                     )
                 except Exception as exc:  # noqa: BLE001
                     _print_error(f"[ERROR] Stage 3 failed: {exc}", use_rich=use_rich)
                     return 1
+
+                duration_delta_seconds = (
+                    measured_duration_seconds - target_duration_seconds
+                )
+                within_tolerance = (
+                    abs(duration_delta_seconds) <= args.duration_tolerance_seconds
+                )
+                _print_info(
+                    (
+                        "[INFO] Duration check: "
+                        f"target={target_duration_seconds:.2f}s "
+                        f"actual={measured_duration_seconds:.2f}s "
+                        f"delta={duration_delta_seconds:+.2f}s "
+                        f"tolerance={args.duration_tolerance_seconds:.2f}s"
+                    ),
+                    use_rich=use_rich,
+                )
+                if within_tolerance:
+                    break
+                if correction_passes_used >= max_correction_passes:
+                    _print_warning(
+                        (
+                            "[WARN] Duration is outside tolerance and max correction "
+                            f"passes ({max_correction_passes}) reached."
+                        ),
+                        use_rich=use_rich,
+                    )
+                    break
+
+                corrected_budget = _calculate_corrected_word_budget(
+                    current_word_budget=current_word_budget,
+                    target_duration_seconds=target_duration_seconds,
+                    measured_duration_seconds=measured_duration_seconds,
+                )
+                if corrected_budget == current_word_budget:
+                    if measured_duration_seconds > target_duration_seconds:
+                        corrected_budget = max(1, current_word_budget - 1)
+                    else:
+                        corrected_budget = current_word_budget + 1
+                correction_passes_used += 1
+                _print_warning(
+                    (
+                        "[WARN] Applying duration correction: "
+                        f"word_budget {current_word_budget} -> {corrected_budget} "
+                        f"(correction pass {correction_passes_used}/{max_correction_passes})."
+                    ),
+                    use_rich=use_rich,
+                )
+                current_word_budget = corrected_budget
+
+            dashboard.complete_stage("Stage 2 complete")
+            _print_success(f"Summary saved to: {summary_output}", use_rich=use_rich)
+            if not args.skip_stage3:
                 dashboard.complete_stage("Stage 3 complete")
-                if not mistral_enabled:
+                _update_summary_report_duration_metrics(
+                    summary_output_path=summary_output,
+                    target_duration_seconds=target_duration_seconds,
+                    measured_duration_seconds=measured_duration_seconds,
+                    duration_tolerance_seconds=args.duration_tolerance_seconds,
+                    duration_correction_passes=correction_passes_used,
+                )
+                if not final_mistral_enabled:
                     _print_warning(
                         "[WARN] Stage 3 ran without Mistral interjections because the model was unavailable.",
                         use_rich=use_rich,
                     )
-                _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
-                _print_success(
-                    f"Interjection log: {interjection_log_path}", use_rich=use_rich
-                )
+                if final_wav_path is not None:
+                    _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
+                if interjection_log_path is not None:
+                    _print_success(
+                        f"Interjection log: {interjection_log_path}",
+                        use_rich=use_rich,
+                    )
             else:
                 dashboard.complete_stage("Stage 3 skipped (--skip-stage3)")
+                _update_summary_report_duration_metrics(
+                    summary_output_path=summary_output,
+                    target_duration_seconds=target_duration_seconds,
+                    measured_duration_seconds=None,
+                    duration_tolerance_seconds=args.duration_tolerance_seconds,
+                    duration_correction_passes=0,
+                )
                 _print_info(
                     "[INFO] Stage 3 skipped by --skip-stage3.",
                     use_rich=use_rich,
@@ -2571,24 +2883,24 @@ def main() -> int:
             use_rich=use_rich,
         )
         _print_checkpoint(
-            f"Stage 1.75: WPM source selected: {args.wpm_source}",
+            f"Stage 1.75: WPM source selected: {normalized_wpm_source}",
             use_rich=use_rich,
         )
 
         stage_175_name = "Stage 1.75 (WPM Calibration)"
         stage_175_module = (
-            "audio2script_and_summarizer.wpm_calibration"
-            if args.wpm_source == "indextts"
+            "audio2script_and_summarizer.tts_pacing_calibration"
+            if normalized_wpm_source == "tts_preflight"
             else "audio2script_and_summarizer.transcript_wpm"
         )
         stage_175_command = (
-            "calibrate_voice_wpm(...)"
-            if args.wpm_source == "indextts"
+            "calibrate_tts_pacing_profiles(...)"
+            if normalized_wpm_source == "tts_preflight"
             else "compute_wpm_from_transcript(...)"
         )
         stage_175_model_info = (
-            "IndexTTS2 checkpoint-based voice calibration"
-            if args.wpm_source == "indextts"
+            "Emotion-aware IndexTTS2 checkpoint preflight calibration"
+            if normalized_wpm_source == "tts_preflight"
             else "Diarized transcript timestamp-based WPM derivation"
         )
         if dashboard.enabled:
@@ -2602,19 +2914,21 @@ def main() -> int:
                 reset_elapsed=True,
             )
             detail_label = (
-                "IndexTTS2 WPM calibration"
-                if args.wpm_source == "indextts"
+                "IndexTTS2 preflight pacing calibration"
+                if normalized_wpm_source == "tts_preflight"
                 else "Transcript WPM derivation"
             )
             dashboard.start_detail_progress(detail_label)
             dashboard.update_detail_progress(1)
 
         per_speaker_wpm: dict[str, float]
+        tts_pacing_calibration: object | None = None
         try:
-            if args.wpm_source == "indextts":
-                from audio2script_and_summarizer.wpm_calibration import (
+            if normalized_wpm_source == "tts_preflight":
+                from audio2script_and_summarizer.tts_pacing_calibration import (
                     CalibrationEvent,
-                    calibrate_voice_wpm,
+                    calibrate_tts_pacing_profiles,
+                    estimate_weighted_wpm_from_transcript,
                 )
 
                 repo_root = Path(__file__).resolve().parent.parent
@@ -2627,7 +2941,7 @@ def main() -> int:
                 model_dir = repo_root / "voice-cloner-and-interjector" / "checkpoints"
 
                 def _on_calibration_progress(event: CalibrationEvent) -> None:
-                    """Reflect IndexTTS calibration progress in the dashboard."""
+                    """Reflect TTS preflight calibration progress in the dashboard."""
                     if not dashboard.enabled:
                         return
                     if event.event_type == "model_init_started":
@@ -2708,12 +3022,22 @@ def main() -> int:
                         )
                         dashboard.update_detail_progress(100)
 
-                avg_wpm, per_speaker_wpm = calibrate_voice_wpm(
+                _, _, tts_pacing = calibrate_tts_pacing_profiles(
                     voice_dir=voice_dir,
                     device=runtime_device,
                     cfg_path=str(cfg_path),
                     model_dir=str(model_dir),
+                    presets_path=args.calibration_presets_path,
                     progress_cb=_on_calibration_progress if dashboard.enabled else None,
+                )
+                avg_wpm, per_speaker_wpm = estimate_weighted_wpm_from_transcript(
+                    transcript_json_path=diarization_json,
+                    calibration=tts_pacing,
+                )
+                tts_pacing_calibration = tts_pacing
+                logger.info(
+                    "Stage 1.75 weighted WPM derived from TTS preflight + transcript distribution: avg_wpm=%.2f",
+                    avg_wpm,
                 )
             else:
                 from audio2script_and_summarizer.transcript_wpm import (
@@ -2748,7 +3072,7 @@ def main() -> int:
         dashboard.complete_stage("Stage 1.75 complete")
 
         _print_info(
-            f"[INFO] Stage 1.75 source={args.wpm_source}; per-speaker WPM: "
+            f"[INFO] Stage 1.75 source={normalized_wpm_source}; per-speaker WPM: "
             f"{_format_speaker_wpm_summary(per_speaker_wpm)}",
             use_rich=use_rich,
         )
@@ -2761,7 +3085,7 @@ def main() -> int:
             return 1
         word_budget = max(1, int(round(avg_wpm * target_minutes)))
         _print_success(
-            f"[SUCCESS] WPM source={args.wpm_source}; calibrated WPM={avg_wpm:.2f}; "
+            f"[SUCCESS] WPM source={normalized_wpm_source}; calibrated WPM={avg_wpm:.2f}; "
             f"target_minutes={target_minutes:.2f}; word_budget={word_budget}",
             use_rich=use_rich,
         )
@@ -2773,101 +3097,134 @@ def main() -> int:
         _print_checkpoint("Stage 2: preparing summarizer subprocess", use_rich=use_rich)
 
         summary_output = f"{base_name}_summary.json"
+        target_duration_seconds = target_minutes * 60.0
+        current_word_budget = word_budget
+        correction_passes_used = 0
+        max_correction_passes = args.max_duration_correction_passes
+        measured_duration_seconds: float | None = None
+        final_wav_path: Path | None = None
+        interjection_log_path: Path | None = None
+        final_mistral_enabled = True
 
-        try:
-            if llm_provider == "openai":
-                api_key = (
-                    args.openai_key
-                    or os.environ.get("OPENAI_API_KEY")
-                    or os.environ.get("LLM_API_KEY")
-                    or os.environ.get("GEMINI_API_KEY")
-                )
-                if not api_key:
-                    _print_error(
-                        "[ERROR] No OpenAI API key found. Use --openai-key/--api-key or set OPENAI_API_KEY.",
-                        use_rich=use_rich,
-                    )
-                    return 1
-                summarize_cmd = [
-                    sys.executable,
-                    "-m",
-                    "audio2script_and_summarizer.summarizer",
-                    "--transcript",
-                    diarization_json,
-                    "--voice-dir",
-                    voice_dir,
-                    "--output",
-                    summary_output,
-                    "--api-key",
-                    api_key,
-                    "--target-minutes",
-                    str(target_minutes),
-                    "--avg-wpm",
-                    f"{avg_wpm:.2f}",
-                    "--word-budget",
-                    str(word_budget),
-                    "--word-budget-tolerance",
-                    str(args.word_budget_tolerance),
-                ]
-                summary_model_info = "Provider: openai | Model: gpt-4o-2024-08-06"
-            else:
-                api_key = os.environ.get("DEEPSEEK_API_KEY")
-                if not api_key:
-                    _print_error(
-                        "[ERROR] No DeepSeek API key found. Set DEEPSEEK_API_KEY.",
-                        use_rich=use_rich,
-                    )
-                    return 1
-                summarize_cmd = [
-                    sys.executable,
-                    "-m",
-                    "audio2script_and_summarizer.summarizer_deepseek",
-                    "--transcript",
-                    diarization_json,
-                    "--voice-dir",
-                    voice_dir,
-                    "--output",
-                    summary_output,
-                    "--api-key",
-                    api_key,
-                    "--max-completion-tokens",
-                    str(args.deepseek_max_completion_tokens),
-                    "--target-minutes",
-                    str(target_minutes),
-                    "--avg-wpm",
-                    f"{avg_wpm:.2f}",
-                    "--word-budget",
-                    str(word_budget),
-                    "--word-budget-tolerance",
-                    str(args.word_budget_tolerance),
-                    "--agent-tool-mode",
-                    args.deepseek_agent_tool_mode,
-                    "--agent-read-max-lines",
-                    str(args.deepseek_agent_read_max_lines),
-                ]
-                summary_model_info = (
-                    "Provider: deepseek | Model: auto(reasoner/chat) "
-                    f"| Max output tokens: {args.deepseek_max_completion_tokens}"
-                )
-            _run_stage_command(
-                cmd=summarize_cmd,
-                current_env=current_env,
-                use_dashboard=dashboard.enabled,
-                stage_name="Stage 2 (Summarizer)",
-                heartbeat_seconds=args.heartbeat_seconds,
-                model_info=summary_model_info,
+        while True:
+            pass_label = correction_passes_used + 1
+            _print_checkpoint(
+                (
+                    f"Stage 2 pass {pass_label}: running summarizer with "
+                    f"word_budget={current_word_budget}"
+                ),
+                use_rich=use_rich,
             )
-        except subprocess.CalledProcessError as e:
-            _print_error(
-                f"[ERROR] Stage 2 crashed with code {e.returncode}", use_rich=use_rich
-            )
-            return 1
-        dashboard.complete_stage("Stage 2 complete")
+            try:
+                if llm_provider == "openai":
+                    api_key = (
+                        args.openai_key
+                        or os.environ.get("OPENAI_API_KEY")
+                        or os.environ.get("LLM_API_KEY")
+                        or os.environ.get("GEMINI_API_KEY")
+                    )
+                    if not api_key:
+                        _print_error(
+                            "[ERROR] No OpenAI API key found. Use --openai-key/--api-key or set OPENAI_API_KEY.",
+                            use_rich=use_rich,
+                        )
+                        return 1
+                    summarize_cmd = [
+                        sys.executable,
+                        "-m",
+                        "audio2script_and_summarizer.summarizer",
+                        "--transcript",
+                        diarization_json,
+                        "--voice-dir",
+                        voice_dir,
+                        "--output",
+                        summary_output,
+                        "--api-key",
+                        api_key,
+                        "--target-minutes",
+                        str(target_minutes),
+                        "--avg-wpm",
+                        f"{avg_wpm:.2f}",
+                        "--word-budget",
+                        str(current_word_budget),
+                        "--word-budget-tolerance",
+                        str(args.word_budget_tolerance),
+                    ]
+                    summary_model_info = "Provider: openai | Model: gpt-4o-2024-08-06"
+                else:
+                    api_key = os.environ.get("DEEPSEEK_API_KEY")
+                    if not api_key:
+                        _print_error(
+                            "[ERROR] No DeepSeek API key found. Set DEEPSEEK_API_KEY.",
+                            use_rich=use_rich,
+                        )
+                        return 1
+                    summarize_cmd = [
+                        sys.executable,
+                        "-m",
+                        "audio2script_and_summarizer.summarizer_deepseek",
+                        "--transcript",
+                        diarization_json,
+                        "--voice-dir",
+                        voice_dir,
+                        "--output",
+                        summary_output,
+                        "--api-key",
+                        api_key,
+                        "--max-completion-tokens",
+                        str(args.deepseek_max_completion_tokens),
+                        "--target-minutes",
+                        str(target_minutes),
+                        "--avg-wpm",
+                        f"{avg_wpm:.2f}",
+                        "--word-budget",
+                        str(current_word_budget),
+                        "--word-budget-tolerance",
+                        str(args.word_budget_tolerance),
+                        "--agent-tool-mode",
+                        args.deepseek_agent_tool_mode,
+                        "--agent-read-max-lines",
+                        str(args.deepseek_agent_read_max_lines),
+                    ]
+                    summary_model_info = (
+                        "Provider: deepseek | Model: auto(reasoner/chat) "
+                        f"| Max output tokens: {args.deepseek_max_completion_tokens}"
+                    )
+                _run_stage_command(
+                    cmd=summarize_cmd,
+                    current_env=current_env,
+                    use_dashboard=dashboard.enabled,
+                    stage_name="Stage 2 (Summarizer)",
+                    heartbeat_seconds=args.heartbeat_seconds,
+                    model_info=summary_model_info,
+                )
+            except subprocess.CalledProcessError as e:
+                _print_error(
+                    f"[ERROR] Stage 2 crashed with code {e.returncode}",
+                    use_rich=use_rich,
+                )
+                return 1
 
-        _print_success(f"Summary saved to: {summary_output}", use_rich=use_rich)
-        if not args.skip_stage3:
+            if args.skip_stage3:
+                break
+
+            if tts_pacing_calibration is not None:
+                from audio2script_and_summarizer.tts_pacing_calibration import (
+                    estimate_summary_duration_seconds,
+                )
+
+                estimated_seconds = estimate_summary_duration_seconds(
+                    summary_json_path=summary_output,
+                    calibration=tts_pacing_calibration,
+                )
+                _print_info(
+                    f"[INFO] Stage 3 preflight estimate={estimated_seconds:.2f}s for pass {pass_label}.",
+                    use_rich=use_rich,
+                )
+
             _print_stage_banner(
-                "[START] STAGE 3: Voice Cloning + Interjections", use_rich=use_rich
+                "[START] STAGE 3: Voice Cloning + Interjections",
+                use_rich=use_rich,
             )
             _print_checkpoint(
                 "Stage 3: running IndexTTS2 synthesis and interjection overlay.",
@@ -2877,31 +3234,108 @@ def main() -> int:
                 Path(args.stage3_output).resolve() if args.stage3_output else None
             )
             try:
-                final_wav_path, interjection_log_path, mistral_enabled = (
-                    _run_stage3_from_summary(
-                        summary_json_path=Path(summary_output).resolve(),
-                        output_wav_path=stage3_output_override,
-                        runtime_device=runtime_device,
-                        interjection_max_ratio=args.interjection_max_ratio,
-                        mistral_model_id=args.mistral_model_id,
-                        mistral_max_new_tokens=args.mistral_max_new_tokens,
-                    )
+                (
+                    final_wav_path,
+                    interjection_log_path,
+                    final_mistral_enabled,
+                    measured_duration_seconds,
+                ) = _run_stage3_from_summary(
+                    summary_json_path=Path(summary_output).resolve(),
+                    output_wav_path=stage3_output_override,
+                    runtime_device=runtime_device,
+                    interjection_max_ratio=args.interjection_max_ratio,
+                    mistral_model_id=args.mistral_model_id,
+                    mistral_max_new_tokens=args.mistral_max_new_tokens,
                 )
             except Exception as exc:  # noqa: BLE001
                 _print_error(f"[ERROR] Stage 3 failed: {exc}", use_rich=use_rich)
                 return 1
+
+            duration_delta_seconds = measured_duration_seconds - target_duration_seconds
+            within_tolerance = (
+                abs(duration_delta_seconds) <= args.duration_tolerance_seconds
+            )
+            _print_info(
+                (
+                    "[INFO] Duration check: "
+                    f"target={target_duration_seconds:.2f}s "
+                    f"actual={measured_duration_seconds:.2f}s "
+                    f"delta={duration_delta_seconds:+.2f}s "
+                    f"tolerance={args.duration_tolerance_seconds:.2f}s"
+                ),
+                use_rich=use_rich,
+            )
+            if within_tolerance:
+                _print_success(
+                    f"[SUCCESS] Duration target met on pass {pass_label}.",
+                    use_rich=use_rich,
+                )
+                break
+            if correction_passes_used >= max_correction_passes:
+                _print_warning(
+                    (
+                        "[WARN] Duration is outside tolerance and max correction passes "
+                        f"({max_correction_passes}) reached."
+                    ),
+                    use_rich=use_rich,
+                )
+                break
+
+            corrected_budget = _calculate_corrected_word_budget(
+                current_word_budget=current_word_budget,
+                target_duration_seconds=target_duration_seconds,
+                measured_duration_seconds=measured_duration_seconds,
+            )
+            if corrected_budget == current_word_budget:
+                if measured_duration_seconds > target_duration_seconds:
+                    corrected_budget = max(1, current_word_budget - 1)
+                else:
+                    corrected_budget = current_word_budget + 1
+
+            correction_passes_used += 1
+            _print_warning(
+                (
+                    "[WARN] Applying duration correction: "
+                    f"word_budget {current_word_budget} -> {corrected_budget} "
+                    f"(correction pass {correction_passes_used}/{max_correction_passes})."
+                ),
+                use_rich=use_rich,
+            )
+            current_word_budget = corrected_budget
+
+        dashboard.complete_stage("Stage 2 complete")
+        _print_success(f"Summary saved to: {summary_output}", use_rich=use_rich)
+
+        if not args.skip_stage3:
             dashboard.complete_stage("Stage 3 complete")
-            if not mistral_enabled:
+            _update_summary_report_duration_metrics(
+                summary_output_path=summary_output,
+                target_duration_seconds=target_duration_seconds,
+                measured_duration_seconds=measured_duration_seconds,
+                duration_tolerance_seconds=args.duration_tolerance_seconds,
+                duration_correction_passes=correction_passes_used,
+            )
+            if not final_mistral_enabled:
                 _print_warning(
                     "[WARN] Stage 3 ran without Mistral interjections because the model was unavailable.",
                     use_rich=use_rich,
                 )
-            _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
-            _print_success(
-                f"Interjection log: {interjection_log_path}", use_rich=use_rich
-            )
+            if final_wav_path is not None:
+                _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
+            if interjection_log_path is not None:
+                _print_success(
+                    f"Interjection log: {interjection_log_path}",
+                    use_rich=use_rich,
+                )
         else:
             dashboard.complete_stage("Stage 3 skipped (--skip-stage3)")
+            _update_summary_report_duration_metrics(
+                summary_output_path=summary_output,
+                target_duration_seconds=target_duration_seconds,
+                measured_duration_seconds=None,
+                duration_tolerance_seconds=args.duration_tolerance_seconds,
+                duration_correction_passes=0,
+            )
             _print_info("[INFO] Stage 3 skipped by --skip-stage3.", use_rich=use_rich)
         _print_stage_banner("[DONE] PIPELINE COMPLETE", use_rich=use_rich)
         return 0

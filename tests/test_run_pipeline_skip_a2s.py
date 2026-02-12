@@ -82,9 +82,14 @@ def test_skip_a2s_summary_uses_explicit_summary_json(
 
     captured: dict[str, object] = {}
 
-    def _fake_stage3(**kwargs: object) -> tuple[Path, Path, bool]:
+    def _fake_stage3(**kwargs: object) -> tuple[Path, Path, bool, float]:
         captured.update(kwargs)
-        return (tmp_path / "final.wav", tmp_path / "final_interjections.json", True)
+        return (
+            tmp_path / "final.wav",
+            tmp_path / "final_interjections.json",
+            True,
+            12.5,
+        )
 
     monkeypatch.setattr(run_pipeline, "_run_stage3_from_summary", _fake_stage3)
     monkeypatch.setattr(
@@ -131,9 +136,14 @@ def test_skip_a2s_summary_auto_detects_newest_summary_json(
 
     captured: dict[str, object] = {}
 
-    def _fake_stage3(**kwargs: object) -> tuple[Path, Path, bool]:
+    def _fake_stage3(**kwargs: object) -> tuple[Path, Path, bool, float]:
         captured.update(kwargs)
-        return (tmp_path / "final.wav", tmp_path / "final_interjections.json", True)
+        return (
+            tmp_path / "final.wav",
+            tmp_path / "final_interjections.json",
+            True,
+            12.5,
+        )
 
     monkeypatch.setattr(run_pipeline, "_run_stage3_from_summary", _fake_stage3)
     monkeypatch.setattr(
@@ -181,6 +191,7 @@ def test_stage3_runtime_output_is_captured_into_dashboard(
         def __init__(self) -> None:
             self.output_wav_path = tmp_path / "out.wav"
             self.interjection_log_path = tmp_path / "out_interjections.json"
+            self.output_duration_ms = 4200
             self.mistral_enabled = True
 
     def _fake_run_stage3_pipeline(**kwargs: object) -> _FakeStage3Result:
@@ -192,7 +203,7 @@ def test_stage3_runtime_output_is_captured_into_dashboard(
     monkeypatch.setattr(run_pipeline, "_ACTIVE_DASHBOARD", fake_dashboard)
     monkeypatch.setattr(stage3_voice, "run_stage3_pipeline", _fake_run_stage3_pipeline)
 
-    output_wav, interjection_log, mistral_enabled = (
+    output_wav, interjection_log, mistral_enabled, duration_seconds = (
         run_pipeline._run_stage3_from_summary(
             summary_json_path=tmp_path / "summary.json",
             output_wav_path=None,
@@ -206,5 +217,6 @@ def test_stage3_runtime_output_is_captured_into_dashboard(
     assert output_wav == tmp_path / "out.wav"
     assert interjection_log == tmp_path / "out_interjections.json"
     assert mistral_enabled is True
+    assert duration_seconds == pytest.approx(4.2)
     assert any("starting inference" in line for line in fake_dashboard.lines)
     assert any("Ninja is required" in line for line in fake_dashboard.lines)

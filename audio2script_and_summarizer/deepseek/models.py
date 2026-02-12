@@ -149,6 +149,11 @@ class SummaryReport(TypedDict):
     naturalness_metrics: dict[str, float | int]
     issues: list[str]
     output_path: str
+    target_duration_seconds: float | None
+    measured_duration_seconds: float | None
+    duration_delta_seconds: float | None
+    duration_within_tolerance: bool | None
+    duration_correction_passes: int
 
 class ToolLoopDiagnostics(TypedDict):
     """Represent tool-loop termination and salvage diagnostics."""
