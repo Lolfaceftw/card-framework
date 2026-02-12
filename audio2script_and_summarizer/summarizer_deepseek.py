@@ -48,6 +48,7 @@ SUMMARY_LINE_WORD_TARGET = 14
 SUMMARY_LINE_WORD_FLOOR = 7.0
 SUMMARY_MAX_SHORT_QUESTION_RATIO = 0.35
 ERROR_DIGEST_MAX_CHARS = 280
+TOOL_EVENT_DETAILS_MAX_CHARS = 1200
 TOKEN_BUDGET_WORD_FACTOR = 1.8
 TOKEN_BUDGET_SAFETY_BUFFER = 256
 TOKEN_BUDGET_MIN = 512
@@ -322,6 +323,21 @@ def _emit_stream_token_event(
     if not text.strip():
         return
     stream_event_callback({"event": "token", "phase": phase, "text": text})
+
+
+def _format_tool_event_details(payload: object) -> str:
+    """Format tool args/results as compact text for output-panel status events."""
+    if isinstance(payload, str):
+        text = " ".join(payload.strip().split())
+    else:
+        try:
+            text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        except TypeError:
+            text = " ".join(str(payload).strip().split())
+
+    if len(text) <= TOOL_EVENT_DETAILS_MAX_CHARS:
+        return text
+    return f"{text[:TOOL_EVENT_DETAILS_MAX_CHARS]}...(truncated)"
 
 
 def _merge_stream_fragment(existing: str, fragment: str) -> str:
@@ -1473,18 +1489,9 @@ def _request_deepseek_completion(
             while True:
                 rounds_used += 1
                 logger.info(
-                    "Tool loop round %d endpoint=%s model=%s (unbounded).",
-                    rounds_used,
+                    "Tool loop iteration endpoint=%s model=%s (unbounded).",
                     endpoint_mode,
                     settings.model,
-                )
-                _emit_stream_token_event(
-                    stream_event_callback,
-                    phase="status",
-                    text=(
-                        f"Tool loop round {rounds_used} "
-                        f"(endpoint={endpoint_mode}, model={settings.model}, unbounded)."
-                    ),
                 )
                 turn = _stream_assistant_turn(
                     client=client,
@@ -1524,18 +1531,18 @@ def _request_deepseek_completion(
                             )
                             continue
 
-                        tool_call_counts[function_name] = (
-                            tool_call_counts.get(function_name, 0) + 1
+                        tool_name_display = function_name or "unknown"
+                        tool_call_counts[tool_name_display] = (
+                            tool_call_counts.get(tool_name_display, 0) + 1
                         )
                         tool_result: dict[str, object]
-                        _emit_stream_token_event(
-                            stream_event_callback,
-                            phase="tool_call",
-                            text=f"Calling {function_name}.",
-                        )
+                        decoded_args: object | None
                         try:
                             decoded_args = json.loads(raw_arguments)
+                            args_text = _format_tool_event_details(decoded_args)
                         except JSONDecodeError as error:
+                            decoded_args = None
+                            args_text = _format_tool_event_details(raw_arguments)
                             tool_result = {
                                 "status": "fail",
                                 "error": f"Invalid tool arguments JSON: {error.msg}",
@@ -1543,140 +1550,109 @@ def _request_deepseek_completion(
                                     "Provide valid JSON arguments for the requested tool."
                                 ],
                             }
-                            _emit_stream_token_event(
-                                stream_event_callback,
-                                phase="tool_result",
-                                text=f"Tool arguments invalid JSON: {error.msg}.",
-                            )
-                        else:
-                            if function_name == READ_TRANSCRIPT_LINES_TOOL_NAME:
-                                if not isinstance(decoded_args, dict):
-                                    tool_result = {
-                                        "status": "fail",
-                                        "hints": [
-                                            "Provide start_index and end_index integers."
-                                        ],
-                                    }
-                                else:
-                                    try:
-                                        start_index = int(
-                                            decoded_args.get("start_index", 0)
-                                        )
-                                        end_index = int(
-                                            decoded_args.get("end_index", 0)
-                                        )
-                                    except (TypeError, ValueError):
-                                        tool_result = {
-                                            "status": "fail",
-                                            "hints": [
-                                                "start_index and end_index must be integers."
-                                            ],
-                                        }
-                                    else:
-                                        read_result = _read_transcript_lines_tool(
-                                            transcript_segments=transcript_segments,
-                                            start_index=start_index,
-                                            end_index=end_index,
-                                            max_lines=settings.agent_read_max_lines,
-                                        )
-                                        tool_result = cast(dict[str, object], read_result)
-                                        _emit_stream_token_event(
-                                            stream_event_callback,
-                                            phase="tool_result",
-                                            text=(
-                                                "Transcript read result: "
-                                                f"status={read_result['status']} "
-                                                f"returned={read_result['returned_count']}."
-                                            ),
-                                        )
-                            elif function_name == COUNT_WORDS_TOOL_NAME:
-                                if not isinstance(decoded_args, dict):
-                                    tool_result = {
-                                        "status": "fail",
-                                        "hints": [
-                                            "Provide text or lines for word counting."
-                                        ],
-                                    }
-                                else:
-                                    text_arg = decoded_args.get("text")
-                                    text = str(text_arg) if text_arg is not None else None
-                                    lines_arg = decoded_args.get("lines")
-                                    lines = (
-                                        [str(line) for line in lines_arg]
-                                        if isinstance(lines_arg, list)
-                                        else None
-                                    )
-                                    count_result = _count_words_tool(
-                                        text=text,
-                                        lines=lines,
-                                    )
-                                    tool_result = cast(dict[str, object], count_result)
-                                    _emit_stream_token_event(
-                                        stream_event_callback,
-                                        phase="tool_result",
-                                        text=(
-                                            f"Word count result: total_words={count_result['total_words']}."
-                                        ),
-                                    )
-                            elif function_name == EVALUATE_SCRIPT_TOOL_NAME:
-                                dialogue_payload = _coerce_tool_dialogue_lines(
-                                    decoded_args.get("dialogue", [])
-                                    if isinstance(decoded_args, dict)
-                                    else []
-                                )
-                                constraint_result = _evaluate_script_constraints_tool(
-                                    dialogue_payload=dialogue_payload,
-                                    allowed_speakers=allowed_speakers,
-                                    segment_speaker_map=segment_speaker_map,
-                                    word_budget=word_budget,
-                                    word_budget_tolerance=word_budget_tolerance,
-                                    source_word_count=source_word_count,
-                                )
-                                latest_tool_status = cast(
-                                    Literal["pass", "fail"], constraint_result["status"]
-                                )
-                                tool_result = cast(dict[str, object], constraint_result)
-                                logger.info(
-                                    "Tool evaluation result: status=%s total_words=%d target=%s natural=%s",
-                                    constraint_result["status"],
-                                    constraint_result["word_budget"]["total_words"],
-                                    constraint_result["word_budget"]["target_words"],
-                                    constraint_result["naturalness"]["is_natural"],
-                                )
-                                budget_info = constraint_result["word_budget"]
-                                validation_info = constraint_result["validation"]
-                                naturalness_info = constraint_result["naturalness"]
-                                _emit_stream_token_event(
-                                    stream_event_callback,
-                                    phase="tool_result",
-                                    text=(
-                                        "Constraint result: "
-                                        f"status={constraint_result['status']} "
-                                        f"total_words={budget_info['total_words']} "
-                                        f"target={budget_info['target_words']} "
-                                        f"range=[{budget_info['lower_bound']},{budget_info['upper_bound']}] "
-                                        f"issues={len(validation_info['issues'])} "
-                                        f"avg_words_per_line={naturalness_info['avg_words_per_line']:.2f}."
-                                    ),
-                                )
-                            else:
+                        _emit_stream_token_event(
+                            stream_event_callback,
+                            phase="tool_call",
+                            text=(
+                                f"Invoked tool={tool_name_display} "
+                                f"arguments={args_text}"
+                            ),
+                        )
+                        if decoded_args is None:
+                            pass
+                        elif function_name == READ_TRANSCRIPT_LINES_TOOL_NAME:
+                            if not isinstance(decoded_args, dict):
                                 tool_result = {
                                     "status": "fail",
-                                    "error": f"Unsupported tool name: {function_name}",
-                                    "hints": [
-                                        (
-                                            "Supported tools: "
-                                            f"{READ_TRANSCRIPT_LINES_TOOL_NAME}, "
-                                            f"{COUNT_WORDS_TOOL_NAME}, "
-                                            f"{EVALUATE_SCRIPT_TOOL_NAME}."
-                                        )
-                                    ],
+                                    "hints": ["Provide start_index and end_index integers."],
                                 }
-                                _emit_stream_token_event(
-                                    stream_event_callback,
-                                    phase="tool_result",
-                                    text=f"Unsupported tool requested: {function_name}.",
+                            else:
+                                try:
+                                    start_index = int(decoded_args.get("start_index", 0))
+                                    end_index = int(decoded_args.get("end_index", 0))
+                                except (TypeError, ValueError):
+                                    tool_result = {
+                                        "status": "fail",
+                                        "hints": [
+                                            "start_index and end_index must be integers."
+                                        ],
+                                    }
+                                else:
+                                    read_result = _read_transcript_lines_tool(
+                                        transcript_segments=transcript_segments,
+                                        start_index=start_index,
+                                        end_index=end_index,
+                                        max_lines=settings.agent_read_max_lines,
+                                    )
+                                    tool_result = cast(dict[str, object], read_result)
+                        elif function_name == COUNT_WORDS_TOOL_NAME:
+                            if not isinstance(decoded_args, dict):
+                                tool_result = {
+                                    "status": "fail",
+                                    "hints": ["Provide text or lines for word counting."],
+                                }
+                            else:
+                                text_arg = decoded_args.get("text")
+                                text = str(text_arg) if text_arg is not None else None
+                                lines_arg = decoded_args.get("lines")
+                                lines = (
+                                    [str(line) for line in lines_arg]
+                                    if isinstance(lines_arg, list)
+                                    else None
                                 )
+                                count_result = _count_words_tool(
+                                    text=text,
+                                    lines=lines,
+                                )
+                                tool_result = cast(dict[str, object], count_result)
+                        elif function_name == EVALUATE_SCRIPT_TOOL_NAME:
+                            dialogue_payload = _coerce_tool_dialogue_lines(
+                                decoded_args.get("dialogue", [])
+                                if isinstance(decoded_args, dict)
+                                else []
+                            )
+                            constraint_result = _evaluate_script_constraints_tool(
+                                dialogue_payload=dialogue_payload,
+                                allowed_speakers=allowed_speakers,
+                                segment_speaker_map=segment_speaker_map,
+                                word_budget=word_budget,
+                                word_budget_tolerance=word_budget_tolerance,
+                                source_word_count=source_word_count,
+                            )
+                            latest_tool_status = cast(
+                                Literal["pass", "fail"], constraint_result["status"]
+                            )
+                            tool_result = cast(dict[str, object], constraint_result)
+                            logger.info(
+                                "Tool evaluation result: status=%s total_words=%d target=%s natural=%s",
+                                constraint_result["status"],
+                                constraint_result["word_budget"]["total_words"],
+                                constraint_result["word_budget"]["target_words"],
+                                constraint_result["naturalness"]["is_natural"],
+                            )
+                        else:
+                            tool_result = {
+                                "status": "fail",
+                                "error": f"Unsupported tool name: {function_name}",
+                                "hints": [
+                                    (
+                                        "Supported tools: "
+                                        f"{READ_TRANSCRIPT_LINES_TOOL_NAME}, "
+                                        f"{COUNT_WORDS_TOOL_NAME}, "
+                                        f"{EVALUATE_SCRIPT_TOOL_NAME}."
+                                    )
+                                ],
+                            }
+
+                        _emit_stream_token_event(
+                            stream_event_callback,
+                            phase="tool_result",
+                            text=(
+                                f"Tool result: tool={tool_name_display} "
+                                f"status={tool_result.get('status', 'unknown')} "
+                                f"details={_format_tool_event_details(tool_result)}"
+                            ),
+                        )
 
                         messages.append(
                             {

@@ -1306,10 +1306,12 @@ def _route_deepseek_stream_event(
     if event_name == "token":
         text = payload.get("text")
         if isinstance(text, str) and text:
-            dashboard.append_deepseek_stream_token(
-                phase=str(payload.get("phase", "answer")),
-                text=text,
-            )
+            phase = str(payload.get("phase", "answer")).strip().lower()
+            if phase in {"reasoning", "answer"}:
+                dashboard.append_deepseek_stream_token(phase=phase, text=text)
+            else:
+                phase_tag = phase.upper() if phase else "TOKEN"
+                dashboard.log(f"[DEEPSEEK {phase_tag}] {text}")
         return True
 
     if event_name == "summary_json_ready":

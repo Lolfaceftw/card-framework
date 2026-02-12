@@ -15,6 +15,7 @@ class _FakeDashboard:
     def __init__(self) -> None:
         self.opened_model: str | None = None
         self.tokens: list[tuple[str, str]] = []
+        self.logs: list[str] = []
         self.closed = False
 
     def open_deepseek_stream_panel(self, model_name: str) -> None:
@@ -28,6 +29,10 @@ class _FakeDashboard:
     def close_deepseek_stream_panel(self) -> None:
         """Record stream panel close action."""
         self.closed = True
+
+    def log(self, message: str) -> None:
+        """Record output panel log lines."""
+        self.logs.append(message)
 
 
 def test_parse_deepseek_stream_event_line_parses_json_payload() -> None:
@@ -62,9 +67,17 @@ def test_route_deepseek_stream_event_dispatches_panel_actions() -> None:
         dashboard, {"event": "token", "phase": "status", "text": "round 1/3"}
     )
     _route_deepseek_stream_event(  # noqa: SLF001
+        dashboard,
+        {"event": "token", "phase": "tool_call", "text": "Invoked count_words."},
+    )
+    _route_deepseek_stream_event(  # noqa: SLF001
         dashboard, {"event": "summary_json_ready", "path": "out.json"}
     )
 
     assert dashboard.opened_model == "deepseek-reasoner"
-    assert dashboard.tokens == [("answer", "hello"), ("status", "round 1/3")]
+    assert dashboard.tokens == [("answer", "hello")]
+    assert dashboard.logs == [
+        "[DEEPSEEK STATUS] round 1/3",
+        "[DEEPSEEK TOOL_CALL] Invoked count_words.",
+    ]
     assert dashboard.closed is True
