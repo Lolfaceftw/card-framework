@@ -113,6 +113,7 @@ class Stage3Result:
 
     output_wav_path: Path
     interjection_log_path: Path
+    output_duration_ms: int
     interjection_count: int
     segment_count: int
     mistral_enabled: bool
@@ -824,14 +825,16 @@ def run_stage3_pipeline(
     )
 
     logger.info(
-        "stage3_completed output=%s interjections=%d segments=%d",
+        "stage3_completed output=%s duration_ms=%d interjections=%d segments=%d",
         resolved_output_path,
+        len(merged_audio),
         len(interjection_log),
         len(processed_segments),
     )
     return Stage3Result(
         output_wav_path=resolved_output_path,
         interjection_log_path=interjection_log_path,
+        output_duration_ms=len(merged_audio),
         interjection_count=len(interjection_log),
         segment_count=len(processed_segments),
         mistral_enabled=mistral_enabled,

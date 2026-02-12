@@ -2466,6 +2466,11 @@ def main() -> int:
             "naturalness_metrics": selected_naturalness_metrics,
             "issues": selected_issues,
             "output_path": args.output,
+            "target_duration_seconds": None,
+            "measured_duration_seconds": None,
+            "duration_delta_seconds": None,
+            "duration_within_tolerance": None,
+            "duration_correction_passes": 0,
         }
         _write_summary_report(summary_report_path, report)
         logger.error(
@@ -2512,6 +2517,11 @@ def main() -> int:
         naturalness_metrics=selected_naturalness_metrics,
         issues=selected_issues,
         output_path=args.output,
+        target_duration_seconds=None,
+        measured_duration_seconds=None,
+        duration_delta_seconds=None,
+        duration_within_tolerance=None,
+        duration_correction_passes=0,
     )
     _write_summary_report(summary_report_path, report)
 

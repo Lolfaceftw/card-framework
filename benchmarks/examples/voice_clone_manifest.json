@@ -1,0 +1,21 @@
+[
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "PATH/TO/SPEAKER_00_PROMPT.wav",
+    "reference_wav": "PATH/TO/SPEAKER_00_HOLDOUT.wav",
+    "text": "Welcome back to the show. Today we evaluate voice cloning quality.",
+    "use_emo_text": true,
+    "emo_text": "Neutral and clear delivery.",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_01",
+    "prompt_wav": "PATH/TO/SPEAKER_01_PROMPT.wav",
+    "reference_wav": "PATH/TO/SPEAKER_01_HOLDOUT.wav",
+    "text": "This benchmark compares generated speech against holdout reference audio.",
+    "use_emo_text": true,
+    "emo_text": "Thoughtful, slightly energetic.",
+    "emo_alpha": 0.6
+  }
+]
+

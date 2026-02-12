@@ -117,6 +117,7 @@ def test_run_stage3_pipeline_with_mocked_engines(tmp_path: Path) -> None:
     assert result.output_wav_path == output_path.resolve()
     assert result.output_wav_path.exists()
     assert result.interjection_log_path.exists()
+    assert result.output_duration_ms > 0
     log_payload = json.loads(result.interjection_log_path.read_text(encoding="utf-8"))
     assert len(log_payload) == 1
 
@@ -138,6 +139,7 @@ def test_run_stage3_pipeline_degrades_when_planner_unavailable(tmp_path: Path) -
     )
 
     assert result.output_wav_path.exists()
+    assert result.output_duration_ms > 0
     assert result.interjection_count == 0
     log_payload = json.loads(result.interjection_log_path.read_text(encoding="utf-8"))
     assert log_payload == []
