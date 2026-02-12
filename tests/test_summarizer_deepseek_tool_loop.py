@@ -175,7 +175,14 @@ def test_request_completion_tool_loop_runs_until_pass() -> None:
                         ]
                     }
                 )
-                split_at = max(1, len(tool_arguments) // 2)
+                write_arguments = json.dumps(
+                    {
+                        "mode": "overwrite",
+                        "content": json.dumps(_sample_payload()),
+                    }
+                )
+                eval_split_at = max(1, len(tool_arguments) // 2)
+                write_split_at = max(1, len(write_arguments) // 2)
                 return [
                     _stream_chunk(reasoning="try again"),
                     _stream_chunk(
@@ -183,8 +190,14 @@ def test_request_completion_tool_loop_runs_until_pass() -> None:
                             _tool_call_delta(
                                 index=0,
                                 tool_name=deepseek_summary.EVALUATE_SCRIPT_TOOL_NAME,
-                                arguments=tool_arguments[:split_at],
+                                arguments=tool_arguments[:eval_split_at],
                                 tool_call_id="call_2",
+                            ),
+                            _tool_call_delta(
+                                index=1,
+                                tool_name=deepseek_summary.WRITE_OUTPUT_SEGMENT_TOOL_NAME,
+                                arguments=write_arguments[:write_split_at],
+                                tool_call_id="call_2_write",
                             )
                         ]
                     ),
@@ -193,7 +206,11 @@ def test_request_completion_tool_loop_runs_until_pass() -> None:
                         tool_calls=[
                             _tool_call_delta(
                                 index=0,
-                                arguments=tool_arguments[split_at:],
+                                arguments=tool_arguments[eval_split_at:],
+                            ),
+                            _tool_call_delta(
+                                index=1,
+                                arguments=write_arguments[write_split_at:],
                             )
                         ],
                     ),
@@ -202,7 +219,7 @@ def test_request_completion_tool_loop_runs_until_pass() -> None:
                 _stream_chunk(reasoning="final"),
                 _stream_chunk(
                     finish_reason="stop",
-                    content=json.dumps(_sample_payload()),
+                    content=deepseek_summary.STAGED_OUTPUT_READY_MARKER,
                 ),
             ]
 
@@ -242,6 +259,7 @@ def test_request_completion_tool_loop_runs_until_pass() -> None:
     assert used_repair is False
     assert tool_rounds == 3
     assert tool_call_counts[deepseek_summary.EVALUATE_SCRIPT_TOOL_NAME] == 2
+    assert tool_call_counts[deepseek_summary.WRITE_OUTPUT_SEGMENT_TOOL_NAME] == 1
     assert all(value is True for value in completions.seen_stream_values)
     event_names = [str(event.get("event", "")) for event in stream_events]
     assert "start" in event_names
@@ -377,6 +395,100 @@ def test_request_completion_full_agentic_requires_read_tool() -> None:
         if event.get("event") == "token" and event.get("phase") == "status"
     ]
     assert any("read_transcript_lines was not called" in message for message in status_messages)
+
+
+def test_request_completion_requires_write_tool_before_final_json() -> None:
+    """Reject finalization until write_output_segment succeeds at least once."""
+
+    class _FakeCompletions:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def create(self, **kwargs: object) -> object:
+            self.call_count += 1
+            if self.call_count >= 4:
+                raise RuntimeError("stop test loop")
+            if self.call_count == 1:
+                tool_arguments = json.dumps(
+                    {
+                        "dialogue": [
+                            _tool_line("hello this line has natural spoken pacing")
+                        ]
+                    }
+                )
+                split_at = max(1, len(tool_arguments) // 2)
+                return [
+                    _stream_chunk(reasoning="evaluate pass"),
+                    _stream_chunk(
+                        tool_calls=[
+                            _tool_call_delta(
+                                index=0,
+                                tool_name=deepseek_summary.EVALUATE_SCRIPT_TOOL_NAME,
+                                arguments=tool_arguments[:split_at],
+                                tool_call_id="call_eval",
+                            )
+                        ],
+                    ),
+                    _stream_chunk(
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            _tool_call_delta(
+                                index=0,
+                                arguments=tool_arguments[split_at:],
+                            )
+                        ],
+                    ),
+                ]
+            return [
+                _stream_chunk(reasoning="skip write"),
+                _stream_chunk(
+                    finish_reason="stop",
+                    content=json.dumps(_sample_payload()),
+                ),
+            ]
+
+    settings = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-reasoner",
+        max_completion_tokens=64000,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=None,
+        auto_beta=False,
+        agent_tool_loop=True,
+        agent_tool_mode="constraints_only",
+        agent_max_tool_rounds=1,
+    )
+    completions = _FakeCompletions()
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    stream_events: list[dict[str, object]] = []
+
+    with pytest.raises(RuntimeError, match="stop test loop"):
+        deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+            client=cast(object, fake_client),
+            settings=settings,
+            transcript_text="[seg_00000|Speaker 0]: hello world",
+            transcript_segments=_segments(),
+            transcript_manifest="segment_count=2",
+            system_prompt="test prompt",
+            retry_context=None,
+            endpoint_mode="stable",
+            allowed_speakers={"Speaker 0"},
+            segment_speaker_map={"seg_00000": "Speaker 0"},
+            word_budget=None,
+            word_budget_tolerance=0.0,
+            source_word_count=20,
+            stream_event_callback=stream_events.append,
+        )
+    assert completions.call_count == 4
+    status_messages = [
+        str(event.get("text", ""))
+        for event in stream_events
+        if event.get("event") == "token" and event.get("phase") == "status"
+    ]
+    assert any(
+        "write_output_segment has no successful writes yet" in message
+        for message in status_messages
+    )
 
 
 def test_read_transcript_lines_tool_clamps_to_bounds() -> None:
