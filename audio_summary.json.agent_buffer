@@ -1,0 +1,32 @@
+{
+ "dialogue": [
+   {
+     "speaker": "SPEAKER_00",
+     "text": "We're joined by Dr. Charles Chafin, whose work bridges psychology and financial planning. Welcome to the Rational Reminder Podcast.",
+     "emo_text": "Warm and engaging",
+     "emo_alpha": 0.6,
+     "source_segment_ids": ["seg_000", "seg_0004"]
+   },
+   {
+     "speaker": "SPEAKER_02",
+     "text": "Thanks for having me.",
+     "emo_text": "Grateful and polite",
+     "emo_alpha": 0.6,
+     "source_segment_ids": ["seg_0005"]
+   },
+   {
+     "speaker": "SPEAKER_00",
+     "text": "Can you talk about what role psychology plays in the financial planning process?",
+     "emo_text": "Curious and focused",
+     "emo_alpha": 0.6,
+     "source_segment_ids": ["seg_0006"]
+   },
+   {
+     "speaker": "SPEAKER_02",
+     "text": "Psychology explains why and how clients behave with money, bridging technical advice and real-world behavior.",
+     "emo_text": "Explanatory and insightful",
+     "emo_alpha": 0.6,
+     "source_segment_ids": ["seg_0007"]
+   }
+ ]
+}

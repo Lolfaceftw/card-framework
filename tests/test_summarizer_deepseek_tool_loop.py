@@ -596,3 +596,155 @@ def test_resolve_summary_report_path_defaults_to_output_sidecar() -> None:
         output_path="summarized_script.json", report_path=None
     )
     assert path == "summarized_script.json.report.json"
+
+
+def test_request_completion_reuses_existing_conversation_messages() -> None:
+    """Keep one chat window by reusing persisted conversation messages."""
+
+    class _FakeCompletions:
+        def __init__(self) -> None:
+            self.seen_messages: list[dict[str, object]] | None = None
+
+        def create(self, **kwargs: object) -> object:
+            self.seen_messages = cast(list[dict[str, object]], kwargs["messages"])
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=json.dumps(_sample_payload())),
+                    )
+                ],
+                usage=SimpleNamespace(total_tokens=128),
+            )
+
+    completions = _FakeCompletions()
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    settings = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-chat",
+        max_completion_tokens=8192,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=0.2,
+        auto_beta=False,
+        agent_tool_loop=False,
+        agent_tool_mode="off",
+        agent_max_tool_rounds=1,
+        agent_read_max_lines=10,
+    )
+    conversation_state = deepseek_summary.ConversationState(
+        messages=[
+            {"role": "system", "content": "persisted system"},
+            {"role": "user", "content": "persisted context"},
+        ]
+    )
+
+    parsed_script, _, _, _ = deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+        client=cast(object, fake_client),
+        settings=settings,
+        transcript_text="[seg_00000|Speaker 0]: ignored for existing state",
+        transcript_segments=_segments(),
+        transcript_manifest="segment_count=2",
+        system_prompt="test prompt",
+        retry_context=None,
+        endpoint_mode="stable",
+        allowed_speakers={"Speaker 0"},
+        segment_speaker_map={"seg_00000": "Speaker 0"},
+        word_budget=None,
+        word_budget_tolerance=0.0,
+        source_word_count=20,
+        conversation_state=conversation_state,
+    )
+
+    assert parsed_script.dialogue[0].text == "hello world"
+    assert completions.seen_messages is not None
+    assert completions.seen_messages[0]["content"] == "persisted system"
+    assert completions.seen_messages[1]["content"] == "persisted context"
+    assert any(
+        message.get("role") == "assistant" for message in conversation_state.messages
+    )
+
+
+def test_request_completion_rolls_over_context_when_low(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Summarize and reset conversation when context budget reaches rollover threshold."""
+
+    class _FakeCompletions:
+        def __init__(self) -> None:
+            self.seen_messages: list[dict[str, object]] | None = None
+
+        def create(self, **kwargs: object) -> object:
+            self.seen_messages = cast(list[dict[str, object]], kwargs["messages"])
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=json.dumps(_sample_payload())),
+                    )
+                ],
+                usage=SimpleNamespace(total_tokens=24),
+            )
+
+    def fake_context_summary(**kwargs: object) -> str:
+        del kwargs
+        return "condensed context"
+
+    monkeypatch.setattr(
+        deepseek_summary,
+        "_summarize_conversation_context_via_deepseek",
+        fake_context_summary,
+    )
+
+    completions = _FakeCompletions()
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    settings = deepseek_summary.DeepSeekRequestSettings(
+        model="deepseek-chat",
+        max_completion_tokens=100,
+        request_timeout_seconds=30.0,
+        http_retries=1,
+        temperature=0.2,
+        auto_beta=False,
+        agent_tool_loop=False,
+        agent_tool_mode="off",
+        agent_max_tool_rounds=1,
+        agent_read_max_lines=10,
+    )
+    conversation_state = deepseek_summary.ConversationState(
+        messages=[
+            {"role": "system", "content": "persisted system"},
+            {"role": "user", "content": "large historic context"},
+        ],
+        rollover_count=0,
+        context_tokens_used=75,
+        context_tokens_limit=100,
+    )
+    stream_events: list[dict[str, object]] = []
+
+    parsed_script, _, _, _ = deepseek_summary._request_deepseek_completion(  # noqa: SLF001
+        client=cast(object, fake_client),
+        settings=settings,
+        transcript_text="[seg_00000|Speaker 0]: ignored",
+        transcript_segments=_segments(),
+        transcript_manifest="segment_count=2",
+        system_prompt="test prompt",
+        retry_context=None,
+        endpoint_mode="stable",
+        allowed_speakers={"Speaker 0"},
+        segment_speaker_map={"seg_00000": "Speaker 0"},
+        word_budget=None,
+        word_budget_tolerance=0.0,
+        source_word_count=20,
+        stream_event_callback=stream_events.append,
+        conversation_state=conversation_state,
+    )
+
+    assert parsed_script.dialogue[0].text == "hello world"
+    assert completions.seen_messages is not None
+    assert completions.seen_messages[1]["content"].startswith(
+        "Summarized context from previous conversation window:"
+    )
+    assert conversation_state.rollover_count == 1
+    assert any(
+        event.get("event") == "context_usage" and event.get("rollover_triggered") is True
+        for event in stream_events
+    )

@@ -64,6 +64,9 @@ WRITE_OUTPUT_SEGMENT_TOOL_NAME = "write_output_segment"
 STAGED_OUTPUT_READY_MARKER = "STAGED_OUTPUT_READY"
 DEFAULT_BUDGET_FAILURE_POLICY = "degraded_success"
 DEFAULT_AGENT_TOOL_MODE = "full_agentic"
+CONTEXT_WINDOW_ROLLOVER_LEFT_RATIO = 0.30
+CONTEXT_SUMMARY_MAX_TOKENS = 1024
+CONTEXT_SUMMARY_MAX_CHARS = 12000
 DISFLUENCY_PATTERN = re.compile(r"\b(?:um+|uh+|ah+)\b", re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
@@ -280,6 +283,26 @@ class DeepSeekRequestSettings:
     agent_read_max_lines: int = DEFAULT_AGENT_READ_MAX_LINES
 
 
+@dataclass(slots=True)
+class ConversationState:
+    """Persist DeepSeek multi-round chat context across repeated calls."""
+
+    messages: list[dict[str, Any]]
+    rollover_count: int = 0
+    context_tokens_used: int | None = None
+    context_tokens_limit: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ContextUsageSnapshot:
+    """Represent normalized context-window usage for UI reporting."""
+
+    tokens_used: int
+    tokens_limit: int
+    tokens_left: int
+    percent_left: float
+
+
 @dataclass(slots=True, frozen=True)
 class StreamedAssistantTurn:
     """Represent one streamed assistant turn with optional tool calls."""
@@ -288,6 +311,7 @@ class StreamedAssistantTurn:
     reasoning_content: str
     content: str
     tool_calls: list[dict[str, Any]]
+    usage_total_tokens: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -340,6 +364,100 @@ def _emit_stream_token_event(
     stream_event_callback({"event": "token", "phase": phase, "text": text})
 
 
+def _coerce_non_negative_int(value: object) -> int | None:
+    """Coerce object to a non-negative integer when possible."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return max(0, int(value))
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = int(stripped)
+        except ValueError:
+            return None
+        return max(0, parsed)
+    return None
+
+
+def _extract_total_tokens_from_usage(usage: object) -> int | None:
+    """Extract total token usage from SDK usage payloads."""
+    if usage is None:
+        return None
+
+    total_tokens: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    if isinstance(usage, dict):
+        total_tokens = _coerce_non_negative_int(usage.get("total_tokens"))
+        prompt_tokens = _coerce_non_negative_int(usage.get("prompt_tokens"))
+        completion_tokens = _coerce_non_negative_int(usage.get("completion_tokens"))
+    else:
+        total_tokens = _coerce_non_negative_int(getattr(usage, "total_tokens", None))
+        prompt_tokens = _coerce_non_negative_int(getattr(usage, "prompt_tokens", None))
+        completion_tokens = _coerce_non_negative_int(
+            getattr(usage, "completion_tokens", None)
+        )
+
+    if total_tokens is not None:
+        return total_tokens
+    if prompt_tokens is None and completion_tokens is None:
+        return None
+    return (prompt_tokens or 0) + (completion_tokens or 0)
+
+
+def _build_context_usage_snapshot(
+    *,
+    tokens_used: int,
+    tokens_limit: int,
+) -> ContextUsageSnapshot:
+    """Create normalized context usage values for dashboard updates."""
+    bounded_limit = max(1, tokens_limit)
+    bounded_used = max(0, tokens_used)
+    tokens_left = max(0, bounded_limit - bounded_used)
+    percent_left = tokens_left / bounded_limit
+    return ContextUsageSnapshot(
+        tokens_used=bounded_used,
+        tokens_limit=bounded_limit,
+        tokens_left=tokens_left,
+        percent_left=percent_left,
+    )
+
+
+def _emit_context_usage_event(
+    stream_event_callback: Callable[[dict[str, object]], None] | None,
+    *,
+    snapshot: ContextUsageSnapshot,
+    rollover_triggered: bool,
+    rollover_count: int,
+) -> None:
+    """Emit context-window usage telemetry for the parent dashboard."""
+    if stream_event_callback is None:
+        return
+    stream_event_callback(
+        {
+            "event": "context_usage",
+            "tokens_used": snapshot.tokens_used,
+            "tokens_limit": snapshot.tokens_limit,
+            "tokens_left": snapshot.tokens_left,
+            "percent_left": snapshot.percent_left,
+            "rollover_triggered": rollover_triggered,
+            "rollover_count": rollover_count,
+        }
+    )
+
+
+def _should_rollover_context(snapshot: ContextUsageSnapshot) -> bool:
+    """Return True when context remaining budget is at or below threshold."""
+    return snapshot.percent_left <= CONTEXT_WINDOW_ROLLOVER_LEFT_RATIO
+
+
 def _format_tool_event_details(payload: object) -> str:
     """Format tool args/results as compact text for output-panel status events."""
     if isinstance(payload, str):
@@ -385,8 +503,14 @@ def _stream_assistant_turn(
     reasoning_parts: list[str] = []
     answer_parts: list[str] = []
     tool_call_accumulator: dict[int, dict[str, Any]] = {}
+    usage_total_tokens: int | None = None
     stream_response = client.chat.completions.create(**cast(Any, request_payload))
     for chunk in stream_response:
+        chunk_total_tokens = _extract_total_tokens_from_usage(
+            getattr(chunk, "usage", None)
+        )
+        if chunk_total_tokens is not None:
+            usage_total_tokens = chunk_total_tokens
         choices = getattr(chunk, "choices", None)
         if not choices:
             continue
@@ -494,6 +618,7 @@ def _stream_assistant_turn(
         reasoning_content="".join(reasoning_parts),
         content="".join(answer_parts),
         tool_calls=normalized_tool_calls,
+        usage_total_tokens=usage_total_tokens,
     )
 
 
@@ -551,6 +676,37 @@ def _build_transcript_manifest(transcript_segments: list[TranscriptSegment]) -> 
         f"segment_count={len(transcript_segments)} "
         f"segment_id_range=[{first_segment}..{last_segment}] "
         f"speaker_distribution={speaker_summary}"
+    )
+
+
+def _build_initial_user_message(
+    *,
+    tool_mode: AgentToolMode,
+    transcript_text: str,
+    transcript_manifest: str,
+) -> str:
+    """Build the initial user turn used to seed a fresh conversation."""
+    if tool_mode == "full_agentic":
+        return (
+            "Use tools to iteratively build a compliant summary.\n"
+            f"Transcript manifest: {transcript_manifest}\n"
+            f"Read transcript slices with {READ_TRANSCRIPT_LINES_TOOL_NAME}.\n"
+            f"Stage JSON chunks with {WRITE_OUTPUT_SEGMENT_TOOL_NAME}.\n"
+            "When staged JSON is complete, you may answer with STAGED_OUTPUT_READY."
+        )
+    return f"Here is the raw transcript:\n\n{transcript_text}"
+
+
+def _build_rollover_continuation_message(tool_mode: AgentToolMode) -> str:
+    """Build continuation instruction after context rollover compression."""
+    if tool_mode == "full_agentic":
+        return (
+            "Continue the same task using the summarized prior conversation. "
+            "Keep using tools until constraints pass and final JSON is valid."
+        )
+    return (
+        "Continue the same summarization task using the summarized prior context. "
+        "Return strict JSON matching the required schema."
     )
 
 
@@ -1564,6 +1720,94 @@ def _build_deepseek_client(
     )
 
 
+def _clone_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Clone chat messages without mutating the source state on failed attempts."""
+    return [dict(message) for message in messages]
+
+
+def _summarize_conversation_context_via_deepseek(
+    *,
+    client: OpenAI,
+    conversation_messages: list[dict[str, Any]],
+    tokens_limit: int,
+    endpoint_mode: EndpointMode,
+) -> str:
+    """Generate a compact summary of prior conversation for context rollover."""
+    if not conversation_messages:
+        return "No prior context."
+
+    summary_messages = _clone_messages(conversation_messages)
+    summary_messages.extend(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "You compress an existing assistant conversation for continuation. "
+                    "Preserve task objective, schema constraints, tool state, unresolved "
+                    "errors, validation/budget targets, and key factual transcript evidence."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Summarize this conversation for a fresh context window. "
+                    "Keep it concise and execution-focused."
+                ),
+            },
+        ]
+    )
+    response = client.chat.completions.create(
+        **cast(
+            Any,
+            {
+                "model": DEEPSEEK_CHAT_MODEL,
+                "messages": summary_messages,
+                "max_tokens": min(tokens_limit, CONTEXT_SUMMARY_MAX_TOKENS),
+                "temperature": 0.0,
+            },
+        )
+    )
+    summary_choice = response.choices[0]
+    summary_text = _normalize_assistant_content(summary_choice.message.content).strip()
+    if not summary_text:
+        raise ValueError("DeepSeek context summary was empty.")
+    if len(summary_text) > CONTEXT_SUMMARY_MAX_CHARS:
+        return summary_text[:CONTEXT_SUMMARY_MAX_CHARS]
+    logger.info(
+        "Generated context rollover summary endpoint=%s chars=%d",
+        endpoint_mode,
+        len(summary_text),
+    )
+    return summary_text
+
+
+def _reset_conversation_with_summary(
+    *,
+    messages: list[dict[str, Any]],
+    system_prompt: str,
+    summary_text: str,
+    tool_mode: AgentToolMode,
+) -> None:
+    """Replace message history with summarized context for a fresh window."""
+    messages.clear()
+    messages.append({"role": "system", "content": system_prompt})
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Summarized context from previous conversation window:\n"
+                f"{summary_text}"
+            ),
+        }
+    )
+    messages.append(
+        {
+            "role": "user",
+            "content": _build_rollover_continuation_message(tool_mode),
+        }
+    )
+
+
 def _request_deepseek_completion(
     client: OpenAI,
     settings: DeepSeekRequestSettings,
@@ -1580,6 +1824,7 @@ def _request_deepseek_completion(
     source_word_count: int,
     tool_output_path: str | None = None,
     stream_event_callback: Callable[[dict[str, object]], None] | None = None,
+    conversation_state: ConversationState | None = None,
 ) -> tuple[PodcastScript, bool, int, dict[str, int]]:
     """Request completion from a specific endpoint and parse JSON output.
 
@@ -1599,13 +1844,32 @@ def _request_deepseek_completion(
         source_word_count: Source transcript word count for short-source handling.
         tool_output_path: Optional output path used to derive a tool-write buffer file.
         stream_event_callback: Optional callback for dashboard stream events.
+        conversation_state: Mutable conversation context reused across calls.
 
     Returns:
         Tuple of parsed script, local JSON-repair flag, tool-loop rounds used,
         and per-tool invocation counts.
     """
     tool_mode = _effective_agent_tool_mode(settings)
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    tokens_limit = max(1, settings.max_completion_tokens)
+    if conversation_state is not None:
+        conversation_state.context_tokens_limit = tokens_limit
+
+    if conversation_state is not None and conversation_state.messages:
+        messages = _clone_messages(conversation_state.messages)
+    else:
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.append(
+            {
+                "role": "user",
+                "content": _build_initial_user_message(
+                    tool_mode=tool_mode,
+                    transcript_text=transcript_text,
+                    transcript_manifest=transcript_manifest,
+                ),
+            }
+        )
+
     if retry_context is not None:
         logger.info(
             "Applying retry context: attempt=%d endpoint=%s type=%s detail=%s",
@@ -1620,31 +1884,115 @@ def _request_deepseek_completion(
                 "content": _build_retry_instruction(retry_context),
             }
         )
-    if tool_mode == "full_agentic":
         messages.append(
             {
                 "role": "user",
                 "content": (
-                    "Use tools to iteratively build a compliant summary.\n"
-                    f"Transcript manifest: {transcript_manifest}\n"
-                    f"Read transcript slices with {READ_TRANSCRIPT_LINES_TOOL_NAME}.\n"
-                    f"Stage JSON chunks with {WRITE_OUTPUT_SEGMENT_TOOL_NAME}.\n"
-                    "When staged JSON is complete, you may answer with STAGED_OUTPUT_READY."
+                    "Regenerate the summary JSON now. Apply the latest corrective "
+                    "feedback, preserve prior accepted constraints, and return a "
+                    "fully compliant result."
                 ),
             }
         )
-    else:
-        messages.append(
-            {
-                "role": "user",
-                "content": f"Here is the raw transcript:\n\n{transcript_text}",
-            }
+
+    latest_context_snapshot: ContextUsageSnapshot | None = None
+    if (
+        conversation_state is not None
+        and conversation_state.context_tokens_used is not None
+    ):
+        prior_limit = conversation_state.context_tokens_limit or tokens_limit
+        latest_context_snapshot = _build_context_usage_snapshot(
+            tokens_used=conversation_state.context_tokens_used,
+            tokens_limit=prior_limit,
         )
+
+    def _record_context_usage(total_tokens: int | None) -> None:
+        """Persist and emit usage telemetry when available."""
+        nonlocal latest_context_snapshot
+        if total_tokens is None:
+            return
+        snapshot = _build_context_usage_snapshot(
+            tokens_used=total_tokens,
+            tokens_limit=tokens_limit,
+        )
+        latest_context_snapshot = snapshot
+        rollover_count = 0
+        if conversation_state is not None:
+            conversation_state.context_tokens_used = snapshot.tokens_used
+            conversation_state.context_tokens_limit = snapshot.tokens_limit
+            rollover_count = conversation_state.rollover_count
+        _emit_context_usage_event(
+            stream_event_callback,
+            snapshot=snapshot,
+            rollover_triggered=False,
+            rollover_count=rollover_count,
+        )
+
+    def _rollover_conversation_if_needed() -> None:
+        """Compress context and reset chat history when remaining budget is low."""
+        nonlocal latest_context_snapshot
+        if latest_context_snapshot is None:
+            return
+        if not _should_rollover_context(latest_context_snapshot):
+            return
+
+        percent_left = latest_context_snapshot.percent_left * 100.0
+        _emit_stream_token_event(
+            stream_event_callback,
+            phase="status",
+            text=(
+                f"Context window low ({percent_left:.1f}% left). "
+                "Summarizing prior context and starting a new conversation window."
+            ),
+        )
+        summary_text = _summarize_conversation_context_via_deepseek(
+            client=client,
+            conversation_messages=messages,
+            tokens_limit=tokens_limit,
+            endpoint_mode=endpoint_mode,
+        )
+        _reset_conversation_with_summary(
+            messages=messages,
+            system_prompt=system_prompt,
+            summary_text=summary_text,
+            tool_mode=tool_mode,
+        )
+        if retry_context is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": _build_retry_instruction(retry_context),
+                }
+            )
+        if conversation_state is not None:
+            conversation_state.rollover_count += 1
+            conversation_state.context_tokens_used = 0
+            conversation_state.context_tokens_limit = tokens_limit
+        latest_context_snapshot = _build_context_usage_snapshot(
+            tokens_used=0,
+            tokens_limit=tokens_limit,
+        )
+        rollover_count = (
+            conversation_state.rollover_count if conversation_state is not None else 1
+        )
+        _emit_context_usage_event(
+            stream_event_callback,
+            snapshot=latest_context_snapshot,
+            rollover_triggered=True,
+            rollover_count=rollover_count,
+        )
+        _emit_stream_token_event(
+            stream_event_callback,
+            phase="status",
+            text="Context rollover complete. Continuing in new chat window.",
+        )
+
+    _rollover_conversation_if_needed()
 
     base_request_payload: dict[str, Any] = {
         "model": settings.model,
         "messages": cast(Any, messages),
-        "max_tokens": settings.max_completion_tokens,
+        "max_tokens": tokens_limit,
     }
     if settings.temperature is not None:
         base_request_payload["temperature"] = settings.temperature
@@ -1685,12 +2033,15 @@ def _request_deepseek_completion(
         tool_payload["tools"] = cast(Any, _deepseek_tool_schemas(tool_mode))
         tool_payload["tool_choice"] = "auto"
         tool_payload["stream"] = True
+        tool_payload["stream_options"] = cast(Any, {"include_usage": True})
         latest_tool_status: Literal["pass", "fail"] | None = None
         tool_call_counts: dict[str, int] = {}
         write_tool_succeeded = False
         rounds_used = 0
         try:
             while True:
+                _rollover_conversation_if_needed()
+                tool_payload["messages"] = cast(Any, messages)
                 rounds_used += 1
                 logger.info(
                     "Tool loop iteration endpoint=%s model=%s (unbounded).",
@@ -1702,6 +2053,7 @@ def _request_deepseek_completion(
                     request_payload=tool_payload,
                     stream_event_callback=stream_event_callback,
                 )
+                _record_context_usage(turn.usage_total_tokens)
                 finish_reason = turn.finish_reason
                 if finish_reason == "length":
                     raise OutputTruncatedError(
@@ -2046,6 +2398,8 @@ def _request_deepseek_completion(
                     phase="status",
                     text="Tool loop satisfied constraints. Final JSON accepted.",
                 )
+                if conversation_state is not None:
+                    conversation_state.messages = _clone_messages(messages)
                 return parsed_script, used_repair, rounds_used, tool_call_counts
         finally:
             if cleanup_staging_output:
@@ -2064,7 +2418,10 @@ def _request_deepseek_completion(
 
     content: str
     if _is_reasoner_model(settings.model):
+        _rollover_conversation_if_needed()
+        request_payload["messages"] = cast(Any, messages)
         request_payload["stream"] = True
+        request_payload["stream_options"] = cast(Any, {"include_usage": True})
         if stream_event_callback is not None:
             stream_event_callback(
                 {
@@ -2074,10 +2431,17 @@ def _request_deepseek_completion(
                 }
             )
         streamed_answer_parts: list[str] = []
+        streamed_reasoning_parts: list[str] = []
         finish_reason: str | None = None
+        usage_total_tokens: int | None = None
         try:
             stream_response = client.chat.completions.create(**cast(Any, request_payload))
             for chunk in stream_response:
+                chunk_total_tokens = _extract_total_tokens_from_usage(
+                    getattr(chunk, "usage", None)
+                )
+                if chunk_total_tokens is not None:
+                    usage_total_tokens = chunk_total_tokens
                 choices = getattr(chunk, "choices", None)
                 if not choices:
                     continue
@@ -2088,6 +2452,7 @@ def _request_deepseek_completion(
                     continue
                 reasoning_piece = getattr(delta, "reasoning_content", None)
                 if isinstance(reasoning_piece, str) and reasoning_piece:
+                    streamed_reasoning_parts.append(reasoning_piece)
                     if stream_event_callback is not None:
                         stream_event_callback(
                             {
@@ -2110,16 +2475,26 @@ def _request_deepseek_completion(
         finally:
             if stream_event_callback is not None:
                 stream_event_callback({"event": "done"})
+        _record_context_usage(usage_total_tokens)
         if finish_reason == "length":
             raise OutputTruncatedError(
                 "DeepSeek response truncated by max_tokens (finish_reason=length)."
             )
         content = "".join(streamed_answer_parts)
+        assistant_message: dict[str, Any] = {"role": "assistant"}
+        if content:
+            assistant_message["content"] = content
+        if streamed_reasoning_parts:
+            assistant_message["reasoning_content"] = "".join(streamed_reasoning_parts)
+        messages.append(assistant_message)
     else:
+        _rollover_conversation_if_needed()
+        request_payload["messages"] = cast(Any, messages)
         # DeepSeek's OpenAI-compatible endpoint accepts these parameters at runtime.
         # The upstream OpenAI SDK type stubs are stricter than the provider surface,
         # so we cast request payload fields for static typing compatibility.
         response = client.chat.completions.create(**cast(Any, request_payload))
+        _record_context_usage(_extract_total_tokens_from_usage(getattr(response, "usage", None)))
         choice = response.choices[0]
         finish_reason = getattr(choice, "finish_reason", None)
         if finish_reason == "length":
@@ -2127,6 +2502,7 @@ def _request_deepseek_completion(
                 "DeepSeek response truncated by max_tokens (finish_reason=length)."
             )
         content = _normalize_assistant_content(choice.message.content)
+        messages.append({"role": "assistant", "content": content})
 
     if not isinstance(content, str) or not content.strip():
         raise ValueError("DeepSeek returned empty response.")
@@ -2137,6 +2513,8 @@ def _request_deepseek_completion(
             "Used balanced local JSON recovery for endpoint=%s.",
             endpoint_mode,
         )
+    if conversation_state is not None:
+        conversation_state.messages = _clone_messages(messages)
     return parsed_script, used_repair, 0, {}
 
 
@@ -2174,6 +2552,7 @@ def generate_summary_deepseek(
     word_budget_tolerance: float,
     tool_output_path: str | None = None,
     stream_event_callback: Callable[[dict[str, object]], None] | None = None,
+    conversation_state: ConversationState | None = None,
 ) -> GenerationSuccess:
     """Generate a structured summary from transcript text via DeepSeek.
 
@@ -2193,6 +2572,7 @@ def generate_summary_deepseek(
         word_budget_tolerance: Inclusive tolerance ratio for word budget.
         tool_output_path: Optional file path used as staging target for tool writes.
         stream_event_callback: Optional callback for dashboard stream updates.
+        conversation_state: Mutable conversation state reused across attempts.
 
     Returns:
         Structured generation result and endpoint metadata.
@@ -2278,8 +2658,7 @@ def generate_summary_deepseek(
             )
 
             try:
-                script, used_repair, tool_rounds, tool_call_counts = (
-                    _request_deepseek_completion(
+                script, used_repair, tool_rounds, tool_call_counts = _request_deepseek_completion(
                     client=client,
                     settings=candidate_settings,
                     transcript_text=transcript_text,
@@ -2295,7 +2674,7 @@ def generate_summary_deepseek(
                     source_word_count=source_word_count,
                     tool_output_path=tool_output_path,
                     stream_event_callback=stream_event_callback,
-                    )
+                    conversation_state=conversation_state,
                 )
                 return GenerationSuccess(
                     script=script,
@@ -2768,6 +3147,7 @@ def main() -> int:
     }
     selected_issues: list[str] = []
     attempts_executed = 0
+    conversation_state = ConversationState(messages=[])
     budget_status: Literal["in_range", "out_of_range", "not_configured", "unknown"] = (
         "unknown"
     )
@@ -2793,6 +3173,7 @@ def main() -> int:
                 word_budget_tolerance=args.word_budget_tolerance,
                 tool_output_path=args.output,
                 stream_event_callback=_emit_deepseek_stream_event,
+                conversation_state=conversation_state,
             )
             structured_script = generation_result.script
         except Exception as exc:  # noqa: BLE001
