@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
+import pytest
+
+import audio2script_and_summarizer.stage3_voice as stage3_voice
+from audio2script_and_summarizer import run_pipeline
 from audio2script_and_summarizer.run_pipeline import _discover_transcript_json_files
 
 
@@ -56,3 +61,150 @@ def test_discover_transcript_json_files_filters_and_orders(tmp_path: Path) -> No
     results = _discover_transcript_json_files(tmp_path)
 
     assert results == [newer_transcript.resolve(), older_transcript.resolve()]
+
+
+def test_skip_a2s_summary_uses_explicit_summary_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Run direct Stage 3 mode with an explicit summary JSON path."""
+    summary_path = tmp_path / "audio_summary.json"
+    _write_json(
+        summary_path,
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "voice_sample": "SPEAKER_00.wav",
+                "text": "Hello world",
+            }
+        ],
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_stage3(**kwargs: object) -> tuple[Path, Path, bool]:
+        captured.update(kwargs)
+        return (tmp_path / "final.wav", tmp_path / "final_interjections.json", True)
+
+    monkeypatch.setattr(run_pipeline, "_run_stage3_from_summary", _fake_stage3)
+    monkeypatch.setattr(
+        run_pipeline,
+        "configure_logging",
+        lambda *args, **kwargs: tmp_path / "test.log",
+    )
+    monkeypatch.setenv("AUDIO2SCRIPT_LOG_LEVEL", "INFO")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_pipeline.py",
+            "--skip-a2s-summary",
+            "--summary-json",
+            str(summary_path),
+            "--plain-ui",
+        ],
+    )
+
+    result_code = run_pipeline.main()
+    assert result_code == 0
+    assert captured["summary_json_path"] == summary_path.resolve()
+
+
+def test_skip_a2s_summary_auto_detects_newest_summary_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Auto-select newest summary JSON in direct Stage 3 mode."""
+    older_summary = tmp_path / "older_summary.json"
+    newer_summary = tmp_path / "newer_summary.json"
+    payload = [
+        {
+            "speaker": "SPEAKER_00",
+            "voice_sample": "SPEAKER_00.wav",
+            "text": "Hello world",
+        }
+    ]
+    _write_json(older_summary, payload)
+    _write_json(newer_summary, payload)
+    now = 1_700_000_000
+    os.utime(older_summary, (now - 30, now - 30))
+    os.utime(newer_summary, (now, now))
+
+    captured: dict[str, object] = {}
+
+    def _fake_stage3(**kwargs: object) -> tuple[Path, Path, bool]:
+        captured.update(kwargs)
+        return (tmp_path / "final.wav", tmp_path / "final_interjections.json", True)
+
+    monkeypatch.setattr(run_pipeline, "_run_stage3_from_summary", _fake_stage3)
+    monkeypatch.setattr(
+        run_pipeline,
+        "configure_logging",
+        lambda *args, **kwargs: tmp_path / "test.log",
+    )
+    monkeypatch.setenv("AUDIO2SCRIPT_LOG_LEVEL", "INFO")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_pipeline.py",
+            "--skip-a2s-summary",
+            "--skip-a2s-search-root",
+            str(tmp_path),
+            "--plain-ui",
+        ],
+    )
+
+    result_code = run_pipeline.main()
+    assert result_code == 0
+    assert captured["summary_json_path"] == newer_summary.resolve()
+
+
+def test_stage3_runtime_output_is_captured_into_dashboard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route Stage 3 stdout/stderr lines into dashboard output when enabled."""
+
+    class _FakeDashboard:
+        """Capture output lines sent to dashboard logs."""
+
+        enabled = True
+
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def log(self, message: str) -> None:
+            self.lines.append(message)
+
+    class _FakeStage3Result:
+        """Mimic the minimal Stage 3 result interface."""
+
+        def __init__(self) -> None:
+            self.output_wav_path = tmp_path / "out.wav"
+            self.interjection_log_path = tmp_path / "out_interjections.json"
+            self.mistral_enabled = True
+
+    def _fake_run_stage3_pipeline(**kwargs: object) -> _FakeStage3Result:
+        print(">> starting inference...")
+        sys.stderr.write("RuntimeError('Ninja is required')\n")
+        return _FakeStage3Result()
+
+    fake_dashboard = _FakeDashboard()
+    monkeypatch.setattr(run_pipeline, "_ACTIVE_DASHBOARD", fake_dashboard)
+    monkeypatch.setattr(stage3_voice, "run_stage3_pipeline", _fake_run_stage3_pipeline)
+
+    output_wav, interjection_log, mistral_enabled = (
+        run_pipeline._run_stage3_from_summary(
+            summary_json_path=tmp_path / "summary.json",
+            output_wav_path=None,
+            runtime_device="cpu",
+            interjection_max_ratio=0.3,
+            mistral_model_id="mistralai/Mistral-7B-Instruct-v0.3",
+            mistral_max_new_tokens=64,
+        )
+    )
+
+    assert output_wav == tmp_path / "out.wav"
+    assert interjection_log == tmp_path / "out_interjections.json"
+    assert mistral_enabled is True
+    assert any("starting inference" in line for line in fake_dashboard.lines)
+    assert any("Ninja is required" in line for line in fake_dashboard.lines)

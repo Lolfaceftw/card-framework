@@ -1,5 +1,6 @@
 import argparse
-import json
+import contextlib
+import io
 import logging
 import os
 import queue
@@ -10,11 +11,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Final, Literal, cast
+from typing import Any, Callable, Final, Iterator, Literal, cast
 
 if __package__:
     from .deepseek.stream_events import (
-        DEEPSEEK_STREAM_EVENT_PREFIX,
         parse_deepseek_stream_event_line as _parse_deepseek_stream_event_line,
         route_deepseek_stream_event as _route_deepseek_stream_event,
     )
@@ -25,7 +25,6 @@ else:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from audio2script_and_summarizer.deepseek.stream_events import (
-        DEEPSEEK_STREAM_EVENT_PREFIX,
         parse_deepseek_stream_event_line as _parse_deepseek_stream_event_line,
         route_deepseek_stream_event as _route_deepseek_stream_event,
     )
@@ -72,7 +71,7 @@ _ACTIVE_DASHBOARD: "_PipelineDashboard | None" = None
 DEFAULT_DEVICE: Final[str] = (
     "cuda" if torch_module is not None and torch_module.cuda.is_available() else "cpu"
 )
-PIPELINE_TOTAL_STAGES: Final[int] = 4
+PIPELINE_TOTAL_STAGES: Final[int] = 5
 LOG_HISTORY_MAX_LINES: Final[int] = 5000
 PROGRESS_PANEL_HEIGHT: Final[int] = 5
 CONTROLS_PANEL_HEIGHT: Final[int] = 9
@@ -96,6 +95,67 @@ SKIP_A2S_EXCLUDED_DIRS: Final[frozenset[str]] = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _DashboardOutputCaptureStream(io.TextIOBase):
+    """Capture text output and forward line-delimited content to a callback."""
+
+    def __init__(self, line_callback: Callable[[str], None]) -> None:
+        """Initialize capture stream.
+
+        Args:
+            line_callback: Callback invoked for each completed output line.
+        """
+        super().__init__()
+        self._line_callback = line_callback
+        self._buffer = ""
+
+    def writable(self) -> bool:
+        """Return True because this object accepts text writes."""
+        return True
+
+    def write(self, text: str) -> int:
+        """Buffer writes and emit one callback call per line."""
+        if not text:
+            return 0
+        # Normalize carriage returns used by progress bars into new lines.
+        self._buffer += text.replace("\r", "\n")
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            cleaned = line.strip()
+            if cleaned:
+                self._line_callback(cleaned)
+        return len(text)
+
+    def flush(self) -> None:
+        """Emit any trailing buffered content."""
+        trailing = self._buffer.strip()
+        if trailing:
+            self._line_callback(trailing)
+        self._buffer = ""
+
+
+@contextlib.contextmanager
+def _capture_stage3_output_lines(enabled: bool) -> Iterator[None]:
+    """Capture Stage 3 stdout/stderr into dashboard logs when enabled."""
+    if not enabled:
+        yield
+        return
+
+    def _on_line(line: str) -> None:
+        logger.debug("Stage 3 runtime | %s", line)
+        if _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled:
+            _ACTIVE_DASHBOARD.log(line)
+
+    capture_stream = _DashboardOutputCaptureStream(_on_line)
+    with (
+        contextlib.redirect_stdout(capture_stream),
+        contextlib.redirect_stderr(capture_stream),
+    ):
+        try:
+            yield
+        finally:
+            capture_stream.flush()
 
 
 def _supports_unicode_output() -> bool:
@@ -511,7 +571,9 @@ class _PipelineDashboard:
             self._deepseek_context_tokens_used = max(0, int(tokens_used))
             self._deepseek_context_tokens_limit = max(1, int(tokens_limit))
             self._deepseek_context_tokens_left = max(0, int(tokens_left))
-            self._deepseek_context_percent_left = max(0.0, min(1.0, float(percent_left)))
+            self._deepseek_context_percent_left = max(
+                0.0, min(1.0, float(percent_left))
+            )
             self._deepseek_context_rollover_count = max(0, int(rollover_count))
         self._refresh()
 
@@ -670,9 +732,7 @@ class _PipelineDashboard:
                 output_text = self._build_output_text_locked()
                 stream_text = self._build_deepseek_stream_text_locked()
                 output_mode = "LIVE" if self._follow_output else "SCROLL"
-                stream_mode = (
-                    "LIVE" if self._deepseek_stream_follow else "SCROLL"
-                )
+                stream_mode = "LIVE" if self._deepseek_stream_follow else "SCROLL"
                 selected_label = (
                     "DeepSeek Stream"
                     if self._selected_panel == "deepseek_stream"
@@ -751,9 +811,7 @@ class _PipelineDashboard:
                 stream_layout.visible = self._deepseek_stream_active
                 if self._deepseek_stream_active:
                     stream_border_style = (
-                        "cyan"
-                        if self._selected_panel == "deepseek_stream"
-                        else "white"
+                        "cyan" if self._selected_panel == "deepseek_stream" else "white"
                     )
                     stream_subtitle = self._build_deepseek_stream_subtitle_locked()
                     stream_layout.update(
@@ -904,7 +962,9 @@ class _PipelineDashboard:
 
     def _visible_line_count_locked(self) -> int:
         """Estimate lines visible inside the currently selected viewport."""
-        return self._visible_line_count_for_panel_locked(self._selected_scroll_target_locked())
+        return self._visible_line_count_for_panel_locked(
+            self._selected_scroll_target_locked()
+        )
 
     def _visible_line_count_for_panel_locked(
         self, panel_name: Literal["output", "deepseek_stream"]
@@ -1014,9 +1074,7 @@ class _PipelineDashboard:
                 )
             else:
                 self._follow_output = False
-                self._scroll_offset = self._max_scroll_offset_for_panel_locked(
-                    "output"
-                )
+                self._scroll_offset = self._max_scroll_offset_for_panel_locked("output")
         self._refresh()
 
     def _scroll_to_latest(self) -> None:
@@ -1734,8 +1792,56 @@ def _prompt_for_transcript_json(search_root: Path, use_rich: bool) -> Path:
         print(f"Please enter a number between 1 and {len(candidates)}.")
 
 
+def _run_stage3_from_summary(
+    *,
+    summary_json_path: Path,
+    output_wav_path: Path | None,
+    runtime_device: str,
+    interjection_max_ratio: float,
+    mistral_model_id: str,
+    mistral_max_new_tokens: int,
+) -> tuple[Path, Path, bool]:
+    """Run Stage 3 voice cloning and interjection pipeline.
+
+    Args:
+        summary_json_path: Path to summary JSON produced by Stage 2.
+        output_wav_path: Optional output WAV path.
+        runtime_device: Runtime device string (cuda/cpu).
+        interjection_max_ratio: Maximum interjection ratio.
+        mistral_model_id: Hugging Face model id for interjection planning.
+        mistral_max_new_tokens: Max generation tokens for planner.
+
+    Returns:
+        Tuple of final output WAV path, interjection log path, and Mistral
+        availability flag.
+    """
+    from audio2script_and_summarizer.stage3_voice import run_stage3_pipeline
+
+    repo_root = Path(__file__).resolve().parent.parent
+    checkpoints_root = repo_root / "voice-cloner-and-interjector" / "checkpoints"
+    capture_stage3_runtime_output = (
+        _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled
+    )
+    with _capture_stage3_output_lines(enabled=capture_stage3_runtime_output):
+        stage3_result = run_stage3_pipeline(
+            summary_json_path=summary_json_path,
+            output_wav_path=output_wav_path,
+            indextts_cfg_path=checkpoints_root / "config.yaml",
+            indextts_model_dir=checkpoints_root,
+            device=runtime_device,
+            interjection_max_ratio=interjection_max_ratio,
+            mistral_model_id=mistral_model_id,
+            mistral_max_new_tokens=mistral_max_new_tokens,
+        )
+    return (
+        stage3_result.output_wav_path,
+        stage3_result.interjection_log_path,
+        stage3_result.mistral_enabled,
+    )
+
+
 def main() -> int:
-    """Run the three-stage Audio2Script, splitter, and summarizer pipeline."""
+    """Run CARD Audio2Script, summarization, and Stage 3 resynthesis pipeline."""
     parser = argparse.ArgumentParser(description="CARD Audio2Script and Summarizer")
     parser.add_argument("--input", required=False, help="Path to input podcast audio")
     parser.add_argument(
@@ -1782,12 +1888,57 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--skip-a2s-summary",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip Stage 1/1.5/1.75/2 and run Stage 3 voice cloning + interjections "
+            "using an existing summary JSON."
+        ),
+    )
+    parser.add_argument(
         "--skip-a2s-search-root",
         default=".",
         help=(
             "Root directory used by --skip-a2s when searching for transcript "
             "JSON files (default: current directory)."
         ),
+    )
+    parser.add_argument(
+        "--summary-json",
+        default=None,
+        help=(
+            "Optional Stage 2 summary JSON path. If omitted with --skip-a2s-summary, "
+            "the newest *_summary.json under --skip-a2s-search-root is used."
+        ),
+    )
+    parser.add_argument(
+        "--stage3-output",
+        default=None,
+        help="Optional final Stage 3 output WAV path.",
+    )
+    parser.add_argument(
+        "--skip-stage3",
+        action="store_true",
+        default=False,
+        help="Skip Stage 3 voice cloning and interjection synthesis.",
+    )
+    parser.add_argument(
+        "--interjection-max-ratio",
+        type=float,
+        default=0.35,
+        help="Maximum ratio of eligible segments that receive interjections.",
+    )
+    parser.add_argument(
+        "--mistral-model-id",
+        default="mistralai/Mistral-7B-Instruct-v0.3",
+        help="Hugging Face model id for Stage 3 interjection planning.",
+    )
+    parser.add_argument(
+        "--mistral-max-new-tokens",
+        type=int,
+        default=64,
+        help="Maximum generation tokens per Stage 3 interjection-planner call.",
     )
     parser.add_argument(
         "--deepseek-max-completion-tokens",
@@ -1889,6 +2040,30 @@ def main() -> int:
             use_rich=use_rich,
         )
         return 1
+    if args.interjection_max_ratio < 0 or args.interjection_max_ratio > 1:
+        _print_error(
+            "[ERROR] --interjection-max-ratio must be within [0, 1].",
+            use_rich=use_rich,
+        )
+        return 1
+    if args.mistral_max_new_tokens <= 0:
+        _print_error(
+            "[ERROR] --mistral-max-new-tokens must be > 0.",
+            use_rich=use_rich,
+        )
+        return 1
+    if args.skip_a2s and args.skip_a2s_summary:
+        _print_error(
+            "[ERROR] --skip-a2s and --skip-a2s-summary are mutually exclusive.",
+            use_rich=use_rich,
+        )
+        return 1
+    if args.skip_a2s_summary and args.skip_stage3:
+        _print_error(
+            "[ERROR] --skip-a2s-summary requires Stage 3 and cannot be used with --skip-stage3.",
+            use_rich=use_rich,
+        )
+        return 1
 
     dashboard = _PipelineDashboard(enabled=use_rich)
     global _ACTIVE_DASHBOARD
@@ -1932,19 +2107,31 @@ def main() -> int:
                     "[WARN] --skip-a2s requires DeepSeek summarizer; overriding --llm-provider to deepseek.",
                     use_rich=use_rich,
                 )
+        elif args.skip_a2s_summary:
+            llm_provider = None
         else:
             llm_provider = args.llm_provider or _prompt_for_provider()
-        _print_checkpoint(f"LLM provider selected: {llm_provider}", use_rich=use_rich)
-        if args.target_minutes is None:
+        if llm_provider is not None:
+            _print_checkpoint(
+                f"LLM provider selected: {llm_provider}", use_rich=use_rich
+            )
+
+        target_minutes: float | None = None
+        if args.skip_a2s_summary:
+            if args.target_minutes is not None and args.target_minutes <= 0:
+                _print_error("[ERROR] Target minutes must be > 0.", use_rich=use_rich)
+                return 1
+            target_minutes = args.target_minutes
+        elif args.target_minutes is None:
             target_minutes = _prompt_for_target_minutes()
         else:
             target_minutes = args.target_minutes
-        if target_minutes <= 0:
+        if target_minutes is not None and target_minutes <= 0:
             _print_error("[ERROR] Target minutes must be > 0.", use_rich=use_rich)
             return 1
 
         input_path = os.path.abspath(args.input) if args.input else ""
-        if not args.skip_a2s:
+        if not args.skip_a2s and not args.skip_a2s_summary:
             if not input_path:
                 _print_error(
                     "[ERROR] --input is required unless --skip-a2s is used.",
@@ -1981,6 +2168,87 @@ def main() -> int:
                 f"[WARN] Could not auto-detect NVIDIA libs (might crash): {e}",
                 use_rich=use_rich,
             )
+
+        if args.skip_a2s_summary:
+            _print_stage_banner(
+                "[SKIP] STAGE 1/1.5/1.75/2: Using Existing Summary JSON",
+                use_rich=use_rich,
+            )
+            dashboard.complete_stage("Stage 1 skipped (--skip-a2s-summary)")
+            dashboard.complete_stage("Stage 1.5 skipped (--skip-a2s-summary)")
+            dashboard.complete_stage("Stage 1.75 skipped (--skip-a2s-summary)")
+            dashboard.complete_stage("Stage 2 skipped (--skip-a2s-summary)")
+
+            if args.summary_json:
+                selected_summary = Path(args.summary_json).resolve()
+                if not selected_summary.exists():
+                    _print_error(
+                        f"[ERROR] Summary JSON not found: {selected_summary}",
+                        use_rich=use_rich,
+                    )
+                    return 1
+            else:
+                search_root = Path(args.skip_a2s_search_root).resolve()
+                from audio2script_and_summarizer.stage3_voice import (
+                    discover_summary_json_files,
+                    select_latest_summary_json,
+                )
+
+                discovered = discover_summary_json_files(search_root)
+                if not discovered:
+                    _print_error(
+                        f"[ERROR] No summary JSON files found under {search_root}.",
+                        use_rich=use_rich,
+                    )
+                    return 1
+                selected_summary = select_latest_summary_json(search_root)
+                _print_info(
+                    f"[INFO] --skip-a2s-summary discovered {len(discovered)} summary candidate(s).",
+                    use_rich=use_rich,
+                )
+            _print_success(
+                f"[SUCCESS] Selected summary JSON: {selected_summary}",
+                use_rich=use_rich,
+            )
+
+            _print_stage_banner(
+                "[START] STAGE 3: Voice Cloning + Interjections",
+                use_rich=use_rich,
+            )
+            _print_checkpoint(
+                "Stage 3: running IndexTTS2 synthesis and interjection overlay.",
+                use_rich=use_rich,
+            )
+            stage3_output_override = (
+                Path(args.stage3_output).resolve() if args.stage3_output else None
+            )
+            try:
+                final_wav_path, interjection_log_path, mistral_enabled = (
+                    _run_stage3_from_summary(
+                        summary_json_path=selected_summary,
+                        output_wav_path=stage3_output_override,
+                        runtime_device=runtime_device,
+                        interjection_max_ratio=args.interjection_max_ratio,
+                        mistral_model_id=args.mistral_model_id,
+                        mistral_max_new_tokens=args.mistral_max_new_tokens,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                _print_error(f"[ERROR] Stage 3 failed: {exc}", use_rich=use_rich)
+                return 1
+            dashboard.complete_stage("Stage 3 complete")
+            if not mistral_enabled:
+                _print_warning(
+                    "[WARN] Stage 3 ran without Mistral interjections because the model was unavailable.",
+                    use_rich=use_rich,
+                )
+            _print_stage_banner("[DONE] PIPELINE COMPLETE", use_rich=use_rich)
+            _print_success(f"Summary input: {selected_summary}", use_rich=use_rich)
+            _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
+            _print_success(
+                f"Interjection log: {interjection_log_path}", use_rich=use_rich
+            )
+            return 0
 
         if args.skip_a2s:
             _print_stage_banner(
@@ -2054,6 +2322,12 @@ def main() -> int:
                 f"{_format_speaker_wpm_summary(per_speaker_wpm)}",
                 use_rich=use_rich,
             )
+            if target_minutes is None:
+                _print_error(
+                    "[ERROR] target minutes is required for --skip-a2s summarization mode.",
+                    use_rich=use_rich,
+                )
+                return 1
             word_budget = max(1, int(round(avg_wpm * target_minutes)))
             _print_success(
                 f"[SUCCESS] WPM source=transcript; calibrated WPM={avg_wpm:.2f}; "
@@ -2122,8 +2396,50 @@ def main() -> int:
                 return 1
 
             dashboard.complete_stage("Stage 2 complete")
-            _print_stage_banner("[DONE] PIPELINE COMPLETE", use_rich=use_rich)
             _print_success(f"Summary saved to: {summary_output}", use_rich=use_rich)
+            if not args.skip_stage3:
+                _print_stage_banner(
+                    "[START] STAGE 3: Voice Cloning + Interjections",
+                    use_rich=use_rich,
+                )
+                _print_checkpoint(
+                    "Stage 3: running IndexTTS2 synthesis and interjection overlay.",
+                    use_rich=use_rich,
+                )
+                stage3_output_override = (
+                    Path(args.stage3_output).resolve() if args.stage3_output else None
+                )
+                try:
+                    final_wav_path, interjection_log_path, mistral_enabled = (
+                        _run_stage3_from_summary(
+                            summary_json_path=Path(summary_output).resolve(),
+                            output_wav_path=stage3_output_override,
+                            runtime_device=runtime_device,
+                            interjection_max_ratio=args.interjection_max_ratio,
+                            mistral_model_id=args.mistral_model_id,
+                            mistral_max_new_tokens=args.mistral_max_new_tokens,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _print_error(f"[ERROR] Stage 3 failed: {exc}", use_rich=use_rich)
+                    return 1
+                dashboard.complete_stage("Stage 3 complete")
+                if not mistral_enabled:
+                    _print_warning(
+                        "[WARN] Stage 3 ran without Mistral interjections because the model was unavailable.",
+                        use_rich=use_rich,
+                    )
+                _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
+                _print_success(
+                    f"Interjection log: {interjection_log_path}", use_rich=use_rich
+                )
+            else:
+                dashboard.complete_stage("Stage 3 skipped (--skip-stage3)")
+                _print_info(
+                    "[INFO] Stage 3 skipped by --skip-stage3.",
+                    use_rich=use_rich,
+                )
+            _print_stage_banner("[DONE] PIPELINE COMPLETE", use_rich=use_rich)
             return 0
 
         # ==========================================
@@ -2437,6 +2753,12 @@ def main() -> int:
             use_rich=use_rich,
         )
 
+        if target_minutes is None:
+            _print_error(
+                "[ERROR] target minutes is required for full pipeline mode.",
+                use_rich=use_rich,
+            )
+            return 1
         word_budget = max(1, int(round(avg_wpm * target_minutes)))
         _print_success(
             f"[SUCCESS] WPM source={args.wpm_source}; calibrated WPM={avg_wpm:.2f}; "
@@ -2542,8 +2864,46 @@ def main() -> int:
             return 1
         dashboard.complete_stage("Stage 2 complete")
 
-        _print_stage_banner("[DONE] PIPELINE COMPLETE", use_rich=use_rich)
         _print_success(f"Summary saved to: {summary_output}", use_rich=use_rich)
+        if not args.skip_stage3:
+            _print_stage_banner(
+                "[START] STAGE 3: Voice Cloning + Interjections", use_rich=use_rich
+            )
+            _print_checkpoint(
+                "Stage 3: running IndexTTS2 synthesis and interjection overlay.",
+                use_rich=use_rich,
+            )
+            stage3_output_override = (
+                Path(args.stage3_output).resolve() if args.stage3_output else None
+            )
+            try:
+                final_wav_path, interjection_log_path, mistral_enabled = (
+                    _run_stage3_from_summary(
+                        summary_json_path=Path(summary_output).resolve(),
+                        output_wav_path=stage3_output_override,
+                        runtime_device=runtime_device,
+                        interjection_max_ratio=args.interjection_max_ratio,
+                        mistral_model_id=args.mistral_model_id,
+                        mistral_max_new_tokens=args.mistral_max_new_tokens,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                _print_error(f"[ERROR] Stage 3 failed: {exc}", use_rich=use_rich)
+                return 1
+            dashboard.complete_stage("Stage 3 complete")
+            if not mistral_enabled:
+                _print_warning(
+                    "[WARN] Stage 3 ran without Mistral interjections because the model was unavailable.",
+                    use_rich=use_rich,
+                )
+            _print_success(f"Final audio: {final_wav_path}", use_rich=use_rich)
+            _print_success(
+                f"Interjection log: {interjection_log_path}", use_rich=use_rich
+            )
+        else:
+            dashboard.complete_stage("Stage 3 skipped (--skip-stage3)")
+            _print_info("[INFO] Stage 3 skipped by --skip-stage3.", use_rich=use_rich)
+        _print_stage_banner("[DONE] PIPELINE COMPLETE", use_rich=use_rich)
         return 0
     finally:
         dashboard.stop()
