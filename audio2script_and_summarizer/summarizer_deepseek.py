@@ -55,9 +55,13 @@ TOKEN_BUDGET_MIN = 512
 DEEPSEEK_STREAM_EVENT_PREFIX = "[DEEPSEEK_STREAM] "
 DEFAULT_AGENT_MAX_TOOL_ROUNDS = 10
 DEFAULT_AGENT_READ_MAX_LINES = 120
+DEFAULT_AGENT_WRITE_MAX_CHARS = 12000
+DEFAULT_AGENT_WRITE_MAX_FILE_CHARS = 400000
 EVALUATE_SCRIPT_TOOL_NAME = "evaluate_script_constraints"
 READ_TRANSCRIPT_LINES_TOOL_NAME = "read_transcript_lines"
 COUNT_WORDS_TOOL_NAME = "count_words"
+WRITE_OUTPUT_SEGMENT_TOOL_NAME = "write_output_segment"
+STAGED_OUTPUT_READY_MARKER = "STAGED_OUTPUT_READY"
 DEFAULT_BUDGET_FAILURE_POLICY = "degraded_success"
 DEFAULT_AGENT_TOOL_MODE = "full_agentic"
 DISFLUENCY_PATTERN = re.compile(r"\b(?:um+|uh+|ah+)\b", re.IGNORECASE)
@@ -160,6 +164,17 @@ class CountWordsToolResult(TypedDict):
     status: Literal["ok", "fail"]
     total_words: int
     line_word_counts: list[int]
+    hints: list[str]
+
+
+class WriteOutputSegmentToolResult(TypedDict):
+    """Represent segmented output-write tool responses."""
+
+    status: Literal["ok", "fail"]
+    mode: Literal["overwrite", "append"] | str
+    path: str
+    chunk_chars: int
+    total_chars: int
     hints: list[str]
 
 
@@ -569,9 +584,9 @@ def _build_system_prompt(
     speaker_list = ", ".join(sorted(allowed_speakers))
     sample_speaker = sorted(allowed_speakers)[0]
     tool_mode_note = (
-        "Tool mode: full_agentic (use read/count/evaluate tools)."
+        "Tool mode: full_agentic (use read/count/write/evaluate tools)."
         if tool_mode == "full_agentic"
-        else "Tool mode: constraints_only (use count/evaluate tools)."
+        else "Tool mode: constraints_only (use count/write/evaluate tools)."
     )
     budget_clause = ""
     if word_budget is not None:
@@ -594,16 +609,20 @@ def _build_system_prompt(
                 f"- {tool_mode_note}\n"
                 f"- Read transcript slices with `{READ_TRANSCRIPT_LINES_TOOL_NAME}` before drafting.\n"
                 f"- Use `{COUNT_WORDS_TOOL_NAME}` for counting candidate wording; do not rely on self-counting.\n"
+                f"- Stage output JSON with `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` in chunks (overwrite first, append next).\n"
                 f"- You must call `{EVALUATE_SCRIPT_TOOL_NAME}` before finalizing JSON.\n"
                 f"- If `{EVALUATE_SCRIPT_TOOL_NAME}` returns status=fail, revise and call it again.\n"
+                f"- Return final response as strict JSON or `STAGED_OUTPUT_READY` after staged output is complete.\n"
                 f"- Return final JSON only after the latest `{EVALUATE_SCRIPT_TOOL_NAME}` is status=pass.\n"
             )
         else:
             tool_loop_clause = (
                 f"- {tool_mode_note}\n"
                 f"- Use `{COUNT_WORDS_TOOL_NAME}` for any word-count checks; do not self-count.\n"
+                f"- Stage output JSON with `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` in chunks (overwrite first, append next).\n"
                 f"- You must call `{EVALUATE_SCRIPT_TOOL_NAME}` before finalizing JSON.\n"
                 f"- If `{EVALUATE_SCRIPT_TOOL_NAME}` returns status=fail, revise and call it again.\n"
+                f"- Return final response as strict JSON or `STAGED_OUTPUT_READY` after staged output is complete.\n"
                 f"- Return final JSON only after the latest `{EVALUATE_SCRIPT_TOOL_NAME}` is status=pass.\n"
             )
 
@@ -612,6 +631,29 @@ def _build_system_prompt(
         "- A compact manifest is provided in user content; do not assume hidden transcript text.\n"
         if require_tool_call and tool_mode == "full_agentic"
         else "- Transcript lines are provided in [segment_id|speaker]: text format."
+    )
+    output_clause = (
+        (
+            "- Output STRICT JSON ONLY, or reply "
+            f"`{STAGED_OUTPUT_READY_MARKER}` after staged output is complete.\n"
+        )
+        if require_tool_call
+        else "- Output STRICT JSON ONLY: no markdown fences, no prose before/after JSON.\n"
+    )
+    completion_checklist_tail = (
+        (
+            f"  5) If replying `{STAGED_OUTPUT_READY_MARKER}`, staged file contains a full valid JSON object.\n"
+            "  6) Spoken style feels conversational, not bulletized.\n"
+            f"  7) Latest `{EVALUATE_SCRIPT_TOOL_NAME}` result is status=pass.\n"
+            f"  8) `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` wrote staged output successfully.\n"
+        )
+        if require_tool_call
+        else (
+            "  5) Output is only JSON and is complete (not truncated).\n"
+            "  6) Spoken style feels conversational, not bulletized.\n"
+            "  7) If tools are enabled, the latest "
+            f"`{EVALUATE_SCRIPT_TOOL_NAME}` result is status=pass.\n"
+        )
     )
 
     return f"""Objective:
@@ -642,7 +684,7 @@ Output contract:
       }}
     ]
   }}
-- Output STRICT JSON ONLY: no markdown fences, no prose before/after JSON.
+{output_clause.rstrip()}
 - The response must end with a fully closed JSON object.
 - Each line must include non-empty source_segment_ids.
 - Target {target_min_lines} to {target_max_lines} dialogue lines total.
@@ -683,9 +725,7 @@ Evaluation:
   2) Each line has non-empty source_segment_ids.
   3) Each line uses only allowed speakers.
   4) Each line's source_segment_ids belong to one speaker only.
-  5) Output is only JSON and is complete (not truncated).
-  6) Spoken style feels conversational, not bulletized.
-  7) If tools are enabled, the latest `{EVALUATE_SCRIPT_TOOL_NAME}` result is status=pass.
+{completion_checklist_tail.rstrip()}
 """
 
 
@@ -1055,6 +1095,125 @@ def _count_words_tool(
     }
 
 
+def _resolve_tool_output_staging_path(output_path: str | None) -> str:
+    """Resolve a deterministic staging path for segmented tool writes."""
+    if output_path is not None and output_path.strip():
+        normalized_output = Path(output_path.strip())
+        return str(normalized_output.with_name(f"{normalized_output.name}.agent_buffer"))
+
+    fallback_name = (
+        f".deepseek_agent_output_{os.getpid()}_{int(time.time() * 1000)}.json"
+    )
+    return str(Path.cwd() / fallback_name)
+
+
+def _write_output_segment_tool(
+    *,
+    staging_path: str,
+    mode: str,
+    content: str,
+    max_chunk_chars: int,
+    max_file_chars: int,
+) -> WriteOutputSegmentToolResult:
+    """Write output JSON content in chunks to a local staging file."""
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"overwrite", "append"}:
+        return {
+            "status": "fail",
+            "mode": normalized_mode or mode,
+            "path": staging_path,
+            "chunk_chars": len(content),
+            "total_chars": 0,
+            "hints": ["mode must be either 'overwrite' or 'append'."],
+        }
+
+    bounded_chunk_limit = max(1, int(max_chunk_chars))
+    bounded_file_limit = max(bounded_chunk_limit, int(max_file_chars))
+    chunk_chars = len(content)
+    if chunk_chars > bounded_chunk_limit:
+        return {
+            "status": "fail",
+            "mode": normalized_mode,
+            "path": staging_path,
+            "chunk_chars": chunk_chars,
+            "total_chars": 0,
+            "hints": [
+                (
+                    f"Chunk exceeds max size ({chunk_chars}>{bounded_chunk_limit}). "
+                    "Split content into smaller segments."
+                )
+            ],
+        }
+
+    staging_file = Path(staging_path)
+    existing_text = ""
+    if normalized_mode == "append" and staging_file.exists():
+        try:
+            existing_text = staging_file.read_text(encoding="utf-8")
+        except OSError as error:
+            return {
+                "status": "fail",
+                "mode": normalized_mode,
+                "path": staging_path,
+                "chunk_chars": chunk_chars,
+                "total_chars": 0,
+                "hints": [f"Failed to read existing staging file: {error}"],
+            }
+    projected_total = (
+        chunk_chars if normalized_mode == "overwrite" else len(existing_text) + chunk_chars
+    )
+    if projected_total > bounded_file_limit:
+        return {
+            "status": "fail",
+            "mode": normalized_mode,
+            "path": staging_path,
+            "chunk_chars": chunk_chars,
+            "total_chars": len(existing_text),
+            "hints": [
+                (
+                    f"Projected file size exceeds limit ({projected_total}>{bounded_file_limit}). "
+                    "Finalize or reduce content."
+                )
+            ],
+        }
+
+    try:
+        staging_file.parent.mkdir(parents=True, exist_ok=True)
+        if normalized_mode == "overwrite":
+            staging_file.write_text(content, encoding="utf-8")
+            total_chars = chunk_chars
+        else:
+            with open(staging_file, "a", encoding="utf-8") as output_handle:
+                output_handle.write(content)
+            total_chars = projected_total
+    except OSError as error:
+        return {
+            "status": "fail",
+            "mode": normalized_mode,
+            "path": staging_path,
+            "chunk_chars": chunk_chars,
+            "total_chars": 0,
+            "hints": [f"Failed to write staging file: {error}"],
+        }
+
+    return {
+        "status": "ok",
+        "mode": cast(Literal["overwrite", "append"], normalized_mode),
+        "path": staging_path,
+        "chunk_chars": chunk_chars,
+        "total_chars": total_chars,
+        "hints": ["Segment written to staging file."],
+    }
+
+
+def _read_staged_output_text(staging_path: str) -> str:
+    """Read staged output text written through segmented tool calls."""
+    try:
+        return Path(staging_path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def _deepseek_tool_schemas(tool_mode: AgentToolMode) -> list[dict[str, object]]:
     """Build DeepSeek tool schema definitions for local agentic evaluation."""
     tool_schemas: list[dict[str, object]] = []
@@ -1098,6 +1257,31 @@ def _deepseek_tool_schemas(tool_mode: AgentToolMode) -> list[dict[str, object]]:
                             "items": {"type": "string"},
                         },
                     },
+                },
+            },
+        }
+    )
+
+    tool_schemas.append(
+        {
+            "type": "function",
+            "function": {
+                "name": WRITE_OUTPUT_SEGMENT_TOOL_NAME,
+                "description": (
+                    "Write output JSON in chunks to a local staging file. "
+                    "Use mode='overwrite' for the first chunk, then mode='append' "
+                    "for later chunks."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["overwrite", "append"],
+                        },
+                        "content": {"type": "string"},
+                    },
+                    "required": ["content"],
                 },
             },
         }
@@ -1394,6 +1578,7 @@ def _request_deepseek_completion(
     word_budget: int | None,
     word_budget_tolerance: float,
     source_word_count: int,
+    tool_output_path: str | None = None,
     stream_event_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[PodcastScript, bool, int, dict[str, int]]:
     """Request completion from a specific endpoint and parse JSON output.
@@ -1412,6 +1597,7 @@ def _request_deepseek_completion(
         word_budget: Optional target total word budget.
         word_budget_tolerance: Inclusive tolerance ratio around word budget.
         source_word_count: Source transcript word count for short-source handling.
+        tool_output_path: Optional output path used to derive a tool-write buffer file.
         stream_event_callback: Optional callback for dashboard stream events.
 
     Returns:
@@ -1441,7 +1627,9 @@ def _request_deepseek_completion(
                 "content": (
                     "Use tools to iteratively build a compliant summary.\n"
                     f"Transcript manifest: {transcript_manifest}\n"
-                    f"Read transcript slices with {READ_TRANSCRIPT_LINES_TOOL_NAME}."
+                    f"Read transcript slices with {READ_TRANSCRIPT_LINES_TOOL_NAME}.\n"
+                    f"Stage JSON chunks with {WRITE_OUTPUT_SEGMENT_TOOL_NAME}.\n"
+                    "When staged JSON is complete, you may answer with STAGED_OUTPUT_READY."
                 ),
             }
         )
@@ -1462,6 +1650,21 @@ def _request_deepseek_completion(
         base_request_payload["temperature"] = settings.temperature
 
     if tool_mode != "off":
+        tool_output_staging_path = _resolve_tool_output_staging_path(tool_output_path)
+        cleanup_staging_output = tool_output_path is None or not tool_output_path.strip()
+        staging_init = _write_output_segment_tool(
+            staging_path=tool_output_staging_path,
+            mode="overwrite",
+            content="",
+            max_chunk_chars=DEFAULT_AGENT_WRITE_MAX_CHARS,
+            max_file_chars=DEFAULT_AGENT_WRITE_MAX_FILE_CHARS,
+        )
+        if staging_init["status"] != "ok":
+            logger.warning(
+                "Failed to initialize staged output file path=%s hints=%s",
+                tool_output_staging_path,
+                staging_init["hints"],
+            )
         if stream_event_callback is not None:
             stream_event_callback(
                 {
@@ -1475,7 +1678,7 @@ def _request_deepseek_completion(
             phase="status",
             text=(
                 f"Tool loop initialized (mode={tool_mode}). "
-                "Waiting for tool calls and validation results."
+                "Waiting for tool calls, staged writes, and validation results."
             ),
         )
         tool_payload: dict[str, Any] = dict(base_request_payload)
@@ -1484,6 +1687,7 @@ def _request_deepseek_completion(
         tool_payload["stream"] = True
         latest_tool_status: Literal["pass", "fail"] | None = None
         tool_call_counts: dict[str, int] = {}
+        write_tool_succeeded = False
         rounds_used = 0
         try:
             while True:
@@ -1605,6 +1809,34 @@ def _request_deepseek_completion(
                                     lines=lines,
                                 )
                                 tool_result = cast(dict[str, object], count_result)
+                        elif function_name == WRITE_OUTPUT_SEGMENT_TOOL_NAME:
+                            if not isinstance(decoded_args, dict):
+                                tool_result = {
+                                    "status": "fail",
+                                    "hints": [
+                                        "Provide mode and content for segmented output writes."
+                                    ],
+                                }
+                            else:
+                                mode_arg = decoded_args.get("mode", "append")
+                                content_arg = decoded_args.get("content", "")
+                                mode = str(mode_arg) if mode_arg is not None else "append"
+                                content = (
+                                    str(content_arg) if content_arg is not None else ""
+                                )
+                                write_result = _write_output_segment_tool(
+                                    staging_path=tool_output_staging_path,
+                                    mode=mode,
+                                    content=content,
+                                    max_chunk_chars=DEFAULT_AGENT_WRITE_MAX_CHARS,
+                                    max_file_chars=DEFAULT_AGENT_WRITE_MAX_FILE_CHARS,
+                                )
+                                if write_result["status"] == "ok":
+                                    write_tool_succeeded = True
+                                tool_result = cast(
+                                    dict[str, object],
+                                    write_result,
+                                )
                         elif function_name == EVALUATE_SCRIPT_TOOL_NAME:
                             dialogue_payload = _coerce_tool_dialogue_lines(
                                 decoded_args.get("dialogue", [])
@@ -1639,6 +1871,7 @@ def _request_deepseek_completion(
                                         "Supported tools: "
                                         f"{READ_TRANSCRIPT_LINES_TOOL_NAME}, "
                                         f"{COUNT_WORDS_TOOL_NAME}, "
+                                        f"{WRITE_OUTPUT_SEGMENT_TOOL_NAME}, "
                                         f"{EVALUATE_SCRIPT_TOOL_NAME}."
                                     )
                                 ],
@@ -1667,37 +1900,6 @@ def _request_deepseek_completion(
                         )
                         tool_payload["messages"] = cast(Any, messages)
                     continue
-
-                normalized_content = turn.content
-                if not normalized_content.strip():
-                    _emit_stream_token_event(
-                        stream_event_callback,
-                        phase="status",
-                        text=(
-                            "Assistant returned empty content. Requesting corrective retry "
-                            "with tool validation."
-                        ),
-                    )
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": (
-                                "You must provide strict JSON output and call "
-                                f"{EVALUATE_SCRIPT_TOOL_NAME} before finalizing."
-                            ),
-                        }
-                    )
-                    tool_payload["messages"] = cast(Any, messages)
-                    continue
-
-                parsed_script, used_repair = _decode_podcast_script_with_fallback(
-                    normalized_content
-                )
-                if used_repair:
-                    logger.warning(
-                        "Used balanced local JSON recovery for endpoint=%s.",
-                        endpoint_mode,
-                    )
 
                 if (
                     tool_mode == "full_agentic"
@@ -1745,6 +1947,100 @@ def _request_deepseek_completion(
                     tool_payload["messages"] = cast(Any, messages)
                     continue
 
+                if not write_tool_succeeded:
+                    _emit_stream_token_event(
+                        stream_event_callback,
+                        phase="status",
+                        text=(
+                            "Final JSON blocked: write_output_segment has no successful "
+                            "writes yet. Stage output chunks before finalizing."
+                        ),
+                    )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Before final response, stage JSON through "
+                                f"{WRITE_OUTPUT_SEGMENT_TOOL_NAME} "
+                                "(overwrite first chunk, append remaining chunks)."
+                            ),
+                        }
+                    )
+                    tool_payload["messages"] = cast(Any, messages)
+                    continue
+
+                normalized_content = turn.content.strip()
+                staged_candidate = ""
+                if (
+                    normalized_content == STAGED_OUTPUT_READY_MARKER
+                    or not normalized_content
+                ):
+                    staged_candidate = _read_staged_output_text(tool_output_staging_path)
+                    if staged_candidate.strip():
+                        _emit_stream_token_event(
+                            stream_event_callback,
+                            phase="status",
+                            text=(
+                                "Using staged output from write_output_segment "
+                                "for final JSON validation."
+                            ),
+                        )
+                candidate_content = (
+                    staged_candidate if staged_candidate.strip() else normalized_content
+                )
+                if not candidate_content.strip():
+                    _emit_stream_token_event(
+                        stream_event_callback,
+                        phase="status",
+                        text=(
+                            "Final JSON missing. Continue staging with "
+                            f"{WRITE_OUTPUT_SEGMENT_TOOL_NAME}."
+                        ),
+                    )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Your final output was empty. Continue writing JSON chunks "
+                                f"with {WRITE_OUTPUT_SEGMENT_TOOL_NAME}, then respond with "
+                                f"{STAGED_OUTPUT_READY_MARKER}."
+                            ),
+                        }
+                    )
+                    tool_payload["messages"] = cast(Any, messages)
+                    continue
+
+                try:
+                    parsed_script, used_repair = _decode_podcast_script_with_fallback(
+                        candidate_content
+                    )
+                except (JSONDecodeError, ValidationError, ValueError) as decode_error:
+                    _emit_stream_token_event(
+                        stream_event_callback,
+                        phase="status",
+                        text=(
+                            "Final JSON validation failed after staged write: "
+                            f"{_error_digest(decode_error)}"
+                        ),
+                    )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Staged output is not valid strict JSON matching schema. "
+                                f"Revise with {WRITE_OUTPUT_SEGMENT_TOOL_NAME}, call "
+                                f"{EVALUATE_SCRIPT_TOOL_NAME}, then finalize."
+                            ),
+                        }
+                    )
+                    tool_payload["messages"] = cast(Any, messages)
+                    continue
+                if used_repair:
+                    logger.warning(
+                        "Used balanced local JSON recovery for endpoint=%s.",
+                        endpoint_mode,
+                    )
+
                 _emit_stream_token_event(
                     stream_event_callback,
                     phase="status",
@@ -1752,6 +2048,14 @@ def _request_deepseek_completion(
                 )
                 return parsed_script, used_repair, rounds_used, tool_call_counts
         finally:
+            if cleanup_staging_output:
+                try:
+                    Path(tool_output_staging_path).unlink(missing_ok=True)
+                except OSError:
+                    logger.debug(
+                        "Could not delete temporary staged output file: %s",
+                        tool_output_staging_path,
+                    )
             if stream_event_callback is not None:
                 stream_event_callback({"event": "done"})
 
@@ -1868,6 +2172,7 @@ def generate_summary_deepseek(
     target_minutes: float | None,
     avg_wpm: float | None,
     word_budget_tolerance: float,
+    tool_output_path: str | None = None,
     stream_event_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> GenerationSuccess:
     """Generate a structured summary from transcript text via DeepSeek.
@@ -1886,6 +2191,7 @@ def generate_summary_deepseek(
         target_minutes: Optional summary target duration.
         avg_wpm: Optional calibrated words-per-minute value.
         word_budget_tolerance: Inclusive tolerance ratio for word budget.
+        tool_output_path: Optional file path used as staging target for tool writes.
         stream_event_callback: Optional callback for dashboard stream updates.
 
     Returns:
@@ -1987,6 +2293,7 @@ def generate_summary_deepseek(
                     word_budget=word_budget,
                     word_budget_tolerance=word_budget_tolerance,
                     source_word_count=source_word_count,
+                    tool_output_path=tool_output_path,
                     stream_event_callback=stream_event_callback,
                     )
                 )
@@ -2484,6 +2791,7 @@ def main() -> int:
                 target_minutes=args.target_minutes,
                 avg_wpm=args.avg_wpm,
                 word_budget_tolerance=args.word_budget_tolerance,
+                tool_output_path=args.output,
                 stream_event_callback=_emit_deepseek_stream_event,
             )
             structured_script = generation_result.script
