@@ -2,85 +2,120 @@
  "dialogue": [
  {
   "speaker": "SPEAKER_00",
-  "text": "Welcome. We're joined by Dr. Charles Chafin, whose work bridges psychology and financial planning.",
-  "emo_text": "Engaging",
+  "text": "Welcome to episode 395 with Dr. Charles Chafin, who bridges psychology and financial planning.",
+  "emo_text": "Warm introduction",
   "emo_alpha": 0.6,
   "source_segment_ids": ["seg_000", "seg_0004"]
  },
  {
+  "speaker": "SPEAKER_00",
+  "text": "Charles, what role does psychology play in financial planning?",
+  "emo_text": "Curious inquiry",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_0006"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Psychology explains client behavior—bridging technical advice with reality. Our brains are wired for survival, not optimization.",
+  "emo_text": "Explaining",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_0007", "seg_00013"]
+ },
+ {
   "speaker": "SPEAKER_01",
-  "text": "We're making a public version of their risk questionnaire available to listeners.",
-  "emo_text": "Enthusiastic",
+  "text": "How do cognitive biases affect financial decisions?",
+  "emo_text": "Thoughtful question",
   "emo_alpha": 0.6,
-  "source_segment_ids": ["seg_0001"]
+  "source_segment_ids": ["seg_00014"]
  },
  {
   "speaker": "SPEAKER_02",
-  "text": "Psychology plays a huge role—it explains client behavior and bridges technical advice with real-world actions.",
-  "emo_text": "Thoughtful",
-  "emo_alpha": 0.6,
-  "source_segment_ids": ["seg_0007"]
- },
- {
-  "speaker": "SPEAKER_02",
-  "text": "Cognitive biases are shortcuts that create errors like overconfidence, loss aversion, and FOMO.",
-  "emo_text": "Explanatory",
+  "text": "Heuristics create errors like overconfidence, interfering with rational thinking amid market noise.",
+  "emo_text": "Clarifying",
   "emo_alpha": 0.6,
   "source_segment_ids": ["seg_00015"]
  },
  {
-  "speaker": "SPEAKER_02",
-  "text": "That's where the advisor's coaching role becomes critical—bringing rationality to irrational behaviors.",
-  "emo_text": "Insightful",
+  "speaker": "SPEAKER_01",
+  "text": "How does environment shape financial psychology?",
+  "emo_text": "Inquisitive",
   "emo_alpha": 0.6,
-  "source_segment_ids": ["seg_00045"]
+  "source_segment_ids": ["seg_00022"]
  },
  {
   "speaker": "SPEAKER_02",
-  "text": "Our environment shapes financial psychology. Create friction for unwanted behaviors, eliminate it for goal-aligned ones.",
-  "emo_text": "Practical",
+  "text": "Create friction for unwanted behaviors, eliminate friction for goals.",
+  "emo_text": "Practical advice",
   "emo_alpha": 0.6,
   "source_segment_ids": ["seg_00023"]
  },
  {
+  "speaker": "SPEAKER_00",
+  "text": "What are money scripts?",
+  "emo_text": "Curious",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00036"]
+ },
+ {
   "speaker": "SPEAKER_02",
-  "text": "Money scripts are unconscious beliefs about money that form early in life.",
-  "emo_text": "Educational",
+  "text": "Unconscious money beliefs—like money avoidance or worship—help anticipate hurdles.",
+  "emo_text": "Explaining",
   "emo_alpha": 0.6,
   "source_segment_ids": ["seg_00035"]
  },
  {
-  "speaker": "SPEAKER_02",
-  "text": "Financial risk tolerance is our emotional response to uncertainty—willingness to endure volatility for long-term gain.",
-  "emo_text": "Clear",
+  "speaker": "SPEAKER_01",
+  "text": "How well do people understand their own risk tolerance?",
+  "emo_text": "Curious",
   "emo_alpha": 0.6,
-  "source_segment_ids": ["seg_00059"]
+  "source_segment_ids": ["seg_00062"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "People overestimate in up markets—recency bias. Risk tolerance shifts with life events.",
+  "emo_text": "Insightful",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00063", "seg_00065"]
+ },
+ {
+  "speaker": "SPEAKER_00",
+  "text": "What's the difference between psychometric and revealed‑preference risk questionnaires?",
+  "emo_text": "Technical question",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00070"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "Psychometrics assess attitudes—how risk feels. Revealed preference infers from past behavior.",
+  "emo_text": "Clarifying",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00071", "seg_00073"]
+ },
+ {
+  "speaker": "SPEAKER_00",
+  "text": "How does MRI help make better financial decisions?",
+  "emo_text": "Practical inquiry",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00080"]
+ },
+ {
+  "speaker": "SPEAKER_02",
+  "text": "It helps you understand irrational behaviors, aligning environment and actions with goals.",
+  "emo_text": "Reflective",
+  "emo_alpha": 0.6,
+  "source_segment_ids": ["seg_00081"]
  },
  {
   "speaker": "SPEAKER_01",
-  "text": "How do we combine risk profiles for a couple with different tolerances?",
-  "emo_text": "Curious",
+  "text": "Last question: how do you define success?",
+  "emo_text": "Personal inquiry",
   "emo_alpha": 0.6,
-  "source_segment_ids": ["seg_00068"]
+  "source_segment_ids": ["seg_00082"]
  },
  {
   "speaker": "SPEAKER_02",
-  "text": "Dialogue and shared frameworks are critical. Making the abstract concrete helps manage differences.",
-  "emo_text": "Practical",
-  "emo_alpha": 0.6,
-  "source_segment_ids": ["seg_00069"]
- },
- {
-  "speaker": "SPEAKER_02",
-  "text": "Psychometric tools assess attitudes, while revealed preference infers from past behaviors. Psychometrics give a more complete picture.",
-  "emo_text": "Authoritative",
-  "emo_alpha": 0.6,
-  "source_segment_ids": ["seg_00071"]
- },
- {
-  "speaker": "SPEAKER_02",
-  "text": "Success is about alignment and impact. Money's a tool, but meaning comes from people relying on you.",
-  "emo_text": "Reflective",
+  "text": "Align your environment, the people around you, and your behaviors with what's meaningful.",
+  "emo_text": "Philosophical",
   "emo_alpha": 0.6,
   "source_segment_ids": ["seg_00083"]
  }

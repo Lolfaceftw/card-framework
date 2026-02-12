@@ -13,12 +13,22 @@ from types import ModuleType
 from typing import Any, Final, Literal, cast
 
 if __package__:
+    from .deepseek.stream_events import (
+        DEEPSEEK_STREAM_EVENT_PREFIX,
+        parse_deepseek_stream_event_line as _parse_deepseek_stream_event_line,
+        route_deepseek_stream_event as _route_deepseek_stream_event,
+    )
     from .logging_utils import configure_logging
 else:
     # Allow `python path/to/run_pipeline.py` by bootstrapping repo root into sys.path.
     repo_root = Path(__file__).resolve().parent.parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
+    from audio2script_and_summarizer.deepseek.stream_events import (
+        DEEPSEEK_STREAM_EVENT_PREFIX,
+        parse_deepseek_stream_event_line as _parse_deepseek_stream_event_line,
+        route_deepseek_stream_event as _route_deepseek_stream_event,
+    )
     from audio2script_and_summarizer.logging_utils import configure_logging
 
 torch_module: ModuleType | None
@@ -70,7 +80,6 @@ DEFAULT_HEARTBEAT_SECONDS: Final[float] = 5.0
 KEYBOARD_POLL_SECONDS: Final[float] = 0.05
 STATUS_REFRESH_SECONDS: Final[float] = 1.0
 DEFAULT_DEEPSEEK_HARD_CEILING_TOKENS: Final[int] = 64000
-DEEPSEEK_STREAM_EVENT_PREFIX: Final[str] = "[DEEPSEEK_STREAM] "
 STREAM_PANEL_MIN_WIDTH: Final[int] = 28
 SKIP_A2S_EXCLUDED_DIRS: Final[frozenset[str]] = frozenset(
     {
@@ -1319,90 +1328,6 @@ def _extract_module_name(cmd: list[str]) -> str:
     if cmd:
         return Path(cmd[0]).name
     return "-"
-
-
-def _parse_deepseek_stream_event_line(line: str) -> dict[str, Any] | None:
-    """Parse a DeepSeek stream event marker from subprocess output."""
-    if not line.startswith(DEEPSEEK_STREAM_EVENT_PREFIX):
-        return None
-
-    payload_text = line[len(DEEPSEEK_STREAM_EVENT_PREFIX) :].strip()
-    if not payload_text:
-        logger.warning("Received empty DeepSeek stream marker payload.")
-        return {}
-
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError as exc:
-        logger.warning("Invalid DeepSeek stream marker payload: %s", exc)
-        return {}
-
-    if not isinstance(payload, dict):
-        logger.warning("DeepSeek stream marker payload must be a JSON object.")
-        return {}
-    return payload
-
-
-def _route_deepseek_stream_event(
-    dashboard: _PipelineDashboard,
-    payload: dict[str, Any],
-) -> bool:
-    """Route a parsed DeepSeek stream event into dashboard state updates."""
-    event_name = str(payload.get("event", "")).strip().lower()
-    if not event_name:
-        return False
-
-    if event_name == "start":
-        model_name = str(payload.get("model", "deepseek-reasoner")).strip()
-        dashboard.open_deepseek_stream_panel(model_name=model_name)
-        return True
-
-    if event_name == "token":
-        text = payload.get("text")
-        if isinstance(text, str) and text:
-            phase = str(payload.get("phase", "answer")).strip().lower()
-            if phase in {"reasoning", "answer"}:
-                dashboard.append_deepseek_stream_token(phase=phase, text=text)
-            else:
-                phase_tag = phase.upper() if phase else "TOKEN"
-                dashboard.log(f"[DEEPSEEK {phase_tag}] {text}")
-        return True
-
-    if event_name == "context_usage":
-        tokens_used_raw = payload.get("tokens_used")
-        tokens_limit_raw = payload.get("tokens_limit")
-        tokens_left_raw = payload.get("tokens_left")
-        percent_left_raw = payload.get("percent_left")
-        rollover_count_raw = payload.get("rollover_count", 0)
-        try:
-            tokens_used = max(0, int(tokens_used_raw))
-            tokens_limit = max(1, int(tokens_limit_raw))
-            tokens_left = max(0, int(tokens_left_raw))
-            percent_left = max(0.0, min(1.0, float(percent_left_raw)))
-            rollover_count = max(0, int(rollover_count_raw))
-        except (TypeError, ValueError):
-            logger.warning(
-                "Invalid DeepSeek context usage payload: %s",
-                payload,
-            )
-            return True
-        dashboard.update_deepseek_context_usage(
-            tokens_used=tokens_used,
-            tokens_limit=tokens_limit,
-            tokens_left=tokens_left,
-            percent_left=percent_left,
-            rollover_count=rollover_count,
-        )
-        return True
-
-    if event_name == "summary_json_ready":
-        dashboard.close_deepseek_stream_panel()
-        return True
-
-    if event_name == "done":
-        return True
-
-    return False
 
 
 def _run_stage_command(
