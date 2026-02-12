@@ -124,6 +124,11 @@ class _PipelineDashboard:
         self._deepseek_stream_follow = True
         self._deepseek_stream_scroll_offset = 0
         self._deepseek_stream_phase = ""
+        self._deepseek_context_tokens_used: int | None = None
+        self._deepseek_context_tokens_limit: int | None = None
+        self._deepseek_context_tokens_left: int | None = None
+        self._deepseek_context_percent_left: float | None = None
+        self._deepseek_context_rollover_count = 0
         self._selected_panel: Literal["output", "deepseek_stream"] = "output"
         self._status_stage = "Pipeline setup"
         self._status_substep = "Initializing dashboard"
@@ -437,6 +442,11 @@ class _PipelineDashboard:
             self._deepseek_stream_follow = True
             self._deepseek_stream_scroll_offset = 0
             self._deepseek_stream_phase = ""
+            self._deepseek_context_tokens_used = None
+            self._deepseek_context_tokens_limit = None
+            self._deepseek_context_tokens_left = None
+            self._deepseek_context_percent_left = None
+            self._deepseek_context_rollover_count = 0
             self._selected_panel = "output"
             self._logs.append(
                 f"[EVENT] DeepSeek stream panel opened (model={model_name.strip() or 'unknown'})."
@@ -476,6 +486,26 @@ class _PipelineDashboard:
                 )
         self._refresh()
 
+    def update_deepseek_context_usage(
+        self,
+        *,
+        tokens_used: int,
+        tokens_limit: int,
+        tokens_left: int,
+        percent_left: float,
+        rollover_count: int = 0,
+    ) -> None:
+        """Update current context window usage for stream-panel subtitle rendering."""
+        if not self.enabled:
+            return
+        with self._state_lock:
+            self._deepseek_context_tokens_used = max(0, int(tokens_used))
+            self._deepseek_context_tokens_limit = max(1, int(tokens_limit))
+            self._deepseek_context_tokens_left = max(0, int(tokens_left))
+            self._deepseek_context_percent_left = max(0.0, min(1.0, float(percent_left)))
+            self._deepseek_context_rollover_count = max(0, int(rollover_count))
+        self._refresh()
+
     def close_deepseek_stream_panel(self) -> None:
         """Hide the DeepSeek stream panel after summarization output is ready."""
         if not self.enabled:
@@ -489,6 +519,11 @@ class _PipelineDashboard:
             self._deepseek_stream_follow = True
             self._deepseek_stream_scroll_offset = 0
             self._deepseek_stream_phase = ""
+            self._deepseek_context_tokens_used = None
+            self._deepseek_context_tokens_limit = None
+            self._deepseek_context_tokens_left = None
+            self._deepseek_context_percent_left = None
+            self._deepseek_context_rollover_count = 0
             if self._selected_panel == "deepseek_stream":
                 self._selected_panel = "output"
             self._logs.append("[EVENT] DeepSeek stream panel closed.")
@@ -711,6 +746,7 @@ class _PipelineDashboard:
                         if self._selected_panel == "deepseek_stream"
                         else "white"
                     )
+                    stream_subtitle = self._build_deepseek_stream_subtitle_locked()
                     stream_layout.update(
                         panel_module.Panel(
                             stream_text,
@@ -719,6 +755,8 @@ class _PipelineDashboard:
                                 if self._selected_panel == "deepseek_stream"
                                 else "DeepSeek Stream"
                             ),
+                            subtitle=stream_subtitle,
+                            subtitle_align="left",
                             border_style=stream_border_style,
                             padding=(0, 1),
                         )
@@ -838,6 +876,22 @@ class _PipelineDashboard:
         if start_index > 0:
             view_lines.insert(0, "[...] older stream output above")
         return "\n".join(view_lines)
+
+    def _build_deepseek_stream_subtitle_locked(self) -> str:
+        """Build subtitle text containing current context window usage."""
+        if (
+            self._deepseek_context_tokens_used is None
+            or self._deepseek_context_tokens_limit is None
+            or self._deepseek_context_tokens_left is None
+            or self._deepseek_context_percent_left is None
+        ):
+            return "Ctx: pending"
+        return (
+            f"Ctx {self._deepseek_context_tokens_used:,}/{self._deepseek_context_tokens_limit:,} "
+            f"| Left {self._deepseek_context_tokens_left:,} "
+            f"({self._deepseek_context_percent_left * 100:.1f}%) "
+            f"| Rollovers {self._deepseek_context_rollover_count}"
+        )
 
     def _visible_line_count_locked(self) -> int:
         """Estimate lines visible inside the currently selected viewport."""
@@ -1312,6 +1366,33 @@ def _route_deepseek_stream_event(
             else:
                 phase_tag = phase.upper() if phase else "TOKEN"
                 dashboard.log(f"[DEEPSEEK {phase_tag}] {text}")
+        return True
+
+    if event_name == "context_usage":
+        tokens_used_raw = payload.get("tokens_used")
+        tokens_limit_raw = payload.get("tokens_limit")
+        tokens_left_raw = payload.get("tokens_left")
+        percent_left_raw = payload.get("percent_left")
+        rollover_count_raw = payload.get("rollover_count", 0)
+        try:
+            tokens_used = max(0, int(tokens_used_raw))
+            tokens_limit = max(1, int(tokens_limit_raw))
+            tokens_left = max(0, int(tokens_left_raw))
+            percent_left = max(0.0, min(1.0, float(percent_left_raw)))
+            rollover_count = max(0, int(rollover_count_raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid DeepSeek context usage payload: %s",
+                payload,
+            )
+            return True
+        dashboard.update_deepseek_context_usage(
+            tokens_used=tokens_used,
+            tokens_limit=tokens_limit,
+            tokens_left=tokens_left,
+            percent_left=percent_left,
+            rollover_count=rollover_count,
+        )
         return True
 
     if event_name == "summary_json_ready":
