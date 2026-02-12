@@ -32,7 +32,7 @@ The exponential growth of long-form podcasting creates a consumption bottleneck,
 
 1.  **Temporal Control:** Utilizing forced alignment to calculate speaker-specific speaking rates, enabling an LLM to compress dialogue into a structured representation that strictly adheres to a user-defined time budget.
 2.  **Spectral Control:** Utilizing diarization timestamps to harvest reference samples directly from raw input, driving zero-shot voice cloning via **IndexTTS2**.
-3.  **Conversational Control:** A refinement module using a 4-bit quantized **Mistral 7B** model to predict semantic interjection points, generating syntactically-aware asynchronous overlaps.
+3.  **Conversational Control:** A refinement module using a 4-bit quantized **Mistral 8B** model (HF) to predict semantic interjection points, generating syntactically-aware asynchronous overlaps.
 
 The outcome is a functional prototype that validates the feasibility of duration-controlled, high-fidelity conversational resynthesis.
 
@@ -43,8 +43,8 @@ The outcome is a functional prototype that validates the feasibility of duration
 The CARD paradigm shifts from extraction to resynthesis through a four-stage pipeline:
 
 ### 1. Audio2Script (Ingestion)
-*   **Models:** OpenAI Whisper (ASR) + NVIDIA NeMo (Forced Alignment).
-*   **Function:** Ingests raw podcast audio to generate a timestamped, speaker-attributed transcript. It calculates the original Words-Per-Minute (WPM) to derive the word budget for the summary.
+*   **Models:** OpenAI Whisper (ASR) + pyannote (speaker diarization/alignment).
+*   **Function:** Ingests raw podcast audio to generate a timestamped, speaker-attributed transcript. Word-budget WPM can be derived from either IndexTTS calibration (default) or transcript timestamps (optional).
 
 ### 2. Speaker Audio Extraction
 *   **Models:** Meta Demucs (Source Separation) + SepFormer (Targeted Overlap Separation).
@@ -58,7 +58,7 @@ The CARD paradigm shifts from extraction to resynthesis through a four-stage pip
 *   **Function:** Compresses the transcript into a JSON structure strictly adhering to the time budget. It injects `emo_text` (affective prompts) and maintains speaker identity.
 
 ### 4. Voice Cloning & Backchanneling
-*   **Models:** **IndexTTS2** (Synthesis) + **Mistral 7B Quantized** (Conversational Supervisor).
+*   **Models:** **IndexTTS2** (Synthesis) + **Mistral 8B Quantized** (Conversational Supervisor).
 *   **Function:** Synthesizes the audio using zero-shot cloning. The Mistral module analyzes the text flow to inject asynchronous interjections (e.g., "Right," "No way") and overlaps to restore the "parasocial" vibe of human conversation.
 
 ---
@@ -136,7 +136,7 @@ The summarizer LLM must output a JSON structure compatible with the CARD pipelin
 ```
 
 ### Phase 3: Resynthesis & Backchanneling
-This stage combines IndexTTS2 for identity preservation and Mistral 7B for conversational dynamics (interjections).
+This stage combines IndexTTS2 for identity preservation and Mistral 8B for conversational dynamics (interjections).
 
 **Run the Advanced Conversational Pipeline:**
 This script corresponds to Section 4.4, handling "Post-Hoc Acoustic Alignment" and "Context-Aware Response Generation."
@@ -146,7 +146,7 @@ This script corresponds to Section 4.4, handling "Post-Hoc Acoustic Alignment" a
 uv run voice-cloner-and-interjector/tools/podcast/llm_context_vibe.py
 ```
 
-*Note: This script uses the quantized Mistral model to detect trigger words (e.g., conflict, surprise) and inserts asynchronous overlaps.*
+*Note: This script uses the quantized Mistral 8B model to detect trigger words (e.g., conflict, surprise) and inserts asynchronous overlaps.*
 
 ### Logging Configuration
 
@@ -154,8 +154,8 @@ All podcast tools use Python's built-in `logging` module with ISO 8601 timestamp
 
 **Default output:**
 ```
-[2026-02-03 19:53:17] [INFO   ] Checking Ollama + Mistral 7B Setup...
-[2026-02-03 19:53:17] [INFO   ] mistral:7b-instruct-q4_0 already loaded
+[2026-02-03 19:53:17] [INFO   ] Checking HF Mistral 8B Setup...
+[2026-02-03 19:53:17] [INFO   ] Mistral 8B loaded (HF 4-bit)
 ```
 
 **Enable DEBUG for verbose output (including LLM responses):**

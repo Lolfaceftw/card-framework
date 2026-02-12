@@ -5,6 +5,7 @@ os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
 import json
 import re
 import time
+import logging
 import librosa
 import torch
 import torchaudio
@@ -38,7 +39,7 @@ import torch.nn.functional as F
 class IndexTTS2:
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None,use_deepspeed=False
+            use_cuda_kernel=None,use_deepspeed=False, use_accel=False, use_torch_compile=False
     ):
         """
         Args:
@@ -48,6 +49,8 @@ class IndexTTS2:
             device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
             use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
             use_deepspeed (bool): whether to use DeepSpeed or not.
+            use_accel (bool): whether to use acceleration engine for GPT2 or not.
+            use_torch_compile (bool): whether to use torch.compile for optimization or not.
         """
         if device is not None:
             self.device = device
@@ -75,10 +78,12 @@ class IndexTTS2:
         self.model_dir = model_dir
         self.dtype = torch.float16 if self.use_fp16 else None
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
+        self.use_accel = use_accel
+        self.use_torch_compile = use_torch_compile
 
         self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
 
-        self.gpt = UnifiedVoice(**self.cfg.gpt)
+        self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
         self.gpt = self.gpt.to(self.device)
@@ -135,6 +140,13 @@ class IndexTTS2:
         )
         self.s2mel = s2mel.to(self.device)
         self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+        
+        # Enable torch.compile optimization if requested
+        if self.use_torch_compile:
+            print(">> Enabling torch.compile optimization")
+            self.s2mel.enable_torch_compile()
+            print(">> torch.compile optimization enabled successfully")
+        
         self.s2mel.eval()
         print(">> s2mel weights restored from:", s2mel_path)
 
@@ -156,11 +168,17 @@ class IndexTTS2:
         print(">> bigvgan weights restored from:", bigvgan_name)
 
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
-        self.normalizer = TextNormalizer()
+        self.normalizer = TextNormalizer(enable_glossary=True)
         self.normalizer.load()
         print(">> TextNormalizer loaded")
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
         print(">> bpe model loaded from:", self.bpe_path)
+
+        # 加载术语词汇表（如果存在）
+        self.glossary_path = os.path.join(self.model_dir, "glossary.yaml")
+        if os.path.exists(self.glossary_path):
+            self.normalizer.load_glossary_from_yaml(self.glossary_path)
+            print(">> Glossary loaded from:", self.glossary_path)
 
         emo_matrix = torch.load(os.path.join(self.model_dir, self.cfg.emo_matrix))
         self.emo_matrix = emo_matrix.to(self.device)
@@ -336,19 +354,45 @@ class IndexTTS2:
 
         return emo_vector
 
+    # Token rate for duration control
+    # Empirically derived from the full pipeline:
+    # - GPT generates semantic tokens
+    # - S2M converts tokens->mel with 1.72x multiplier: mel_frames = tokens * 1.72
+    # - BigVGAN vocoder: audio_samples = mel_frames * hop_size (256)
+    # - sample_rate = 22050
+    # So: duration = tokens * 1.72 * 256 / 22050
+    # Therefore: tokens/second = 22050 / (1.72 * 256) ≈ 50.08
+    TOKENS_PER_SECOND = 50.077217
+
+    def duration_to_tokens(self, duration_seconds: float) -> int:
+        """Convert target duration in seconds to target token count.
+        
+        Args:
+            duration_seconds: Target speech duration in seconds.
+            
+        Returns:
+            Token count for duration control.
+        """
+        logger = logging.getLogger('indextts.duration')
+        tokens = int(duration_seconds * self.TOKENS_PER_SECOND)
+        logger.debug(f"duration_to_tokens: {duration_seconds}s * {self.TOKENS_PER_SECOND} = {tokens} tokens")
+        return tokens
+
     # 原始推理模式
     def infer(self, spk_audio_prompt, text, output_path,
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0,
+              target_duration=None, target_tokens=None, **generation_kwargs):
         if stream_return:
             return self.infer_generator(
                 spk_audio_prompt, text, output_path,
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                target_duration=target_duration, target_tokens=target_tokens, **generation_kwargs
             )
         else:
             try:
@@ -357,7 +401,8 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                    target_duration=target_duration, target_tokens=target_tokens, **generation_kwargs
                 ))[0]
             except IndexError:
                 return None
@@ -366,9 +411,33 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0,
+              target_duration=None, target_tokens=None, **generation_kwargs):
+        """
+        Generate speech from text with optional duration control.
+        
+        Args:
+            target_duration: Target speech duration in seconds. If specified, enables duration control.
+            target_tokens: Target token count (overrides target_duration if both specified).
+            ... (other args same as before)
+        """
+        logger = logging.getLogger('indextts.duration')
+        logger.debug(f"infer_generator called: target_duration={target_duration}, target_tokens={target_tokens}")
+        
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
+        
+        # Handle duration control
+        computed_target_tokens = None
+        if target_tokens is not None:
+            computed_target_tokens = target_tokens
+            logger.debug(f"Using explicit target_tokens={computed_target_tokens}")
+            print(f">> Duration control: using target_tokens={computed_target_tokens}")
+        elif target_duration is not None:
+            computed_target_tokens = self.duration_to_tokens(target_duration)
+            logger.debug(f"Converted target_duration={target_duration}s to {computed_target_tokens} tokens")
+            print(f">> Duration control: target_duration={target_duration}s -> target_tokens={computed_target_tokens}")
+        
         if verbose:
             print(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt}, "
                   f"emo_audio_prompt:{emo_audio_prompt}, emo_alpha:{emo_alpha}, "
@@ -453,7 +522,7 @@ class IndexTTS2:
             ref_mel = self.cache_mel
 
         if emo_vector is not None:
-            weight_vector = torch.tensor(emo_vector).to(self.device)
+            weight_vector = torch.tensor(emo_vector, device=self.device)
             if use_random:
                 random_index = [random.randint(0, x - 1) for x in self.emo_num]
             else:
@@ -560,8 +629,13 @@ class IndexTTS2:
                         num_beams=num_beams,
                         repetition_penalty=repetition_penalty,
                         max_generate_length=max_mel_tokens,
+                        target_tokens=computed_target_tokens,
                         **generation_kwargs
                     )
+                    
+                    # Debug: log generated codes info
+                    logger.debug(f"GPT returned codes shape: {codes.shape}")
+                    logger.debug(f"Requested target_tokens: {computed_target_tokens}, Got: {codes.shape[-1]} tokens")
 
                 gpt_gen_time += time.perf_counter() - m_start_time
                 if not has_warned and (codes[:, -1] != self.stop_mel_token).any():
@@ -580,17 +654,22 @@ class IndexTTS2:
                 #                     print(f"code len: {code_lens}")
 
                 code_lens = []
+                max_code_len = 0
                 for code in codes:
                     if self.stop_mel_token not in code:
-                        code_lens.append(len(code))
                         code_len = len(code)
                     else:
-                        len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0] + 1
-                        code_len = len_ - 1
+                        len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0]
+                        code_len = len_[0].item() if len_.numel() > 0 else len(code)
                     code_lens.append(code_len)
-                codes = codes[:, :code_len]
+                    max_code_len = max(max_code_len, code_len)
+                codes = codes[:, :max_code_len]
                 code_lens = torch.LongTensor(code_lens)
                 code_lens = code_lens.to(self.device)
+                
+                # Debug: log final code lengths after stop token processing
+                logger.debug(f"After stop-token processing: code_lens={code_lens.tolist()}, max_code_len={max_code_len}")
+                
                 if verbose:
                     print(codes, type(codes))
                     print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
@@ -623,6 +702,13 @@ class IndexTTS2:
                     S_infer = S_infer.transpose(1, 2)
                     S_infer = S_infer + latent
                     target_lengths = (code_lens * 1.72).long()
+                    
+                    # Debug: log S2M conversion
+                    logger.debug(f"S2M: code_lens={code_lens.tolist()}, target_lengths (mel frames)={target_lengths.tolist()}")
+                    # Expected duration = mel_frames * hop_size / sample_rate
+                    # hop_size=256, sample_rate=22050 -> mel_frames * 256 / 22050
+                    expected_duration = target_lengths[0].item() * 256 / 22050
+                    logger.debug(f"S2M: expected audio duration from mel frames: {expected_duration:.2f}s")
 
                     cond = self.s2mel.models['length_regulator'](S_infer,
                                                                  ylens=target_lengths,
@@ -636,10 +722,13 @@ class IndexTTS2:
                                                                    inference_cfg_rate=inference_cfg_rate)
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
                     s2mel_time += time.perf_counter() - m_start_time
+                    
+                    logger.debug(f"S2M: vc_target (mel) shape: {vc_target.shape}")
 
                     m_start_time = time.perf_counter()
                     wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
                     print(wav.shape)
+                    logger.debug(f"BigVGAN: wav shape: {wav.shape}, duration: {wav.shape[-1]/22050:.2f}s")
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
 
@@ -815,6 +904,19 @@ class QwenEmotion:
 if __name__ == "__main__":
     prompt_wav = "examples/voice_01.wav"
     text = '欢迎大家来体验indextts2，并给予我们意见与反馈，谢谢大家。'
-
-    tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_cuda_kernel=False)
+    tts = IndexTTS2(
+        cfg_path="checkpoints/config.yaml", 
+        model_dir="checkpoints", 
+        use_cuda_kernel=False,
+        use_torch_compile=True
+    )
     tts.infer(spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
+    char_size = 5
+    import string
+    time_buckets = []
+    for i in range(10):
+        text = ''.join(random.choices(string.ascii_letters, k=char_size))
+        start_time = time.time()
+        tts.infer(spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
+        time_buckets.append(time.time() - start_time)
+    print(time_buckets)

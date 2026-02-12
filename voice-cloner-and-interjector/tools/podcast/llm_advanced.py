@@ -1,85 +1,44 @@
 """
 LLM-enhanced multi-speaker podcast synthesis with advanced trigger detection.
 
-Uses Mistral 7B via Ollama to detect trigger phrases and generate
+Uses Mistral 8B (HF 4-bit) to detect trigger phrases and generate
 contextual interjections with cross-fading between segments.
 """
 
 import json
 import os
 import random
-import subprocess
 from pathlib import Path
 from tkinter import Tk, filedialog, messagebox
 
-import requests
+import torch
 from pydub import AudioSegment
 
 from indextts.infer_v2 import IndexTTS2
+from tools.podcast.hf_backchannel import MODEL_ID, ensure_model, extract_first_json, generate_text
 from tools.podcast.logger import get_logger
 
 # Initialize logger
 logger = get_logger(__name__)
 
 # Initialize Index-TTS-2
+_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 tts = IndexTTS2(
     cfg_path="checkpoints/config.yaml",
     model_dir="checkpoints",
-    device="cuda:0",
-    use_fp16=True,
-    use_cuda_kernel=True
+    device=_DEVICE,
+    use_fp16=_DEVICE.startswith("cuda"),
+    use_cuda_kernel=_DEVICE.startswith("cuda"),
 )
-
-# OLLAMA CONFIGURATION
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "mistral:7b-instruct-q4_0"
-OLLAMA_CHECK_URL = "http://localhost:11434/api/tags"
-
-
-def check_ollama_running() -> bool:
-    """Verify Ollama service is running.
-
-    Returns:
-        True if Ollama is reachable, False otherwise.
-    """
-    try:
-        response = requests.get(OLLAMA_CHECK_URL, timeout=2)
-        return response.status_code == 200
-    except Exception:
-        return False
 
 
 def ensure_mistral_loaded() -> bool:
-    """Download Mistral 7B 4-bit if not already present.
-
-    Returns:
-        True if model is ready, False if Ollama is not running.
-    """
-    if not check_ollama_running():
-        logger.error("Ollama is not running!")
-        logger.info("Start Ollama with: ollama serve")
-        logger.info("Then run this script again.")
-        return False
-
-    try:
-        response = requests.get(OLLAMA_CHECK_URL, timeout=5)
-        models = response.json().get("models", [])
-        model_names = [m["name"] for m in models]
-
-        if OLLAMA_MODEL not in model_names:
-            logger.info(f"Downloading {OLLAMA_MODEL}... (one-time setup, ~2-3 minutes)")
-            subprocess.run(["ollama", "pull", OLLAMA_MODEL], check=True)
-            logger.info("Mistral 7B loaded!")
-        else:
-            logger.info(f"{OLLAMA_MODEL} already loaded")
-        return True
-    except Exception as e:
-        logger.error(f"Error checking Ollama models: {e}")
-        return False
+    """Ensure HF Mistral 8B is available."""
+    return ensure_model()
 
 
 def detect_trigger_with_llm(text: str) -> list:
-    """Use Mistral 7B to identify the best trigger point for an interjection.
+    """Use Mistral 8B to identify the best trigger point for an interjection.
 
     Args:
         text: Speaker text to analyze.
@@ -133,28 +92,21 @@ Now, analyze the provided text and give your JSON response.
 """
 
     try:
-        response = requests.post(
-            OLLAMA_API_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json"
-            },
-            timeout=30
+        result_text = generate_text(
+            [
+                {"role": "system", "content": "You are an expert conversation analyst."},
+                {"role": "user", "content": prompt},
+            ],
+            max_new_tokens=80,
+            temperature=0.3,
+            top_p=0.9,
         )
-
-        if response.status_code == 200:
-            result_text = response.json().get("response", "")
+        if result_text:
             logger.debug(f"LLM trigger response: {result_text}")
-            trigger_data = json.loads(result_text)
-
-            if "trigger_word" in trigger_data and "char_pos" in trigger_data:
+            trigger_data = extract_first_json(result_text)
+            if trigger_data and "trigger_word" in trigger_data and "char_pos" in trigger_data:
                 trigger_data["pos_percent"] = trigger_data["char_pos"] / len(text)
                 return [trigger_data]
-        else:
-            logger.warning(f"LLM trigger detection failed with status {response.status_code}")
-
     except Exception as e:
         logger.warning(f"LLM trigger detection error: {e}")
 
@@ -219,7 +171,7 @@ def calculate_interjection_timing_and_trigger(main_text: str, main_audio_path: s
 
 
 def generate_interjection_llm(main_speaker_text: str, speaker_name: str) -> str:
-    """Generate interjection using Mistral 7B via Ollama.
+    """Generate interjection using Mistral 8B (HF 4-bit).
 
     Args:
         main_speaker_text: What the main speaker said.
@@ -238,26 +190,19 @@ Make it sound natural, not robotic. Examples: "Yeah, totally!", "That's wild!", 
 Respond with ONLY the interjection phrase, nothing else."""
 
     try:
-        response = requests.post(
-            OLLAMA_API_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "num_predict": 20
-            },
-            timeout=30
+        result_text = generate_text(
+            [
+                {"role": "system", "content": "You generate short conversational interjections."},
+                {"role": "user", "content": prompt},
+            ],
+            max_new_tokens=20,
+            temperature=0.7,
+            top_p=0.9,
         )
-
-        if response.status_code == 200:
-            result = response.json()
-            interjection = result.get("response", "").strip()
-            interjection = interjection.replace('"', '').replace("*", '')
+        if result_text:
+            interjection = result_text.replace('"', "").replace("*", "").strip()
             logger.debug(f"LLM interjection: {interjection}")
             return interjection[:50]
-
     except Exception as e:
         logger.warning(f"LLM error {e}, using fallback")
 
@@ -265,7 +210,7 @@ Respond with ONLY the interjection phrase, nothing else."""
 
 
 def get_fallback_interjection(main_speaker_text: str) -> str:
-    """Fast fallback interjection pool if Ollama is down.
+    """Fast fallback interjection pool if HF model is unavailable.
 
     Args:
         main_speaker_text: Context for selecting appropriate fallback.
@@ -324,39 +269,59 @@ def get_user_input():
     for spk in sorted(speaker_files_required):
         logger.info(f"  - {spk}")
 
-    logger.info("Select directory containing speaker WAV files...")
-    speaker_dir = filedialog.askdirectory(
-        title="Select directory containing speaker WAV files",
-        initialdir=os.getcwd()
-    )
-
-    if not speaker_dir:
-        logger.error("No speaker directory selected.")
-        root.destroy()
-        return None, None, None, None
-
-    logger.debug(f"Selected speaker directory: {speaker_dir}")
-
     speaker_paths = {}
     missing_files = []
+    json_dir = os.path.dirname(json_path)
 
+    # First pass: resolve absolute paths or paths relative to JSON file
     for spk_file in speaker_files_required:
-        full_path = os.path.join(speaker_dir, spk_file)
-        if os.path.exists(full_path):
-            speaker_paths[spk_file] = full_path
-            logger.debug(f"  Found: {spk_file}")
-        else:
-            missing_files.append(spk_file)
-            logger.warning(f"  Missing: {spk_file}")
+        candidate = spk_file
+        if os.path.isabs(candidate) and os.path.exists(candidate):
+            speaker_paths[spk_file] = candidate
+            logger.info(f"  Found (absolute): {spk_file}")
+            continue
 
+        json_relative = os.path.join(json_dir, spk_file)
+        if os.path.exists(json_relative):
+            speaker_paths[spk_file] = json_relative
+            logger.info(f"  Found (json-relative): {spk_file}")
+            continue
+
+        missing_files.append(spk_file)
+
+    # If some files are missing, prompt for a speaker directory
     if missing_files:
-        logger.error(f"{len(missing_files)} speaker WAV file(s) not found:")
-        messagebox.showerror(
-            "Missing Files",
-            f"The following speaker files are missing:\n" + "\n".join(missing_files)
+        logger.info("Select directory containing speaker WAV files...")
+        speaker_dir = filedialog.askdirectory(
+            title="Select directory containing speaker WAV files",
+            initialdir=os.getcwd()
         )
-        root.destroy()
-        return None, None, None, None
+
+        if not speaker_dir:
+            logger.error("No speaker directory selected.")
+            root.destroy()
+            return None, None, None, None
+
+        logger.debug(f"Selected speaker directory: {speaker_dir}")
+
+        still_missing = []
+        for spk_file in missing_files:
+            full_path = os.path.join(speaker_dir, spk_file)
+            if os.path.exists(full_path):
+                speaker_paths[spk_file] = full_path
+                logger.debug(f"  Found: {spk_file}")
+            else:
+                still_missing.append(spk_file)
+                logger.warning(f"  Missing: {spk_file}")
+
+        if still_missing:
+            logger.error(f"{len(still_missing)} speaker WAV file(s) not found:")
+            messagebox.showerror(
+                "Missing Files",
+                f"The following speaker files are missing:\n" + "\n".join(still_missing)
+            )
+            root.destroy()
+            return None, None, None, None
 
     logger.info(f"All {len(speaker_files_required)} required speaker files found!")
 
@@ -587,7 +552,7 @@ def cleanup_temp_files(output_dir: str) -> None:
 def main():
     """Main execution flow."""
     logger.info("=" * 60)
-    logger.info("Checking Ollama + Mistral 7B Setup...")
+    logger.info("Checking HF Mistral 8B Setup...")
     logger.info("=" * 60)
 
     if not ensure_mistral_loaded():
@@ -603,7 +568,7 @@ def main():
     logger.info(f"  Input JSON: {json_path}")
     logger.info(f"  Output Directory: {output_dir}")
     logger.info(f"  Final Output: {final_output_path}")
-    logger.info(f"  Interjection Model: Mistral 7B (4-bit via Ollama)")
+    logger.info(f"  Interjection Model: {MODEL_ID} (HF 4-bit)")
     logger.info("=" * 60)
 
     with open(json_path, "r", encoding="utf-8") as f:

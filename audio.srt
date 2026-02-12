@@ -1,0 +1,4044 @@
+﻿1
+00:00:08,181 --> 00:00:14,240
+SPEAKER_00: This is the Rational Reminder Podcast, a weekly reality check on sensible investing and financial decision-making from two Canadians.
+
+2
+00:00:14,300 --> 00:00:21,740
+SPEAKER_00: We are hosted by me, Benjamin Felix, Chief Investment Officer and Braden Warwick, Financial Planning Product Architect at PWL Capital.
+
+3
+00:00:23,820 --> 00:00:29,420
+SPEAKER_00: All right, welcome to episode 395.
+
+4
+00:00:30,240 --> 00:00:33,040
+SPEAKER_00: We're joined in this episode by Dr.
+
+5
+00:00:33,220 --> 00:00:38,260
+SPEAKER_00: Charles Chafin, really interesting guest and there is a bit of a backstory.
+
+6
+00:00:38,780 --> 00:00:42,820
+SPEAKER_00: but I'll introduce who Charles is first and then we'll talk a little bit about the backstory.
+
+7
+00:00:43,880 --> 00:00:46,000
+SPEAKER_00: And we have a, I don't know what I'd call it.
+
+8
+00:00:46,580 --> 00:00:47,320
+SPEAKER_00: Is it an announcement?
+
+9
+00:00:47,420 --> 00:00:49,120
+SPEAKER_00: Is it a, is it a gift for listeners?
+
+10
+00:00:49,220 --> 00:00:49,440
+SPEAKER_00: I don't know.
+
+11
+00:00:49,780 --> 00:00:52,040
+SPEAKER_00: I don't know what it is, but it's something cool that people are going to like.
+
+12
+00:00:53,260 --> 00:00:53,440
+SPEAKER_00: Okay.
+
+13
+00:00:53,760 --> 00:00:57,660
+SPEAKER_00: So Charles' work bridges psychology and financial planning.
+
+14
+00:00:58,900 --> 00:01:02,540
+SPEAKER_00: He's written a book on the psychology of financial planning.
+
+15
+00:01:03,220 --> 00:01:05,980
+SPEAKER_00: He's written a bunch of books, nine books in total.
+
+16
+00:01:06,400 --> 00:01:07,920
+SPEAKER_00: The most recent one was on goals.
+
+17
+00:01:08,980 --> 00:01:13,440
+SPEAKER_00: the psychology of defining, pursuing and achieving what matters, which we did talk about.
+
+18
+00:01:14,520 --> 00:01:22,080
+SPEAKER_00: And then his, his sort of big meaty book on the psychology of financial planning is the psychology of financial planning practitioners guide to money and behavior.
+
+19
+00:01:22,520 --> 00:01:26,440
+SPEAKER_00: And there is a new edition of that book coming out in April, 2026.
+
+20
+00:01:26,480 --> 00:01:31,820
+SPEAKER_00: I read the 2023 version, I believe to think of the questions to ask Charles.
+
+21
+00:01:32,320 --> 00:01:40,140
+SPEAKER_00: So he's got this, you know, big body of, of books on financial planning, psychology, and related topics.
+
+22
+00:01:41,200 --> 00:01:45,460
+SPEAKER_00: He also creates instructional programs for financial planners.
+
+23
+00:01:46,700 --> 00:01:51,380
+SPEAKER_00: He is a professor of practice in the College of Human Sciences at Iowa State University.
+
+24
+00:01:52,520 --> 00:01:57,940
+SPEAKER_00: There's a very broad knowledge set in financial planning psychology.
+
+25
+00:01:59,920 --> 00:02:03,600
+SPEAKER_00: Yeah, so that's the setup for who Charles is.
+
+26
+00:02:06,000 --> 00:02:18,720
+SPEAKER_00: The story here though, is that we have been using the risk tolerance scale that was developed by John Grebel in 1999.
+
+27
+00:02:19,380 --> 00:02:21,440
+SPEAKER_00: That's the Grebel-Litton risk tolerance scale.
+
+28
+00:02:23,980 --> 00:02:27,400
+SPEAKER_00: We had built our own tool using that scale a couple of years ago.
+
+29
+00:02:27,840 --> 00:02:31,360
+SPEAKER_00: We've been using it for a while to do risk profiling for our clients here at PWL Capital.
+
+30
+00:02:32,160 --> 00:02:35,020
+SPEAKER_00: And we wanted to sort of update it.
+
+31
+00:02:35,180 --> 00:02:36,140
+SPEAKER_00: It felt a little bit dated.
+
+32
+00:02:36,180 --> 00:02:45,400
+SPEAKER_00: I mean, it's from 1999. we wanted to improve it, uh, maybe cover a little bit more ground than what was in that risk scale, risk tolerance scale.
+
+33
+00:02:45,820 --> 00:02:54,440
+SPEAKER_00: So I reached out to John Grebel and asked him if he'd be open to consulting with PWL to help us create our own risk tolerance scale, which I thought would be a really cool project.
+
+34
+00:02:55,620 --> 00:03:04,040
+SPEAKER_00: And he replied basically no, but good timing because I just launched a commercial product with some co-founders.
+
+35
+00:03:04,480 --> 00:03:09,420
+SPEAKER_00: for exactly this purpose, like to do risk tolerance profiling.
+
+36
+00:03:10,420 --> 00:03:11,800
+SPEAKER_00: So, okay, cool.
+
+37
+00:03:12,560 --> 00:03:18,940
+SPEAKER_00: So we dig into the tool, we learn about it, we go through the risk questionnaire, we read the literature about how they developed it.
+
+38
+00:03:20,040 --> 00:03:21,360
+SPEAKER_00: And it's really cool.
+
+39
+00:03:22,720 --> 00:03:32,080
+SPEAKER_00: It's a seven question risk tolerance questionnaire, but it also has a whole bunch of questions on financial psychology more generally.
+
+40
+00:03:32,800 --> 00:03:38,040
+SPEAKER_00: And we talk a lot about that with Charles in this episode and why that's important.
+
+41
+00:03:38,500 --> 00:03:46,300
+SPEAKER_00: Anyway, so Charles is John Grebel's co-founder in this company, which they've called Money and Risk Inventory.
+
+42
+00:03:48,160 --> 00:03:54,380
+SPEAKER_00: So full disclosure, PWL has a business relationship with Charles and with Money and Risk Inventory.
+
+43
+00:03:54,520 --> 00:03:59,380
+SPEAKER_00: We are using their product for our clients, so all new clients.
+
+44
+00:04:00,280 --> 00:04:07,680
+SPEAKER_00: Once the tool is rolled out, which is happening at the beginning of February, we'll go through this risk tolerance questionnaire and psychological profile.
+
+45
+00:04:08,860 --> 00:04:12,680
+SPEAKER_00: We are paying money in risk inventory to use their product, to use their intellectual property.
+
+46
+00:04:13,220 --> 00:04:16,579
+SPEAKER_00: Braden actually built the product that we're using, but we're using their intellectual property.
+
+47
+00:04:18,040 --> 00:04:19,100
+SPEAKER_00: What else do I have to disclose?
+
+48
+00:04:19,540 --> 00:04:21,360
+SPEAKER_00: They did not pay us to come on the podcast.
+
+49
+00:04:21,779 --> 00:04:23,860
+SPEAKER_00: They did not give us a discount to come on the podcast.
+
+50
+00:04:23,940 --> 00:04:24,520
+SPEAKER_00: Nothing like that.
+
+51
+00:04:25,460 --> 00:04:35,860
+SPEAKER_00: We're a customer of theirs and we thought that their the underlying thinking behind what they've built with money and risk inventory would be useful information for listeners.
+
+52
+00:04:36,720 --> 00:04:45,600
+SPEAKER_00: The other thing that we thought would be useful for listeners is if we made a version of the money and risk inventory questionnaire available to anybody.
+
+53
+00:04:46,420 --> 00:04:47,140
+SPEAKER_00: So Braden did that.
+
+54
+00:04:47,580 --> 00:04:58,880
+SPEAKER_00: He's been working hard on creating a public facing version of this questionnaire and assuming all has gone well, people listening right now should be able to click on a link.
+
+55
+00:04:59,180 --> 00:05:13,760
+SPEAKER_00: that we'll put in the episode description where they can access the money and risk inventory questionnaire and get back their, their, uh, risk tolerance, uh, score by going through the questionnaire.
+
+56
+00:05:15,060 --> 00:05:16,260
+SPEAKER_00: Uh, so hopefully people think that's cool.
+
+57
+00:05:16,420 --> 00:05:22,540
+SPEAKER_00: There aren't a whole lot of great risk tolerance questionnaires out there for anybody to use.
+
+58
+00:05:23,740 --> 00:05:29,860
+SPEAKER_00: And I'm pretty sure this is going to be, uh, the only I'm.
+
+59
+00:05:29,900 --> 00:05:42,700
+SPEAKER_00: I mean, I hope I'm not making stuff up here, but I'm, I don't know of other risk tolerance questionnaires that are a psychometric, uh, and based on the type of research that, that John has done on risk profiling.
+
+60
+00:05:42,740 --> 00:05:47,140
+SPEAKER_00: There are other ones out there that a lot more like a casual, I guess I would call it like.
+
+61
+00:05:47,180 --> 00:05:48,600
+SPEAKER_00: they seem like they're just kind of throwing together.
+
+62
+00:05:48,660 --> 00:05:58,200
+SPEAKER_00: You can find some of those online, but this one's like a solid evidence-based, um, valid and reliable questionnaire that we are making available to whoever is interested.
+
+63
+00:05:59,820 --> 00:06:00,360
+SPEAKER_01: Yeah, it's pretty cool.
+
+64
+00:06:00,540 --> 00:06:04,500
+SPEAKER_01: I can give a little bit more context and talk about what the tool does and how it works.
+
+65
+00:06:04,760 --> 00:06:08,420
+SPEAKER_01: So if you're listing and you're clicking on the link, you have some idea what you're looking at.
+
+66
+00:06:09,140 --> 00:06:12,660
+SPEAKER_01: But basically there's two dimensions of risk profiling.
+
+67
+00:06:12,860 --> 00:06:15,040
+SPEAKER_01: There's tolerance and there's also capacity.
+
+68
+00:06:15,640 --> 00:06:26,300
+SPEAKER_01: So the focus of our conversation with Charles is on tolerance and also the psychometric and behavioral stuff that go along with that to try and better understand our client's relationship with money.
+
+69
+00:06:28,080 --> 00:06:35,600
+SPEAKER_01: But in terms of the profiling aspect, the tolerance gets evaluated based on the answer to those seven questions that Ben mentioned.
+
+70
+00:06:36,460 --> 00:06:39,720
+SPEAKER_01: And then that also gets combined with risk capacity.
+
+71
+00:06:39,900 --> 00:06:51,920
+SPEAKER_01: And I think it's important to note that we created the risk capacity questions ourselves based on the outline of risk capacity from the CFA Institute guidelines.
+
+72
+00:06:53,140 --> 00:07:00,560
+SPEAKER_01: But we also got Charles and John Grebel to review our capacity questions as a part of this overall product.
+
+73
+00:07:01,280 --> 00:07:04,640
+SPEAKER_01: So they've reviewed it and said that they're great to move forward with.
+
+74
+00:07:05,540 --> 00:07:15,320
+SPEAKER_01: So once you've answered both the tolerance and the capacity questions, then those two scores combine together to form your overall risk profile.
+
+75
+00:07:16,640 --> 00:07:22,140
+SPEAKER_01: And they're combined, like both dimensions are combined together.
+
+76
+00:07:24,960 --> 00:07:30,340
+SPEAKER_01: which is a little bit above and beyond the regulatory requirements, which is just to use the minimum of the two scores.
+
+77
+00:07:30,440 --> 00:07:39,620
+SPEAKER_01: We combine them together and then that generates an overall score, which is then used to inform the suggested asset mix.
+
+78
+00:07:39,760 --> 00:07:41,420
+SPEAKER_01: And that's how the tool works.
+
+79
+00:07:41,900 --> 00:07:49,480
+SPEAKER_01: And if you use the tool, go through the questionnaires, it'll pop up a suggested asset mix based on the same portfolio mappings that we use with our clients.
+
+80
+00:07:51,080 --> 00:07:56,140
+SPEAKER_00: That's, again, something that's worth just disclosing is those mappings do not come from MRI.
+
+81
+00:07:56,720 --> 00:07:58,640
+SPEAKER_00: They give you a risk tolerance score.
+
+82
+00:08:00,700 --> 00:08:07,240
+SPEAKER_00: The firm has to map those risk tolerance scores to an asset allocation or to a range of asset allocations.
+
+83
+00:08:07,520 --> 00:08:09,240
+SPEAKER_00: That's something that PWL did.
+
+84
+00:08:09,380 --> 00:08:11,900
+SPEAKER_00: A different firm might do different mappings.
+
+85
+00:08:12,040 --> 00:08:14,160
+SPEAKER_00: We think that the mappings we've done make a lot of sense.
+
+86
+00:08:15,260 --> 00:08:19,000
+SPEAKER_00: John and Charles have seen those as well and given them the green light.
+
+87
+00:08:19,380 --> 00:08:22,160
+SPEAKER_00: but that is PWL's discretion.
+
+88
+00:08:22,940 --> 00:08:29,920
+SPEAKER_00: And again, like a different firm might use different mappings based on the risk tolerance scores that come out of the tool.
+
+89
+00:08:31,600 --> 00:08:33,400
+SPEAKER_00: Yeah, but that's it.
+
+90
+00:08:33,480 --> 00:08:41,780
+SPEAKER_00: So this is a company and a couple of professionals, both PhDs, Charles and John, and they've got another co-founder as well.
+
+91
+00:08:44,520 --> 00:08:56,060
+SPEAKER_00: I've known about John in particular's research for a long time, which led me to their risk profiling process, which then led us to this product that we're now rolling out for our clients.
+
+92
+00:08:56,380 --> 00:09:05,420
+SPEAKER_00: And we thought it would be a great opportunity to highlight their research, not just on risk profiling, but on financial planning psychology more generally.
+
+93
+00:09:05,900 --> 00:09:13,660
+SPEAKER_00: And we also thought it'd be a great opportunity for us to share a version of what we're using for clients with listeners so they can see what we're doing.
+
+94
+00:09:14,780 --> 00:09:16,820
+SPEAKER_00: I think that's pretty good for a setup.
+
+95
+00:09:17,300 --> 00:09:18,020
+SPEAKER_00: Anything else you can think of?
+
+96
+00:09:18,560 --> 00:09:19,840
+SPEAKER_00: Nope.
+
+97
+00:09:19,900 --> 00:09:23,840
+SPEAKER_00: Oh, and this is Braden's first time co-hosting, right?
+
+98
+00:09:24,060 --> 00:09:25,540
+SPEAKER_00: You've been on as a guest on the panel.
+
+99
+00:09:25,880 --> 00:09:36,240
+SPEAKER_00: You've been on as a co-host with just me where we, we talked through, uh, the engineering approach to financial planning and, but this is your first time co-hosting with a guest.
+
+100
+00:09:36,580 --> 00:09:36,980
+SPEAKER_00: So welcome.
+
+101
+00:09:37,420 --> 00:09:37,660
+SPEAKER_01: Thanks.
+
+102
+00:09:37,720 --> 00:09:38,360
+SPEAKER_01: It was pretty cool.
+
+103
+00:09:38,660 --> 00:09:46,320
+SPEAKER_01: It's pretty cool just to hear, to be right there and to hear those answers firsthand and to chip in my two cents where we're necessary.
+
+104
+00:09:48,280 --> 00:09:48,400
+SPEAKER_00: Yup.
+
+105
+00:09:48,680 --> 00:09:48,840
+SPEAKER_00: Cool.
+
+106
+00:09:49,120 --> 00:09:49,360
+SPEAKER_00: All right.
+
+107
+00:09:49,980 --> 00:10:01,120
+SPEAKER_00: I hope people enjoy the episode and give us feedback if you're able to check out the risk profiling tool that we'll make available to you in the show description.
+
+108
+00:10:04,760 --> 00:10:04,980
+SPEAKER_00: Dr.
+
+109
+00:10:05,020 --> 00:10:07,780
+SPEAKER_00: Charles Chafin, welcome to the Rational Reminder Podcast.
+
+110
+00:10:08,540 --> 00:10:09,280
+SPEAKER_02: Thanks for having me.
+
+111
+00:10:10,480 --> 00:10:11,560
+SPEAKER_00: Very excited to be talking to you.
+
+112
+00:10:11,600 --> 00:10:13,340
+SPEAKER_00: We have lots of cool ground to cover.
+
+113
+00:10:14,540 --> 00:10:19,620
+SPEAKER_00: To start us off, can you talk about what role psychology plays in the financial planning process?
+
+114
+00:10:21,120 --> 00:10:22,320
+SPEAKER_02: Yeah, it was a big role, right?
+
+115
+00:10:22,380 --> 00:10:44,080
+SPEAKER_02: I mean it really, really explains why and how clients behave the way they do when it comes to money and everything from our decision-making, our follow-through when it comes to goals and from an advisor's perspective, client engagement, why clients engage as much as they do, why they don't engage, why they ghost their advisor, why they are money avoided and whatnot.
+
+116
+00:10:44,220 --> 00:10:53,560
+SPEAKER_02: and really it's bridging that gap between what is the technical advice of planning and what is real world behavior right and the specific elements of that.
+
+117
+00:10:53,680 --> 00:11:03,320
+SPEAKER_02: So you know if you think about the idea of knowledge or information you know information is not really worth as much now as it was decades ago.
+
+118
+00:11:03,440 --> 00:11:09,420
+SPEAKER_02: you know decades ago you had a professional whether it was a financial advisor or any other professional.
+
+119
+00:11:10,680 --> 00:11:15,780
+SPEAKER_02: They were the sage that you went to and they imparted knowledge on the individual and the individual listed.
+
+120
+00:11:15,860 --> 00:11:19,760
+SPEAKER_02: Maybe they took notes relative to that and they went on their merry way.
+
+121
+00:11:19,980 --> 00:11:24,500
+SPEAKER_02: Well now you can get information anywhere and that's certainly the case when it comes to financial planning.
+
+122
+00:11:24,900 --> 00:11:30,720
+SPEAKER_02: Now some information is better than others, some information is more relevant to some clients than others and whatnot.
+
+123
+00:11:31,620 --> 00:11:48,880
+SPEAKER_02: But the reality is... Where we see psychology playing a role here is going beyond just that information and looking at the biases, the experiences, the emotions of the individual and how that impacts their decision-making and ultimately their overall financial well-being.
+
+124
+00:11:50,500 --> 00:11:57,060
+SPEAKER_01: So how does the Klontz-Schaffen model of financial psychology describe the factors that impact money behaviors?
+
+125
+00:11:58,000 --> 00:11:59,060
+SPEAKER_02: Well, we see it broadly.
+
+126
+00:12:00,080 --> 00:12:05,640
+SPEAKER_02: There's a lot of other approaches before and lots of good work has been done in the area before.
+
+127
+00:12:06,360 --> 00:12:13,140
+SPEAKER_02: that focus on our heuristics and biases or maybe some element of individual's history with money and whatnot.
+
+128
+00:12:13,580 --> 00:12:15,320
+SPEAKER_02: But we look at it more broadly.
+
+129
+00:12:15,540 --> 00:12:31,280
+SPEAKER_02: Certainly heuristics and biases are important, but we think about it relative to individuals, their biology, Their personal history, for example, how they maybe they had a history of fraud or maybe even something more basic that they grew up poor, which creates could create a scarcity mindset.
+
+130
+00:12:32,020 --> 00:12:33,640
+SPEAKER_02: So family history, they're learning.
+
+131
+00:12:34,140 --> 00:12:38,840
+SPEAKER_02: how much information do they know when it comes to things like financial literacy and their environment.
+
+132
+00:12:39,400 --> 00:12:46,180
+SPEAKER_02: So if we have a better understanding of how individuals are wired, their biology and their history and putting all those factors together.
+
+133
+00:12:46,760 --> 00:13:00,280
+SPEAKER_02: we can not only help individuals when it comes to them reaching their goals but help advisors take on that more coaching relationship that it's not the transactional side of planning but more along the lines of.
+
+134
+00:13:00,800 --> 00:13:02,500
+SPEAKER_02: I'm going to help you reach these goals.
+
+135
+00:13:02,560 --> 00:13:12,020
+SPEAKER_02: and here's three hurdles that everyone has and maybe there's three hurdles that you specifically have because you're money avoidant or whatever it might be that are going to get in the way.
+
+136
+00:13:12,140 --> 00:13:21,400
+SPEAKER_02: And so we see it as a broad view of all the elements that go into an individual psychology that ultimately impact the client advisor relationship.
+
+137
+00:13:23,160 --> 00:13:32,500
+SPEAKER_00: And we're going to touch on some of those elements and we will, for people who are watching, we will have an image of the model from your book Charles.
+
+138
+00:13:33,280 --> 00:13:36,320
+SPEAKER_00: just so people can get a visual representation of what you're describing.
+
+139
+00:13:36,880 --> 00:13:38,580
+SPEAKER_00: It's a very fancy looking image too.
+
+140
+00:13:38,660 --> 00:13:40,760
+SPEAKER_02: It's very fancy with circles and squares.
+
+141
+00:13:41,380 --> 00:13:41,880
+SPEAKER_00: You know what though?
+
+142
+00:13:42,400 --> 00:13:42,920
+SPEAKER_00: It's helpful.
+
+143
+00:13:43,440 --> 00:13:48,760
+SPEAKER_00: The way that it's, for me anyway, looking at it on the page and thinking about all the different elements, I did find it to be helpful.
+
+144
+00:13:49,360 --> 00:13:53,220
+SPEAKER_00: We will have that up on the video for anybody that's interested.
+
+145
+00:13:54,400 --> 00:13:58,600
+SPEAKER_00: Can you talk about why humans are, generally speaking, bad with money?
+
+146
+00:14:00,080 --> 00:14:03,500
+SPEAKER_02: Yeah, I mean our brains are really designed for survival.
+
+147
+00:14:03,580 --> 00:14:17,920
+SPEAKER_02: They're not really designed for long-term financial optimization or actually any long-term optimization and emotions really override logic, especially when you add in elements of uncertainty or you add in elements of stress.
+
+148
+00:14:18,400 --> 00:14:26,240
+SPEAKER_02: So my analogy always is that money is like fire and our brains are like toddlers and fire is really really great, right?
+
+149
+00:14:26,320 --> 00:14:27,180
+SPEAKER_02: It helps us cook.
+
+150
+00:14:27,360 --> 00:14:28,980
+SPEAKER_02: It helps us, you know light our way.
+
+151
+00:14:29,640 --> 00:14:34,140
+SPEAKER_02: it helps us stay warm and whatnot, but it can also burn your house down, right?
+
+152
+00:14:35,160 --> 00:14:43,780
+SPEAKER_02: And toddlers are more curious, they're impulsive, and certainly not thinking about anything when it comes to long-term planning.
+
+153
+00:14:43,820 --> 00:14:48,400
+SPEAKER_02: They're thinking about short-term rewards, thinking that immediate gratification and whatnot.
+
+154
+00:14:48,520 --> 00:14:54,200
+SPEAKER_02: And so when you put those two elements together, then you have this toddler was fire, right?
+
+155
+00:14:54,680 --> 00:14:59,100
+SPEAKER_02: And so we can over identify some of those biases and really, really overcome them.
+
+156
+00:14:59,200 --> 00:15:09,180
+SPEAKER_02: But, you know, last night, my iPhone got an update and probably the third update this year, and our brain hasn't had an update in 100,000 years.
+
+157
+00:15:09,260 --> 00:15:11,280
+SPEAKER_02: We're still thinking about hunting and gathering.
+
+158
+00:15:11,400 --> 00:15:18,100
+SPEAKER_02: So that notion of saving and investing is really contrary to how we're wired in general.
+
+159
+00:15:18,920 --> 00:15:23,220
+SPEAKER_01: So, how do cognitive biases and heuristics affect financial decision-making?
+
+160
+00:15:24,260 --> 00:15:29,900
+SPEAKER_02: Well, you know, cognitive biases and specifically heuristics are, I mean, they're helpful to us, right?
+
+161
+00:15:30,360 --> 00:15:33,980
+SPEAKER_02: They're really helpful to kind of make quick decisions, right?
+
+162
+00:15:35,240 --> 00:15:37,000
+SPEAKER_02: We're basically wired to be lazy.
+
+163
+00:15:37,720 --> 00:15:40,300
+SPEAKER_02: So we get the fast shortcuts to make decisions.
+
+164
+00:15:40,700 --> 00:15:45,580
+SPEAKER_02: The problem with them is that they create these biases, these systematic errors, right?
+
+165
+00:15:45,640 --> 00:15:54,020
+SPEAKER_02: Whether it's something like overconfidence or loss aversion or confirmation bias that kind of get in the way of rational thinking, right?
+
+166
+00:15:54,520 --> 00:15:58,720
+SPEAKER_02: So we tend to see what happens with clients.
+
+167
+00:15:58,920 --> 00:16:02,700
+SPEAKER_02: is You become more susceptible to things like market noise?
+
+168
+00:16:02,880 --> 00:16:17,480
+SPEAKER_02: or you become more susceptible to FOMO because you hear someone talking about a gain and suddenly you're going to throw out not only your goals, but maybe even upend your risk tolerance because you see something that's in front of you that's, oh my gosh, this is a gain.
+
+169
+00:16:17,580 --> 00:16:18,860
+SPEAKER_02: I'm going to take it.
+
+170
+00:16:18,940 --> 00:16:26,960
+SPEAKER_02: When in reality, rationality would tell us, well, people are only posting about their gains on some cryptocurrency or whatever it might be.
+
+171
+00:16:28,560 --> 00:16:43,880
+SPEAKER_02: they affect us because they really get in the way of us thinking about our long-term planning and we suddenly are thinking about short-term rewards or we're thinking we're changing the type of information that we follow particularly in the information age where we become more susceptible to that.
+
+172
+00:16:44,400 --> 00:17:00,680
+SPEAKER_02: so overcoming those biases can be a real challenge but if we just recognize them on the on the front end it's a major step forward and there's you know it's a long evolving list of of biases I think we're In our book, we recognized 47 of them.
+
+173
+00:17:02,160 --> 00:17:06,160
+SPEAKER_02: Sometimes you'll read, they'll say there are like 80 of them or whatnot, but there's tons of them.
+
+174
+00:17:06,200 --> 00:17:08,880
+SPEAKER_02: But in reality, they're just kind of shortcuts.
+
+175
+00:17:09,200 --> 00:17:11,780
+SPEAKER_02: They really get in the way of rational thinking.
+
+176
+00:17:12,540 --> 00:17:21,819
+SPEAKER_00: I likely describe the interaction between FOMO and risk tolerance where somebody rationally assessing their risk tolerance would think of the full distribution of outcomes and they would base the risk tolerance on that.
+
+177
+00:17:22,460 --> 00:17:28,500
+SPEAKER_00: but someone affected by FOMO is only looking at the whatever the right the right hand side of the distribution and they're thinking oh yeah I can take lots of risk.
+
+178
+00:17:29,360 --> 00:17:32,200
+SPEAKER_02: Right because because what's happening there is they start chasing.
+
+179
+00:17:32,380 --> 00:17:39,020
+SPEAKER_02: right now you're chasing which is which is total change of posture in every way no matter what your risk tolerance is.
+
+180
+00:17:39,080 --> 00:17:44,520
+SPEAKER_02: when you go from that point where you're you're settled and you have a plan and now you're chasing something.
+
+181
+00:17:45,060 --> 00:17:47,740
+SPEAKER_02: that's when that's when you can be in real trouble.
+
+182
+00:17:48,800 --> 00:17:52,940
+SPEAKER_00: What are some of the tools or techniques for overcoming biases in financial decisions?
+
+183
+00:17:53,920 --> 00:17:55,580
+SPEAKER_02: Yeah, I mean, you could think about a couple of different things.
+
+184
+00:17:55,660 --> 00:18:04,360
+SPEAKER_02: So we think about decision frameworks or automation or even we work with advisors a lot to get into what we call pre-commitment strategies.
+
+185
+00:18:04,420 --> 00:18:08,440
+SPEAKER_02: So structured decision frameworks are really, really great.
+
+186
+00:18:08,500 --> 00:18:14,640
+SPEAKER_02: So, for example, if you find that you're someone who is, you have an incredible amount of optimism.
+
+187
+00:18:15,080 --> 00:18:22,340
+SPEAKER_02: or even an incredible amount of overconfidence then you can come up with okay let's take a scenario and let's decide that that scenario.
+
+188
+00:18:22,380 --> 00:18:25,320
+SPEAKER_02: uh the outcome of that scenario is going to be seven.
+
+189
+00:18:25,480 --> 00:18:26,680
+SPEAKER_02: keep it very very basic.
+
+190
+00:18:27,100 --> 00:18:32,000
+SPEAKER_02: well Instead of instead of using just the seven let's develop a high and medium and low.
+
+191
+00:18:32,140 --> 00:18:35,560
+SPEAKER_02: the seven could be your medium But let's go low and let's go high.
+
+192
+00:18:35,600 --> 00:18:39,180
+SPEAKER_02: Well, what is a worst-case scenario relative to that if everything doesn't go?
+
+193
+00:18:39,440 --> 00:18:40,820
+SPEAKER_02: Well, everything goes badly.
+
+194
+00:18:41,240 --> 00:18:42,200
+SPEAKER_02: What's that number gonna be?
+
+195
+00:18:42,620 --> 00:18:43,700
+SPEAKER_02: Well, it might be a four.
+
+196
+00:18:44,200 --> 00:18:45,680
+SPEAKER_02: Well, what if everything goes great?
+
+197
+00:18:46,020 --> 00:18:49,100
+SPEAKER_02: Well The seven was everything goes great, right?
+
+198
+00:18:49,500 --> 00:18:59,660
+SPEAKER_02: So now okay Well, let's put a five in the middle, right so that can help us if we come up with was kind of three outcomes relative to to something if we're overconfident or whatnot.
+
+199
+00:19:00,300 --> 00:19:05,320
+SPEAKER_02: Now, automation is really, really helpful in a lot of spaces in financial planning, right?
+
+200
+00:19:05,680 --> 00:19:08,740
+SPEAKER_02: And it's built on this idea of status quo bias, right?
+
+201
+00:19:08,840 --> 00:19:11,060
+SPEAKER_02: We are, again, we're inherently lazy.
+
+202
+00:19:12,460 --> 00:19:14,240
+SPEAKER_02: And that's part of our wiring, right?
+
+203
+00:19:14,300 --> 00:19:22,500
+SPEAKER_02: So 100,000 years ago, if we were sitting in a cave and there wasn't a large animal coming after us, we didn't move.
+
+204
+00:19:22,580 --> 00:19:23,600
+SPEAKER_02: It was a good thing to do.
+
+205
+00:19:23,840 --> 00:19:25,780
+SPEAKER_02: Just stay put, right?
+
+206
+00:19:26,580 --> 00:19:40,500
+SPEAKER_02: So what we find now, especially in the information age and in technology, status quo bias can be used to the advantage of the client and the advisor by saying, you know what, we're going to set aside a certain amount of money.
+
+207
+00:19:40,560 --> 00:19:45,140
+SPEAKER_02: We're going to automate that every month relative to investing or even relative to saving.
+
+208
+00:19:45,520 --> 00:19:50,880
+SPEAKER_02: And I'm going to make that decision one time and then I'm not going to think about it again.
+
+209
+00:19:51,360 --> 00:19:54,400
+SPEAKER_02: It's going to happen at the first of the month and it's done.
+
+210
+00:19:54,660 --> 00:20:00,040
+SPEAKER_02: And more often than not, That has huge advantages for the client and the advisor.
+
+211
+00:20:00,760 --> 00:20:04,360
+SPEAKER_02: I think, you know, slowing decisions down can always be helpful.
+
+212
+00:20:05,540 --> 00:20:15,780
+SPEAKER_02: You know, if we take time to kind of think and reflect about what it is that we're going to do and not have that impulse, we could cut down on impulse spending.
+
+213
+00:20:16,240 --> 00:20:25,260
+SPEAKER_02: We might even cut down on the toxic things we post on X. So we're taking a little bit of time to think about, do we really want to do this?
+
+214
+00:20:26,680 --> 00:20:35,280
+SPEAKER_02: You know, we work with advisors in asking clients, is this really consistent with where you want to be in three years, five years, whatever the time horizon is?
+
+215
+00:20:35,660 --> 00:20:37,720
+SPEAKER_02: Is this behavior consistent with that?
+
+216
+00:20:38,200 --> 00:20:43,280
+SPEAKER_02: And, you know, as an important side to that, it isn't about judgment of the client.
+
+217
+00:20:44,040 --> 00:20:52,940
+SPEAKER_02: It's about helping align the behaviors of the client that are consistent with their goals, not the advisor's goals, but the client's goals.
+
+218
+00:20:53,040 --> 00:20:57,980
+SPEAKER_02: And so asking that question and always going back to is this consistent with where you want to be?
+
+219
+00:20:58,960 --> 00:21:00,180
+SPEAKER_02: is really, really helpful.
+
+220
+00:21:00,320 --> 00:21:10,280
+SPEAKER_02: And what tends to happen with any human is that push, that nudge is better than a push, not a push, but that nudge because you're basically keeping them in power.
+
+221
+00:21:11,700 --> 00:21:13,320
+SPEAKER_02: The client is in charge here.
+
+222
+00:21:13,860 --> 00:21:15,440
+SPEAKER_02: You tell me if that's where you want to be.
+
+223
+00:21:15,560 --> 00:21:21,700
+SPEAKER_02: And if they say it is consistent, then that's the advisor's opportunity to say, Maybe we need to think about the goals.
+
+224
+00:21:21,860 --> 00:21:22,920
+SPEAKER_02: Maybe we need to revisit them.
+
+225
+00:21:23,020 --> 00:21:23,960
+SPEAKER_02: Should we revisit them?
+
+226
+00:21:24,520 --> 00:21:27,680
+SPEAKER_02: And even in a lot of those cases, clients will say, oh no, no, no, no, no, right?
+
+227
+00:21:28,000 --> 00:21:29,080
+SPEAKER_02: At that very last point.
+
+228
+00:21:30,060 --> 00:21:36,100
+SPEAKER_02: But again, if we can help that client align those behaviors with the goals, we're going to be far better off.
+
+229
+00:21:36,280 --> 00:21:41,940
+SPEAKER_02: And then finally, the element of accountability is really, really helpful.
+
+230
+00:21:42,840 --> 00:21:46,200
+SPEAKER_02: Anytime you set up and say, this is my goal, this is what I want to do.
+
+231
+00:21:47,740 --> 00:22:04,800
+SPEAKER_02: Whether it's within your social network or even with your within your advisor That that's also going to help align behavior too because now you're bringing in elements of identity which is really important when it comes to goals and You're also basically say this is what I this is where I want to be and I want you to help me get there.
+
+232
+00:22:05,240 --> 00:22:11,920
+SPEAKER_02: and obviously finally the the advisors role is that coach Really is kind of that external perspective.
+
+233
+00:22:12,080 --> 00:22:15,760
+SPEAKER_02: It's taking that bringing that rationality into all of it.
+
+234
+00:22:15,860 --> 00:22:26,060
+SPEAKER_02: So So it's important to know when we think about heuristics and biases we can really use some of them to the advantage of the of the client through things like automation.
+
+235
+00:22:26,560 --> 00:22:34,040
+SPEAKER_02: and at the same time it really is where the coaching element comes in to kind of help align those behaviors with the long-term goals of the of the client.
+
+236
+00:22:35,060 --> 00:22:53,300
+SPEAKER_01: I think that's really well said and I think that as technology evolves even further it just it really cements the advisors role as that behavioral coach to try to get to the root of what the clients goals are and how to how to make it make the biggest impact on the clients life.
+
+237
+00:22:53,960 --> 00:22:58,200
+SPEAKER_02: Well beyond that if you take that element out and and talk about bias.
+
+238
+00:22:58,240 --> 00:23:00,420
+SPEAKER_02: I mean I have a bias working in financial psychology.
+
+239
+00:23:00,520 --> 00:23:02,680
+SPEAKER_02: so of course I've got to say it's highly important.
+
+240
+00:23:03,080 --> 00:23:09,000
+SPEAKER_02: but with that being said without that coaching element What else sister?
+
+241
+00:23:09,140 --> 00:23:09,860
+SPEAKER_02: what else is left?
+
+242
+00:23:09,940 --> 00:23:11,520
+SPEAKER_02: the transactional piece is gone.
+
+243
+00:23:11,960 --> 00:23:15,880
+SPEAKER_02: Nobody needs a sage on the stage anymore Nobody needs to be told.
+
+244
+00:23:15,960 --> 00:23:17,500
+SPEAKER_02: I mean I live in Midtown Manhattan.
+
+245
+00:23:17,560 --> 00:23:23,720
+SPEAKER_02: if I went outside and asked a hundred people Regardless of their income and advising experiences.
+
+246
+00:23:24,480 --> 00:23:26,580
+SPEAKER_02: Should you buy high or low?
+
+247
+00:23:27,420 --> 00:23:28,920
+SPEAKER_02: Should you sell high or sell low?
+
+248
+00:23:28,940 --> 00:23:32,300
+SPEAKER_02: 99% of people are going to get it right.
+
+249
+00:23:32,920 --> 00:23:34,080
+SPEAKER_02: they know that right.
+
+250
+00:23:34,520 --> 00:23:36,280
+SPEAKER_02: but it's it's all the other elements.
+
+251
+00:23:36,360 --> 00:23:38,120
+SPEAKER_02: It's our biases in them.
+
+252
+00:23:38,160 --> 00:23:43,960
+SPEAKER_02: Irrational behaviors are passed with money that get in the way of what is otherwise a very straightforward decision.
+
+253
+00:23:44,060 --> 00:23:56,300
+SPEAKER_02: So if we're not bringing that coaching element to the transactional piece, then our relevance as a profession is at minimum diminished, maybe even worse than that.
+
+254
+00:23:57,300 --> 00:24:01,220
+SPEAKER_01: So how does our environment shape our financial psychology?
+
+255
+00:24:02,600 --> 00:24:04,380
+SPEAKER_02: I mean, environment's really, really important.
+
+256
+00:24:05,700 --> 00:24:06,280
+SPEAKER_02: You know, so B.F.
+
+257
+00:24:06,360 --> 00:24:13,980
+SPEAKER_02: Skinner was a psychologist and behaviorist back in the 1900s and probably the most influential.
+
+258
+00:24:14,300 --> 00:24:21,240
+SPEAKER_02: And, you know, he once famously said that our environment or we don't make any decisions on our own.
+
+259
+00:24:21,300 --> 00:24:23,020
+SPEAKER_02: Our environment makes them for us.
+
+260
+00:24:23,740 --> 00:24:26,780
+SPEAKER_02: Now, some of that has been disputed and even a little bit debunked.
+
+261
+00:24:26,880 --> 00:24:28,940
+SPEAKER_02: But there is a lot of reality to that.
+
+262
+00:24:28,980 --> 00:24:29,580
+SPEAKER_02: There's a lot of.
+
+263
+00:24:29,680 --> 00:24:30,800
+SPEAKER_02: there's not a truth to that.
+
+264
+00:24:30,880 --> 00:24:31,040
+SPEAKER_02: Right.
+
+265
+00:24:31,580 --> 00:24:31,640
+SPEAKER_02: So.
+
+266
+00:24:32,500 --> 00:24:39,480
+SPEAKER_02: You think about our environment relative to creating, let's say we have a goal that we want to, let's talk about eating for a second.
+
+267
+00:24:39,800 --> 00:24:43,460
+SPEAKER_02: So if we want to eat better, we want to stop eating cookies.
+
+268
+00:24:43,600 --> 00:24:47,760
+SPEAKER_02: Well, the best way to stop eating cookies is to not have them available, right?
+
+269
+00:24:48,240 --> 00:24:54,420
+SPEAKER_02: So I still might eat cookies, but if I don't have them in my home, And I make sure that they're not in my home.
+
+270
+00:24:54,520 --> 00:24:55,580
+SPEAKER_02: I've created friction.
+
+271
+00:24:55,680 --> 00:24:56,980
+SPEAKER_02: I've altered my environment.
+
+272
+00:24:57,300 --> 00:25:00,180
+SPEAKER_02: So now I have friction in between me and the cookies.
+
+273
+00:25:00,440 --> 00:25:02,900
+SPEAKER_02: And this is a very personal experience when it comes to cookies.
+
+274
+00:25:02,980 --> 00:25:04,880
+SPEAKER_02: All of this is actually true, right?
+
+275
+00:25:05,100 --> 00:25:06,320
+SPEAKER_02: So I have to go here.
+
+276
+00:25:06,420 --> 00:25:08,180
+SPEAKER_02: I have to go across the street to a bodega.
+
+277
+00:25:08,660 --> 00:25:12,320
+SPEAKER_02: You know, it's 20 degrees Fahrenheit here in New York right now.
+
+278
+00:25:12,720 --> 00:25:14,580
+SPEAKER_02: That makes it tougher for me to get the cookies.
+
+279
+00:25:14,640 --> 00:25:16,520
+SPEAKER_02: If I have three packs of Oreos here.
+
+280
+00:25:17,360 --> 00:25:19,120
+SPEAKER_02: my likelihood of eating them goes way up.
+
+281
+00:25:19,660 --> 00:25:25,620
+SPEAKER_02: At the same time, I want to eliminate friction for the things that I do want to do that are consistent with my goals.
+
+282
+00:25:25,880 --> 00:25:32,080
+SPEAKER_02: So if I have exercise as a goal, then I might put my running shoes close to the door.
+
+283
+00:25:32,980 --> 00:25:37,840
+SPEAKER_02: I might be, I'm not going to join a gym that's, you know, five miles away.
+
+284
+00:25:38,020 --> 00:25:39,040
+SPEAKER_02: I'm going to join one closer.
+
+285
+00:25:39,420 --> 00:25:45,120
+SPEAKER_02: And we have data that show that you know, people who live closer to parks and gyms go to the gym more.
+
+286
+00:25:45,340 --> 00:25:49,340
+SPEAKER_02: And it's that basic element of eliminating friction.
+
+287
+00:25:49,400 --> 00:25:52,220
+SPEAKER_02: So our environment's a real critical part of that, right?
+
+288
+00:25:52,700 --> 00:25:58,540
+SPEAKER_02: Now, our environment also is not just friction and what's around us when it comes to material things.
+
+289
+00:25:58,600 --> 00:26:01,860
+SPEAKER_02: It's also our environment when it comes to the people who are around us, right?
+
+290
+00:26:02,180 --> 00:26:06,520
+SPEAKER_02: So who we're around when it comes to social norms relative to spending and saving and investing.
+
+291
+00:26:07,180 --> 00:26:11,880
+SPEAKER_02: is critical to our family, how our family talks about money, how our family thinks about money.
+
+292
+00:26:12,820 --> 00:26:19,300
+SPEAKER_02: If we're around friends who are really money status people, they're more expensive people in our lives.
+
+293
+00:26:20,580 --> 00:26:31,800
+SPEAKER_02: I tell people all the time, partially joking, that if you go to a bar and you're looking to meet someone and they have a really fancy handbag, run away.
+
+294
+00:26:32,440 --> 00:26:35,780
+SPEAKER_02: Because there's a high likelihood that their money status people they're gonna.
+
+295
+00:26:35,920 --> 00:26:37,200
+SPEAKER_02: it's gonna cost you a fortune.
+
+296
+00:26:37,300 --> 00:26:39,460
+SPEAKER_02: Now there's plenty of people that have nice bags.
+
+297
+00:26:39,500 --> 00:26:42,400
+SPEAKER_02: that are you know someone's listening to your podcast is gonna get mad at me.
+
+298
+00:26:42,520 --> 00:26:45,680
+SPEAKER_02: But in reality money status people are more expensive.
+
+299
+00:26:45,720 --> 00:26:50,100
+SPEAKER_02: But if we're around money status people there's a higher likelihood that they're gonna be more expensive for us.
+
+300
+00:26:50,180 --> 00:26:51,980
+SPEAKER_02: So the people that are around us are important.
+
+301
+00:26:52,900 --> 00:26:57,560
+SPEAKER_02: What the information that we engage relative to our environment is really important too.
+
+302
+00:26:57,660 --> 00:27:00,560
+SPEAKER_02: We think about media and market narratives.
+
+303
+00:27:00,920 --> 00:27:20,680
+SPEAKER_02: because if we're in that in that element where we're on social media and we're seeing going back to FOMO and we're hearing about these gains that could also create some emotional responses right and that could absolutely get in the way of of how we're thinking about our our behaviors and spending and whatnot.
+
+304
+00:27:21,120 --> 00:27:24,860
+SPEAKER_02: and then finally you know I kind of think about that element of choice.
+
+305
+00:27:25,160 --> 00:27:26,840
+SPEAKER_02: we think about choice architecture right.
+
+306
+00:27:26,900 --> 00:27:30,000
+SPEAKER_02: so we work with advisors a lot on this which is like okay.
+
+307
+00:27:31,000 --> 00:27:35,240
+SPEAKER_02: There's 30 options here and younger advisors want to share all of them.
+
+308
+00:27:35,340 --> 00:27:38,640
+SPEAKER_02: right because younger advisors want to say show how intelligent they are.
+
+309
+00:27:39,320 --> 00:27:45,440
+SPEAKER_02: So they talk way too much and you know 60% of what they say is not relevant to the client.
+
+310
+00:27:45,480 --> 00:27:46,480
+SPEAKER_02: that's in front of them, right?
+
+311
+00:27:46,820 --> 00:28:02,040
+SPEAKER_02: Let's winnow these choices down from 30 to 3 And we know we have data, if your listeners are interested, the famous JAM studies out there that shows that fewer options actually leads to more people making decisions and pulling the trigger.
+
+312
+00:28:03,060 --> 00:28:18,780
+SPEAKER_02: So if we say, okay, in transparency to a client, yeah, there are 30 options that we could go with here, but I presented the best, the three here, and most clients in your situation, pick this one.
+
+313
+00:28:18,900 --> 00:28:32,480
+SPEAKER_02: Now, if you want to see all the other 27, happy to talk about that, but that's an element of choice architecture where we kind of help manage the cognitive load, basically not being overwhelmed, and they can make a choice and move on.
+
+314
+00:28:32,540 --> 00:28:38,100
+SPEAKER_02: Because if we overwhelm clients, we only have so much attention, and if we overwhelm them fast, they're going to ghost us.
+
+315
+00:28:38,660 --> 00:28:39,320
+SPEAKER_00: That's really interesting.
+
+316
+00:28:39,500 --> 00:28:44,980
+SPEAKER_00: It's like if you don't want to be gambling, you shouldn't be on the Wall Street Bets subreddit.
+
+317
+00:28:46,460 --> 00:28:47,080
+SPEAKER_02: Well, that's right.
+
+318
+00:28:47,220 --> 00:28:47,880
+SPEAKER_02: I mean, it's true.
+
+319
+00:28:47,980 --> 00:28:53,120
+SPEAKER_02: I mean you can and and I guess it's really important point that We.
+
+320
+00:28:54,160 --> 00:28:57,600
+SPEAKER_02: it really isn't about Willpower and discipline.
+
+321
+00:28:57,660 --> 00:29:00,320
+SPEAKER_02: that's a really antiquated element.
+
+322
+00:29:01,040 --> 00:29:03,380
+SPEAKER_02: There's some elements to it that are true.
+
+323
+00:29:03,460 --> 00:29:07,080
+SPEAKER_02: So I don't want your listeners to think that I'm saying that there's no such thing.
+
+324
+00:29:07,660 --> 00:29:17,620
+SPEAKER_02: but it's about our environment and if people understand if advisors can help clients and clients and even consumers and individuals could say I can be in charge of my environment.
+
+325
+00:29:18,280 --> 00:29:20,100
+SPEAKER_02: I can make my environment work for me.
+
+326
+00:29:20,220 --> 00:29:32,360
+SPEAKER_02: The people that I'm around relative to what's important to me, financial and otherwise, I can create friction for things that I don't want to do anymore and I can eliminate friction for the things that I do want to do that are going to lead me to where I want to go.
+
+327
+00:29:32,740 --> 00:29:33,580
+SPEAKER_02: I'm in charge of that.
+
+328
+00:29:34,040 --> 00:29:36,280
+SPEAKER_02: That is 75% of the battle.
+
+329
+00:29:36,680 --> 00:29:38,160
+SPEAKER_00: What are financial flashpoints?
+
+330
+00:29:39,320 --> 00:29:40,720
+SPEAKER_02: So that kind of gets into.
+
+331
+00:29:40,960 --> 00:29:51,520
+SPEAKER_02: our financial flashpoints are basically our past experiences or kind of unresolved beliefs based upon something that really impact, give us some sort of emotional reaction to money.
+
+332
+00:29:52,900 --> 00:29:59,580
+SPEAKER_02: So you could think about something like people that, grandparents that lived through the depression, right?
+
+333
+00:29:59,920 --> 00:30:05,900
+SPEAKER_02: That was a flashpoint for them in terms of they tend to be more savers, right?
+
+334
+00:30:05,940 --> 00:30:10,420
+SPEAKER_02: You go through an experience like that, it changes who you are as part of your history.
+
+335
+00:30:10,940 --> 00:30:24,680
+SPEAKER_02: If you were, you know, as part of MRI, we ask a question that has been our, I would say probably surprisingly, if I picked all the elements that are part of MRI, I wouldn't have picked this one to be as important to firms as it is.
+
+336
+00:30:24,740 --> 00:30:28,020
+SPEAKER_02: And that is, what's the history of your family when it comes to fraud?
+
+337
+00:30:28,620 --> 00:30:29,440
+SPEAKER_02: I knew it was important.
+
+338
+00:30:29,560 --> 00:30:38,380
+SPEAKER_02: We have data that suggests it, but it's really important because if you've gone through that, especially if it's significant, It impacts your risk tolerance.
+
+339
+00:30:38,460 --> 00:30:39,560
+SPEAKER_02: It impacts everything.
+
+340
+00:30:39,920 --> 00:30:43,220
+SPEAKER_02: It impacts how you, the trust level of your, you are with your advisor.
+
+341
+00:30:43,760 --> 00:30:44,980
+SPEAKER_02: It's a big part of that.
+
+342
+00:30:45,080 --> 00:30:52,200
+SPEAKER_02: So that history, especially something that's so significant has an impact for the rest of your life.
+
+343
+00:30:52,260 --> 00:31:00,160
+SPEAKER_02: in a lot of cases with these big, big events, whether they're at a macro level like the depression or the great recession or something on the individual level like fraud.
+
+344
+00:31:00,560 --> 00:31:01,560
+SPEAKER_01: Yeah, it's really interesting.
+
+345
+00:31:02,640 --> 00:31:05,840
+SPEAKER_01: I think past experiences can play such an important role.
+
+346
+00:31:06,920 --> 00:31:15,120
+SPEAKER_01: and our beliefs with money, but are there any other areas that influence people's beliefs about money?
+
+347
+00:31:15,680 --> 00:31:21,820
+SPEAKER_02: Well, who you're, I mean, going back to, we've talked about environment a few minutes ago, who you're around has a huge impact, right?
+
+348
+00:31:22,280 --> 00:31:48,880
+SPEAKER_02: If you are around people who are distrustful of rich people, and you've heard that for 20 years, and we have lots of data on this, that people who have heard for 20 years that that rich people should not be trusted and then suddenly let's say they're an athlete and suddenly their bank account went from six dollars to 60 million.
+
+349
+00:31:49,940 --> 00:31:56,980
+SPEAKER_02: they are so much more susceptible to financial enablement and fraud and all kinds of different things for lots of reasons.
+
+350
+00:31:57,060 --> 00:32:02,640
+SPEAKER_02: but for one of those one of those reasons is because now they're on the other side.
+
+351
+00:32:03,700 --> 00:32:06,040
+SPEAKER_02: They're what has been talked about for 20 years.
+
+352
+00:32:06,160 --> 00:32:13,340
+SPEAKER_02: And I don't want to oversimplify that because there's lots of reasons and financial illiteracy and some of these other things that we're talking about today.
+
+353
+00:32:13,420 --> 00:32:20,780
+SPEAKER_02: But when it comes to our past history, you started to become something that people have talked about for 20 years.
+
+354
+00:32:21,000 --> 00:32:23,580
+SPEAKER_02: It can have a huge impact on your behaviors going forward.
+
+355
+00:32:23,640 --> 00:32:26,280
+SPEAKER_02: So that circle of who you're with is important.
+
+356
+00:32:26,760 --> 00:32:31,580
+SPEAKER_02: And I guess I'd also mention too, like if you... Past successes and failures can be critical too.
+
+357
+00:32:31,700 --> 00:32:38,940
+SPEAKER_02: So if you started a business and it failed miserably, it can have a huge impact on how you see money going forward.
+
+358
+00:32:39,040 --> 00:32:42,020
+SPEAKER_02: And actually one extreme or the other, quite frankly.
+
+359
+00:32:42,620 --> 00:32:47,960
+SPEAKER_02: But you know, our history, our financial history when it comes to success and failure can also play a role.
+
+360
+00:32:48,680 --> 00:32:54,300
+SPEAKER_00: Can you talk about how the beliefs that people form about money affect their financial decision making in the future?
+
+361
+00:32:55,660 --> 00:32:59,000
+SPEAKER_02: Yeah, I mean it could make you lots of different things, but it could make you money avoidant.
+
+362
+00:32:59,500 --> 00:33:02,720
+SPEAKER_02: It could impact how you see your risk, right?
+
+363
+00:33:04,280 --> 00:33:10,060
+SPEAKER_02: again one extreme of the other One thing we haven't talked about your financial self-efficacy, right?
+
+364
+00:33:10,180 --> 00:33:14,020
+SPEAKER_02: So your confidence when it comes to When it comes to money.
+
+365
+00:33:14,220 --> 00:33:16,100
+SPEAKER_02: so going back to the example of someone who?
+
+366
+00:33:18,120 --> 00:33:23,780
+SPEAKER_02: Had a business failure they could be at that level of really low financial self-efficacy.
+
+367
+00:33:24,060 --> 00:33:27,600
+SPEAKER_02: right feeling like I I just can't do this.
+
+368
+00:33:28,120 --> 00:33:32,600
+SPEAKER_02: or you know that they have this External what we call external locus of control meaning.
+
+369
+00:33:32,640 --> 00:33:36,560
+SPEAKER_02: It's not coming from within this coming from beyond Something else.
+
+370
+00:33:37,420 --> 00:33:39,760
+SPEAKER_02: I'm not meant to have money.
+
+371
+00:33:40,380 --> 00:33:41,620
+SPEAKER_02: I my business failed.
+
+372
+00:33:43,360 --> 00:33:45,300
+SPEAKER_02: It's just not for me.
+
+373
+00:33:45,620 --> 00:33:46,960
+SPEAKER_02: I'm not gonna I'm not gonna get there.
+
+374
+00:33:47,360 --> 00:33:50,300
+SPEAKER_02: Well that has a huge impact on your you know your financial confidence.
+
+375
+00:33:50,420 --> 00:33:54,460
+SPEAKER_02: now You're not prone to say begin investing.
+
+376
+00:33:54,580 --> 00:34:04,560
+SPEAKER_02: And by the way, those individuals that have that low level of financial competence, the lowest level of financial self-efficacy, those are the people that a lot of cases advisors never even see.
+
+377
+00:34:05,880 --> 00:34:18,540
+SPEAKER_02: And in some cases, you know, in the States here, we have these data that show that, you know, in some cases, 70% or more of widows fire the financial advisor that the husband was working with.
+
+378
+00:34:18,860 --> 00:34:20,540
+SPEAKER_02: Now, there's lots of reasons for that.
+
+379
+00:34:21,060 --> 00:34:23,659
+SPEAKER_02: But one of them is financial self-efficacy.
+
+380
+00:34:23,840 --> 00:34:24,639
+SPEAKER_02: It's confidence.
+
+381
+00:34:25,300 --> 00:34:28,380
+SPEAKER_02: Because you have somebody who says, I can't do this.
+
+382
+00:34:29,139 --> 00:34:30,560
+SPEAKER_02: I've never done this.
+
+383
+00:34:31,420 --> 00:34:36,500
+SPEAKER_02: I'm 75 years old and I'm not cut out for this.
+
+384
+00:34:37,360 --> 00:34:42,620
+SPEAKER_02: They do the opposite of what you would think a human would do.
+
+385
+00:34:42,880 --> 00:34:44,600
+SPEAKER_02: And I say they, I mean us, this human.
+
+386
+00:34:44,659 --> 00:34:46,120
+SPEAKER_02: This is how we're all prone to do this.
+
+387
+00:34:47,080 --> 00:34:55,020
+SPEAKER_02: You would think people who have that low confidence are seeking as much information as they can to get better.
+
+388
+00:34:55,380 --> 00:34:55,860
+SPEAKER_02: They don't.
+
+389
+00:34:56,000 --> 00:34:57,080
+SPEAKER_02: It's the perfect storm.
+
+390
+00:34:57,120 --> 00:35:01,080
+SPEAKER_02: Those people with that low financial competence, they're avoidant.
+
+391
+00:35:02,120 --> 00:35:04,500
+SPEAKER_02: And that's one of the reasons why they fire an advisor.
+
+392
+00:35:05,060 --> 00:35:06,900
+SPEAKER_02: And it creates all kinds of problems there.
+
+393
+00:35:07,600 --> 00:35:09,960
+SPEAKER_02: So we can fix that.
+
+394
+00:35:11,500 --> 00:35:15,140
+SPEAKER_02: And the best way to fix that is.
+
+395
+00:35:17,140 --> 00:35:18,680
+SPEAKER_02: I have a new book out on goals.
+
+396
+00:35:20,200 --> 00:35:22,140
+SPEAKER_02: People always want to talk about thinking big.
+
+397
+00:35:23,260 --> 00:35:26,020
+SPEAKER_02: Thinking big is not the recipe for success.
+
+398
+00:35:26,840 --> 00:35:38,440
+SPEAKER_02: think small and so think about Shorter time horizons and think about when you have a you have a client that has that low financial confidence You have that.
+
+399
+00:35:39,140 --> 00:35:47,720
+SPEAKER_02: you have that widow or widower who's in your office at maybe the worst point of their lives and they think They can't do this.
+
+400
+00:35:48,520 --> 00:36:02,420
+SPEAKER_02: They need Wins and that win might be a budget for the week or a budget for the month or some basic element in investing and We can build confidence in people through wins.
+
+401
+00:36:02,660 --> 00:36:05,880
+SPEAKER_02: So when we think about that We want to try to.
+
+402
+00:36:06,080 --> 00:36:09,340
+SPEAKER_02: we want to try to establish horizons that are much more manageable.
+
+403
+00:36:09,660 --> 00:36:16,380
+SPEAKER_02: And again, it goes back to that coaching mindset and I I coach advisors individually and we talk about that all the time.
+
+404
+00:36:17,320 --> 00:36:18,560
+SPEAKER_02: You need to have shorter horizons.
+
+405
+00:36:18,680 --> 00:36:20,740
+SPEAKER_02: Get them a win and celebrate that win.
+
+406
+00:36:21,500 --> 00:36:23,520
+SPEAKER_02: You know casinos are really good at that.
+
+407
+00:36:24,100 --> 00:36:28,040
+SPEAKER_02: Casinos are so, I mean they're just brilliant about everything.
+
+408
+00:36:28,100 --> 00:36:33,040
+SPEAKER_02: There's a reason why you go into casinos and they all look so nice is because they have so much of our money, right?
+
+409
+00:36:33,800 --> 00:36:35,360
+SPEAKER_02: But they do a couple things that are really good.
+
+410
+00:36:35,720 --> 00:37:00,140
+SPEAKER_02: The first thing they do, when you walk into a casino, we may be off topic here, but when you walk into a casino, More often than not you'll see pictures of people who have won like all over the casino, right and This is probably not Nice to say but most of the time when you see those pictures is somebody wearing like a t-shirt.
+
+411
+00:37:00,200 --> 00:37:01,280
+SPEAKER_02: It's like all wrinkly.
+
+412
+00:37:01,500 --> 00:37:03,780
+SPEAKER_02: maybe they got like a little barbecue sauce on the side.
+
+413
+00:37:03,820 --> 00:37:05,880
+SPEAKER_02: I mean, they don't look very good right now.
+
+414
+00:37:06,240 --> 00:37:12,740
+SPEAKER_02: That's not because They couldn't find a better shirt or that they couldn't schedule a picture later.
+
+415
+00:37:13,020 --> 00:37:14,280
+SPEAKER_02: That's done by design.
+
+416
+00:37:15,000 --> 00:37:23,180
+SPEAKER_02: That's done so that somebody on vacation who's wearing flip-flops walks into the casino and they see those pictures right and they say that can be me.
+
+417
+00:37:24,560 --> 00:37:25,320
+SPEAKER_02: That can be me.
+
+418
+00:37:25,560 --> 00:37:32,980
+SPEAKER_02: I'm going to play because I want to be that person holding that ridiculously large check in that picture with the barbecue sauce on their t-shirt right.
+
+419
+00:37:33,700 --> 00:37:38,380
+SPEAKER_02: The second thing they do casinos do a really good job of and this goes back to getting wins.
+
+420
+00:37:39,060 --> 00:37:45,140
+SPEAKER_02: is you're on a slot machine and you put a quarter in or whatever, penny to penny slots even, right?
+
+421
+00:37:45,540 --> 00:37:50,900
+SPEAKER_02: And you win a nickel and all the lights go off, right?
+
+422
+00:37:51,000 --> 00:37:52,540
+SPEAKER_02: As if you won a million dollars.
+
+423
+00:37:52,840 --> 00:37:54,060
+SPEAKER_02: That's by design, right?
+
+424
+00:37:54,120 --> 00:37:55,880
+SPEAKER_02: That's by design because, oh, I gotta win.
+
+425
+00:37:55,920 --> 00:37:57,100
+SPEAKER_02: I gotta keep playing, right?
+
+426
+00:37:57,240 --> 00:37:57,700
+SPEAKER_02: I gotta keep playing.
+
+427
+00:37:57,740 --> 00:37:58,560
+SPEAKER_02: It keeps you engaged.
+
+428
+00:37:59,020 --> 00:38:04,920
+SPEAKER_02: So we can build that element of confidence by celebrating wins like the casino does with the slot machine.
+
+429
+00:38:05,340 --> 00:38:13,780
+SPEAKER_02: And we can also We don't need to have barbecue sauce on our client's t-shirts, but we can have that picture of success say, that can be you.
+
+430
+00:38:14,080 --> 00:38:17,620
+SPEAKER_02: You can get there in building people's confidence.
+
+431
+00:38:18,100 --> 00:38:20,520
+SPEAKER_01: Yeah, it's so interesting the point you made about confidence.
+
+432
+00:38:21,380 --> 00:38:27,460
+SPEAKER_01: And on first thought, it seemed counterintuitive that the widow would avoid financial advice.
+
+433
+00:38:27,500 --> 00:38:41,680
+SPEAKER_01: You'd think that they would be the perfect candidate to speak with an advisor because, especially in the case where the spouse did a lot of that financial work and then they're left kind of uncertain about how to handle things.
+
+434
+00:38:42,540 --> 00:38:44,980
+SPEAKER_01: But actually it makes a lot of sense when you think about it.
+
+435
+00:38:45,140 --> 00:38:48,880
+SPEAKER_01: I draw the parallel to going to the gym, for example.
+
+436
+00:38:50,000 --> 00:38:58,360
+SPEAKER_01: It's usually the people that have the most confidence that are there all the time, but the people that may need it the most kind of end up avoiding the gym.
+
+437
+00:38:58,440 --> 00:39:01,440
+SPEAKER_01: And I think there's, yeah, it's just really interesting when you unpack that.
+
+438
+00:39:02,060 --> 00:39:02,980
+SPEAKER_02: It is and that's.
+
+439
+00:39:03,180 --> 00:39:06,800
+SPEAKER_02: it's the case in everything and it's certainly the case when it comes to financial planning.
+
+440
+00:39:07,360 --> 00:39:09,760
+SPEAKER_02: It's that case in fitness that you're talking about.
+
+441
+00:39:09,840 --> 00:39:10,980
+SPEAKER_02: It's that case in education.
+
+442
+00:39:11,120 --> 00:39:31,020
+SPEAKER_02: There's a huge community college in in South Florida and they have this amazing retention rate of students who are coming in meeting extensive remediation and the reason why they're so successful is they basically tell their tell their incoming students and their current students, we will get you there.
+
+443
+00:39:31,180 --> 00:39:32,360
+SPEAKER_02: We will get you to success.
+
+444
+00:39:33,360 --> 00:39:38,260
+SPEAKER_02: We may have to remediate like crazy, but you can get there and here's the path to do it.
+
+445
+00:39:38,580 --> 00:39:44,380
+SPEAKER_02: And so as we think about our relationship with clients, that's what, that's what needs to happen.
+
+446
+00:39:44,480 --> 00:39:46,020
+SPEAKER_02: That's what coaching it is.
+
+447
+00:39:46,080 --> 00:39:55,960
+SPEAKER_02: It really is that partnership between the client and the advisor to overcome some of these biases, build that confidence so that individuals can say, yes, I can do this.
+
+448
+00:39:56,580 --> 00:39:57,280
+SPEAKER_01: Really interesting.
+
+449
+00:39:57,900 --> 00:39:59,260
+SPEAKER_02: So what are money scripts?
+
+450
+00:40:00,320 --> 00:40:07,080
+SPEAKER_02: Yeah, so my business partner Brad Klontz developed all these things, you know, they got the Klontz money script inventory.
+
+451
+00:40:07,420 --> 00:40:11,700
+SPEAKER_02: So there's kind of our, there are unconscious beliefs about money, right?
+
+452
+00:40:11,800 --> 00:40:17,240
+SPEAKER_02: So they tend to form early in our lives through our culture, through our family.
+
+453
+00:40:17,300 --> 00:40:21,100
+SPEAKER_02: And I mean, and our experiences, our life experiences I guess are part of that.
+
+454
+00:40:21,620 --> 00:40:25,180
+SPEAKER_02: And they have a huge impact on everything that we've been talking about here, right?
+
+455
+00:40:25,220 --> 00:40:27,180
+SPEAKER_02: Whether it's our behaviors or our decisions.
+
+456
+00:40:28,660 --> 00:40:31,800
+SPEAKER_02: And he, you know, he boils us down to the kind of four things.
+
+457
+00:40:31,860 --> 00:40:34,880
+SPEAKER_02: We could have people who are like money avoidant, right?
+
+458
+00:40:34,940 --> 00:40:38,660
+SPEAKER_02: These are people who, for whatever reason, for some of the reasons we were talking about, right?
+
+459
+00:40:39,960 --> 00:40:49,620
+SPEAKER_02: They see money as bad or evil, or they see people as greedy or immoral, or they just, they don't feel like they can really be successful in that space, right?
+
+460
+00:40:49,700 --> 00:40:51,940
+SPEAKER_02: You have people who are kind of money worship.
+
+461
+00:40:53,100 --> 00:40:54,980
+SPEAKER_02: That money will solve their problems.
+
+462
+00:40:55,060 --> 00:41:02,020
+SPEAKER_02: There's never enough right and their self-worth is really aligned to Money, right money status.
+
+463
+00:41:02,080 --> 00:41:03,640
+SPEAKER_02: people cut already talked about them.
+
+464
+00:41:03,740 --> 00:41:09,040
+SPEAKER_02: right your net worth is kind of your self-worth and money is really that measure of who you are in success.
+
+465
+00:41:09,500 --> 00:41:16,200
+SPEAKER_02: and then the vigilant people are basically people that are monitoring their their money constantly.
+
+466
+00:41:16,280 --> 00:41:19,720
+SPEAKER_02: they're that client right who's checking their accounts all the time.
+
+467
+00:41:19,760 --> 00:41:30,780
+SPEAKER_02: they may be that client that even any remote little changes in volatile elements of market volatility they're emailing they're questioning their plan all the time.
+
+468
+00:41:30,820 --> 00:41:33,880
+SPEAKER_02: you know could lead to some some neurotic behavior on their part.
+
+469
+00:41:33,980 --> 00:41:40,300
+SPEAKER_02: so if we understand kind of where they're coming from it's not about changing people again.
+
+470
+00:41:40,340 --> 00:41:43,000
+SPEAKER_02: it kind of goes back to what we've been talking about throughout this conversation.
+
+471
+00:41:43,640 --> 00:42:15,020
+SPEAKER_02: but we can help kind of help them identify your potential barriers that may get in the way of whatever plan you're trying to whatever goal you're trying to develop in the plan and we know we have tons of data that shows if we identify if we develop a plan and we have a sense of these these clients where they fit relative to these bunny scripts and we work on this in MRI it's part of we ask them basically find out What they are relative to the inventory without judgment, by the way, this is there's nothing about.
+
+472
+00:42:15,080 --> 00:42:17,060
+SPEAKER_02: any of this is about judgment, right?
+
+473
+00:42:17,120 --> 00:42:27,580
+SPEAKER_02: So identifying who we are and helping individuals move forward, but if we can identify factors like this and say, okay, here's the plan.
+
+474
+00:42:28,820 --> 00:42:36,160
+SPEAKER_02: Here's the goal where we want to go and let's identify three obstacles.
+
+475
+00:42:36,960 --> 00:42:39,800
+SPEAKER_02: They're going to get in the way at some point.
+
+476
+00:42:40,540 --> 00:42:45,220
+SPEAKER_02: on this journey and you know kinds of well I like to gamble.
+
+477
+00:42:45,340 --> 00:42:48,460
+SPEAKER_02: I probably not the best example but I like to.
+
+478
+00:42:48,700 --> 00:42:49,360
+SPEAKER_02: I I've been let.
+
+479
+00:42:49,460 --> 00:42:51,000
+SPEAKER_02: impulse spending is an issue for me.
+
+480
+00:42:51,040 --> 00:42:52,200
+SPEAKER_02: this is an issue for me.
+
+481
+00:42:52,340 --> 00:42:53,620
+SPEAKER_02: that's an issue for me okay.
+
+482
+00:42:54,180 --> 00:42:59,600
+SPEAKER_02: so we identify that and maybe we adjust the plan a little bit to accommodate that.
+
+483
+00:43:00,160 --> 00:43:06,680
+SPEAKER_02: but more importantly when those things come up we don't do what a lot of people do and that is ditch the plan.
+
+484
+00:43:06,740 --> 00:43:09,980
+SPEAKER_02: It goes back to that external locus of control, right?
+
+485
+00:43:10,040 --> 00:43:19,080
+SPEAKER_02: Where we say, I'm not cut out for this, I can't do this, I'm not meant to have money, I'm not meant to retire, I can't do this.
+
+486
+00:43:19,160 --> 00:43:23,460
+SPEAKER_02: Instead it's like, I knew this was coming, it's fine.
+
+487
+00:43:24,700 --> 00:43:33,560
+SPEAKER_02: Advisors are great about, many of my coaching clients, the advisors are great using the analogy of the plane and turbulence.
+
+488
+00:43:34,560 --> 00:43:35,700
+SPEAKER_02: It's the best example.
+
+489
+00:43:36,280 --> 00:43:38,100
+SPEAKER_02: The pilot comes on ahead of time.
+
+490
+00:43:39,180 --> 00:43:40,600
+SPEAKER_02: Hey, we're flying to LA.
+
+491
+00:43:41,980 --> 00:43:44,760
+SPEAKER_02: And I just had this on an overnight flight last night, right?
+
+492
+00:43:44,840 --> 00:43:48,440
+SPEAKER_02: And the pilot says, we're gonna have some turbulence about halfway through the flight.
+
+493
+00:43:48,680 --> 00:43:49,500
+SPEAKER_02: It's gonna be a little shaky.
+
+494
+00:43:49,660 --> 00:43:52,360
+SPEAKER_02: I'll put the fastest seatbelt sign on, whatever, right?
+
+495
+00:43:52,860 --> 00:43:58,140
+SPEAKER_02: Okay, so we get in the plane and we're halfway through and it gets bumpy, right?
+
+496
+00:43:58,220 --> 00:43:59,440
+SPEAKER_02: What's the first thing you think about?
+
+497
+00:43:59,540 --> 00:44:00,940
+SPEAKER_02: Oh, here it is.
+
+498
+00:44:01,960 --> 00:44:06,460
+SPEAKER_02: You your likelihood of panicking goes way down because we saw it coming.
+
+499
+00:44:07,120 --> 00:44:11,560
+SPEAKER_02: now I still my first instinct is to look at the flight attendant if they're not panicking and we're good, right?
+
+500
+00:44:12,160 --> 00:44:15,000
+SPEAKER_02: But the reality is I knew this was coming.
+
+501
+00:44:15,620 --> 00:44:16,480
+SPEAKER_02: So we're good.
+
+502
+00:44:16,800 --> 00:44:30,000
+SPEAKER_02: We've got the plan We've accommodated that we can move forward and it just understanding those factors about who the client is and How those could manifest themselves into some hurdle or turbulence along the way?
+
+503
+00:44:30,580 --> 00:44:32,300
+SPEAKER_02: can be critical for them in going forward.
+
+504
+00:44:32,700 --> 00:44:35,460
+SPEAKER_00: That makes a ton of sense for the client advisor relationship.
+
+505
+00:44:35,840 --> 00:44:38,520
+SPEAKER_00: Should people try and understand their own money scripts as well?
+
+506
+00:44:39,000 --> 00:44:39,160
+SPEAKER_02: Yes.
+
+507
+00:44:39,640 --> 00:44:45,460
+SPEAKER_02: I mean, if you can understand who you are, when it comes to anything, it can be helpful, right?
+
+508
+00:44:45,560 --> 00:44:47,680
+SPEAKER_02: It could just help you understand.
+
+509
+00:44:48,820 --> 00:44:49,720
+SPEAKER_02: And it's not easy to do.
+
+510
+00:44:50,020 --> 00:44:50,180
+SPEAKER_02: Okay.
+
+511
+00:44:50,260 --> 00:44:55,920
+SPEAKER_02: So just like just knowing it, I don't think lots of get upset would be saying that people could go take this inventory.
+
+512
+00:44:56,000 --> 00:44:56,400
+SPEAKER_02: It's great.
+
+513
+00:44:57,580 --> 00:45:04,320
+SPEAKER_02: It's not a be-all end-all, but it does help immensely, right, to know, okay, well, I tend to be more money status.
+
+514
+00:45:05,140 --> 00:45:08,280
+SPEAKER_02: You know, I don't know that I want to be money status.
+
+515
+00:45:08,580 --> 00:45:12,120
+SPEAKER_02: I see how that's gotten in the way of X, Y, and Z. Okay.
+
+516
+00:45:13,600 --> 00:45:15,940
+SPEAKER_02: So it can be immensely helpful.
+
+517
+00:45:16,220 --> 00:45:18,600
+SPEAKER_02: It tried to kind of bring in some rationality.
+
+518
+00:45:19,020 --> 00:45:29,420
+SPEAKER_02: And maybe with some people, it can say, you know, whether it's a client or advisor saying, you know what, I'm gonna put a cushion on when I'm gonna pull the trigger here.
+
+519
+00:45:29,480 --> 00:45:30,200
+SPEAKER_02: I'm gonna wait a day.
+
+520
+00:45:31,680 --> 00:45:33,460
+SPEAKER_02: And then the next day, oh no, I don't want this anymore.
+
+521
+00:45:34,020 --> 00:45:36,140
+SPEAKER_02: So it can be helpful, absolutely.
+
+522
+00:45:37,720 --> 00:45:43,220
+SPEAKER_00: You mentioned the inventory, just to be clear for listeners, how can people go and understand their own money scripts?
+
+523
+00:45:43,320 --> 00:45:45,680
+SPEAKER_00: Like what is the inventory, I guess is the question.
+
+524
+00:45:46,200 --> 00:45:49,820
+SPEAKER_02: So it's a series of, I should know more about his inventory, he's my business partner.
+
+525
+00:45:49,860 --> 00:45:53,140
+SPEAKER_02: But if you Google Claude's money script inventory, you can find it, you can take it.
+
+526
+00:45:54,060 --> 00:45:56,260
+SPEAKER_02: You keep your results back in minutes.
+
+527
+00:45:57,140 --> 00:45:58,920
+SPEAKER_02: But yeah, it's easy to find on the web.
+
+528
+00:45:59,680 --> 00:46:00,060
+SPEAKER_02: Okay, cool.
+
+529
+00:46:00,700 --> 00:46:04,800
+SPEAKER_01: So what are some of the common financial behaviors that can lead to bad outcomes?
+
+530
+00:46:05,940 --> 00:46:07,380
+SPEAKER_02: Bad spending, bad investing.
+
+531
+00:46:09,860 --> 00:46:14,500
+SPEAKER_02: Well, I mean, so I mean, obviously we think about what.
+
+532
+00:46:14,660 --> 00:46:16,820
+SPEAKER_02: so was it bad?
+
+533
+00:46:17,720 --> 00:46:18,520
+SPEAKER_02: I can be clarified.
+
+534
+00:46:19,640 --> 00:46:23,780
+SPEAKER_02: Bad is anything that's inconsistent with helping somebody reach their goals.
+
+535
+00:46:23,960 --> 00:46:24,180
+SPEAKER_02: Right.
+
+536
+00:46:24,320 --> 00:46:35,700
+SPEAKER_02: I mean, so and that goes back to what we talked about a while ago, that that we're not in the business of identifying good and bad, whether it's what we do with MRI or what advisors do with clients.
+
+537
+00:46:36,280 --> 00:46:39,220
+SPEAKER_02: We're basically saying this either aligns or it doesn't.
+
+538
+00:46:39,440 --> 00:46:42,120
+SPEAKER_02: So I mean, common things are obviously impulse spending.
+
+539
+00:46:42,800 --> 00:46:48,600
+SPEAKER_02: Any time we bring emotion into investing, we've got a problem more often than not.
+
+540
+00:46:48,720 --> 00:46:48,940
+SPEAKER_02: Right.
+
+541
+00:46:49,980 --> 00:46:53,360
+SPEAKER_02: If we are if we're money avoided.
+
+542
+00:46:53,740 --> 00:46:56,940
+SPEAKER_02: If we're avoidant of certain issues, that's never going to be good.
+
+543
+00:46:57,140 --> 00:46:59,740
+SPEAKER_02: Problems don't just go away magically, right?
+
+544
+00:47:01,860 --> 00:47:09,280
+SPEAKER_02: I think going back to that element of chasing, right, what we talked about when it comes to FOMO, that could be an issue.
+
+545
+00:47:09,840 --> 00:47:24,260
+SPEAKER_02: So I think any time that we're not, if we could constantly, for the consumers that are listening to this, you know, it really, to me, it really, what boils down to this is thinking about, okay, What's your goal?
+
+546
+00:47:25,100 --> 00:47:30,240
+SPEAKER_02: And everything that you do, every behavior following that goal either aligns with it or not.
+
+547
+00:47:30,360 --> 00:47:31,860
+SPEAKER_02: And if you could categorize that.
+
+548
+00:47:32,820 --> 00:47:38,440
+SPEAKER_02: Now, if you need to have a little cushion in there because you want to have a little impulse spending or whatever it is, then factor for that.
+
+549
+00:47:39,460 --> 00:47:40,400
+SPEAKER_02: But aligning that.
+
+550
+00:47:41,340 --> 00:47:43,600
+SPEAKER_02: This is consistent with what I want and this isn't.
+
+551
+00:47:44,020 --> 00:47:50,900
+SPEAKER_02: And then on the investing side, I think it really does get into that element, particularly people that are on active investing.
+
+552
+00:47:51,400 --> 00:47:53,220
+SPEAKER_02: people that are doing that element of day trading.
+
+553
+00:47:54,920 --> 00:48:02,500
+SPEAKER_02: Again, not good or bad, but understanding what is emotionally driven there and what's not is really, really important.
+
+554
+00:48:03,160 --> 00:48:07,720
+SPEAKER_00: So those behaviors are bad, detrimental for what I think are pretty obvious reasons.
+
+555
+00:48:08,280 --> 00:48:14,220
+SPEAKER_00: But we've also talked about biases and heuristics and beliefs and preconceptions or flashpoints, money scripts.
+
+556
+00:48:14,760 --> 00:48:21,300
+SPEAKER_00: How can people presumably people don't always realize when they're making these mistakes, what can people do to recognize and mitigate them?
+
+557
+00:48:22,620 --> 00:48:23,460
+SPEAKER_02: I think there's probably a few things.
+
+558
+00:48:23,760 --> 00:48:27,160
+SPEAKER_02: I think first of all, we kind of talked about this is be aware of your emotional triggers.
+
+559
+00:48:27,520 --> 00:48:36,000
+SPEAKER_02: So going back to the analogy of the cookies in my place here, what are the cookies that are gonna get in the way of your nutrition?
+
+560
+00:48:36,060 --> 00:48:38,440
+SPEAKER_02: So know what your emotional triggers are right there.
+
+561
+00:48:39,400 --> 00:48:44,700
+SPEAKER_02: We talk a lot in goal setting about if then statements, if this happens, then do this, right?
+
+562
+00:48:45,440 --> 00:48:46,460
+SPEAKER_02: can be really, really critical.
+
+563
+00:48:46,520 --> 00:48:50,260
+SPEAKER_02: We have a plan for what we're gonna do relative to that.
+
+564
+00:48:51,900 --> 00:48:56,540
+SPEAKER_02: And some of that is habit driven and it's impulse driven.
+
+565
+00:48:57,220 --> 00:49:02,580
+SPEAKER_02: So, and it's at a lot of cases too, it's tied to other behaviors.
+
+566
+00:49:03,100 --> 00:49:08,140
+SPEAKER_02: So for example, if you have a problem, I'll go back to snacking.
+
+567
+00:49:08,220 --> 00:49:15,640
+SPEAKER_02: If you have a problem with snacking, and you do most of your snacking watching television, maybe you need to think about watching less television, right?
+
+568
+00:49:15,700 --> 00:49:21,420
+SPEAKER_02: Because you're coupling those behaviors, those habits into two different things which can be critical.
+
+569
+00:49:22,660 --> 00:49:25,400
+SPEAKER_02: We already talked earlier about being in charge of your environment.
+
+570
+00:49:26,200 --> 00:49:30,840
+SPEAKER_02: What in your environment is insistent with your goals?
+
+571
+00:49:31,480 --> 00:49:33,900
+SPEAKER_02: What in your environment is getting in the way of your goals?
+
+572
+00:49:34,320 --> 00:49:40,060
+SPEAKER_02: And that could be anything from maybe on Amazon, you don't have your credit card stored.
+
+573
+00:49:40,820 --> 00:49:42,800
+SPEAKER_02: I mean, those places are so great.
+
+574
+00:49:43,120 --> 00:49:44,340
+SPEAKER_02: That's frictionless payment.
+
+575
+00:49:44,860 --> 00:49:47,020
+SPEAKER_02: That's the best example of frictionless behavior.
+
+576
+00:49:47,520 --> 00:49:51,720
+SPEAKER_02: So I'm gonna make a commitment that I have too much impulse spending.
+
+577
+00:49:51,800 --> 00:49:56,680
+SPEAKER_02: So I'm gonna take my credit card number out of all of these websites today.
+
+578
+00:49:56,860 --> 00:49:57,620
+SPEAKER_02: I'm gonna do that.
+
+579
+00:49:58,060 --> 00:50:00,680
+SPEAKER_02: I'm gonna make it harder for me to purchase things.
+
+580
+00:50:01,200 --> 00:50:05,020
+SPEAKER_02: So being in charge of your environment, which I think is really, really critical.
+
+581
+00:50:06,340 --> 00:50:09,840
+SPEAKER_02: We talked already identifying those hurdles ahead of time.
+
+582
+00:50:10,480 --> 00:50:11,740
+SPEAKER_02: can be really, really critical.
+
+583
+00:50:14,200 --> 00:50:16,360
+SPEAKER_02: And the last piece I'll just reinforce that we already mentioned.
+
+584
+00:50:17,600 --> 00:50:32,380
+SPEAKER_02: There's some people who, for lots of different reasons, feel like they are just at that level of no financial self-efficacy, or even when it comes to nutrition or health.
+
+585
+00:50:33,000 --> 00:50:43,840
+SPEAKER_02: And I would reinforce to those folks this idea of maybe we don't need a time horizon to get a win for a month, maybe we need to win today, right?
+
+586
+00:50:45,160 --> 00:50:55,420
+SPEAKER_02: And sometimes those changes evolve into making your bed when you get up in the morning, getting a win and building on that win and thinking slower.
+
+587
+00:50:55,520 --> 00:51:05,340
+SPEAKER_02: So I think those things at a general level can help people kind of mitigate those behaviors that again aren't good or bad, but they're just getting in the way of where people wanna go.
+
+588
+00:51:07,240 --> 00:51:16,440
+SPEAKER_00: Something that jumped out of me as you're talking through that was that and we're always Super careful not to push the role of advisors because a lot of people who listen are do-it-yourself investors.
+
+589
+00:51:16,560 --> 00:51:23,980
+SPEAKER_00: I'm sure they do a great job Yeah, but a lot of those areas are places where getting an outside perspective which you mentioned earlier seems like it could be really valuable.
+
+590
+00:51:24,740 --> 00:51:26,480
+SPEAKER_02: Absolutely, that's exactly right.
+
+591
+00:51:26,520 --> 00:51:32,400
+SPEAKER_02: I mean, there are lots of people that are listening that are active investors and do And are very successful at it.
+
+592
+00:51:33,620 --> 00:51:50,140
+SPEAKER_02: but having that element of that that external person that helps mitigate our rationality can or irrationality can be really really helpful right and having that is so different than you know when it comes to relationships.
+
+593
+00:51:50,200 --> 00:51:54,420
+SPEAKER_02: you have that that friend that Gives that gives that advice.
+
+594
+00:51:54,500 --> 00:52:00,020
+SPEAKER_02: They're the irrational or they're the rest They're the rational party relative that they can provide that.
+
+595
+00:52:00,080 --> 00:52:02,500
+SPEAKER_02: if I saying is this this this makes sense of whatnot.
+
+596
+00:52:02,820 --> 00:52:09,340
+SPEAKER_02: And and by the way that friend that gives that relationship advice their life could be, their relationship life could be a mess.
+
+597
+00:52:10,160 --> 00:52:12,440
+SPEAKER_02: Okay, but they give the best advice.
+
+598
+00:52:12,980 --> 00:52:20,120
+SPEAKER_02: And the reason, usually the reason why that is is because they have the irrationality when it comes to their own behavior, right?
+
+599
+00:52:20,180 --> 00:52:27,900
+SPEAKER_02: They have all the impulses and all the other things that they're bringing, but they understand at a basic level, elements of a relationship.
+
+600
+00:52:27,960 --> 00:52:29,460
+SPEAKER_02: So they can give that good advice.
+
+601
+00:52:30,440 --> 00:52:33,020
+SPEAKER_02: Not that this is a relationship advice podcast, but.
+
+602
+00:52:33,760 --> 00:52:38,460
+SPEAKER_02: That outside source could be helpful to bring rationality to what otherwise could be irrational.
+
+603
+00:52:39,280 --> 00:52:41,900
+SPEAKER_00: I started working with a personal trainer over the last few months.
+
+604
+00:52:42,200 --> 00:52:51,000
+SPEAKER_00: I've been an athlete my whole life and I know how to go to the gym, but I've found it really helpful to have a program designed for me and to have that accountability layer.
+
+605
+00:52:51,560 --> 00:52:52,520
+SPEAKER_00: Something I found really interesting.
+
+606
+00:52:52,580 --> 00:52:59,800
+SPEAKER_00: talking to this guy who's also a lifelong athlete, but he's very well credentialed in weight training.
+
+607
+00:53:00,220 --> 00:53:02,240
+SPEAKER_00: He has someone else design his programs for him.
+
+608
+00:53:02,980 --> 00:53:08,600
+SPEAKER_00: His comment to me was that if I do my own programs, I'm only going to put exercises that I like into the program.
+
+609
+00:53:08,660 --> 00:53:14,880
+SPEAKER_00: But when someone else does it for me, they'll put in the exercises that are best for me achieving my goals, not just what I'm going to enjoy the most.
+
+610
+00:53:14,940 --> 00:53:18,480
+SPEAKER_00: I thought that was a really interesting perspective from a totally different discipline.
+
+611
+00:53:19,120 --> 00:53:19,800
+SPEAKER_02: It's totally true.
+
+612
+00:53:20,260 --> 00:53:23,180
+SPEAKER_02: That's the case in lots of different areas, whether it's training.
+
+613
+00:53:23,680 --> 00:53:24,580
+SPEAKER_02: Musicians are like that.
+
+614
+00:53:24,620 --> 00:53:30,640
+SPEAKER_02: There's great studies that look at musicians who are professional musicians or studying to be professional musicians.
+
+615
+00:53:32,780 --> 00:53:45,360
+SPEAKER_02: if they allocate five hours in a practice room trying to become a better singer or piano player or whatever it might be, they tend to practice the things that they're already good at, right?
+
+616
+00:53:45,400 --> 00:53:46,580
+SPEAKER_02: They're impressing themselves.
+
+617
+00:53:46,740 --> 00:53:47,420
+SPEAKER_02: It's easier.
+
+618
+00:53:47,680 --> 00:53:52,740
+SPEAKER_02: They're not pushing their range or dexterity or whatever it might be to that point, right?
+
+619
+00:53:52,800 --> 00:53:55,440
+SPEAKER_02: And so having that outside person say, let's identify that.
+
+620
+00:53:55,660 --> 00:54:01,020
+SPEAKER_02: And by the way, that gets into goal setting where Okay, that's where you want to be.
+
+621
+00:54:01,340 --> 00:54:04,940
+SPEAKER_02: You want to be at 10, whatever that might be.
+
+622
+00:54:05,260 --> 00:54:09,000
+SPEAKER_02: Or say you want to be at 100 pounds, deadlifting or whatever it might be.
+
+623
+00:54:09,740 --> 00:54:14,980
+SPEAKER_02: Okay, and right now you're at 70, then the real focus is the delta of 30 pounds.
+
+624
+00:54:15,620 --> 00:54:18,000
+SPEAKER_02: And that's what an outside perspective could help you on.
+
+625
+00:54:18,160 --> 00:54:19,440
+SPEAKER_02: I don't need to think about 100.
+
+626
+00:54:19,840 --> 00:54:22,000
+SPEAKER_02: You should not be picking up 100 pounds if you're picking up 70.
+
+627
+00:54:22,580 --> 00:54:28,820
+SPEAKER_02: Maybe you need to pick up 75, but it's all about that delta, the space between where you are and where you want to be.
+
+628
+00:54:30,140 --> 00:54:32,900
+SPEAKER_01: So what role does identity play in goal setting?
+
+629
+00:54:33,520 --> 00:54:33,780
+SPEAKER_02: A lot.
+
+630
+00:54:33,960 --> 00:54:41,500
+SPEAKER_02: I mean, so we are far more successful and goals are more sustainable if they're part of it.
+
+631
+00:54:41,560 --> 00:54:48,500
+SPEAKER_02: We see a goal as kind of part of our identity and our identity shapes really meaning.
+
+632
+00:54:48,600 --> 00:54:54,000
+SPEAKER_02: So it shapes what we see as meaningful as opposed to what's expected.
+
+633
+00:54:55,020 --> 00:55:06,840
+SPEAKER_02: You think about a lot of people that climb a lot of ladders corporate ladders that They climb that ladder because it's the next rung up and maybe there's some extrinsic motivation, right?
+
+634
+00:55:06,880 --> 00:55:14,900
+SPEAKER_02: They get more money more status and that's great But it's actually coming from outside as opposed to what's meaningful to them.
+
+635
+00:55:15,420 --> 00:55:20,740
+SPEAKER_02: So if we have goals that are outside of our identity, then we become kind of disengaged.
+
+636
+00:55:20,840 --> 00:55:22,060
+SPEAKER_02: we put them off.
+
+637
+00:55:22,660 --> 00:55:25,580
+SPEAKER_02: We say, well, I don't need to do that or we just quit them altogether.
+
+638
+00:55:25,940 --> 00:55:31,140
+SPEAKER_02: So we could be far more motivated and resilient if we see something tied to our identity.
+
+639
+00:55:31,780 --> 00:55:36,200
+SPEAKER_02: If we want to go into something new, then that's where we get into shorter time horizons and some of those other things.
+
+640
+00:55:36,260 --> 00:55:38,720
+SPEAKER_02: But our identity is really, really important.
+
+641
+00:55:38,860 --> 00:55:58,120
+SPEAKER_02: So if you have a client who sees themselves as a provider or a mentor, then goals that are kind of framed in that way, right, they're framed as providing security and guidance, then they're going to be like, okay, I want to do that as opposed to like maximizing a return.
+
+642
+00:55:58,200 --> 00:56:01,860
+SPEAKER_02: I have that mindset as a provider.
+
+643
+00:56:03,080 --> 00:56:04,880
+SPEAKER_02: I need to make sure my goals align.
+
+644
+00:56:04,920 --> 00:56:05,760
+SPEAKER_02: That's what I want to be.
+
+645
+00:56:05,860 --> 00:56:07,400
+SPEAKER_02: I want to be that provider for my family.
+
+646
+00:56:07,820 --> 00:56:09,160
+SPEAKER_02: I'm not thinking about maximizing.
+
+647
+00:56:09,200 --> 00:56:13,660
+SPEAKER_02: I'm going to align my behaviors towards being that provider and providing security.
+
+648
+00:56:13,860 --> 00:56:17,420
+SPEAKER_02: So identity is critical, is a critical part of that.
+
+649
+00:56:17,840 --> 00:56:20,140
+SPEAKER_02: And our environment of course plays a huge part in that too.
+
+650
+00:56:21,100 --> 00:56:28,260
+SPEAKER_00: It may be self-evident from the conversation so far, and you have mentioned goals a few times, but can you talk about why setting goals is important?
+
+651
+00:56:29,140 --> 00:56:32,840
+SPEAKER_02: Setting goals, I mean, setting goals, it aligns our behavior.
+
+652
+00:56:32,920 --> 00:56:33,760
+SPEAKER_02: So where do we want to go?
+
+653
+00:56:34,540 --> 00:56:38,160
+SPEAKER_02: is the first step relative to any one facet of our lives.
+
+654
+00:56:38,220 --> 00:56:58,500
+SPEAKER_02: So if we say this is where our end point needs to be, every behavior after that, if we're committed to that, if we're committed to being at that that point at the end of the path that every step we take either is again going back to what we've been talking about here is either consistent with that or inconsistent with that.
+
+655
+00:56:59,080 --> 00:57:05,140
+SPEAKER_02: So and there's only so much so many resources that we have to dedicate it to otherwise we're kind of shifting.
+
+656
+00:57:06,000 --> 00:57:08,180
+SPEAKER_02: you know mindlessly we're not really focusing.
+
+657
+00:57:08,220 --> 00:57:13,720
+SPEAKER_02: we're kind of that that boat that's just adrift in the ocean and we're the winds are kind of taking us where we want to go.
+
+658
+00:57:14,460 --> 00:57:17,540
+SPEAKER_02: So our goals help align our behaviors.
+
+659
+00:57:17,820 --> 00:57:26,500
+SPEAKER_02: they also motivate us in the sense of you know, that element of progress is a huge motivator in and of itself for us.
+
+660
+00:57:26,580 --> 00:57:33,260
+SPEAKER_02: So if we have an end point in mind, we're now motivated to kind of achieve that.
+
+661
+00:57:33,300 --> 00:57:35,700
+SPEAKER_02: We're wired actually neurologically to do that.
+
+662
+00:57:35,820 --> 00:57:40,920
+SPEAKER_02: So it is really behavior alignment and motivation that are essential when it comes to goals.
+
+663
+00:57:41,680 --> 00:58:00,300
+SPEAKER_01: You know, it's funny because I come from an engineering background and we have a different reason for why goals are important, but I just think that the combination of both the technical aspects of solving goals and setting your objectives and also the behavioral side of things just really emphasizes why setting goals is so important.
+
+664
+00:58:00,380 --> 00:58:10,640
+SPEAKER_02: Yeah, and we're not really, so we're not really wired for, so in this new book I eval, we talked about, I beat up pretty hard on retirement.
+
+665
+00:58:11,120 --> 00:58:22,220
+SPEAKER_02: And one of the reasons why is because the retirement data, our health, whether it's physical health or mental health, just goes off a cliff when we retire.
+
+666
+00:58:22,660 --> 00:58:23,420
+SPEAKER_02: Well, why is that?
+
+667
+00:58:23,520 --> 00:58:37,760
+SPEAKER_02: Well, the reason why, and it's apples to apples comparison, if people age similar health background and whatnot, that people who retire tend to have this huge decline.
+
+668
+00:58:37,860 --> 00:58:42,620
+SPEAKER_02: And a lot of that really ties in this idea of how we're neurologically wired.
+
+669
+00:58:43,200 --> 00:58:44,620
+SPEAKER_02: We're wired for progress.
+
+670
+00:58:44,940 --> 00:58:53,320
+SPEAKER_02: We get that shot of dopamine when we get closer to achieving a goal, when we get closer to, oh, we made a major step today.
+
+671
+00:58:53,480 --> 00:58:59,040
+SPEAKER_02: Yes, we don't get that dopamine when we're sitting back thinking about what we did a year ago.
+
+672
+00:58:59,560 --> 00:59:00,780
+SPEAKER_02: No, we can be proud of it.
+
+673
+00:59:01,260 --> 00:59:11,140
+SPEAKER_02: We can look at our trophy case, so we can look at the plaques on our wall or look at our bank account, and I'm not dismissing those things, but that's not what gives us purpose.
+
+674
+00:59:11,380 --> 00:59:16,820
+SPEAKER_02: What gives us purpose and what gives us that shot of dopamine is really progress.
+
+675
+00:59:17,100 --> 00:59:31,820
+SPEAKER_02: And so if we can do anything for clients or even ourselves that gives us the opportunity for progress, we're gonna be far more, we're gonna be far happier, far more fulfilled in what we're doing.
+
+676
+00:59:32,480 --> 00:59:32,900
+SPEAKER_01: Totally.
+
+677
+00:59:33,240 --> 00:59:34,760
+SPEAKER_01: So goal setting is super important.
+
+678
+00:59:35,700 --> 00:59:39,880
+SPEAKER_01: How can people think through setting goals that align with their values and their long-term vision?
+
+679
+00:59:41,540 --> 00:59:47,400
+SPEAKER_02: Well So I would think about a couple different ways so we can look at goals Separating.
+
+680
+00:59:47,480 --> 00:59:49,320
+SPEAKER_02: let's separate two different types of goals.
+
+681
+00:59:49,460 --> 01:00:01,260
+SPEAKER_02: Let's look at extrinsic goals that I talked about in intrinsic goals, so extrinsic goals are Money and things the material elements, right?
+
+682
+01:00:01,620 --> 01:00:07,040
+SPEAKER_02: Intrinsic goals are a good rule of thumb for an intrinsic goal or the things you do when nobody else is looking.
+
+683
+01:00:07,300 --> 01:00:08,400
+SPEAKER_02: You do it for the sake of doing.
+
+684
+01:00:08,440 --> 01:00:09,560
+SPEAKER_02: you want to do them right.
+
+685
+01:00:09,600 --> 01:00:16,740
+SPEAKER_02: you do it for the love of doing them And neither is good or bad necessarily.
+
+686
+01:00:18,120 --> 01:00:26,860
+SPEAKER_02: But we do need to have a cocktail of both when it comes to goal setting, particularly if we're an advisor working with a client, but even for consumers out there.
+
+687
+01:00:28,280 --> 01:00:36,560
+SPEAKER_02: We know that financial plans that have intrinsic goals mixed in are far more sticky than those that are not.
+
+688
+01:00:37,100 --> 01:00:39,860
+SPEAKER_02: We know that clients are engaging their advisors more.
+
+689
+01:00:40,420 --> 01:00:47,940
+SPEAKER_02: having more plans developed, achieving progress on those plans when they have both of those things.
+
+690
+01:00:48,500 --> 01:00:59,200
+SPEAKER_02: And that could be as basic as renaming an account that could say education account and changing the name of it to the name of the child whose education it is.
+
+691
+01:00:59,520 --> 01:01:04,020
+SPEAKER_02: Now I'm saving money for Naomi as opposed to just education, right?
+
+692
+01:01:04,620 --> 01:01:08,240
+SPEAKER_02: But that intrinsic element is really, really important.
+
+693
+01:01:08,820 --> 01:01:13,060
+SPEAKER_02: And we can be far more perseverant when we have both of those things.
+
+694
+01:01:14,180 --> 01:01:19,860
+SPEAKER_02: Again, it kind of goes back to how we're wired and what we're really looking for as individuals.
+
+695
+01:01:19,920 --> 01:01:28,620
+SPEAKER_02: And we basically boil, we basically have three things that as human beings, we all really, really craze.
+
+696
+01:01:29,220 --> 01:01:32,160
+SPEAKER_02: And that is, we wanna be competent.
+
+697
+01:01:32,580 --> 01:01:37,200
+SPEAKER_02: We wanna be able to do the things that we need to do to sustain, right?
+
+698
+01:01:38,000 --> 01:01:39,220
+SPEAKER_02: We want to be autonomous.
+
+699
+01:01:39,740 --> 01:01:46,960
+SPEAKER_02: We want to be able to make decisions over our well-being and in many cases our environment.
+
+700
+01:01:47,860 --> 01:01:49,140
+SPEAKER_02: And we want to be connected.
+
+701
+01:01:49,660 --> 01:01:52,440
+SPEAKER_02: So we want to be part of something bigger than ourselves.
+
+702
+01:01:52,880 --> 01:01:57,240
+SPEAKER_02: And that could be any number of things and not necessarily just a romantic relationship.
+
+703
+01:01:57,800 --> 01:02:03,100
+SPEAKER_02: Be part of our community, part of a church, synagogue or mosque or something like that.
+
+704
+01:02:03,460 --> 01:02:10,560
+SPEAKER_02: Having all three of those things is really critical and For your listeners out there, what I'm talking about is something called self-determination theory.
+
+705
+01:02:12,660 --> 01:02:15,640
+SPEAKER_02: And those things are what drives us.
+
+706
+01:02:16,220 --> 01:02:19,540
+SPEAKER_02: If we have those three things, we're good.
+
+707
+01:02:20,120 --> 01:02:25,040
+SPEAKER_02: And some of those are extrinsic and material, because we got paid for these things, right?
+
+708
+01:02:25,080 --> 01:02:25,960
+SPEAKER_02: Capitalism, right?
+
+709
+01:02:26,680 --> 01:02:29,080
+SPEAKER_02: And then a lot of those things are intrinsic, right?
+
+710
+01:02:29,600 --> 01:02:30,660
+SPEAKER_02: They don't come with money.
+
+711
+01:02:31,780 --> 01:02:46,560
+SPEAKER_02: When those are out of whack, That's when we get into, not only do we get into elements of individuals resolve towards achieving goals, but we become much more susceptible to things like FOMO.
+
+712
+01:02:47,700 --> 01:03:04,640
+SPEAKER_02: There's a huge connection between FOMO and this self-determination theory that I'm talking about, that if we're not aligned in these three areas, we tend to be on social media more, seeing what other people are doing and say, okay, Why isn't that me?
+
+713
+01:03:05,520 --> 01:03:06,440
+SPEAKER_02: And now we're chasing.
+
+714
+01:03:06,580 --> 01:03:07,760
+SPEAKER_02: We're chasing returns.
+
+715
+01:03:10,000 --> 01:03:16,620
+SPEAKER_02: We're chasing extrinsic rewards like likes on Instagram or Facebook or whatever it might be.
+
+716
+01:03:17,520 --> 01:03:21,860
+SPEAKER_02: So having that cocktail of things is really, really critical.
+
+717
+01:03:22,580 --> 01:03:29,920
+SPEAKER_02: Now for advisors, that's hard to get to when it comes to talking to the client.
+
+718
+01:03:29,960 --> 01:03:32,760
+SPEAKER_02: Now MRI helps with that because we ask about.
+
+719
+01:03:34,080 --> 01:03:35,120
+SPEAKER_02: We ask about financial FOMO.
+
+720
+01:03:35,580 --> 01:03:36,920
+SPEAKER_02: We ask about general FOMO.
+
+721
+01:03:37,040 --> 01:03:39,320
+SPEAKER_02: We call general FOMO basically your life's FOMO.
+
+722
+01:03:42,020 --> 01:03:47,240
+SPEAKER_02: But it really comes down to for an advisor beyond beyond MRI is specificity.
+
+723
+01:03:47,640 --> 01:03:59,280
+SPEAKER_02: So being specific with someone about what makes them tick is going to get you the answer that you want as opposed to something that's general.
+
+724
+01:03:59,340 --> 01:04:03,280
+SPEAKER_02: but it's not going to get a client sizzling hot about their plan which is what you want to do.
+
+725
+01:04:03,820 --> 01:04:04,800
+SPEAKER_02: you want to get them sizzling.
+
+726
+01:04:04,860 --> 01:04:13,100
+SPEAKER_02: I say this is the tool that's gonna get me just to the goals that I want as a human being.
+
+727
+01:04:15,360 --> 01:04:22,260
+SPEAKER_02: and so you know one thing relative to that is specificity is thinking about retirement.
+
+728
+01:04:22,740 --> 01:04:29,920
+SPEAKER_02: so you know lots of advisors say to clients what do you want your retirement to look like?
+
+729
+01:04:30,520 --> 01:04:41,980
+SPEAKER_02: and you know people say well you know They've seen a bunch of commercials with people with gray hair walking on the beach or these vineyards that they all have.
+
+730
+01:04:42,060 --> 01:04:48,180
+SPEAKER_02: I don't know how people could all have these vineyards, but they always don't seem to have a vineyard and they're smiling and happy and whatnot.
+
+731
+01:04:48,540 --> 01:04:49,760
+SPEAKER_02: So they kind of regurgitate that.
+
+732
+01:04:50,460 --> 01:04:54,280
+SPEAKER_02: In a lot of cases, they regurgitate that because they hadn't really thought about it themselves, right?
+
+733
+01:04:55,280 --> 01:04:56,260
+SPEAKER_02: So you don't get a good answer.
+
+734
+01:04:57,600 --> 01:05:04,260
+SPEAKER_02: You get a good answer when you say, so you're retirement.
+
+735
+01:05:04,760 --> 01:05:09,900
+SPEAKER_02: Talk to me about Tuesday morning at 10 o'clock during your retirement.
+
+736
+01:05:10,940 --> 01:05:11,980
+SPEAKER_02: What are you going to be doing?
+
+737
+01:05:12,280 --> 01:05:13,280
+SPEAKER_02: What do you want to be doing?
+
+738
+01:05:13,940 --> 01:05:15,000
+SPEAKER_02: Who's going to be with you?
+
+739
+01:05:15,860 --> 01:05:16,680
+SPEAKER_02: Where's it at?
+
+740
+01:05:17,580 --> 01:05:19,420
+SPEAKER_02: And what kind of impact are you looking for?
+
+741
+01:05:20,120 --> 01:05:21,840
+SPEAKER_02: Now we're getting somewhere, right?
+
+742
+01:05:22,620 --> 01:05:25,620
+SPEAKER_02: Now we're thinking about things that maybe we hadn't thought about.
+
+743
+01:05:26,440 --> 01:05:29,720
+SPEAKER_02: Still hard questions, but there's specificity to it.
+
+744
+01:05:29,840 --> 01:05:39,580
+SPEAKER_02: And now as an advisor, I'm now bringing in The extrinsic, because I got to pay for whatever, if their goal is to have that vineyard, it's going to cost money.
+
+745
+01:05:40,420 --> 01:05:42,180
+SPEAKER_02: But I'm bringing in the intrinsic too.
+
+746
+01:05:43,040 --> 01:05:44,740
+SPEAKER_02: And now I'm saying, that's what I want.
+
+747
+01:05:44,860 --> 01:05:48,440
+SPEAKER_02: Let's build a plan that's going to get that client there.
+
+748
+01:05:49,340 --> 01:05:56,180
+SPEAKER_00: How do you know, either as an individual or maybe as an advisor working with a client too, how do you know when it's time to quit on a goal?
+
+749
+01:05:57,520 --> 01:05:59,460
+SPEAKER_02: Yeah, I wrote about quitting.
+
+750
+01:05:59,700 --> 01:06:06,840
+SPEAKER_02: It's amazing in the book, I have more people talking about Quitting that chapter on quitting.
+
+751
+01:06:07,500 --> 01:06:08,700
+SPEAKER_02: I it kind of surprises me.
+
+752
+01:06:08,740 --> 01:06:14,000
+SPEAKER_02: Um, I Think I think the biggest element is it there's there's really two pieces to it.
+
+753
+01:06:14,060 --> 01:06:24,360
+SPEAKER_02: So the first element is this the is the goal that you have Still aligned with what your identity is and that's a hard question for some people to answer.
+
+754
+01:06:26,620 --> 01:06:30,800
+SPEAKER_02: It takes some time to get there but is this really what it is that you do you want to be doing?
+
+755
+01:06:30,960 --> 01:06:33,100
+SPEAKER_02: I think the second piece is probably the more.
+
+756
+01:06:35,120 --> 01:06:39,960
+SPEAKER_02: The more prevalent element is is some cost fallacy talking about biases, right?
+
+757
+01:06:40,720 --> 01:06:45,840
+SPEAKER_02: I mean basically say well, you know, I'm doing this because I've been doing it for three years.
+
+758
+01:06:46,100 --> 01:06:51,300
+SPEAKER_02: if I quit now, I Put three years into this.
+
+759
+01:06:52,240 --> 01:06:57,180
+SPEAKER_02: well, okay, but That's not a reason to continue on.
+
+760
+01:06:57,700 --> 01:07:01,300
+SPEAKER_02: I do goal-setting for organizations and this is what they talk about all the time.
+
+761
+01:07:01,340 --> 01:07:02,360
+SPEAKER_02: Maybe it is.
+
+762
+01:07:02,560 --> 01:07:03,600
+SPEAKER_02: it is like poison.
+
+763
+01:07:04,240 --> 01:07:04,980
+SPEAKER_02: Get into this what we.
+
+764
+01:07:05,280 --> 01:07:11,620
+SPEAKER_02: we put all this energy into this And in reality, you know what it was time to walk away.
+
+765
+01:07:11,760 --> 01:07:23,940
+SPEAKER_02: if it's if it's not getting anywhere It's not aligned with your identity or it's just an outdated goal and you're holding on to because you because of some costs and by the way Relationships are the worst for that right?
+
+766
+01:07:24,360 --> 01:07:28,240
+SPEAKER_02: I mean We talk about making this a relationship podcast with people.
+
+767
+01:07:28,560 --> 01:07:33,160
+SPEAKER_02: I mean, we've been together for four years and I've been put up with their garbage for four years.
+
+768
+01:07:33,200 --> 01:07:34,180
+SPEAKER_02: I can't walk away now.
+
+769
+01:07:34,260 --> 01:07:35,200
+SPEAKER_02: What are you talking about?
+
+770
+01:07:35,340 --> 01:07:35,540
+SPEAKER_02: Right.
+
+771
+01:07:37,220 --> 01:07:41,000
+SPEAKER_02: You're basing it on a sunk cost as opposed to what it is going forward.
+
+772
+01:07:41,580 --> 01:07:53,640
+SPEAKER_02: So if you feel like that is driving your persistence, is what you've put into it in the past, it is probably at least worth revisiting.
+
+773
+01:07:54,900 --> 01:07:55,580
+SPEAKER_01: putting that goal.
+
+774
+01:07:56,460 --> 01:07:57,700
+SPEAKER_01: That's super interesting.
+
+775
+01:07:58,440 --> 01:08:11,840
+SPEAKER_01: So, so far we've talked a lot about financial planning psychology and goal setting, two areas they have a ton of expertise in, but you also have the MRI product and that's dealing with risk profiling.
+
+776
+01:08:12,140 --> 01:08:15,380
+SPEAKER_01: So I'd like to get into that a little bit more.
+
+777
+01:08:16,200 --> 01:08:19,580
+SPEAKER_01: So what is financial risk tolerance?
+
+778
+01:08:21,380 --> 01:08:26,140
+SPEAKER_02: So financial risk tolerance is kind of our, it's our emotional behavioral response to uncertainty.
+
+779
+01:08:26,700 --> 01:08:28,920
+SPEAKER_02: It's kind of boiling it down to a basic level.
+
+780
+01:08:29,020 --> 01:08:40,380
+SPEAKER_02: and you know, how willing are we to endure some element of volatility or even short term loss for a potential longer term gain, right?
+
+781
+01:08:43,340 --> 01:08:44,359
+SPEAKER_02: It's not just that you know.
+
+782
+01:08:44,700 --> 01:08:47,939
+SPEAKER_02: in a lot of cases you know a score is important and we have a score.
+
+783
+01:08:47,979 --> 01:08:49,300
+SPEAKER_02: the MRI and lots of products do.
+
+784
+01:08:49,800 --> 01:08:51,340
+SPEAKER_02: but it's really really beyond that right.
+
+785
+01:08:51,420 --> 01:08:53,600
+SPEAKER_02: it's really getting into our past.
+
+786
+01:08:55,100 --> 01:09:06,160
+SPEAKER_02: when it comes to for example if we want to know how somebody reacts to something how they're gonna react to something in the future the best thing to do is ask well how do they react to it before in the same circumstance?
+
+787
+01:09:06,200 --> 01:09:07,500
+SPEAKER_02: that's usually a good predictor.
+
+788
+01:09:08,760 --> 01:09:19,920
+SPEAKER_02: But at the basic level, it's thinking about, for your listeners out there that are consumers, it really is our willingness to take on loss and how we deal with uncertainty.
+
+789
+01:09:20,060 --> 01:09:24,140
+SPEAKER_02: In a lot of cases, uncertainty is a little more challenging than taking on loss.
+
+790
+01:09:25,420 --> 01:09:29,380
+SPEAKER_00: How does risk tolerance relate to setting and achieving long-term financial goals?
+
+791
+01:09:30,279 --> 01:09:40,979
+SPEAKER_02: Well, I mean, if we have a misalignment when it comes to financial plan and our investment portfolio it's gonna cause a lot of stress.
+
+792
+01:09:42,319 --> 01:09:48,420
+SPEAKER_02: the client may just abandon the plan altogether right and so we know kind of what we were talking about before.
+
+793
+01:09:48,500 --> 01:09:55,480
+SPEAKER_02: if we have proper alignment then during that volatility that's where that goes back to the to the we're talking about turbulence.
+
+794
+01:09:55,580 --> 01:09:57,780
+SPEAKER_02: right we play for this is we do.
+
+795
+01:09:57,880 --> 01:09:59,260
+SPEAKER_02: this was coming that we're fine.
+
+796
+01:09:59,300 --> 01:10:01,060
+SPEAKER_02: we're set based upon your risk tolerance.
+
+797
+01:10:01,140 --> 01:10:04,940
+SPEAKER_02: we've got the portfolio exactly has as as it needs to be for you.
+
+798
+01:10:05,100 --> 01:10:06,260
+SPEAKER_02: There's no reason to panic.
+
+799
+01:10:06,920 --> 01:10:08,060
+SPEAKER_02: We're fine going forward.
+
+800
+01:10:08,160 --> 01:10:17,100
+SPEAKER_02: And so if we've got somebody who's conservative but they're in something a little bit more volatile, it's a mismatch in their behaviors.
+
+801
+01:10:17,420 --> 01:10:20,120
+SPEAKER_02: They're going to either walk away or they're going to ghost their advisor.
+
+802
+01:10:21,240 --> 01:10:23,980
+SPEAKER_01: How well do people tend to understand their own risk tolerance?
+
+803
+01:10:24,780 --> 01:10:31,760
+SPEAKER_02: Well, it's kind of like race car driving and sex.
+
+804
+01:10:31,960 --> 01:10:34,100
+SPEAKER_02: I mean, everyone says that they're good at it.
+
+805
+01:10:35,120 --> 01:10:36,040
+SPEAKER_02: We don't really know that.
+
+806
+01:10:36,100 --> 01:10:36,740
+SPEAKER_02: that's true.
+
+807
+01:10:37,080 --> 01:10:41,840
+SPEAKER_02: You have to ask someone else if that's really true, but everyone thinks that they're good at it, right?
+
+808
+01:10:41,980 --> 01:10:49,620
+SPEAKER_02: I mean, so everyone thinks that, you know, that they get over, they overestimate their tolerance, particularly if the market's doing well, right?
+
+809
+01:10:49,980 --> 01:10:53,620
+SPEAKER_02: So we overestimate that and at the same time during downturns, right?
+
+810
+01:10:55,100 --> 01:11:03,620
+SPEAKER_02: Although in some cases, a lot of people find their true tolerance in downturns, but we tend to, we tend to have that willingness to take on more risk than we should.
+
+811
+01:11:04,660 --> 01:11:11,000
+SPEAKER_02: When when the markets up and advisors everywhere talking about that right that you know Oh, this is gonna go on forever, right?
+
+812
+01:11:11,040 --> 01:11:13,000
+SPEAKER_02: They get to get the tie again biases, right?
+
+813
+01:11:13,040 --> 01:11:16,320
+SPEAKER_02: It's a recency bias right and that and that goes back to the.
+
+814
+01:11:16,760 --> 01:11:18,560
+SPEAKER_02: you know, it's a full circle conversation here.
+
+815
+01:11:18,600 --> 01:11:33,400
+SPEAKER_02: That's where the the advisors just so critical and not only being being that that rationality element of saying well remember that the market goes through these corrections or you know five out of six years or whatever the data people want to talk about.
+
+816
+01:11:33,460 --> 01:11:36,780
+SPEAKER_02: as far as gross does this there's going to be changes.
+
+817
+01:11:36,820 --> 01:11:39,400
+SPEAKER_02: so let's not get too confident here and whatnot.
+
+818
+01:11:39,520 --> 01:11:41,980
+SPEAKER_02: so that tends to.
+
+819
+01:11:42,020 --> 01:11:44,920
+SPEAKER_02: so people tend to to exaggerate them.
+
+820
+01:11:45,180 --> 01:11:50,540
+SPEAKER_02: but more often than not when there's when the market is is really doing well they think it's going to go on forever.
+
+821
+01:11:51,220 --> 01:11:56,880
+SPEAKER_00: it was assuming that someone has established their appropriate risk tolerance, how stable is that trade over time?
+
+822
+01:11:57,820 --> 01:11:59,800
+SPEAKER_02: Well it's it's relatively stable.
+
+823
+01:11:59,840 --> 01:12:04,660
+SPEAKER_02: as we think about this idea of of an attitude versus an emotion.
+
+824
+01:12:04,940 --> 01:12:09,300
+SPEAKER_02: right so an attitude is much more stable and emotion is not.
+
+825
+01:12:09,560 --> 01:12:17,100
+SPEAKER_02: you know emotion happened quickly and then they're they're very ephemeral and they kind of um they kind of disappear right.
+
+826
+01:12:17,320 --> 01:12:22,120
+SPEAKER_02: so now the biggest element that's a change is a life event, right?
+
+827
+01:12:22,220 --> 01:12:24,180
+SPEAKER_02: I would say that's probably the biggest personal life event.
+
+828
+01:12:24,240 --> 01:12:31,100
+SPEAKER_02: So, for example, if you have your first child, now you're going back to that idea of a provider.
+
+829
+01:12:31,500 --> 01:12:32,600
+SPEAKER_02: I gave that example earlier.
+
+830
+01:12:33,080 --> 01:12:35,940
+SPEAKER_02: Well, now your risk tolerance may change.
+
+831
+01:12:36,000 --> 01:12:38,100
+SPEAKER_02: Well, I'm responsible now.
+
+832
+01:12:38,160 --> 01:12:38,860
+SPEAKER_02: We're a family.
+
+833
+01:12:38,940 --> 01:12:39,680
+SPEAKER_02: It's not just me.
+
+834
+01:12:39,940 --> 01:12:49,320
+SPEAKER_02: I can't just be, you know, taking on, I don't want to take on as much risk because I have a different Life situation.
+
+835
+01:12:49,900 --> 01:12:53,420
+SPEAKER_02: obviously when it comes to the market to that can change people's response.
+
+836
+01:12:53,460 --> 01:12:58,240
+SPEAKER_02: if you've been burned Then you're gonna have a change in that that element of risk tolerance, too.
+
+837
+01:12:58,420 --> 01:13:03,960
+SPEAKER_02: So really life events play a play a critical part in it kind of being that element of altering.
+
+838
+01:13:04,220 --> 01:13:10,280
+SPEAKER_02: So that's why You know, we advise firms just when it comes to MRI and you've been doing our TQ.
+
+839
+01:13:10,500 --> 01:13:18,540
+SPEAKER_02: You should be giving out our comfort with risk profile, you know every six months if you can and just and it's a great opportunity to to just re-engage.
+
+840
+01:13:18,640 --> 01:13:27,780
+SPEAKER_02: It's a it's a great precipitator of dialogue because what we do with MRI, we give the score but we provide lots of.
+
+841
+01:13:28,260 --> 01:13:33,860
+SPEAKER_02: you know the advisor can look at this and say okay there's other things relative to them just being conservative.
+
+842
+01:13:34,180 --> 01:13:42,840
+SPEAKER_02: there are opportunities for conversation and maybe opportunities for more investment, you know, higher wallet share, but just a deeper relationship.
+
+843
+01:13:42,940 --> 01:13:45,940
+SPEAKER_02: It's a, it's a great excuse to, to really re-engage.
+
+844
+01:13:46,020 --> 01:13:52,540
+SPEAKER_02: But, but it is important because life events and, and you know, macro events do change people's risk, comfort with risk.
+
+845
+01:13:53,520 --> 01:13:54,620
+SPEAKER_00: That's really interesting.
+
+846
+01:13:54,860 --> 01:13:55,920
+SPEAKER_00: Braden, I'm taking notes here.
+
+847
+01:13:56,140 --> 01:14:04,200
+SPEAKER_00: So we should, we should be doing the, the seven question risk tolerance questionnaire every six months and then we'll have like a time series of a time series of, of risk.
+
+848
+01:14:04,480 --> 01:14:10,460
+SPEAKER_00: profile for each client and we can even overlay that on other stuff that's happening in the world or has was happening in the world at the time.
+
+849
+01:14:10,500 --> 01:14:12,260
+SPEAKER_00: That's a that's a really cool idea.
+
+850
+01:14:12,900 --> 01:14:18,100
+SPEAKER_02: Yeah and even like firms that we have firms that we work with that do you know the prudent processing between October and December.
+
+851
+01:14:18,760 --> 01:14:23,040
+SPEAKER_02: Oh okay there you go give it out right and it's and most people want to.
+
+852
+01:14:23,080 --> 01:14:26,420
+SPEAKER_02: they want to see their score and it's great opportunity to talk through it with them.
+
+853
+01:14:26,460 --> 01:14:27,720
+SPEAKER_02: it just makes all the sense in the world.
+
+854
+01:14:28,640 --> 01:14:32,020
+SPEAKER_01: So you know When we're developing our own risk profiling tool.
+
+855
+01:14:32,100 --> 01:14:43,000
+SPEAKER_01: before we partnered with MRI, one of the biggest challenges for us was figuring out how do we combine risk stores of a couple that have materially different profiles.
+
+856
+01:14:44,060 --> 01:14:44,960
+SPEAKER_01: So what are your thoughts on that?
+
+857
+01:14:45,600 --> 01:14:50,640
+SPEAKER_01: What's the best way to handle a scenario when a couple has two different risk profiles?
+
+858
+01:14:51,400 --> 01:14:56,480
+SPEAKER_02: Yeah, you know, we've developed some things for specific firms that look at that, right?
+
+859
+01:14:56,520 --> 01:14:58,260
+SPEAKER_02: That they can get the scores of both.
+
+860
+01:14:58,620 --> 01:15:00,120
+SPEAKER_02: But I mean, it's a challenge, right?
+
+861
+01:15:00,180 --> 01:15:02,220
+SPEAKER_02: Because you've got tension.
+
+862
+01:15:02,340 --> 01:15:11,000
+SPEAKER_02: If there's differences in the risk tolerance in two individuals, more often than not, I mean, that kind of gets on the side.
+
+863
+01:15:11,040 --> 01:15:17,560
+SPEAKER_02: that could get in some real power struggles or even some avoidance of one member of the couple.
+
+864
+01:15:19,220 --> 01:15:24,600
+SPEAKER_02: I think the biggest thing of that beyond using MRI is dialogue, right?
+
+865
+01:15:24,700 --> 01:15:28,260
+SPEAKER_02: So there needs to be communication and some real shared frameworks.
+
+866
+01:15:29,420 --> 01:15:30,880
+SPEAKER_02: regarding steps going forward.
+
+867
+01:15:30,980 --> 01:15:45,280
+SPEAKER_02: if there is a huge delta between the risk tolerances in the couple but having those conversations can be absolutely critical and even kind of walking through going back that idea of if then right okay well if there is a downturn here's what we're looking at there.
+
+868
+01:15:45,700 --> 01:15:49,980
+SPEAKER_02: and sometimes that making that abstract concrete can be really really helpful.
+
+869
+01:15:51,160 --> 01:16:06,580
+SPEAKER_02: and if there's a if there is some if the advisor is able to make some sort of Let's say resolution to that in terms of going forward even when there's a huge Delta and risk tolerances When there is that that turbulence?
+
+870
+01:16:06,620 --> 01:16:15,780
+SPEAKER_02: There's a lesser likelihood of a power struggle or a problem because it's already been out in the open It's already been discussed and they're likely there's a higher likelihood.
+
+871
+01:16:15,820 --> 01:16:19,640
+SPEAKER_02: They're gonna move forward even with that difference in risk tolerance.
+
+872
+01:16:20,960 --> 01:16:23,200
+SPEAKER_00: We're talking about risk tolerance and risk tolerance questionnaires.
+
+873
+01:16:23,600 --> 01:16:25,360
+SPEAKER_00: There's different ways to evaluate this.
+
+874
+01:16:25,420 --> 01:16:32,140
+SPEAKER_00: Can you talk with the differences between psychometric which is what MRI is and revealed preference risk questionnaires.
+
+875
+01:16:32,760 --> 01:16:33,900
+SPEAKER_02: Yeah so I've been looking at.
+
+876
+01:16:33,960 --> 01:16:40,360
+SPEAKER_02: so we look at it from and not saying anything about about our competitors.
+
+877
+01:16:40,440 --> 01:16:50,520
+SPEAKER_02: but we really look at integration of that many of those elements that are part of part of the financial psychology that we have data and that we've worked on.
+
+878
+01:16:50,580 --> 01:17:00,680
+SPEAKER_02: it brings in the beliefs and emotions and behaviors of an individual beyond just looking at what individuals have stated as a revealed preference, right?
+
+879
+01:17:00,980 --> 01:17:06,660
+SPEAKER_02: And knowing exactly, okay, we wanna give that score so that we can map a portfolio and we do that.
+
+880
+01:17:07,660 --> 01:17:15,780
+SPEAKER_02: But we will also, as I mentioned earlier, we wanna be able to find out, okay, well, in similar situations, how did you respond?
+
+881
+01:17:16,180 --> 01:17:18,140
+SPEAKER_02: Because that's gonna be the ultimate predictor.
+
+882
+01:17:18,980 --> 01:17:24,920
+SPEAKER_02: But just basically what people say is, People say lots of things, and that's all of us.
+
+883
+01:17:25,140 --> 01:17:25,980
+SPEAKER_02: I say lots of things.
+
+884
+01:17:26,040 --> 01:17:27,860
+SPEAKER_02: I mean, that's just how we're wired as humans.
+
+885
+01:17:27,920 --> 01:17:42,180
+SPEAKER_02: So if we can really tie in the behavioral element, then now we've got a much higher likelihood of getting a score and a mapping that's gonna be far more accurate and consistent for the client to stay engaged.
+
+886
+01:17:43,480 --> 01:17:51,420
+SPEAKER_01: So of those two types, the psychometric and the revealed preference risk profile, or risk questionnaire, how do we know which one is better?
+
+887
+01:17:52,620 --> 01:17:53,900
+SPEAKER_02: Well, so psychometric tools are.
+
+888
+01:17:53,980 --> 01:17:58,120
+SPEAKER_02: they're assessing like the attitudes and the beliefs kind of that emotional element.
+
+889
+01:17:58,200 --> 01:18:16,520
+SPEAKER_02: Right revealed preference kind of it infers tolerance from past or more often than not hypothetical behaviors, so Psychometrically we're looking at kind of how risk I guess you could say how risk feels and Revealed preference would be kind of how how risk is acted upon if that makes sense.
+
+890
+01:18:16,880 --> 01:18:38,300
+SPEAKER_02: but if you don't have a combination and bring in all the behavioral pieces then From our perspective anyway, it's not exactly complete in terms of giving an accurate picture of what is that, not just risk tolerance, but that comfort with risk that ties in what an individual is able to and what they're comfortable with taking on relative to risk.
+
+891
+01:18:39,660 --> 01:18:59,120
+SPEAKER_00: I will give a shout out to your MRI co-founder, John Grable, who does have a 2019 paper where they designed a test to determine which of revealed preference and psychometric actually explains people's households risk-taking behavior better and they find in that study that psychometric does a much better job.
+
+892
+01:18:59,360 --> 01:19:02,320
+SPEAKER_00: It's highly correlated with actual equity ownership of the people.
+
+893
+01:19:02,360 --> 01:19:06,480
+SPEAKER_00: in the sample and the revealed preference scores were unrelated to equity ownership.
+
+894
+01:19:06,680 --> 01:19:15,480
+SPEAKER_00: So it's not just an opinion you're sharing, it's a real evidence-based thing that this type of questionnaires is in fact better, at least in that study it was.
+
+895
+01:19:16,100 --> 01:19:17,480
+SPEAKER_02: Yeah and I mean that's and that's his.
+
+896
+01:19:17,660 --> 01:19:25,640
+SPEAKER_02: you know his work that that's part of MRI and and it's been it's critical bringing that into this space.
+
+897
+01:19:25,700 --> 01:19:35,780
+SPEAKER_02: and MRI has been running for we've been running for like a year now and we're just thrilled with with the response so far because of his his work and bringing it making it so strong.
+
+898
+01:19:36,920 --> 01:19:38,080
+SPEAKER_00: I mean, both your work, right?
+
+899
+01:19:38,420 --> 01:19:47,880
+SPEAKER_00: John's work on the RTQ piece and the risk tolerance questionnaire piece, but you combine that with the psychology as we've been talking about it, it really creates this full picture, which is why we're excited about using it.
+
+900
+01:19:49,840 --> 01:19:51,820
+SPEAKER_00: I don't want you to throw your competitors under the bus.
+
+901
+01:19:52,160 --> 01:19:56,700
+SPEAKER_00: You already mentioned not wanting to do that, but you've obviously built this tool because you thought there was a gap in the market.
+
+902
+01:19:56,860 --> 01:20:01,220
+SPEAKER_00: Can you talk about where common risk tolerance assessments fall short?
+
+903
+01:20:03,740 --> 01:20:04,980
+SPEAKER_02: This is what we hear from firms.
+
+904
+01:20:05,440 --> 01:20:18,960
+SPEAKER_02: What we hear from firms is it's an exercise that ends up in a file on you know a client's file and it's not really revisited.
+
+905
+01:20:20,360 --> 01:20:22,420
+SPEAKER_02: It's not the best use of everyone's time.
+
+906
+01:20:22,480 --> 01:20:26,200
+SPEAKER_02: It's something you got to check that box from a regulatory perspective.
+
+907
+01:20:27,660 --> 01:20:30,380
+SPEAKER_02: And it doesn't provide the opportunities that we were just talking about, right?
+
+908
+01:20:30,480 --> 01:20:33,880
+SPEAKER_02: To have that deeper relationship with a client and understand the client better.
+
+909
+01:20:34,440 --> 01:20:36,960
+SPEAKER_02: And yes, check the box from a regulatory perspective.
+
+910
+01:20:37,560 --> 01:20:47,960
+SPEAKER_02: I think that some RTQs seem to be overly simplistic and are decontextualized, right?
+
+911
+01:20:48,040 --> 01:20:53,440
+SPEAKER_02: And you get into these hypotheticals and it's, again, it's not really relevant.
+
+912
+01:20:54,180 --> 01:21:03,180
+SPEAKER_02: And perhaps more than that, Bringing in the side of the street the work that I do it ignores the emotions and the beliefs and the narratives.
+
+913
+01:21:03,760 --> 01:21:05,380
+SPEAKER_02: that is absolutely critical.
+
+914
+01:21:05,480 --> 01:21:13,880
+SPEAKER_02: and knowing your client and You know that element of assuming that stability, you know doesn't even exist in some cases.
+
+915
+01:21:13,980 --> 01:21:31,680
+SPEAKER_02: So I think that you know, our approach has been to think about comfort with risk holistically like we are with the elements of psychology and and Grable you know is the person that brings that into the risk space and then provides.
+
+916
+01:21:32,020 --> 01:21:47,980
+SPEAKER_02: you know we basically in our feedback which you all have seen is we basically develop it so that an advisor can look at that for 90 seconds before a meeting and say I got it here's the score here's the yellow reds and greens here's the things to think about.
+
+917
+01:21:48,020 --> 01:21:54,320
+SPEAKER_02: here's what we do relative to mapping and if a firm has 20 portfolios to map or nine whatever it is fine we can do that.
+
+918
+01:21:54,720 --> 01:22:06,960
+SPEAKER_02: but then they can they can move forward in a systematic way and eliminate the guesswork and perhaps more importantly know where to go in the relationship when when you have a conversation your clients don't have all the time in the world.
+
+919
+01:22:07,040 --> 01:22:12,740
+SPEAKER_02: neither do you as an advisor and you could go a million different directions with a conversation.
+
+920
+01:22:12,780 --> 01:22:18,360
+SPEAKER_02: this basically says okay here's the reds and reds aren't good or bad reds are priorities.
+
+921
+01:22:18,400 --> 01:22:24,360
+SPEAKER_02: this is probably a priority item for you to talk about with your with your client right now and Get to it.
+
+922
+01:22:24,440 --> 01:22:31,700
+SPEAKER_02: It's gonna make the most most of your time most of all of you to both the client and the advisors time And you go into a little bit more detail about that.
+
+923
+01:22:31,800 --> 01:22:33,000
+SPEAKER_01: you touched on on the.
+
+924
+01:22:33,660 --> 01:22:39,960
+SPEAKER_01: you know What the advisor gets to see but like what specifically does the output of the MRI questionnaire tell us?
+
+925
+01:22:40,580 --> 01:22:41,400
+SPEAKER_02: yeah, so it's so.
+
+926
+01:22:41,660 --> 01:22:45,020
+SPEAKER_02: it is the use case of the.
+
+927
+01:22:45,340 --> 01:22:50,380
+SPEAKER_02: the client takes it and then that output relative to all these different areas we talked about.
+
+928
+01:22:50,440 --> 01:23:10,700
+SPEAKER_02: so everything from financial confidence to History of fraud in the family to follow the overconfidence and biases also for things shoots out a Pretty succinct overview that goes to the advisor Specific to that client saying here's what we saw this client has high levels of FOMO.
+
+929
+01:23:11,180 --> 01:23:13,580
+SPEAKER_02: where they have low levels of financial confidence.
+
+930
+01:23:13,620 --> 01:23:19,640
+SPEAKER_02: Here's what to think about relative to that and it's written in a way kind of going back to what we talked about a while ago.
+
+931
+01:23:20,840 --> 01:23:30,120
+SPEAKER_02: it's written in a way that first of all is not as if it was written by three PhDs but very very basic so an advisor could read it very quickly.
+
+932
+01:23:30,460 --> 01:23:32,700
+SPEAKER_02: but more importantly it's written without judgment.
+
+933
+01:23:33,500 --> 01:23:39,140
+SPEAKER_02: so we do have firms that want their client the clients to see it and that's not a problem.
+
+934
+01:23:39,180 --> 01:23:39,960
+SPEAKER_02: they can see it.
+
+935
+01:23:40,920 --> 01:23:46,780
+SPEAKER_02: now the the language in there says your client is this it doesn't say the individual.
+
+936
+01:23:46,840 --> 01:23:51,640
+SPEAKER_02: now some firms are are customizing to change that But that's okay.
+
+937
+01:23:52,260 --> 01:23:56,600
+SPEAKER_02: We wrote it in a way that if the client saw this, they wouldn't be offended.
+
+938
+01:23:56,700 --> 01:23:59,360
+SPEAKER_02: They wouldn't feel judged and whatnot.
+
+939
+01:23:59,520 --> 01:24:10,480
+SPEAKER_02: And then based upon that, there's the opportunity, okay, here in that discovery meeting, here are the three things that we wanna start with in this conversation relative to the plan and let's get to it.
+
+940
+01:24:10,640 --> 01:24:15,160
+SPEAKER_02: And in our first year, what we're seeing is it is incredibly helpful.
+
+941
+01:24:16,440 --> 01:24:21,420
+SPEAKER_02: Not only for existing clients, but on that discovery and converting prospects, because you know where to go with the conversation.
+
+942
+01:24:21,780 --> 01:24:25,640
+SPEAKER_02: You're going to talk about things that you're sure are relevant to that client.
+
+943
+01:24:26,760 --> 01:24:31,180
+SPEAKER_00: It makes a ton of sense from the perspective of the advisor and improving the quality of that relationship.
+
+944
+01:24:31,540 --> 01:24:39,480
+SPEAKER_00: From the perspective of the end investor of the client, can you talk about how the full set of information provided by MRI helps someone make better financial decisions?
+
+945
+01:24:40,480 --> 01:24:42,180
+SPEAKER_02: It kind of goes back to what we were talking about.
+
+946
+01:24:42,500 --> 01:24:44,040
+SPEAKER_02: is understanding yourself better.
+
+947
+01:24:44,500 --> 01:24:49,380
+SPEAKER_02: We all have elements of, you know, irrational behavior.
+
+948
+01:24:50,580 --> 01:24:56,340
+SPEAKER_02: We all have elements of our history that helps us and gets in the way of our goals.
+
+949
+01:24:56,820 --> 01:25:07,000
+SPEAKER_02: So if we understand that better, then it goes back to altering our environment, altering our behaviors to reach our goals, all those different things.
+
+950
+01:25:07,100 --> 01:25:15,940
+SPEAKER_02: So for individuals, and we're seeing this amongst a lot of firms that, you know, working on that consumer-facing element of MRI.
+
+951
+01:25:16,060 --> 01:25:17,460
+SPEAKER_02: We think there's an opportunity there.
+
+952
+01:25:18,560 --> 01:25:29,100
+SPEAKER_02: That is a critical piece for individuals to set better goals because of their financial competence or their high levels of FOMO or whatever it might be.
+
+953
+01:25:30,480 --> 01:25:33,180
+SPEAKER_01: That's super, super insightful, Charles.
+
+954
+01:25:33,700 --> 01:25:34,360
+SPEAKER_01: This has been great.
+
+955
+01:25:34,880 --> 01:25:35,620
+SPEAKER_01: Last question.
+
+956
+01:25:36,080 --> 01:25:37,880
+SPEAKER_01: How do you define success in your life?
+
+957
+01:25:39,100 --> 01:25:40,760
+SPEAKER_02: In my life or life in general?
+
+958
+01:25:42,980 --> 01:25:43,600
+SPEAKER_02: In your life.
+
+959
+01:25:44,020 --> 01:26:00,040
+SPEAKER_02: Well, I think at a 30,000 foot level, if you want your life to matter, then everything you do has to matter.
+
+960
+01:26:01,500 --> 01:26:08,440
+SPEAKER_02: And mattering means that it's beyond just impulsive behaviors.
+
+961
+01:26:09,820 --> 01:26:13,840
+SPEAKER_02: If that's what you want, if you want to satisfy impulsive desires, that's it.
+
+962
+01:26:14,640 --> 01:26:15,980
+SPEAKER_02: there's again there's no good or bad.
+
+963
+01:26:16,060 --> 01:26:17,800
+SPEAKER_02: I'm not a sorry in judgment to that.
+
+964
+01:26:18,300 --> 01:26:30,540
+SPEAKER_02: but if you want if you want there to be meaning and you want you want to have some element of impact which is important to me then you want to have.
+
+965
+01:26:30,720 --> 01:26:31,780
+SPEAKER_02: you want to have alignment.
+
+966
+01:26:31,900 --> 01:26:33,680
+SPEAKER_02: you want to have alignment of your environment.
+
+967
+01:26:33,740 --> 01:26:35,560
+SPEAKER_02: you want to have alignment of the people around you.
+
+968
+01:26:36,000 --> 01:26:39,200
+SPEAKER_02: you want to have alignment of your behaviors that are consistent with that.
+
+969
+01:26:39,680 --> 01:26:59,100
+SPEAKER_02: and if that's a real issue for people that are listening to this saying I'm not doing that then take a look take stock take that inventory what what what what is getting in the way and and don't beat up on yourself and say it's because you have no willpower or because you're not meant for it.
+
+970
+01:26:59,780 --> 01:27:07,320
+SPEAKER_02: Be objective about the environments that you're in and adjust if they're not working for you.
+
+971
+01:27:08,540 --> 01:27:16,220
+SPEAKER_02: And that goes to even if your goal is to satisfy impulsive desires, fine, then have an environment that's conducive to that.
+
+972
+01:27:17,540 --> 01:27:22,600
+SPEAKER_02: But to me, I think that element of having meaning and purpose is important.
+
+973
+01:27:23,020 --> 01:27:37,500
+SPEAKER_02: I think that kind of going back to that retirement piece, I don't think that we talk enough about the gift of people relying on you.
+
+974
+01:27:38,380 --> 01:27:55,100
+SPEAKER_02: When you have someone counting on you, whether they're counting on you for food and shelter, or they're counting on you for support, counting on you for love, counting on you for just an ear to listen, that is actually an incredible gift that not only you're giving that person, but you're getting.
+
+975
+01:27:55,780 --> 01:28:04,140
+SPEAKER_02: And I always feel sorry for people who don't have that, that they don't have somebody relying on them for something.
+
+976
+01:28:05,360 --> 01:28:12,620
+SPEAKER_02: So to me, that goes back to that idea of impact and I think tying in to the money piece.
+
+977
+01:28:12,920 --> 01:28:23,300
+SPEAKER_02: you know this is this is a financial conversation that the the money is a tool to get there right and that's where the extrinsic and intrinsic.
+
+978
+01:28:23,740 --> 01:28:30,020
+SPEAKER_02: the extrinsic is the fuel to get to what their real meaning is which is which is really the intrinsic.
+
+979
+01:28:30,860 --> 01:28:31,520
+SPEAKER_00: That's a great answer.
+
+980
+01:28:32,140 --> 01:28:33,680
+SPEAKER_00: Thanks Charles this has been great conversation.
+
+981
+01:28:33,740 --> 01:28:35,160
+SPEAKER_00: we really appreciate you coming on the podcast.
+
+982
+01:28:35,580 --> 01:28:36,380
+SPEAKER_02: Yeah thanks for having me.
+
+983
+01:28:40,980 --> 01:28:42,540
+SPEAKER_03: Hey everyone, it's producer Matt.
+
+984
+01:28:42,880 --> 01:28:44,960
+SPEAKER_03: Thank you so much for tuning in to this week's episode.
+
+985
+01:28:45,520 --> 01:28:48,500
+SPEAKER_03: Before we sign off, here's the disclaimer you've been waiting for.
+
+986
+01:28:49,500 --> 01:29:01,000
+SPEAKER_03: Portfolio management and brokerage services in Canada are offered exclusively by PWL Capital, which is regulated by the Canadian Investment Regulatory Organization and is a member of the Canadian Investor Protection Fund.
+
+987
+01:29:01,860 --> 01:29:08,180
+SPEAKER_03: Investment advisory services in the United States of America are offered exclusively by One Digital Investment Advisors LLC.
+
+988
+01:29:09,080 --> 01:29:15,040
+SPEAKER_03: One Digital and PWL Capital are affiliated entities, and they mostly get on really well with each other.
+
+989
+01:29:15,520 --> 01:29:20,680
+SPEAKER_03: However, each company has financial responsibility for only its own products and services.
+
+990
+01:29:21,220 --> 01:29:26,040
+SPEAKER_03: Nothing herein constitutes an offer or solicitation to buy or sell any security.
+
+991
+01:29:26,720 --> 01:29:33,040
+SPEAKER_03: Occasionally, we tell you not to buy crappy investments in the first place, but that's not the same thing as telling you to sell them.
+
+992
+01:29:33,080 --> 01:29:36,880
+SPEAKER_03: This communication is distributed for informational purposes only.
+
+993
+01:29:36,920 --> 01:29:44,180
+SPEAKER_03: the information contained herein has been derived from sources believed to be truthy, but not necessarily accurate.
+
+994
+01:29:44,780 --> 01:29:47,960
+SPEAKER_03: We really do try, but we can't make any guarantees.
+
+995
+01:29:48,540 --> 01:29:52,320
+SPEAKER_03: Even if nothing we say is fundamentally wrong, it might not be the whole story.
+
+996
+01:29:53,000 --> 01:29:58,080
+SPEAKER_03: Furthermore, nothing herein should be construed as investment, tax, or legal advice.
+
+997
+01:29:59,060 --> 01:30:09,180
+SPEAKER_03: Even though we call the podcast your weekly reality check on sensible investing and financial decision making, You shouldn't rely on us when making actual decisions, only hypothetical ones.
+
+998
+01:30:09,880 --> 01:30:15,600
+SPEAKER_03: Different types of investments and investment strategies have varying degrees of risk and are not suitable for all investors.
+
+999
+01:30:16,120 --> 01:30:22,220
+SPEAKER_03: You should consult with a professional advisor to see how the information contained herein may apply to your individual circumstances.
+
+1000
+01:30:22,900 --> 01:30:23,840
+SPEAKER_03: It might not apply at all.
+
+1001
+01:30:24,620 --> 01:30:26,980
+SPEAKER_03: Honestly, you can probably ignore most of it.
+
+1002
+01:30:27,660 --> 01:30:33,580
+SPEAKER_03: All market indices discussed are unmanaged, do not incur management fees, and cannot be invested indirectly.
+
+1003
+01:30:34,340 --> 01:30:37,080
+SPEAKER_03: Which is a shame, because it would be awesome if you could.
+
+1004
+01:30:37,760 --> 01:30:45,440
+SPEAKER_03: All investing involves risk of loss, including loss of money, loss of sleep, loss of hair, and loss of reputation.
+
+1005
+01:30:46,040 --> 01:30:50,560
+SPEAKER_03: Nothing herein should be construed as a guarantee of any specific outcome or profit.
+
+1006
+01:30:51,180 --> 01:30:54,860
+SPEAKER_03: Past performance is not indicative of or a guarantee of future results.
+
+1007
+01:30:55,520 --> 01:30:58,920
+SPEAKER_03: If it were, it would be much easier to be a Leafs fan.
+
+1008
+01:30:59,620 --> 01:31:09,060
+SPEAKER_03: All statements and opinions presented herein are those of the individual host, and our guests, and our current, only as of this communication's original publication date.
+
+1009
+01:31:09,660 --> 01:31:12,360
+SPEAKER_03: No one should be surprised if they have all since recanted.
+
+1010
+01:31:13,120 --> 01:31:21,080
+SPEAKER_03: Neither One Digital nor PWL Capital has any obligation to provide revised statements and or opinions in the event of changed circumstances.
+
+1011
+01:31:21,780 --> 01:31:30,520
+SPEAKER_03: See you next time.
+

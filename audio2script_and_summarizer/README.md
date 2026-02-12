@@ -40,6 +40,13 @@ Do not install `audio2script_and_summarizer` dependencies with `pip -r requireme
 You must provide:
 - **OpenAI API Key** for the summarization stage
 - **HuggingFace Token** for pyannote diarization models
+- **Target summary duration** in minutes (prompted if not passed)
+
+By default, the pipeline runs a short IndexTTS2 calibration pass on extracted
+speaker samples to estimate WPM, then converts your target minutes into a strict
+word budget for the summarizer.
+You can optionally derive WPM directly from transcript timestamps with
+`--wpm-source transcript`.
 
 ### Using uv (Recommended)
 
@@ -50,14 +57,34 @@ From the root `card-framework` directory:
 export OPENAI_API_KEY="sk-..."
 export HF_TOKEN="hf_..."
 
-# Run the pipeline
+# Run the pipeline (you will be prompted for target minutes and LLM provider if omitted)
 uv run --extra audio2script python -m audio2script_and_summarizer \
     --input "path/to/podcast.wav"
 
-# Or pass API key directly
+# Or pass the target duration explicitly (minutes)
+uv run --extra audio2script python -m audio2script_and_summarizer \
+    --input "path/to/podcast.wav" \
+    --target-minutes 5
+
+# Or pass API key directly (OpenAI)
 uv run --extra audio2script python -m audio2script_and_summarizer \
     --input "path/to/podcast.wav" \
     --openai-key "sk-..."
+
+# Use DeepSeek instead of OpenAI
+export DEEPSEEK_API_KEY="ds-..."
+uv run --extra audio2script python -m audio2script_and_summarizer \
+    --input "path/to/podcast.wav" \
+    --llm-provider deepseek \
+    --target-minutes 8
+
+# DeepSeek defaults to model deepseek-reasoner with a larger output token budget.
+# Override with --model only if you need a specific model behavior.
+
+# Use transcript-derived WPM instead of IndexTTS calibration
+uv run --extra audio2script python -m audio2script_and_summarizer \
+    --input "path/to/podcast.wav" \
+    --wpm-source transcript
 ```
 
 ### Alternate Entry Point (still via uv)
@@ -75,7 +102,13 @@ uv run --extra audio2script python -m audio2script_and_summarizer.run_pipeline \
 | `--openai-key` | Your OpenAI API key | `$OPENAI_API_KEY` |
 | `--device` | Processing device | `cuda` (if available) |
 | `--voice-dir` | Directory for speaker samples | `stage2_voices` |
-| `--diarizer` | Diarization model (`pyannote` or `msdd`) | `pyannote` |
+| `--wpm-source` | WPM source (`indextts` or `transcript`) | `indextts` |
+| `--target-minutes` | Target summary duration in minutes | Prompted |
+| `--llm-provider` | `openai` or `deepseek` | Prompted |
+| `--word-budget-tolerance` | Allowed deviation ratio (e.g. 0.05 = +/-5%) | `0.05` |
+| `--skip-a2s` | Skip Stage 1/1.5 and choose an existing transcript JSON for direct DeepSeek summarization | `false` |
+| `--skip-a2s-search-root` | Root folder scanned for transcript JSON when `--skip-a2s` is used | `.` |
+| `--deepseek-max-completion-tokens` | Hard output token ceiling passed to DeepSeek summarizer | `64000` |
 
 ## 🔊 Diarizer Options
 

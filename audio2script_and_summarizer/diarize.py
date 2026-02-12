@@ -23,7 +23,8 @@ THIRD_PARTY_DEPRECATION_PATTERNS: Final[tuple[str, ...]] = (
     r".*Module 'speechbrain\.pretrained' was deprecated.*",
     r".*std\(\): degrees of freedom is <= 0.*",
 )
-PIPELINE_STAGE_COUNT: Final[int] = 8
+PIPELINE_STAGE_COUNT: Final[int] = 10
+PYANNOTE_MODEL_NAME: Final[str] = "pyannote/speaker-diarization-3.1"
 
 
 def _parse_show_deprecation_warnings_flag(argv: list[str]) -> bool:
@@ -73,9 +74,7 @@ def _suppress_noisy_third_party_loggers(show_deprecation_warnings: bool) -> None
 
 
 _SHOW_DEPRECATION_WARNINGS = _parse_show_deprecation_warnings_flag(sys.argv[1:])
-_apply_deprecation_warning_filters(
-    show_deprecation_warnings=_SHOW_DEPRECATION_WARNINGS
-)
+_apply_deprecation_warning_filters(show_deprecation_warnings=_SHOW_DEPRECATION_WARNINGS)
 _suppress_noisy_third_party_loggers(
     show_deprecation_warnings=_SHOW_DEPRECATION_WARNINGS
 )
@@ -122,11 +121,14 @@ from .helpers import (  # noqa: E402
     whisper_langs,
     write_srt,
 )
+from .logging_utils import configure_logging  # noqa: E402
 
 # --- Environment setup for Windows compatibility ---
 # Disable symlinks to avoid Windows permission issues
 if os.environ.get("HF_HUB_DISABLE_SYMLINKS") != "1":
-    print("[INFO] Setting HF_HUB_DISABLE_SYMLINKS=1 to avoid Windows symlink permission issues...")
+    print(
+        "[INFO] Setting HF_HUB_DISABLE_SYMLINKS=1 to avoid Windows symlink permission issues..."
+    )
     os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 
 # Prompt for HuggingFace token if not set (required for pyannote.audio)
@@ -136,7 +138,9 @@ if not os.environ.get("HF_TOKEN"):
     print("=" * 60)
     print("To get a token:")
     print("  1. Create an account at https://huggingface.co")
-    print("  2. Accept terms at https://huggingface.co/pyannote/speaker-diarization-3.1")
+    print(
+        "  2. Accept terms at https://huggingface.co/pyannote/speaker-diarization-3.1"
+    )
     print("  3. Get your token at https://huggingface.co/settings/tokens")
     print("=" * 60)
     hf_token = input("Enter your HuggingFace token (or press Enter to skip): ").strip()
@@ -144,8 +148,11 @@ if not os.environ.get("HF_TOKEN"):
         os.environ["HF_TOKEN"] = hf_token
         print("[INFO] HF_TOKEN set successfully.\n")
     else:
-        print("[WARNING] No token provided. Diarization may fail if pyannote is used.\n")
+        print(
+            "[WARNING] No token provided. Diarization may fail if pyannote is used.\n"
+        )
 # -------------------------------------------------------
+
 
 def _is_cuda_device(device: str) -> bool:
     """Return True when the requested device targets CUDA."""
@@ -169,6 +176,51 @@ def _cuda_empty_cache(device: str) -> None:
     """Free cached CUDA memory only when running on CUDA."""
     if _is_cuda_device(device) and torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def _run_demucs_command(cmd: list[str], hide_child_output: bool) -> int:
+    """Run Demucs and emit normalized progress markers.
+
+    Args:
+        cmd: Full Demucs command line.
+        hide_child_output: Suppress raw Demucs lines when True.
+
+    Returns:
+        Subprocess return code.
+    """
+    percent_pattern = re.compile(r"(\d{1,3})%")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    print("[PROGRESS] htdemucs start")
+    last_percent = -1
+    assert process.stdout is not None
+
+    for raw_line in process.stdout:
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = percent_pattern.search(line)
+        if match is not None:
+            percent_value = min(100, max(0, int(match.group(1))))
+            if percent_value != last_percent:
+                last_percent = percent_value
+                print(f"[PROGRESS] htdemucs {percent_value}")
+        if not hide_child_output:
+            print(line)
+
+    return_code = process.wait()
+    if return_code == 0:
+        if last_percent < 100:
+            print("[PROGRESS] htdemucs 100")
+        print("[PROGRESS] htdemucs done")
+    else:
+        print("[PROGRESS] htdemucs failed")
+    return return_code
 
 
 class ProgressReporter(Protocol):
@@ -320,6 +372,7 @@ def _collect_transcript_text(
         )
     )
 
+
 pid = os.getpid()
 temp_outputs_dir = f"temp_outputs_{pid}"
 temp_path = os.path.join(os.getcwd(), "temp_outputs")
@@ -397,8 +450,19 @@ parser.add_argument(
     default=False,
     help="Disable stage and transcription progress bars.",
 )
+parser.add_argument(
+    "--log-level",
+    default=os.getenv("AUDIO2SCRIPT_LOG_LEVEL", "INFO").upper(),
+    type=str.upper,
+    choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    help="Console log level for diarization runtime logs.",
+)
 
 args = parser.parse_args()
+configure_logging(
+    level=args.log_level,
+    component="diarize",
+)
 args.device = _resolve_device(args.device)
 language = process_language_arg(args.language, args.model_name)
 _apply_deprecation_warning_filters(
@@ -409,6 +473,10 @@ pipeline_progress.advance("Setup complete")
 
 if args.stemming:
     # Isolate vocals from the rest of the audio
+    print(
+        f"[MODEL] Source separation model=htdemucs | backend=demucs | device={args.device}"
+    )
+    print("[STATUS] Running source separation (Demucs htdemucs)...")
 
     demucs_cmd = [
         sys.executable,
@@ -425,17 +493,17 @@ if args.stemming:
         "--device",
         args.device,
     ]
-    demucs_kwargs: dict[str, Any] = {"check": False}
-    if args.no_progress:
-        demucs_kwargs["stdout"] = subprocess.DEVNULL
-        demucs_kwargs["stderr"] = subprocess.DEVNULL
-    return_code = subprocess.run(demucs_cmd, **demucs_kwargs).returncode
+    return_code = _run_demucs_command(
+        cmd=demucs_cmd,
+        hide_child_output=args.no_progress,
+    )
 
     if return_code != 0:
         logging.warning(
             "Source splitting failed, using original audio file. "
             "Use --no-stem argument to disable it."
         )
+        print("[STATUS] Source separation failed. Falling back to original audio.")
         vocal_target = args.audio
     else:
         vocal_target = os.path.join(
@@ -445,20 +513,29 @@ if args.stemming:
             "vocals.wav",
         )
         logging.info("Source separation complete.")
+        print("[STATUS] Source separation complete. Preparing Whisper transcription.")
 else:
     vocal_target = args.audio
     logging.info("Source separation skipped (--no-stem).")
+    print("[STATUS] Source separation skipped (--no-stem). Using original audio.")
 
 pipeline_progress.advance("Source separation")
 
 
 # Transcribe the audio file
+whisper_compute_type = _compute_type_for_device(args.device)
+print(
+    f"[MODEL] Whisper model={args.model_name} | device={args.device} | compute_type={whisper_compute_type}"
+)
+print("[STATUS] Initializing Whisper model weights...")
 
 whisper_model = faster_whisper.WhisperModel(
     args.model_name,
     device=args.device,
-    compute_type=_compute_type_for_device(args.device),
+    compute_type=whisper_compute_type,
 )
+pipeline_progress.advance("Whisper model loaded")
+print("[STATUS] Whisper model initialized. Starting transcription...")
 whisper_pipeline = faster_whisper.BatchedInferencePipeline(whisper_model)
 audio_waveform = faster_whisper.decode_audio(vocal_target)
 suppress_tokens = (
@@ -492,7 +569,7 @@ pipeline_progress.advance("Whisper transcription")
 # --- MEMORY FLUSH (Required for preventing crashes on low-VRAM GPUs) ---
 print("[INFO] Clearing Whisper from VRAM...")
 del whisper_model, whisper_pipeline
-gc.collect()             # Force Python to free RAM immediately
+gc.collect()  # Force Python to free RAM immediately
 _cuda_empty_cache(args.device)
 # ----------------------------------------------------------------------
 
@@ -532,14 +609,20 @@ pipeline_progress.advance("Forced alignment")
 
 diarizer_model: Any
 if args.diarizer == "pyannote":
+    print(f"[MODEL] Diarizer model={PYANNOTE_MODEL_NAME} | backend=pyannote.audio")
+    print("[STATUS] Initializing pyannote diarization pipeline...")
     from .diarization import PyannoteDiarizer
+
     if PyannoteDiarizer is None:
         raise ImportError(
             "pyannote diarizer is not available. Install pyannote.audio extras."
         )
     diarizer_model = PyannoteDiarizer(device=args.device)
 elif args.diarizer == "msdd":
+    print("[MODEL] Diarizer model=msdd | backend=nemo_toolkit[asr]")
+    print("[STATUS] Initializing NeMo MSDD diarizer...")
     from .diarization import MSDDDiarizer
+
     if MSDDDiarizer is None:
         raise ImportError(
             "NeMo MSDD diarizer not available. Install nemo_toolkit[asr] in a separate environment "
@@ -547,6 +630,8 @@ elif args.diarizer == "msdd":
         )
     diarizer_model = MSDDDiarizer(device=args.device)
 
+pipeline_progress.advance("Diarizer model loaded")
+print("[STATUS] Running speaker diarization inference...")
 speaker_ts = diarizer_model.diarize(torch.from_numpy(audio_waveform).unsqueeze(0))
 del diarizer_model
 _cuda_empty_cache(args.device)
@@ -605,13 +690,15 @@ if ssm:
         "speaker": ssm[0]["speaker"],
         "start_time": ssm[0]["start_time"],
         "end_time": ssm[0]["end_time"],
-        "text": ssm[0]["text"]
+        "text": ssm[0]["text"],
     }
-    
+
     for next_seg in ssm[1:]:
         if next_seg["speaker"] == current_seg["speaker"]:
             # SAME SPEAKER: Append text and extend end time
-            current_seg["text"] = current_seg["text"].strip() + " " + next_seg["text"].strip()
+            current_seg["text"] = (
+                current_seg["text"].strip() + " " + next_seg["text"].strip()
+            )
             current_seg["end_time"] = next_seg["end_time"]
         else:
             # NEW SPEAKER: Save current and start new
@@ -620,7 +707,7 @@ if ssm:
                 "speaker": next_seg["speaker"],
                 "start_time": next_seg["start_time"],
                 "end_time": next_seg["end_time"],
-                "text": next_seg["text"]
+                "text": next_seg["text"],
             }
     # Don't forget the last one
     grouped_segments.append(current_seg)

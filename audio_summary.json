@@ -1,0 +1,134 @@
+[
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "./audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Welcoming",
+    "emo_alpha": 0.6,
+    "text": "Welcome to the Rational Reminder Podcast. We're joined by Dr. Charles Chafin to discuss the psychology of financial planning and risk profiling.",
+    "source_segment_ids": [
+      "seg_00000",
+      "seg_00004"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Explanatory",
+    "emo_alpha": 0.6,
+    "text": "Psychology explains why and how clients behave with money, bridging the gap between technical advice and real-world behavior.",
+    "source_segment_ids": [
+      "seg_00007"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Analytical",
+    "emo_alpha": 0.6,
+    "text": "Cognitive biases are shortcuts that create systematic errors like overconfidence or loss aversion, getting in the way of rational thinking.",
+    "source_segment_ids": [
+      "seg_00015"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_01",
+    "voice_sample": "./audio_voices/SPEAKER_01.wav",
+    "use_emo_text": true,
+    "emo_text": "Inquisitive",
+    "emo_alpha": 0.6,
+    "text": "So how does our environment shape our financial psychology?",
+    "source_segment_ids": [
+      "seg_00022"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Insightful",
+    "emo_alpha": 0.6,
+    "text": "Our environment shapes our financial psychology. We can create friction for unwanted behaviors and eliminate friction for goals.",
+    "source_segment_ids": [
+      "seg_00023"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Descriptive",
+    "emo_alpha": 0.6,
+    "text": "Money scripts are unconscious beliefs about money, like being money avoidant or money status, that impact our decisions.",
+    "source_segment_ids": [
+      "seg_00035"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Motivational",
+    "emo_alpha": 0.6,
+    "text": "Setting goals aligns our behavior and motivates us. We're neurologically wired for progress, which gives us dopamine.",
+    "source_segment_ids": [
+      "seg_00051",
+      "seg_00053"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Defining",
+    "emo_alpha": 0.6,
+    "text": "Risk tolerance is our emotional response to uncertainty: willingness to endure short-term loss for potential long-term gain.",
+    "source_segment_ids": [
+      "seg_00059"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_02",
+    "voice_sample": "./audio_voices/SPEAKER_02.wav",
+    "use_emo_text": true,
+    "emo_text": "Critical",
+    "emo_alpha": 0.6,
+    "text": "Common risk assessments fall short by ignoring emotions and beliefs. MRI provides a holistic view of comfort with risk.",
+    "source_segment_ids": [
+      "seg_00077"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  },
+  {
+    "speaker": "SPEAKER_00",
+    "voice_sample": "./audio_voices/SPEAKER_00.wav",
+    "use_emo_text": true,
+    "emo_text": "Grateful",
+    "emo_alpha": 0.6,
+    "text": "Thanks Charles, this has been a great conversation.",
+    "source_segment_ids": [
+      "seg_00084"
+    ],
+    "validation_status": "valid",
+    "repair_reason": null
+  }
+]
