@@ -1,4 +1,4 @@
-# CARD Framework
+# CARD: Constraint-aware Audio Resynthesis and Distillation
 
 CARD (Constraint-aware Audio Resynthesis and Distillation) provides an automated
 pipeline that turns a single input audio file into:
@@ -7,7 +7,66 @@ pipeline that turns a single input audio file into:
 - per-speaker voice samples,
 - a structured summary JSON for downstream synthesis.
 
-This root README focuses on running that automated pipeline end-to-end.
+### Undergraduate Student Project | University of the Philippines, Diliman
+
+This root README focuses on running the automated pipeline end-to-end while
+preserving the core project framing from `main`.
+
+<div align="center">
+  <a href="#abstract">Abstract</a> |
+  <a href="#system-architecture">Architecture</a> |
+  <a href="#automated-pipeline-quickstart-powershell">Quickstart</a> |
+  <a href="#pipeline-argument-reference">Arguments</a> |
+  <a href="#project-structure">Project Structure</a> |
+  <a href="#related-workflows">Workflows</a> |
+  <a href="#development-notes">Development</a>
+</div>
+
+<br/>
+
+**Authors:**
+- **Rei Dennis Agustin** (BS Electronics Engineering)
+- **Sean Luigi P. Caranzo** (BS Computer Engineering)
+- **Johnbell R. De Leon** (BS Computer Engineering)
+- **Christian Klein C. Ramos** (BS Electronics Engineering)
+
+**Adviser:**
+- **Rowel D. Atienza**
+
+## Abstract
+
+The exponential growth of long-form podcasting creates a consumption bottleneck, as listeners lack efficient means to digest multi-speaker content within limited timeframes. Current summarization approaches, whether text-based or extractive audio clipping, fail to preserve the immersive, prosodic nature of conversational audio.
+
+**CARD (Constraint-aware Audio Resynthesis and Distillation)** is a generative framework designed to resolve the trade-off between consumption efficiency and audio fidelity. We propose a pipeline that addresses three critical challenges in audio generation:
+
+1. **Temporal Control:** Utilizing forced alignment to calculate speaker-specific speaking rates, enabling an LLM to compress dialogue into a structured representation that strictly adheres to a user-defined time budget.
+2. **Spectral Control:** Utilizing diarization timestamps to harvest reference samples directly from raw input, driving zero-shot voice cloning via **IndexTTS2**.
+3. **Conversational Control:** A refinement module using a 4-bit quantized **Mistral 7B** model to predict semantic interjection points, generating syntactically-aware asynchronous overlaps.
+
+The outcome is a functional prototype that validates the feasibility of duration-controlled, high-fidelity conversational resynthesis.
+
+## System Architecture
+
+The CARD paradigm shifts from extraction to resynthesis through a four-stage pipeline:
+
+### 1) Audio2Script (Ingestion)
+- **Models:** OpenAI Whisper (ASR) + NVIDIA NeMo (Forced Alignment).
+- **Function:** Ingests raw podcast audio to generate a timestamped, speaker-attributed transcript. It calculates the original Words-Per-Minute (WPM) to derive the word budget for the summary.
+
+### 2) Speaker Audio Extraction
+- **Models:** Meta Demucs (Source Separation) + SepFormer (Targeted Overlap Separation).
+- **Function:** Extracts clean, speaker-pure reference audio tracks. It uses a "Targeted Separation" strategy:
+  - Non-overlapping segments are extracted directly.
+  - Overlapping segments are processed via SepFormer to disentangle speakers.
+  - Outputs enrollment embeddings for the Voice Cloner.
+
+### 3) Script Summarizer
+- **Models:** GitHub Copilot / GPT-5 Class LLM.
+- **Function:** Compresses the transcript into a JSON structure strictly adhering to the time budget. It injects `emo_text` (affective prompts) and maintains speaker identity.
+
+### 4) Voice Cloning and Backchanneling
+- **Models:** **IndexTTS2** (Synthesis) + **Mistral 7B Quantized** (Conversational Supervisor).
+- **Function:** Synthesizes the audio using zero-shot cloning. The Mistral module analyzes the text flow to inject asynchronous interjections (e.g., "Right," "No way") and overlaps to restore the "parasocial" vibe of human conversation.
 
 ## Automated Pipeline Quickstart (PowerShell)
 
@@ -185,16 +244,27 @@ beside the input file using the input path without extension (for example
 This root guide intentionally prioritizes the automated pipeline.
 
 - Wrapper entrypoints with auto-config injection:
-  - `scripts/run_audio2script.py`
-  - `scripts/run_audio2script_deepseek.py`
+  - [`scripts/run_audio2script.py` (main branch)](https://github.com/Lolfaceftw/card-framework/blob/main/scripts/run_audio2script.py)
+  - [`scripts/run_audio2script_deepseek.py` (main branch)](https://github.com/Lolfaceftw/card-framework/blob/main/scripts/run_audio2script_deepseek.py)
 - Speaker separation workflow:
-  - `scripts/run_separation.py`
-  - `CARD-SpeakerAudioExtraction/src/separation/main.py`
+  - [`scripts/run_separation.py` (main branch)](https://github.com/Lolfaceftw/card-framework/blob/main/scripts/run_separation.py)
+  - [`CARD-SpeakerAudioExtraction/src/separation/main.py`](CARD-SpeakerAudioExtraction/src/separation/main.py)
 - Additional docs:
-  - `audio2script_and_summarizer/README.md`
-  - `docs/CONFIGURATION.md`
-  - `docs/ARCHITECTURE.md`
-  - `docs/STRUCTURE.md`
+  - [`audio2script_and_summarizer/README.md`](audio2script_and_summarizer/README.md)
+  - [`docs/CONFIGURATION.md` (main branch)](https://github.com/Lolfaceftw/card-framework/blob/main/docs/CONFIGURATION.md)
+  - [`docs/ARCHITECTURE.md` (main branch)](https://github.com/Lolfaceftw/card-framework/blob/main/docs/ARCHITECTURE.md)
+  - [`docs/STRUCTURE.md` (main branch)](https://github.com/Lolfaceftw/card-framework/blob/main/docs/STRUCTURE.md)
+
+## Project Structure
+
+- [`audio2script_and_summarizer/`](audio2script_and_summarizer/) - Runtime pipeline orchestration, diarization, summarization, and Stage 3 integration.
+- [`CARD-SpeakerAudioExtraction/`](CARD-SpeakerAudioExtraction/) - Speaker extraction and separation subsystem.
+- [`voice-cloner-and-interjector/`](voice-cloner-and-interjector/) - IndexTTS2 engine and related voice-cloning assets/workflows.
+- [`benchmarks/`](benchmarks/) - Voice cloning benchmark tooling and run artifacts.
+- [`scripts/quality_gate.py`](scripts/quality_gate.py) - Evidence-based lint/type/test quality gate runner.
+- [`tests/`](tests/) - Automated test suite.
+- [`FLOW.MD`](FLOW.MD) - Comprehensive sequence-diagram flow documentation.
+- [`AGENTS.md`](AGENTS.md) - Repository-wide agent/contributor standards.
 
 ## Development Notes
 
