@@ -1507,6 +1507,33 @@ def _run_stage_command(
                         _ACTIVE_DASHBOARD,
                         stream_event_payload,
                     )
+                    if stage_name == "Stage 2 (Summarizer)":
+                        event_name = (
+                            str(stream_event_payload.get("event", ""))
+                            .strip()
+                            .lower()
+                        )
+                        stream_status_substep = ""
+                        if event_name == "summary_json_ready":
+                            stream_status_substep = (
+                                "Summary JSON ready; finalizing subprocess"
+                            )
+                        elif event_name == "done":
+                            stream_status_substep = (
+                                "DeepSeek stream done; waiting for subprocess completion"
+                            )
+                        if stream_status_substep:
+                            _ACTIVE_DASHBOARD.set_status(
+                                stage_name=stage_name,
+                                substep=stream_status_substep,
+                                module_name=module_name,
+                                command_display=command_display,
+                                model_info=model_info,
+                                pid=process.pid,
+                            )
+                            _ACTIVE_DASHBOARD.set_progress_detail(
+                                f"{stage_name} - {stream_status_substep}"
+                            )
                     next_heartbeat = time.monotonic() + max(0.0, heartbeat_seconds)
                     continue
                 handled_status_marker = False
@@ -1611,6 +1638,8 @@ def _run_stage_command(
     return_code = process.wait()
     elapsed_total = int(time.monotonic() - started_at)
     if _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled:
+        if stage_name == "Stage 2 (Summarizer)":
+            _ACTIVE_DASHBOARD.close_deepseek_stream_panel()
         _ACTIVE_DASHBOARD.set_status(
             stage_name=stage_name,
             substep=f"Completed with exit code {return_code}",

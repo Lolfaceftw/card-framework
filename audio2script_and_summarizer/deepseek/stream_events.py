@@ -113,11 +113,20 @@ def route_deepseek_stream_event(
         return True
 
     if event_name == "summary_json_ready":
-        dashboard.close_deepseek_stream_panel()
+        output_path = str(payload.get("path", "")).strip()
+        if output_path:
+            dashboard.log(
+                "[DEEPSEEK STATUS] Summary JSON ready; finalizing Stage 2 "
+                f"subprocess (output={output_path})."
+            )
+        else:
+            dashboard.log(
+                "[DEEPSEEK STATUS] Summary JSON ready; finalizing Stage 2 subprocess."
+            )
         return True
 
     if event_name == "done":
+        dashboard.log("[DEEPSEEK STATUS] Stream finished for current DeepSeek call.")
         return True
 
     return False
-

@@ -116,6 +116,7 @@ models/*
 /temp_outputs_*/
 /tmp/
 /deepseek_chat_logs/
+/artifacts/quality/
 /voice-cloner-and-interjector/indextts/utils/maskgct/models/tts/maskgct/ckpt/
 /voice-cloner-and-interjector/assets/IndexTTS2.mp4
 
