@@ -1,93 +1,93 @@
-# =============================================================================
-# Python
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Python bytecode and build artifacts
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
 .eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
+pip-wheel-metadata/
+wheels/
+share/python-wheels/
 MANIFEST
 
-# =============================================================================
-# Virtual Environments
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Virtual environments
+# -----------------------------------------------------------------------------
+.venv/
+.venv*/
 venv/
 env/
 ENV/
 env.bak/
 venv.bak/
-.venv/
-.venv*/
 conda_env*/
 
-# =============================================================================
-# IDEs & Development Tools
-# =============================================================================
-.vscode/
-.idea/
+# -----------------------------------------------------------------------------
+# Tooling caches and test artifacts
+# -----------------------------------------------------------------------------
 .mypy_cache/
+.pytest_cache/
 .ruff_cache/
+.pyre/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
 .dmypy.json
 dmypy.json
+
+# -----------------------------------------------------------------------------
+# IDE/editor and OS clutter
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+desktop.ini
 
-# =============================================================================
-# Jupyter Notebook
-# =============================================================================
-.ipynb_checkpoints
-*.ipynb
+# -----------------------------------------------------------------------------
+# Jupyter
+# -----------------------------------------------------------------------------
+.ipynb_checkpoints/
 
-# =============================================================================
-# PyTorch / Model Weights
-# =============================================================================
-*.pth
-*.pt
-*.ckpt
-*.safetensors
-*.bin
+# -----------------------------------------------------------------------------
+# Local secrets/config
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+.pypirc
 
-# =============================================================================
-# Audio/Video Files (exclude large files)
-# =============================================================================
-*.wav
-*.mp3
-*.mp4
-*.flac
-*.ogg
-*.m4a
+# -----------------------------------------------------------------------------
+# Logs and local caches
+# -----------------------------------------------------------------------------
+logs/
+*.log
+wandb/
+.cache/
+transformers_cache/
 
-# Keep specific example audio files
-!examples/voice_*.wav
-!examples/emo_*.wav
-
-# =============================================================================
-# Data Directories (keep structure, ignore contents)
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Data/model directories (keep placeholders tracked)
+# -----------------------------------------------------------------------------
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
-
-# Specifically ignore large datasets
 data/raw/LibriSpeech/
 data/raw/Libri2Mix/
 data/raw/Libri3Mix/
@@ -95,87 +95,58 @@ data/raw/wham_noise/
 data/raw/*.tar.gz
 data/raw/*.zip
 
-# =============================================================================
-# Models Directory (keep structure, ignore large files)
-# =============================================================================
 models/*
 !models/.gitkeep
 !models/README.md
 
-# =============================================================================
-# IndexTTS Specific
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Project-generated outputs (root)
+# -----------------------------------------------------------------------------
 /cache/
 /checkpoints/*
 !/checkpoints/*.yaml
 !/checkpoints/*.vocab
-/outputs/
-
-# =============================================================================
-# Outputs & Generated Files
-# =============================================================================
-outputs/*
-!outputs/.gitkeep
+/outputs/*
+!/outputs/.gitkeep
 /gen_test/
+/audio_samples/
+/stage2_voices/
+/output_integrated/
+/temp_outputs/
+/temp_outputs_*/
+/tmp/
+/deepseek_chat_logs/
+/artifacts/quality/
+/voice-cloner-and-interjector/indextts/utils/maskgct/models/tts/maskgct/ckpt/
+/voice-cloner-and-interjector/assets/IndexTTS2.mp4
+
+# Generated artifacts
+*.agent_buffer
+*.report.json
 gen_*.wav
 interjection_*.wav
 calibration_*.wav
 repomix-output.md
+audio.wav
+audio.json
+audio.srt
+audio.txt
+audio_summary.json
+audio_summary.json.agent_buffer
+audio_summary.json.report.json
+less.webm$.json
+less.webm$.srt
+less.webm$.txt
+less.webm$.wav
+less.webm$_summary.json
+less.webm$_summary.json.agent_buffer
+less.webm$_summary_resynth.wav
+less.webm$_summary_resynth_interjections.json
+less.webm$_voices/
 
-# =============================================================================
-# Logs
-# =============================================================================
-logs/
-*.log
-
-# =============================================================================
-# Testing
-# =============================================================================
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-
-# =============================================================================
-# Operating System Junk
-# =============================================================================
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-._*
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-desktop.ini
-
-# Linux
-*~
-
-# =============================================================================
-# Temporary Files
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Temporary files
+# -----------------------------------------------------------------------------
 *.tmp
 *.temp
 *.bak
-
-# =============================================================================
-# Environment Variables
-# =============================================================================
-.env
-.env.local
-.pypirc
-
-# =============================================================================
-# Type Checkers
-# =============================================================================
-.pyre/
-
-# =============================================================================
-# ML Tools & Caches
-# =============================================================================
-wandb/
-.cache/
-transformers_cache/

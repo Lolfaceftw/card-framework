@@ -1,0 +1,67 @@
+{
+  "run_timestamp_utc": "2026-02-13T06:18:29Z",
+  "research_cutoff_date": "2026-02-12",
+  "manifest_path": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\manifests\\voice_clone_manifest_20260213T061502Z.json",
+  "config": {
+    "cfg_path": "C:\\Users\\chris\\card-framework-merged\\voice-cloner-and-interjector\\checkpoints\\config.yaml",
+    "model_dir": "C:\\Users\\chris\\card-framework-merged\\voice-cloner-and-interjector\\checkpoints",
+    "device": "cuda",
+    "max_items": null,
+    "seed": 1337,
+    "prepare_mos_kit": true,
+    "allow_prompt_reference_overlap": false,
+    "asr_model": "small",
+    "require_text_metrics": false
+  },
+  "dataset": {
+    "item_count": 10,
+    "speaker_count": 3,
+    "speakers": [
+      "SPEAKER_00",
+      "SPEAKER_01",
+      "SPEAKER_02"
+    ],
+    "prompt_reference_overlap_rows": 0
+  },
+  "metrics": {
+    "ss_cosine_mean": 0.9533340309204539,
+    "ss_cosine_std": 0.012292893976585386,
+    "ss_cosine_ci95": [
+      0.9462917858017883,
+      0.9616558614228976
+    ],
+    "ss_cosine_macro_mean": 0.9577695717503483,
+    "top1_speaker_acc": 1.0,
+    "top1_speaker_ci95": [
+      1.0,
+      1.0
+    ],
+    "top1_speaker_macro_acc": 1.0,
+    "asv_eer": 0.0,
+    "asv_eer_ci95": [
+      0.0,
+      0.0
+    ],
+    "asv_positive_pairs": 66,
+    "asv_negative_pairs": 34,
+    "text_metric_status": "ok",
+    "wer_mean": 0.03428571428571429,
+    "wer_ci95": [
+      0.007142857142857143,
+      0.06142857142857143
+    ],
+    "cer_mean": 0.007104878258011369,
+    "cer_ci95": [
+      0.0016129032258064516,
+      0.012930442372414933
+    ]
+  },
+  "artifacts": {
+    "pair_scores_csv": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T061510Z\\pair_scores.csv",
+    "text_scores_csv": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T061510Z\\text_scores.csv",
+    "generated_dir": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T061510Z\\generated",
+    "mos_dir": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T061510Z\\mos_pack",
+    "mos_key_internal_csv": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T061510Z\\mos_pack\\mos_key_internal.csv",
+    "run_log": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T061510Z\\run.log"
+  }
+}

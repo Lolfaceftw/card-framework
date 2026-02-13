@@ -1,0 +1,7 @@
+# Dependencies are managed from the repository root with `uv`.
+#
+# Install this pipeline's dependencies with:
+#   uv sync --extra audio2script
+#
+# Run it with:
+#   uv run --extra audio2script python -m audio2script_and_summarizer --input <audio-file>

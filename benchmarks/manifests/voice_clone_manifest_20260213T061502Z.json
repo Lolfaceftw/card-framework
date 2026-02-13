@@ -1,0 +1,92 @@
+[
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "Welcome to the Rational Reminder Podcast. Today we're sharing key investing lessons and discussing bank advice quality.",
+    "use_emo_text": true,
+    "emo_text": "Warm and informative",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "First, you're not that smart relative to the market\u2014it aggregates all information and you're competing against the smartest.",
+    "use_emo_text": true,
+    "emo_text": "Analytical",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "Second, this time is always different. Narratives change, but empirical reality shows things typically turn out okay.",
+    "use_emo_text": true,
+    "emo_text": "Reflective",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "Third, market forecasts are not useful. They're wrong more often than right.",
+    "use_emo_text": true,
+    "emo_text": "Matter-of-fact",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "Fourth, most funds don't beat the market. About 90% underperform over 10 years.",
+    "use_emo_text": true,
+    "emo_text": "Concerned",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "Also, time in the market beats timing the market. Successful market timing is extremely difficult.",
+    "use_emo_text": true,
+    "emo_text": "Insightful",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "Now, a CBC feature highlights how bank advisors often prioritize employer interests over customers, according to research.",
+    "use_emo_text": true,
+    "emo_text": "Serious",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_00",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_00.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_00.wav",
+    "text": "Incentives matter. Advisors may believe they're doing the right thing, but the system often prioritizes sales.",
+    "use_emo_text": true,
+    "emo_text": "Concerned",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_02",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_02.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_02.wav",
+    "text": "It's important to understand the hierarchy of service. Many branch advisors are sales-driven.",
+    "use_emo_text": true,
+    "emo_text": "Explanatory",
+    "emo_alpha": 0.6
+  },
+  {
+    "speaker_id": "SPEAKER_01",
+    "prompt_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_prompt\\20260213T061453Z\\SPEAKER_01.wav",
+    "reference_wav": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\auto_holdout\\20260213T061453Z\\SPEAKER_01.wav",
+    "text": "That's a wrap for episode 299. Next week, Abby Sussman on decision-making.",
+    "use_emo_text": true,
+    "emo_text": "Upbeat",
+    "emo_alpha": 0.6
+  }
+]

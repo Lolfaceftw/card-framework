@@ -1,0 +1,2 @@
+# Constraints are centrally resolved in `pyproject.toml` + `uv.lock`.
+# Use `uv lock` / `uv sync` from the repository root instead of this file.

@@ -1,0 +1,39 @@
+{
+  "presets": [
+    {
+      "name": "neutral",
+      "emo_text": "Neutral, clear, steady delivery",
+      "emo_alpha": 0.6,
+      "calibration_text": "Today we are reviewing a practical topic. The explanation should sound clear and balanced.",
+      "keywords": ["neutral", "clear", "steady", "balanced"]
+    },
+    {
+      "name": "excited_fast",
+      "emo_text": "Excited, energetic, fast-paced",
+      "emo_alpha": 0.7,
+      "calibration_text": "This is exciting news and everything is moving quickly. The energy is high and the pace feels lively.",
+      "keywords": ["excited", "energetic", "fast", "upbeat", "lively"]
+    },
+    {
+      "name": "serious_slow",
+      "emo_text": "Serious, deliberate, measured and slower",
+      "emo_alpha": 0.65,
+      "calibration_text": "This section requires careful reasoning and a measured pace. Each point should be delivered deliberately.",
+      "keywords": ["serious", "deliberate", "measured", "slow", "calm"]
+    },
+    {
+      "name": "empathetic",
+      "emo_text": "Empathetic, supportive, warm and thoughtful",
+      "emo_alpha": 0.65,
+      "calibration_text": "I understand why this situation can feel difficult. Let us walk through it with a warm and thoughtful tone.",
+      "keywords": ["empathetic", "supportive", "warm", "thoughtful", "gentle"]
+    },
+    {
+      "name": "inquisitive",
+      "emo_text": "Curious, inquisitive, reflective",
+      "emo_alpha": 0.6,
+      "calibration_text": "That is an interesting question and it is worth exploring. Let us think through the key details together.",
+      "keywords": ["curious", "inquisitive", "reflective", "questioning"]
+    }
+  ]
+}
