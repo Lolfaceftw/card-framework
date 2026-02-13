@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from benchmarks.voice_clone.types import ManifestItem, RawManifestItem
@@ -69,3 +70,43 @@ def load_manifest(manifest_path: Path, *, max_items: int | None = None) -> list[
         raise ValueError("Manifest contains no entries after applying max-items.")
     return items
 
+
+def _normalized_path_key(path: Path) -> str:
+    """Normalize path for case-insensitive equality checks."""
+    return os.path.normcase(str(path.resolve()))
+
+
+def count_prompt_reference_overlaps(items: list[ManifestItem]) -> int:
+    """Count rows where cloning prompt and reference audio are the same file."""
+    return sum(
+        1
+        for item in items
+        if _normalized_path_key(item.prompt_wav) == _normalized_path_key(item.reference_wav)
+    )
+
+
+def validate_holdout_integrity(
+    *,
+    items: list[ManifestItem],
+    allow_prompt_reference_overlap: bool,
+) -> int:
+    """Validate holdout separation and return overlap count.
+
+    Args:
+        items: Validated manifest items.
+        allow_prompt_reference_overlap: When True, allow overlap for exploratory runs.
+
+    Returns:
+        Count of rows where prompt and reference paths are equal.
+
+    Raises:
+        ValueError: Prompt/reference overlap exists while strict mode is enabled.
+    """
+    overlap_count = count_prompt_reference_overlaps(items)
+    if overlap_count > 0 and not allow_prompt_reference_overlap:
+        raise ValueError(
+            "Manifest contains prompt_wav == reference_wav rows. "
+            "Use separate holdout references or rerun with "
+            "--allow-prompt-reference-overlap for exploratory-only runs."
+        )
+    return overlap_count

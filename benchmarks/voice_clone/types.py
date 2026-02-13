@@ -50,6 +50,19 @@ class PairScoreRow:
 
 
 @dataclass(slots=True, frozen=True)
+class TextScoreRow:
+    """Represent a per-utterance text-fidelity score row."""
+
+    item_id: int
+    speaker_id: str
+    generated_wav: Path
+    reference_text: str
+    hypothesis_text: str
+    wer: float
+    cer: float
+
+
+@dataclass(slots=True, frozen=True)
 class BenchmarkArtifacts:
     """Represent paths of generated benchmark artifacts."""
 
@@ -85,3 +98,9 @@ class SpeakerEmbedderProtocol(Protocol):
     def embed(self, wav_path: Path) -> np.ndarray:
         """Return one speaker embedding vector."""
 
+
+class SpeechTranscriberProtocol(Protocol):
+    """Define ASR backend interface used for text-fidelity evaluation."""
+
+    def transcribe(self, wav_path: Path) -> str:
+        """Return decoded transcript text for one WAV file."""

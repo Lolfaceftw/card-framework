@@ -80,8 +80,39 @@ def write_mos_kit(
 
     randomized_rows = [rows[idx] for idx in rng.permutation(len(rows))]
     pairs_csv_path = mos_dir / "mos_pairs.csv"
+    key_csv_path = mos_dir / "mos_key_internal.csv"
     template_csv_path = mos_dir / "ratings_template.csv"
     instructions_path = mos_dir / "mos_instructions.md"
+    pair_assignments: list[dict[str, object]] = []
+
+    for pair_index, row in enumerate(randomized_rows):
+        pair_id = f"pair_{pair_index:04d}"
+        generated_side = "A" if bool(rng.integers(0, 2)) else "B"
+        file_a = audio_dir / f"{pair_id}_A.wav"
+        file_b = audio_dir / f"{pair_id}_B.wav"
+        if generated_side == "A":
+            shutil.copy2(row.generated_wav, file_a)
+            shutil.copy2(row.reference_wav, file_b)
+            a_label = "generated"
+            b_label = "reference"
+        else:
+            shutil.copy2(row.reference_wav, file_a)
+            shutil.copy2(row.generated_wav, file_b)
+            a_label = "reference"
+            b_label = "generated"
+        pair_assignments.append(
+            {
+                "pair_id": pair_id,
+                "item_id": row.item_id,
+                "speaker_id": row.speaker_id,
+                "text": item_by_id[row.item_id].text,
+                "audio_a_path": str(file_a.relative_to(mos_dir)),
+                "audio_b_path": str(file_b.relative_to(mos_dir)),
+                "generated_side": generated_side,
+                "a_label": a_label,
+                "b_label": b_label,
+            }
+        )
 
     with pairs_csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -93,38 +124,39 @@ def write_mos_kit(
                 "text",
                 "audio_a_path",
                 "audio_b_path",
+            ],
+        )
+        writer.writeheader()
+        for assignment in pair_assignments:
+            writer.writerow(
+                {
+                    "pair_id": assignment["pair_id"],
+                    "item_id": assignment["item_id"],
+                    "speaker_id": assignment["speaker_id"],
+                    "text": assignment["text"],
+                    "audio_a_path": assignment["audio_a_path"],
+                    "audio_b_path": assignment["audio_b_path"],
+                }
+            )
+
+    with key_csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "pair_id",
                 "generated_side",
                 "a_label",
                 "b_label",
             ],
         )
         writer.writeheader()
-        for pair_index, row in enumerate(randomized_rows):
-            pair_id = f"pair_{pair_index:04d}"
-            generated_side = "A" if bool(rng.integers(0, 2)) else "B"
-            file_a = audio_dir / f"{pair_id}_A.wav"
-            file_b = audio_dir / f"{pair_id}_B.wav"
-            if generated_side == "A":
-                shutil.copy2(row.generated_wav, file_a)
-                shutil.copy2(row.reference_wav, file_b)
-                a_label = "generated"
-                b_label = "reference"
-            else:
-                shutil.copy2(row.reference_wav, file_a)
-                shutil.copy2(row.generated_wav, file_b)
-                a_label = "reference"
-                b_label = "generated"
+        for assignment in pair_assignments:
             writer.writerow(
                 {
-                    "pair_id": pair_id,
-                    "item_id": row.item_id,
-                    "speaker_id": row.speaker_id,
-                    "text": item_by_id[row.item_id].text,
-                    "audio_a_path": str(file_a.relative_to(mos_dir)),
-                    "audio_b_path": str(file_b.relative_to(mos_dir)),
-                    "generated_side": generated_side,
-                    "a_label": a_label,
-                    "b_label": b_label,
+                    "pair_id": assignment["pair_id"],
+                    "generated_side": assignment["generated_side"],
+                    "a_label": assignment["a_label"],
+                    "b_label": assignment["b_label"],
                 }
             )
 
@@ -157,4 +189,3 @@ def write_mos_kit(
 
     instructions_path.write_text(build_mos_instruction_markdown(), encoding="utf-8")
     return mos_dir
-

@@ -1,0 +1,48 @@
+{
+  "run_timestamp_utc": "2026-02-13T05:54:38Z",
+  "research_cutoff_date": "2026-02-12",
+  "manifest_path": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\manifests\\voice_clone_manifest_20260213T054756Z.json",
+  "config": {
+    "cfg_path": "C:\\Users\\chris\\card-framework-merged\\voice-cloner-and-interjector\\checkpoints\\config.yaml",
+    "model_dir": "C:\\Users\\chris\\card-framework-merged\\voice-cloner-and-interjector\\checkpoints",
+    "device": "cuda",
+    "max_items": null,
+    "seed": 1337,
+    "prepare_mos_kit": true
+  },
+  "dataset": {
+    "item_count": 10,
+    "speaker_count": 3,
+    "speakers": [
+      "SPEAKER_00",
+      "SPEAKER_01",
+      "SPEAKER_02"
+    ]
+  },
+  "metrics": {
+    "ss_cosine_mean": 0.9610487254501281,
+    "ss_cosine_std": 0.01599812427004108,
+    "ss_cosine_ci95": [
+      0.951707440130196,
+      0.9708318464317387
+    ],
+    "top1_speaker_acc": 1.0,
+    "top1_speaker_ci95": [
+      1.0,
+      1.0
+    ],
+    "asv_eer": 0.23885918003565063,
+    "asv_eer_ci95": [
+      0.07574719800747198,
+      0.3280259279537392
+    ],
+    "asv_positive_pairs": 66,
+    "asv_negative_pairs": 34
+  },
+  "artifacts": {
+    "pair_scores_csv": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T055058Z\\pair_scores.csv",
+    "generated_dir": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T055058Z\\generated",
+    "mos_dir": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T055058Z\\mos_pack",
+    "run_log": "C:\\Users\\chris\\card-framework-merged\\benchmarks\\runs\\20260213T055058Z\\run.log"
+  }
+}

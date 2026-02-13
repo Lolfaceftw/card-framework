@@ -1,0 +1,11 @@
+pair_id,generated_side,a_label,b_label
+pair_0000,B,reference,generated
+pair_0001,B,reference,generated
+pair_0002,B,reference,generated
+pair_0003,B,reference,generated
+pair_0004,B,reference,generated
+pair_0005,B,reference,generated
+pair_0006,B,reference,generated
+pair_0007,B,reference,generated
+pair_0008,A,generated,reference
+pair_0009,A,generated,reference

@@ -14,23 +14,31 @@ import numpy as np
 from audio2script_and_summarizer.logging_utils import LOG_FILE_ENV_VAR, configure_logging
 from audio2script_and_summarizer.stage3_voice import IndexTTS2Engine
 from benchmarks.voice_clone.constants import (
+    DEFAULT_ASR_MODEL_SIZE,
     DEFAULT_BOOTSTRAP_SAMPLES,
     RESEARCH_CUTOFF_DATE,
 )
 from benchmarks.voice_clone.embedder import WavLMSpeakerEmbedder
-from benchmarks.voice_clone.manifest import load_manifest
+from benchmarks.voice_clone.manifest import load_manifest, validate_holdout_integrity
 from benchmarks.voice_clone.metrics import (
     bootstrap_ci95_eer,
     bootstrap_ci95_mean,
+    compute_macro_speaker_metrics,
     collect_asv_pairs,
     compute_eer,
     make_pair_rows,
     write_pair_scores_csv,
 )
 from benchmarks.voice_clone.mos import write_mos_kit
+from benchmarks.voice_clone.text_metrics import (
+    FasterWhisperTranscriber,
+    make_text_score_rows,
+    write_text_scores_csv,
+)
 from benchmarks.voice_clone.types import (
     BenchmarkArtifacts,
     ManifestItem,
+    SpeechTranscriberProtocol,
     SpeakerEmbedderProtocol,
     TTSEngineProtocol,
 )
@@ -92,8 +100,12 @@ def run_benchmark(
     max_items: int | None,
     seed: int,
     prepare_mos_kit: bool,
+    allow_prompt_reference_overlap: bool = False,
+    asr_model: str | None = None,
+    require_text_metrics: bool = False,
     tts_engine: TTSEngineProtocol | None = None,
     embedder: SpeakerEmbedderProtocol | None = None,
+    transcriber: SpeechTranscriberProtocol | None = None,
 ) -> BenchmarkArtifacts:
     """Run end-to-end IndexTTS2 voice-cloning benchmark.
 
@@ -106,8 +118,12 @@ def run_benchmark(
         max_items: Optional row cap for smoke runs.
         seed: Random seed for deterministic operations.
         prepare_mos_kit: Whether to emit subjective MOS package.
+        allow_prompt_reference_overlap: Allow prompt/reference overlap in exploratory runs.
+        asr_model: Optional faster-whisper model id for WER/CER scoring.
+        require_text_metrics: Fail run when text metrics cannot be computed.
         tts_engine: Optional injected TTS engine for tests.
         embedder: Optional injected speaker embedder for tests.
+        transcriber: Optional injected ASR transcriber for tests.
 
     Returns:
         Paths to generated benchmark artifacts.
@@ -130,6 +146,16 @@ def run_benchmark(
         output_dir,
     )
     items = load_manifest(manifest_path, max_items=max_items)
+    overlap_count = validate_holdout_integrity(
+        items=items,
+        allow_prompt_reference_overlap=allow_prompt_reference_overlap,
+    )
+    if overlap_count > 0:
+        logger.warning(
+            "benchmark_data_integrity prompt_reference_overlap_rows=%d exploratory_mode=true",
+            overlap_count,
+        )
+
     unique_speakers = sorted({item.speaker_id for item in items})
     logger.info(
         "benchmark_manifest_loaded items=%d speaker_count=%d",
@@ -169,6 +195,7 @@ def run_benchmark(
     )
     pair_scores_csv = output_dir / "pair_scores.csv"
     write_pair_scores_csv(pair_rows, pair_scores_csv)
+    macro_metrics = compute_macro_speaker_metrics(pair_rows)
 
     cosine_values = np.array([row.same_item_cosine for row in pair_rows], dtype=np.float64)
     top1_values = np.array([float(row.top1_correct) for row in pair_rows], dtype=np.float64)
@@ -193,6 +220,46 @@ def run_benchmark(
         sample_count=DEFAULT_BOOTSTRAP_SAMPLES,
     )
 
+    text_scores_csv: Path | None = None
+    text_wer_values: np.ndarray | None = None
+    text_cer_values: np.ndarray | None = None
+    text_wer_ci95: tuple[float, float] | None = None
+    text_cer_ci95: tuple[float, float] | None = None
+    text_metric_status = "disabled"
+    if transcriber is not None or (asr_model is not None and asr_model.strip()):
+        runtime_transcriber = transcriber or FasterWhisperTranscriber(
+            model_size=str(asr_model),
+            device=device,
+        )
+        try:
+            text_rows = make_text_score_rows(
+                items=items,
+                generated_paths=generated_paths,
+                transcriber=runtime_transcriber,
+            )
+            text_scores_csv = output_dir / "text_scores.csv"
+            write_text_scores_csv(text_rows, text_scores_csv)
+            text_wer_values = np.array([row.wer for row in text_rows], dtype=np.float64)
+            text_cer_values = np.array([row.cer for row in text_rows], dtype=np.float64)
+            text_wer_ci95 = bootstrap_ci95_mean(
+                text_wer_values,
+                rng=bootstrap_rng,
+                sample_count=DEFAULT_BOOTSTRAP_SAMPLES,
+            )
+            text_cer_ci95 = bootstrap_ci95_mean(
+                text_cer_values,
+                rng=bootstrap_rng,
+                sample_count=DEFAULT_BOOTSTRAP_SAMPLES,
+            )
+            text_metric_status = "ok"
+        except Exception as exc:  # noqa: BLE001
+            text_metric_status = f"error:{type(exc).__name__}"
+            logger.warning("benchmark_text_metrics_unavailable reason=%s", exc)
+            if require_text_metrics:
+                raise RuntimeError(
+                    "Text metrics were required but could not be computed."
+                ) from exc
+
     item_by_id = {item.item_id: item for item in items}
     mos_dir: Path | None = None
     if prepare_mos_kit:
@@ -216,11 +283,15 @@ def run_benchmark(
             "max_items": max_items,
             "seed": seed,
             "prepare_mos_kit": prepare_mos_kit,
+            "allow_prompt_reference_overlap": allow_prompt_reference_overlap,
+            "asr_model": asr_model,
+            "require_text_metrics": require_text_metrics,
         },
         "dataset": {
             "item_count": len(items),
             "speaker_count": len(unique_speakers),
             "speakers": unique_speakers,
+            "prompt_reference_overlap_rows": overlap_count,
         },
         "metrics": {
             "ss_cosine_mean": float(np.mean(cosine_values)),
@@ -228,17 +299,40 @@ def run_benchmark(
             if cosine_values.size > 1
             else 0.0,
             "ss_cosine_ci95": list(cosine_ci95) if cosine_ci95 is not None else None,
+            "ss_cosine_macro_mean": (
+                macro_metrics[0] if macro_metrics is not None else None
+            ),
             "top1_speaker_acc": float(np.mean(top1_values)),
             "top1_speaker_ci95": list(top1_ci95) if top1_ci95 is not None else None,
+            "top1_speaker_macro_acc": (
+                macro_metrics[1] if macro_metrics is not None else None
+            ),
             "asv_eer": asv_eer,
             "asv_eer_ci95": list(asv_eer_ci95) if asv_eer_ci95 is not None else None,
             "asv_positive_pairs": asv_positive_pairs,
             "asv_negative_pairs": asv_negative_pairs,
+            "text_metric_status": text_metric_status,
+            "wer_mean": (
+                float(np.mean(text_wer_values))
+                if text_wer_values is not None and text_wer_values.size > 0
+                else None
+            ),
+            "wer_ci95": list(text_wer_ci95) if text_wer_ci95 is not None else None,
+            "cer_mean": (
+                float(np.mean(text_cer_values))
+                if text_cer_values is not None and text_cer_values.size > 0
+                else None
+            ),
+            "cer_ci95": list(text_cer_ci95) if text_cer_ci95 is not None else None,
         },
         "artifacts": {
             "pair_scores_csv": str(pair_scores_csv),
+            "text_scores_csv": str(text_scores_csv) if text_scores_csv is not None else None,
             "generated_dir": str(generated_dir),
             "mos_dir": str(mos_dir) if mos_dir is not None else None,
+            "mos_key_internal_csv": (
+                str(mos_dir / "mos_key_internal.csv") if mos_dir is not None else None
+            ),
             "run_log": str(run_log),
         },
     }
@@ -269,12 +363,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", required=True, help="Path to benchmark manifest JSON.")
     parser.add_argument(
         "--cfg-path",
-        default="checkpoints/config.yaml",
+        default="voice-cloner-and-interjector/checkpoints/config.yaml",
         help="IndexTTS2 config path.",
     )
     parser.add_argument(
         "--model-dir",
-        default="checkpoints",
+        default="voice-cloner-and-interjector/checkpoints",
         help="IndexTTS2 checkpoint directory.",
     )
     parser.add_argument(
@@ -304,6 +398,23 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Generate MOS subjective rating package.",
+    )
+    parser.add_argument(
+        "--allow-prompt-reference-overlap",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Allow prompt_wav == reference_wav rows for exploratory-only runs.",
+    )
+    parser.add_argument(
+        "--asr-model",
+        default=DEFAULT_ASR_MODEL_SIZE,
+        help="Optional faster-whisper ASR model for WER/CER text metrics.",
+    )
+    parser.add_argument(
+        "--require-text-metrics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fail run if WER/CER metrics cannot be computed.",
     )
     parser.add_argument(
         "--log-level",
@@ -341,5 +452,8 @@ def main() -> int:
         max_items=args.max_items,
         seed=int(args.seed),
         prepare_mos_kit=bool(args.prepare_mos_kit),
+        allow_prompt_reference_overlap=bool(args.allow_prompt_reference_overlap),
+        asr_model=(str(args.asr_model).strip() or None),
+        require_text_metrics=bool(args.require_text_metrics),
     )
     return 0
