@@ -3,12 +3,14 @@ import contextlib
 import io
 import json
 import logging
+import math
 import os
 import queue
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -46,12 +48,14 @@ rich_layout: ModuleType | None
 rich_live: ModuleType | None
 rich_panel: ModuleType | None
 rich_progress: ModuleType | None
+rich_text: ModuleType | None
 try:
     import rich.console as _rich_console
     import rich.layout as _rich_layout
     import rich.live as _rich_live
     import rich.panel as _rich_panel
     import rich.progress as _rich_progress
+    import rich.text as _rich_text
 
     RICH_AVAILABLE = True
 except ImportError:
@@ -60,6 +64,7 @@ except ImportError:
     rich_live = None
     rich_panel = None
     rich_progress = None
+    rich_text = None
     RICH_AVAILABLE = False
 else:
     rich_console = _rich_console
@@ -67,6 +72,7 @@ else:
     rich_live = _rich_live
     rich_panel = _rich_panel
     rich_progress = _rich_progress
+    rich_text = _rich_text
 
 UI_CONSOLE: Any = rich_console.Console() if rich_console is not None else None
 _ACTIVE_DASHBOARD: "_PipelineDashboard | None" = None
@@ -84,6 +90,9 @@ DEFAULT_MAX_DURATION_CORRECTION_PASSES: Final[int] = 1
 KEYBOARD_POLL_SECONDS: Final[float] = 0.05
 STATUS_REFRESH_SECONDS: Final[float] = 1.0
 DEFAULT_DEEPSEEK_HARD_CEILING_TOKENS: Final[int] = 64000
+DEFAULT_DEEPSEEK_AGENT_MAX_TOOL_ROUNDS: Final[int] = 0
+DEFAULT_DEEPSEEK_AGENT_LOOP_EXHAUSTION_POLICY: Final[str] = "auto_salvage"
+DEFAULT_DEEPSEEK_BUDGET_FAILURE_POLICY: Final[str] = "degraded_success"
 STREAM_PANEL_MIN_WIDTH: Final[int] = 28
 SKIP_A2S_EXCLUDED_DIRS: Final[frozenset[str]] = frozenset(
     {
@@ -100,6 +109,90 @@ SKIP_A2S_EXCLUDED_DIRS: Final[frozenset[str]] = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class _DashboardTheme:
+    """Color and animation settings for Rich terminal dashboard rendering."""
+
+    progress_border_style: str
+    progress_spinner_style: str
+    progress_track_style: str
+    progress_complete_style: str
+    progress_finished_style: str
+    progress_pulse_style: str
+    progress_percent_style: str
+    output_border_style_selected: str
+    output_border_style_idle: str
+    stream_border_style_selected: str
+    stream_border_style_idle: str
+    controls_border_style: str
+    controls_panel_style: str
+    controls_text_style: str
+    controls_secondary_text_style: str
+    output_text_style: str
+    output_event_style: str
+    output_info_style: str
+    output_warning_style: str
+    output_error_style: str
+    output_deepseek_status_style: str
+    output_deepseek_tool_style: str
+    output_indextts_style: str
+    output_prompt_style: str
+    output_hint_style: str
+    stream_text_style: str
+    stream_meta_style: str
+    stream_reasoning_header_style: str
+    stream_answer_header_style: str
+    stream_reasoning_text_style: str
+    stream_answer_text_style: str
+    subtitle_ok_style: str
+    subtitle_warn_style: str
+    subtitle_critical_style: str
+    live_badge_style: str
+    unicode_heartbeat_frames: tuple[str, ...]
+    ascii_heartbeat_frames: tuple[str, ...]
+
+
+DEFAULT_DASHBOARD_THEME: Final[_DashboardTheme] = _DashboardTheme(
+    progress_border_style="#20c7b3",
+    progress_spinner_style="#67f7e8 bold",
+    progress_track_style="#1b3d42",
+    progress_complete_style="#2ee6d2",
+    progress_finished_style="#64ffda",
+    progress_pulse_style="#00d4ff",
+    progress_percent_style="#9ef6f2 bold",
+    output_border_style_selected="#31e0cf",
+    output_border_style_idle="#2d4b50",
+    stream_border_style_selected="#00d2ff",
+    stream_border_style_idle="#2d4b50",
+    controls_border_style="#25c8ba",
+    controls_panel_style="on #102126",
+    controls_text_style="#ddfff9",
+    controls_secondary_text_style="#9dc8c4",
+    output_text_style="#d4f4f1",
+    output_event_style="#62f3ff bold",
+    output_info_style="#9ad0ff",
+    output_warning_style="#ffd166 bold",
+    output_error_style="#ff7b7b bold",
+    output_deepseek_status_style="#8cebd9",
+    output_deepseek_tool_style="#74b9ff bold",
+    output_indextts_style="#7ad3ff",
+    output_prompt_style="#ffde7a bold",
+    output_hint_style="#8eb6b2",
+    stream_text_style="#d8fbf7",
+    stream_meta_style="#8eb6b2",
+    stream_reasoning_header_style="#8cc9df bold",
+    stream_answer_header_style="#8effb3 bold",
+    stream_reasoning_text_style="#aed4e0",
+    stream_answer_text_style="#c8ffe0",
+    subtitle_ok_style="#7dffb2 bold",
+    subtitle_warn_style="#ffd166 bold",
+    subtitle_critical_style="#ff7b7b bold",
+    live_badge_style="#67f7e8 bold",
+    unicode_heartbeat_frames=("●", "◐", "○", "◑"),
+    ascii_heartbeat_frames=("*", "+", ".", "+"),
+)
 
 
 class _DashboardOutputCaptureStream(io.TextIOBase):
@@ -140,6 +233,98 @@ class _DashboardOutputCaptureStream(io.TextIOBase):
         self._buffer = ""
 
 
+INDEXTTS_RUNTIME_HINTS: Final[tuple[str, ...]] = (
+    "weights restored from",
+    "semantic_codec",
+    "s2mel",
+    "campplus",
+    "bigvgan",
+    "textnormalizer loaded",
+    "bpe model loaded",
+    "starting inference",
+    "emotion vectors",
+    "removing weight norm",
+    "past_key_values",
+)
+
+
+def _looks_like_indextts_runtime_line(line: str) -> bool:
+    """Return True when a runtime line likely originated from IndexTTS2."""
+    normalized = line.strip().lower()
+    if not normalized:
+        return False
+    if normalized.startswith(">>"):
+        return True
+    return any(hint in normalized for hint in INDEXTTS_RUNTIME_HINTS)
+
+
+def _with_indextts_prefix(line: str, *, severity_prefix: str | None = None) -> str:
+    """Attach an IndexTTS2 marker and optional severity prefix to a line."""
+    clean_line = line.strip()
+    if not clean_line:
+        return ""
+    if "[INDEXTTS2]" in clean_line:
+        return clean_line
+    if severity_prefix:
+        return f"{severity_prefix} [INDEXTTS2] {clean_line}"
+    return f"[INDEXTTS2] {clean_line}"
+
+
+def _format_runtime_output_line_for_dashboard(
+    line: str,
+    *,
+    prefer_indextts_tag: bool,
+) -> str:
+    """Normalize one captured runtime line before writing to dashboard output."""
+    clean_line = line.strip()
+    if not clean_line:
+        return ""
+    is_indextts_line = prefer_indextts_tag or _looks_like_indextts_runtime_line(
+        clean_line
+    )
+    if not is_indextts_line:
+        return clean_line
+
+    lowered = clean_line.lower()
+    if lowered.startswith("traceback"):
+        return _with_indextts_prefix(clean_line, severity_prefix="[ERROR]")
+    if (
+        "runtimeerror(" in lowered
+        or "failed to " in lowered
+        or "falling back to" in lowered
+        or "deprecated" in lowered
+    ):
+        return _with_indextts_prefix(clean_line, severity_prefix="[WARNING]")
+    return _with_indextts_prefix(clean_line)
+
+
+@contextlib.contextmanager
+def _capture_stage175_output_lines(enabled: bool) -> Iterator[None]:
+    """Capture Stage 1.75 stdout/stderr into dashboard logs when enabled."""
+    if not enabled:
+        yield
+        return
+
+    def _on_line(line: str) -> None:
+        logger.debug("Stage 1.75 runtime | %s", line)
+        formatted_line = _format_runtime_output_line_for_dashboard(
+            line,
+            prefer_indextts_tag=True,
+        )
+        if _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled and formatted_line:
+            _ACTIVE_DASHBOARD.log(formatted_line)
+
+    capture_stream = _DashboardOutputCaptureStream(_on_line)
+    with (
+        contextlib.redirect_stdout(capture_stream),
+        contextlib.redirect_stderr(capture_stream),
+    ):
+        try:
+            yield
+        finally:
+            capture_stream.flush()
+
+
 @contextlib.contextmanager
 def _capture_stage3_output_lines(enabled: bool) -> Iterator[None]:
     """Capture Stage 3 stdout/stderr into dashboard logs when enabled."""
@@ -149,8 +334,12 @@ def _capture_stage3_output_lines(enabled: bool) -> Iterator[None]:
 
     def _on_line(line: str) -> None:
         logger.debug("Stage 3 runtime | %s", line)
-        if _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled:
-            _ACTIVE_DASHBOARD.log(line)
+        formatted_line = _format_runtime_output_line_for_dashboard(
+            line,
+            prefer_indextts_tag=False,
+        )
+        if _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled and formatted_line:
+            _ACTIVE_DASHBOARD.log(formatted_line)
 
     capture_stream = _DashboardOutputCaptureStream(_on_line)
     with (
@@ -178,6 +367,7 @@ class _PipelineDashboard:
         Args:
             enabled: Enable rich dashboard rendering when True.
         """
+        self._theme = DEFAULT_DASHBOARD_THEME
         self.enabled = bool(
             enabled
             and rich_console is not None
@@ -185,6 +375,7 @@ class _PipelineDashboard:
             and rich_live is not None
             and rich_panel is not None
             and rich_progress is not None
+            and rich_text is not None
         )
         self._started = False
         self._state_lock = threading.RLock()
@@ -250,9 +441,14 @@ class _PipelineDashboard:
         progress_module = cast(Any, rich_progress)
         spinner_or_marker: Any
         if _supports_unicode_output():
-            spinner_or_marker = progress_module.SpinnerColumn()
+            spinner_or_marker = progress_module.SpinnerColumn(
+                style=self._theme.progress_spinner_style
+            )
         else:
-            spinner_or_marker = progress_module.TextColumn(">")
+            spinner_or_marker = progress_module.TextColumn(
+                ">",
+                style=self._theme.progress_spinner_style,
+            )
 
         self._console = console_module.Console()
         self._layout = layout_module.Layout()
@@ -272,9 +468,21 @@ class _PipelineDashboard:
         )
         self._progress = progress_module.Progress(
             spinner_or_marker,
-            progress_module.TextColumn("[progress.description]{task.description}"),
-            progress_module.BarColumn(bar_width=None),
-            progress_module.TextColumn("{task.percentage:>3.0f}%"),
+            progress_module.TextColumn(
+                "[progress.description]{task.description}",
+                style=self._theme.controls_text_style,
+            ),
+            progress_module.BarColumn(
+                bar_width=None,
+                style=self._theme.progress_track_style,
+                complete_style=self._theme.progress_complete_style,
+                finished_style=self._theme.progress_finished_style,
+                pulse_style=self._theme.progress_pulse_style,
+            ),
+            progress_module.TextColumn(
+                "{task.percentage:>3.0f}%",
+                style=self._theme.progress_percent_style,
+            ),
             progress_module.TimeElapsedColumn(),
             progress_module.TimeRemainingColumn(),
             console=self._console,
@@ -736,6 +944,10 @@ class _PipelineDashboard:
             with self._state_lock:
                 output_text = self._build_output_text_locked()
                 stream_text = self._build_deepseek_stream_text_locked()
+                output_renderable = self._build_output_renderable_locked(output_text)
+                stream_renderable = self._build_deepseek_stream_renderable_locked(
+                    stream_text
+                )
                 output_mode = "LIVE" if self._follow_output else "SCROLL"
                 stream_mode = "LIVE" if self._deepseek_stream_follow else "SCROLL"
                 selected_label = (
@@ -744,6 +956,7 @@ class _PipelineDashboard:
                     and self._deepseek_stream_active
                     else "Output"
                 )
+                heartbeat = self._heartbeat_symbol_locked()
                 if self._prompt_active:
                     if self._prompt_capture_enabled:
                         controls_header = "Prompt active | Typing enabled | Enter submit | Esc exit typing"
@@ -766,7 +979,7 @@ class _PipelineDashboard:
                         f"Module: {self._status_module}\n"
                         f"Command: {self._truncate_for_controls(self._status_command)}\n"
                         f"Model: {self._status_model}\n"
-                        f"PID: {self._status_pid if self._status_pid is not None else '-'} | Output: {output_mode}\n"
+                        f"PID: {self._status_pid if self._status_pid is not None else '-'} | Output: {output_mode} | Pulse: {heartbeat}\n"
                         f"Selected panel: {selected_label} | Stream: {stream_mode if self._deepseek_stream_active else 'hidden'}\n"
                         f"Elapsed: {self._elapsed_text_locked()} | Last output: {self._last_output_text_locked()}\n"
                         f"{self._detail_metrics_text_locked()}"
@@ -780,7 +993,7 @@ class _PipelineDashboard:
                         f"Module: {self._status_module}\n"
                         f"Command: {self._truncate_for_controls(self._status_command)}\n"
                         f"Model: {self._status_model}\n"
-                        f"PID: {self._status_pid if self._status_pid is not None else '-'} | Output: {output_mode}\n"
+                        f"PID: {self._status_pid if self._status_pid is not None else '-'} | Output: {output_mode} | Pulse: {heartbeat}\n"
                         f"Selected panel: {selected_label} | Stream: {stream_mode if self._deepseek_stream_active else 'hidden'}\n"
                         f"Elapsed: {self._elapsed_text_locked()} | Last output: {self._last_output_text_locked()}\n"
                         f"{self._detail_metrics_text_locked()}"
@@ -789,19 +1002,19 @@ class _PipelineDashboard:
                     panel_module.Panel(
                         self._progress,
                         title="Progress",
-                        border_style="cyan",
+                        border_style=self._theme.progress_border_style,
                         padding=(0, 1),
                     )
                 )
                 output_border_style = (
-                    "cyan"
+                    self._theme.output_border_style_selected
                     if self._selected_panel == "output"
                     or not self._deepseek_stream_active
-                    else "white"
+                    else self._theme.output_border_style_idle
                 )
                 self._layout["output"].update(
                     panel_module.Panel(
-                        output_text,
+                        output_renderable,
                         title=(
                             "Output (Selected)"
                             if self._selected_panel == "output"
@@ -816,16 +1029,20 @@ class _PipelineDashboard:
                 stream_layout.visible = self._deepseek_stream_active
                 if self._deepseek_stream_active:
                     stream_border_style = (
-                        "cyan" if self._selected_panel == "deepseek_stream" else "white"
+                        self._theme.stream_border_style_selected
+                        if self._selected_panel == "deepseek_stream"
+                        else self._theme.stream_border_style_idle
                     )
-                    stream_subtitle = self._build_deepseek_stream_subtitle_locked()
+                    stream_subtitle = (
+                        self._build_deepseek_stream_subtitle_renderable_locked()
+                    )
                     stream_layout.update(
                         panel_module.Panel(
-                            stream_text,
+                            stream_renderable,
                             title=(
-                                "DeepSeek Stream (Selected)"
+                                f"DeepSeek Stream {heartbeat} (Selected)"
                                 if self._selected_panel == "deepseek_stream"
-                                else "DeepSeek Stream"
+                                else f"DeepSeek Stream {heartbeat}"
                             ),
                             subtitle=stream_subtitle,
                             subtitle_align="left",
@@ -835,10 +1052,10 @@ class _PipelineDashboard:
                     )
                 self._layout["controls"].update(
                     panel_module.Panel(
-                        controls_text,
+                        self._build_controls_renderable_locked(controls_text),
                         title="Controls",
-                        border_style="#555555",
-                        style="on #2f2f2f",
+                        border_style=self._theme.controls_border_style,
+                        style=self._theme.controls_panel_style,
                         padding=(0, 1),
                     )
                 )
@@ -892,6 +1109,144 @@ class _PipelineDashboard:
         if len(clean) <= max_chars:
             return clean
         return f"{clean[: max_chars - 3]}..."
+
+    def _heartbeat_symbol_locked(self) -> str:
+        """Return an animated heartbeat glyph for lightweight live feedback."""
+        if _supports_unicode_output():
+            frames = self._theme.unicode_heartbeat_frames
+        else:
+            frames = self._theme.ascii_heartbeat_frames
+        if not frames:
+            return "*"
+        frame_index = int(time.monotonic() * 2.0) % len(frames)
+        return frames[frame_index]
+
+    def _build_controls_renderable_locked(self, controls_text: str) -> Any:
+        """Build controls panel renderable with theme-aware styling."""
+        if rich_text is None:
+            return controls_text
+        text_module = cast(Any, rich_text)
+        renderable = text_module.Text()
+        lines = controls_text.splitlines()
+        for index, line in enumerate(lines):
+            line_style = self._theme.controls_text_style
+            if (
+                line.startswith("Keys unavailable:")
+                or line.startswith("Selected panel:")
+                or line.startswith("Elapsed:")
+                or line.startswith("Detail:")
+            ):
+                line_style = self._theme.controls_secondary_text_style
+
+            if " | Pulse: " in line:
+                prefix, pulse = line.split(" | Pulse: ", maxsplit=1)
+                renderable.append(prefix, style=line_style)
+                renderable.append(" | Pulse: ", style=self._theme.controls_text_style)
+                renderable.append(pulse, style=self._theme.live_badge_style)
+            else:
+                renderable.append(line, style=line_style)
+            if index < len(lines) - 1:
+                renderable.append("\n")
+        return renderable
+
+    def _build_output_renderable_locked(self, output_text: str) -> Any:
+        """Build output panel renderable with semantic line colorization."""
+        if rich_text is None:
+            return output_text
+        text_module = cast(Any, rich_text)
+        renderable = text_module.Text()
+        lines = output_text.splitlines()
+        if not lines:
+            lines = [output_text]
+        for index, line in enumerate(lines):
+            renderable.append(line, style=self._output_line_style(line))
+            if index < len(lines) - 1:
+                renderable.append("\n")
+        return renderable
+
+    def _build_deepseek_stream_renderable_locked(self, stream_text: str) -> Any:
+        """Build DeepSeek stream renderable with phase-aware line colors."""
+        if rich_text is None:
+            return stream_text
+        text_module = cast(Any, rich_text)
+        renderable = text_module.Text()
+        lines = stream_text.splitlines()
+        if not lines:
+            lines = [stream_text]
+        active_phase = ""
+        for index, line in enumerate(lines):
+            style, active_phase = self._stream_line_style(
+                line=line,
+                active_phase=active_phase,
+            )
+            renderable.append(line, style=style)
+            if index < len(lines) - 1:
+                renderable.append("\n")
+        return renderable
+
+    def _output_line_style(self, line: str) -> str:
+        """Map one output log line to a theme style."""
+        normalized = line.strip()
+        if not normalized:
+            return self._theme.output_text_style
+        if normalized.startswith("[EVENT]"):
+            return self._theme.output_event_style
+        if normalized.startswith("[DEEPSEEK STATUS]"):
+            return self._theme.output_deepseek_status_style
+        if normalized.startswith("[DEEPSEEK TOOL_CALL]"):
+            return self._theme.output_deepseek_tool_style
+        if normalized.startswith("[INDEXTTS2]"):
+            return self._theme.output_indextts_style
+        if normalized.startswith("[ERROR]") or normalized.startswith("Traceback"):
+            return self._theme.output_error_style
+        if normalized.startswith("[WARNING]") or normalized.startswith("[WARN]"):
+            return self._theme.output_warning_style
+        if normalized.startswith("[INFO]"):
+            return self._theme.output_info_style
+        if (
+            normalized.startswith("[PROMPT")
+            or normalized.startswith("Input mode:")
+            or normalized.startswith("Choice>")
+            or normalized.startswith("Esc exits typing mode.")
+            or normalized.startswith("Error:")
+        ):
+            return self._theme.output_prompt_style
+        if normalized.startswith("[...]"):
+            return self._theme.output_hint_style
+        if normalized.startswith("Waiting for output"):
+            return self._theme.output_hint_style
+        return self._theme.output_text_style
+
+    def _stream_line_style(self, *, line: str, active_phase: str) -> tuple[str, str]:
+        """Return stream-line style and updated active phase tracker."""
+        normalized = line.strip()
+        if not normalized:
+            if active_phase == "reasoning":
+                return self._theme.stream_reasoning_text_style, active_phase
+            if active_phase == "answer":
+                return self._theme.stream_answer_text_style, active_phase
+            return self._theme.stream_text_style, active_phase
+        if normalized == "[REASONING]":
+            return self._theme.stream_reasoning_header_style, "reasoning"
+        if normalized == "[ANSWER]":
+            return self._theme.stream_answer_header_style, "answer"
+        if normalized.startswith("[...]") or normalized.startswith("Waiting for"):
+            return self._theme.stream_meta_style, active_phase
+        if active_phase == "reasoning":
+            return self._theme.stream_reasoning_text_style, active_phase
+        if active_phase == "answer":
+            return self._theme.stream_answer_text_style, active_phase
+        return self._theme.stream_text_style, active_phase
+
+    def _style_for_context_percent_left(self, percent_left: float | None) -> str:
+        """Choose context subtitle color based on remaining-token percentage."""
+        if percent_left is None:
+            return self._theme.stream_meta_style
+        if percent_left < 0.15:
+            return self._theme.subtitle_critical_style
+        if percent_left < 0.35:
+            return self._theme.subtitle_warn_style
+        return self._theme.subtitle_ok_style
 
     def _build_output_text_locked(self) -> str:
         """Render the visible output viewport from log history and scroll state."""
@@ -964,6 +1319,41 @@ class _PipelineDashboard:
             f"({self._deepseek_context_percent_left * 100:.1f}%) "
             f"| Rollovers {self._deepseek_context_rollover_count}"
         )
+
+    def _build_deepseek_stream_subtitle_renderable_locked(self) -> Any:
+        """Build styled subtitle renderable with context-health color cues."""
+        if rich_text is None:
+            return self._build_deepseek_stream_subtitle_locked()
+        text_module = cast(Any, rich_text)
+        if (
+            self._deepseek_context_tokens_used is None
+            or self._deepseek_context_tokens_limit is None
+            or self._deepseek_context_tokens_left is None
+            or self._deepseek_context_percent_left is None
+        ):
+            return text_module.Text("Ctx: pending", style=self._theme.stream_meta_style)
+
+        remaining_style = self._style_for_context_percent_left(
+            self._deepseek_context_percent_left
+        )
+        subtitle = text_module.Text(style=self._theme.stream_meta_style)
+        subtitle.append("Ctx ", style=self._theme.stream_meta_style)
+        subtitle.append(
+            f"{self._deepseek_context_tokens_used:,}/{self._deepseek_context_tokens_limit:,}",
+            style=self._theme.controls_text_style,
+        )
+        subtitle.append(" | Left ", style=self._theme.stream_meta_style)
+        subtitle.append(
+            f"{self._deepseek_context_tokens_left:,} "
+            f"({self._deepseek_context_percent_left * 100:.1f}%)",
+            style=remaining_style,
+        )
+        subtitle.append(" | Rollovers ", style=self._theme.stream_meta_style)
+        subtitle.append(
+            str(self._deepseek_context_rollover_count),
+            style=self._theme.output_info_style,
+        )
+        return subtitle
 
     def _visible_line_count_locked(self) -> int:
         """Estimate lines visible inside the currently selected viewport."""
@@ -1851,6 +2241,59 @@ def _calculate_corrected_word_budget(
     return max(1, corrected)
 
 
+def _calculate_adaptive_tool_rounds(
+    *,
+    word_budget: int,
+    target_minutes: float,
+) -> int:
+    """Estimate DeepSeek tool-loop rounds from summary size and target duration.
+
+    Args:
+        word_budget: Current Stage 2 dialogue word budget target.
+        target_minutes: Requested summary duration in minutes.
+
+    Returns:
+        Adaptive tool-loop round limit clamped to [10, 30].
+    """
+    base_rounds = 10
+    normalized_budget = max(1, int(word_budget))
+    normalized_minutes = max(0.0, float(target_minutes))
+    extra_budget_rounds = int(
+        math.ceil(max(0, normalized_budget - 180) / 45.0)
+    )
+    extra_duration_rounds = int(
+        math.ceil(max(0.0, normalized_minutes - 1.0) * 2.0)
+    )
+    adaptive_rounds = base_rounds + extra_budget_rounds + extra_duration_rounds
+    return max(10, min(30, adaptive_rounds))
+
+
+def _resolve_deepseek_agent_max_tool_rounds(
+    *,
+    configured_max_tool_rounds: int,
+    current_word_budget: int,
+    target_minutes: float,
+) -> tuple[int, str]:
+    """Resolve explicit or adaptive DeepSeek max tool rounds for this pass.
+
+    Args:
+        configured_max_tool_rounds: CLI-provided max rounds (0 means adaptive mode).
+        current_word_budget: Current Stage 2 word budget for this pass.
+        target_minutes: Requested summary duration in minutes.
+
+    Returns:
+        Tuple of `(resolved_max_rounds, source_label)` where source label is
+        `"override"` or `"adaptive"`.
+    """
+    if configured_max_tool_rounds > 0:
+        return configured_max_tool_rounds, "override"
+    adaptive_rounds = _calculate_adaptive_tool_rounds(
+        word_budget=current_word_budget,
+        target_minutes=target_minutes,
+    )
+    return adaptive_rounds, "adaptive"
+
+
 def _summary_report_path_for_output(summary_output_path: str) -> Path:
     """Resolve default summary report path for a summary JSON output path."""
     summary_output = Path(summary_output_path)
@@ -2133,6 +2576,33 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--deepseek-agent-max-tool-rounds",
+        type=int,
+        default=DEFAULT_DEEPSEEK_AGENT_MAX_TOOL_ROUNDS,
+        help=(
+            "DeepSeek max agentic tool rounds per attempt. Use 0 for adaptive "
+            f"auto-scaling (default: {DEFAULT_DEEPSEEK_AGENT_MAX_TOOL_ROUNDS})."
+        ),
+    )
+    parser.add_argument(
+        "--deepseek-agent-loop-exhaustion-policy",
+        choices=["auto_salvage", "fail_fast"],
+        default=DEFAULT_DEEPSEEK_AGENT_LOOP_EXHAUSTION_POLICY,
+        help=(
+            "DeepSeek tool-loop exhaustion policy forwarded to Stage 2 "
+            "(default: auto_salvage)."
+        ),
+    )
+    parser.add_argument(
+        "--deepseek-budget-failure-policy",
+        choices=["degraded_success", "strict_fail"],
+        default=DEFAULT_DEEPSEEK_BUDGET_FAILURE_POLICY,
+        help=(
+            "DeepSeek budget failure policy forwarded to Stage 2 "
+            "(default: degraded_success)."
+        ),
+    )
+    parser.add_argument(
         "--wpm-source",
         choices=["tts_preflight", "indextts", "transcript"],
         default="tts_preflight",
@@ -2213,6 +2683,12 @@ def main() -> int:
     if args.deepseek_agent_read_max_lines <= 0:
         _print_error(
             "[ERROR] --deepseek-agent-read-max-lines must be > 0.",
+            use_rich=use_rich,
+        )
+        return 1
+    if args.deepseek_agent_max_tool_rounds < 0:
+        _print_error(
+            "[ERROR] --deepseek-agent-max-tool-rounds must be >= 0.",
             use_rich=use_rich,
         )
         return 1
@@ -2531,14 +3007,20 @@ def main() -> int:
                     model_dir = (
                         repo_root / "voice-cloner-and-interjector" / "checkpoints"
                     )
-                    _, _, tts_pacing = calibrate_tts_pacing_profiles(
-                        voice_dir=voice_dir,
-                        device=runtime_device,
-                        cfg_path=str(cfg_path),
-                        model_dir=str(model_dir),
-                        presets_path=args.calibration_presets_path,
-                        progress_cb=None,
+                    capture_stage175_runtime_output = (
+                        _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled
                     )
+                    with _capture_stage175_output_lines(
+                        enabled=capture_stage175_runtime_output
+                    ):
+                        _, _, tts_pacing = calibrate_tts_pacing_profiles(
+                            voice_dir=voice_dir,
+                            device=runtime_device,
+                            cfg_path=str(cfg_path),
+                            model_dir=str(model_dir),
+                            presets_path=args.calibration_presets_path,
+                            progress_cb=None,
+                        )
                     avg_wpm, per_speaker_wpm = estimate_weighted_wpm_from_transcript(
                         transcript_json_path=diarization_json,
                         calibration=tts_pacing,
@@ -2603,6 +3085,23 @@ def main() -> int:
 
             while True:
                 pass_label = correction_passes_used + 1
+                resolved_max_tool_rounds, rounds_source = (
+                    _resolve_deepseek_agent_max_tool_rounds(
+                        configured_max_tool_rounds=args.deepseek_agent_max_tool_rounds,
+                        current_word_budget=current_word_budget,
+                        target_minutes=target_minutes,
+                    )
+                )
+                _print_info(
+                    (
+                        f"[INFO] Stage 2 pass {pass_label}: "
+                        f"DeepSeek max_tool_rounds={resolved_max_tool_rounds} "
+                        f"(source={rounds_source}; "
+                        f"word_budget={current_word_budget}; "
+                        f"target_minutes={target_minutes:.2f})."
+                    ),
+                    use_rich=use_rich,
+                )
                 summarize_cmd = [
                     sys.executable,
                     "-m",
@@ -2629,6 +3128,12 @@ def main() -> int:
                     args.deepseek_agent_tool_mode,
                     "--agent-read-max-lines",
                     str(args.deepseek_agent_read_max_lines),
+                    "--agent-max-tool-rounds",
+                    str(resolved_max_tool_rounds),
+                    "--agent-loop-exhaustion-policy",
+                    args.deepseek_agent_loop_exhaustion_policy,
+                    "--budget-failure-policy",
+                    args.deepseek_budget_failure_policy,
                 ]
                 try:
                     _run_stage_command(
@@ -3051,14 +3556,22 @@ def main() -> int:
                         )
                         dashboard.update_detail_progress(100)
 
-                _, _, tts_pacing = calibrate_tts_pacing_profiles(
-                    voice_dir=voice_dir,
-                    device=runtime_device,
-                    cfg_path=str(cfg_path),
-                    model_dir=str(model_dir),
-                    presets_path=args.calibration_presets_path,
-                    progress_cb=_on_calibration_progress if dashboard.enabled else None,
+                capture_stage175_runtime_output = (
+                    _ACTIVE_DASHBOARD is not None and _ACTIVE_DASHBOARD.enabled
                 )
+                with _capture_stage175_output_lines(
+                    enabled=capture_stage175_runtime_output
+                ):
+                    _, _, tts_pacing = calibrate_tts_pacing_profiles(
+                        voice_dir=voice_dir,
+                        device=runtime_device,
+                        cfg_path=str(cfg_path),
+                        model_dir=str(model_dir),
+                        presets_path=args.calibration_presets_path,
+                        progress_cb=(
+                            _on_calibration_progress if dashboard.enabled else None
+                        ),
+                    )
                 avg_wpm, per_speaker_wpm = estimate_weighted_wpm_from_transcript(
                     transcript_json_path=diarization_json,
                     calibration=tts_pacing,
@@ -3188,6 +3701,25 @@ def main() -> int:
                             use_rich=use_rich,
                         )
                         return 1
+                    resolved_max_tool_rounds, rounds_source = (
+                        _resolve_deepseek_agent_max_tool_rounds(
+                            configured_max_tool_rounds=(
+                                args.deepseek_agent_max_tool_rounds
+                            ),
+                            current_word_budget=current_word_budget,
+                            target_minutes=target_minutes,
+                        )
+                    )
+                    _print_info(
+                        (
+                            f"[INFO] Stage 2 pass {pass_label}: "
+                            f"DeepSeek max_tool_rounds={resolved_max_tool_rounds} "
+                            f"(source={rounds_source}; "
+                            f"word_budget={current_word_budget}; "
+                            f"target_minutes={target_minutes:.2f})."
+                        ),
+                        use_rich=use_rich,
+                    )
                     summarize_cmd = [
                         sys.executable,
                         "-m",
@@ -3214,6 +3746,12 @@ def main() -> int:
                         args.deepseek_agent_tool_mode,
                         "--agent-read-max-lines",
                         str(args.deepseek_agent_read_max_lines),
+                        "--agent-max-tool-rounds",
+                        str(resolved_max_tool_rounds),
+                        "--agent-loop-exhaustion-policy",
+                        args.deepseek_agent_loop_exhaustion_policy,
+                        "--budget-failure-policy",
+                        args.deepseek_budget_failure_policy,
                     ]
                     summary_model_info = (
                         "Provider: deepseek | Model: auto(reasoner/chat) "

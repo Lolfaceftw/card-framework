@@ -18,6 +18,50 @@ def test_calculate_corrected_word_budget_scales_to_duration_ratio() -> None:
     assert corrected == 120
 
 
+def test_calculate_adaptive_tool_rounds_scales_for_three_minute_target() -> None:
+    """Scale tool rounds upward for longer, larger-word-budget summaries."""
+    rounds = run_pipeline._calculate_adaptive_tool_rounds(  # noqa: SLF001
+        word_budget=426,
+        target_minutes=3.0,
+    )
+
+    assert rounds == 20
+
+
+def test_calculate_adaptive_tool_rounds_clamps_to_upper_bound() -> None:
+    """Cap adaptive rounds at a deterministic upper bound."""
+    rounds = run_pipeline._calculate_adaptive_tool_rounds(  # noqa: SLF001
+        word_budget=1200,
+        target_minutes=8.0,
+    )
+
+    assert rounds == 30
+
+
+def test_resolve_deepseek_agent_max_tool_rounds_prefers_explicit_override() -> None:
+    """Use operator-provided round limit when override is configured."""
+    rounds, source = run_pipeline._resolve_deepseek_agent_max_tool_rounds(  # noqa: SLF001
+        configured_max_tool_rounds=18,
+        current_word_budget=426,
+        target_minutes=3.0,
+    )
+
+    assert rounds == 18
+    assert source == "override"
+
+
+def test_resolve_deepseek_agent_max_tool_rounds_uses_adaptive_default() -> None:
+    """Fallback to adaptive round sizing when override is disabled."""
+    rounds, source = run_pipeline._resolve_deepseek_agent_max_tool_rounds(  # noqa: SLF001
+        configured_max_tool_rounds=0,
+        current_word_budget=426,
+        target_minutes=3.0,
+    )
+
+    assert rounds == 20
+    assert source == "adaptive"
+
+
 def test_update_summary_report_duration_metrics_patches_report(
     tmp_path: Path,
 ) -> None:

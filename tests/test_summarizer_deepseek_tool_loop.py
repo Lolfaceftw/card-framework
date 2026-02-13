@@ -159,6 +159,9 @@ def test_build_system_prompt_enforces_zero_padded_segment_ids() -> None:
     assert "example: seg_00004" in prompt
     assert "never seg_0004" not in prompt
     assert "batched `lines` payloads" in prompt
+    assert "Prioritize broad transcript coverage early" in prompt
+    assert "full candidate dialogue list" in prompt
+    assert "Prefer one material rewrite" in prompt
 
 
 def test_stream_assistant_turn_invokes_chunk_callback() -> None:
