@@ -130,6 +130,7 @@ audio2script = [
 ]
 # Development and testing dependencies
 dev = [
+  "mypy>=1.11.2",
   "pytest>=9.0.0",
   "pytest-cov>=6.0.0",
   "ruff>=0.6.9",
@@ -148,6 +149,42 @@ indextts = "indextts.cli:main"
 # NOTE: Use `uv tool install -e .` to install the package as a CLI tool.
 requires = ["hatchling >= 1.27.0"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+force-exclude = true
+extend-exclude = [
+  "voice-cloner-and-interjector",
+  "benchmarks",
+  "llm",
+  "checkpoints",
+]
+
+[tool.ruff.lint]
+select = ["F"]
+
+[tool.mypy]
+python_version = "3.10"
+files = [
+  "audio2script_and_summarizer",
+  "CARD-SpeakerAudioExtraction/src",
+  "tests",
+]
+exclude = "(?x)(^voice-cloner-and-interjector/|^benchmarks/|^llm/|^checkpoints/)"
+follow_imports = "skip"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+check_untyped_defs = true
+pretty = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers -ra --maxfail=1"
 
 [tool.hatch.metadata]
 # Allow git-based dependencies in optional-dependencies (e.g., audio2script extras)
