@@ -1,0 +1,11 @@
+pair_id,item_id,speaker_id,text,audio_a_path,audio_b_path
+pair_0000,7,SPEAKER_00,"Incentives matter. Advisors may believe they're doing the right thing, but the system often prioritizes sales.",audio\pair_0000_A.wav,audio\pair_0000_B.wav
+pair_0001,6,SPEAKER_00,"Now, a CBC feature highlights how bank advisors often prioritize employer interests over customers, according to research.",audio\pair_0001_A.wav,audio\pair_0001_B.wav
+pair_0002,3,SPEAKER_00,"Third, market forecasts are not useful. They're wrong more often than right.",audio\pair_0002_A.wav,audio\pair_0002_B.wav
+pair_0003,5,SPEAKER_00,"Also, time in the market beats timing the market. Successful market timing is extremely difficult.",audio\pair_0003_A.wav,audio\pair_0003_B.wav
+pair_0004,2,SPEAKER_00,"Second, this time is always different. Narratives change, but empirical reality shows things typically turn out okay.",audio\pair_0004_A.wav,audio\pair_0004_B.wav
+pair_0005,8,SPEAKER_02,It's important to understand the hierarchy of service. Many branch advisors are sales-driven.,audio\pair_0005_A.wav,audio\pair_0005_B.wav
+pair_0006,4,SPEAKER_00,"Fourth, most funds don't beat the market. About 90% underperform over 10 years.",audio\pair_0006_A.wav,audio\pair_0006_B.wav
+pair_0007,9,SPEAKER_01,"That's a wrap for episode 299. Next week, Abby Sussman on decision-making.",audio\pair_0007_A.wav,audio\pair_0007_B.wav
+pair_0008,0,SPEAKER_00,Welcome to the Rational Reminder Podcast. Today we're sharing key investing lessons and discussing bank advice quality.,audio\pair_0008_A.wav,audio\pair_0008_B.wav
+pair_0009,1,SPEAKER_00,"First, you're not that smart relative to the market—it aggregates all information and you're competing against the smartest.",audio\pair_0009_A.wav,audio\pair_0009_B.wav

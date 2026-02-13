@@ -15,6 +15,8 @@ from audio2script_and_summarizer.stage3_voice import (
     load_summary_entries,
     resolve_voice_sample_path,
 )
+from benchmarks.voice_clone.constants import DEFAULT_ASR_MODEL_SIZE
+from benchmarks.voice_clone.holdout_wizard import HoldoutSplitResult, run_holdout_wizard
 from benchmarks.voice_clone.runner import choose_benchmark_device, run_benchmark
 from benchmarks.voice_clone.utils import now_utc_compact
 
@@ -31,7 +33,9 @@ class ManifestBuildResult:
 
     manifest_path: Path
     item_count: int
+    used_prompt_dir: Path | None
     used_holdout_dir: Path | None
+    fallback_prompt_count: int
     fallback_reference_count: int
 
 
@@ -106,14 +110,16 @@ def build_manifest_from_summary(
     *,
     summary_json_path: Path,
     manifest_path: Path,
-    holdout_dir: Path | None,
-    max_items: int | None,
+    prompt_dir: Path | None = None,
+    holdout_dir: Path | None = None,
+    max_items: int | None = None,
 ) -> ManifestBuildResult:
     """Build a benchmark manifest from Stage 2 summary JSON.
 
     Args:
         summary_json_path: Stage 2 summary JSON path.
         manifest_path: Destination manifest path.
+        prompt_dir: Optional directory containing generated prompt WAVs.
         holdout_dir: Optional directory containing holdout reference WAVs.
         max_items: Optional cap on number of rows.
 
@@ -127,13 +133,22 @@ def build_manifest_from_summary(
     summary_dir = summary_json_path.resolve().parent
     selected_entries = entries if max_items is None else entries[: max(0, max_items)]
     rows: list[dict[str, object]] = []
+    fallback_prompt_count = 0
     fallback_reference_count = 0
 
     for entry in selected_entries:
-        prompt_path = resolve_voice_sample_path(entry.voice_sample, summary_dir)
+        resolved_source_prompt_path = resolve_voice_sample_path(entry.voice_sample, summary_dir)
+        prompt_path = resolved_source_prompt_path
+        if prompt_dir is not None:
+            candidate_prompt = (prompt_dir / resolved_source_prompt_path.name).resolve()
+            if candidate_prompt.exists():
+                prompt_path = candidate_prompt
+            else:
+                fallback_prompt_count += 1
+
         reference_path = prompt_path
         if holdout_dir is not None:
-            candidate_reference = (holdout_dir / prompt_path.name).resolve()
+            candidate_reference = (holdout_dir / resolved_source_prompt_path.name).resolve()
             if candidate_reference.exists():
                 reference_path = candidate_reference
             else:
@@ -156,7 +171,9 @@ def build_manifest_from_summary(
     return ManifestBuildResult(
         manifest_path=manifest_path.resolve(),
         item_count=len(rows),
+        used_prompt_dir=prompt_dir.resolve() if prompt_dir is not None else None,
         used_holdout_dir=holdout_dir.resolve() if holdout_dir is not None else None,
+        fallback_prompt_count=fallback_prompt_count,
         fallback_reference_count=fallback_reference_count,
     )
 
@@ -181,16 +198,30 @@ def run_wizard() -> int:
     summary_json_path = _pick_summary_json(search_root)
     print(f"\nSelected summary: {summary_json_path}")
 
-    use_holdout = _prompt_yes_no(
-        "Use a separate holdout directory for reference_wav?",
+    split_result: HoldoutSplitResult | None = None
+    if _prompt_yes_no(
+        "Run holdout split wizard to auto-generate prompt and holdout WAVs?",
         default=False,
-    )
+    ):
+        split_result = run_holdout_wizard(summary_json_path=summary_json_path)
+
+    prompt_dir: Path | None = None
     holdout_dir: Path | None = None
-    if use_holdout:
-        holdout_raw = _prompt_text("Holdout WAV directory path", default="")
-        holdout_dir = Path(holdout_raw).expanduser().resolve()
-        if not holdout_dir.exists():
-            raise FileNotFoundError(f"Holdout directory not found: {holdout_dir}")
+    if split_result is not None:
+        prompt_dir = split_result.prompt_dir
+        holdout_dir = split_result.holdout_dir
+        print(f"Using generated prompt dir: {prompt_dir}")
+        print(f"Using generated holdout dir: {holdout_dir}")
+    else:
+        use_holdout = _prompt_yes_no(
+            "Use a separate holdout directory for reference_wav?",
+            default=False,
+        )
+        if use_holdout:
+            holdout_raw = _prompt_text("Holdout WAV directory path", default="")
+            holdout_dir = Path(holdout_raw).expanduser().resolve()
+            if not holdout_dir.exists():
+                raise FileNotFoundError(f"Holdout directory not found: {holdout_dir}")
 
     manifest_name_default = f"voice_clone_manifest_{now_utc_compact()}.json"
     manifest_raw = _prompt_text(
@@ -206,11 +237,20 @@ def run_wizard() -> int:
     result = build_manifest_from_summary(
         summary_json_path=summary_json_path,
         manifest_path=manifest_path,
+        prompt_dir=prompt_dir,
         holdout_dir=holdout_dir,
         max_items=max_items,
     )
     print(f"\nManifest created: {result.manifest_path}")
     print(f"Rows: {result.item_count}")
+    if result.used_prompt_dir is not None:
+        print(f"Prompt dir: {result.used_prompt_dir}")
+        if result.fallback_prompt_count > 0:
+            print(
+                "Warning: "
+                f"{result.fallback_prompt_count} row(s) fell back to summary voice_sample "
+                "because matching prompt files were not found."
+            )
     if result.used_holdout_dir is not None:
         print(f"Holdout dir: {result.used_holdout_dir}")
         if result.fallback_reference_count > 0:
@@ -229,10 +269,16 @@ def run_wizard() -> int:
         return 0
 
     cfg_path = Path(
-        _prompt_text("IndexTTS2 config path", default="checkpoints/config.yaml")
+        _prompt_text(
+            "IndexTTS2 config path",
+            default="voice-cloner-and-interjector/checkpoints/config.yaml",
+        )
     ).expanduser().resolve()
     model_dir = Path(
-        _prompt_text("IndexTTS2 model directory", default="checkpoints")
+        _prompt_text(
+            "IndexTTS2 model directory",
+            default="voice-cloner-and-interjector/checkpoints",
+        )
     ).expanduser().resolve()
     if not cfg_path.exists():
         raise FileNotFoundError(f"IndexTTS2 config not found: {cfg_path}")
@@ -245,6 +291,18 @@ def run_wizard() -> int:
     output_dir = Path(_prompt_text("Benchmark output dir", default=output_dir_default)).resolve()
     run_max_items = _prompt_int("Benchmark max-items (blank = no cap)", allow_empty=True)
     prepare_mos_kit = _prompt_yes_no("Generate MOS rating kit?", default=True)
+    allow_overlap = _prompt_yes_no(
+        "Allow prompt_wav == reference_wav overlap (exploratory only)?",
+        default=False,
+    )
+    asr_model_raw = _prompt_text(
+        "ASR model for WER/CER (blank disables text metrics)",
+        default=DEFAULT_ASR_MODEL_SIZE,
+    )
+    require_text_metrics = _prompt_yes_no(
+        "Require WER/CER metrics (fail run if unavailable)?",
+        default=False,
+    )
     seed_value = _prompt_int("Random seed", default=1337, allow_empty=False)
     assert seed_value is not None
     log_level = _prompt_text("Log level", default="INFO").upper()
@@ -274,6 +332,9 @@ def run_wizard() -> int:
         max_items=run_max_items,
         seed=seed_value,
         prepare_mos_kit=prepare_mos_kit,
+        allow_prompt_reference_overlap=allow_overlap,
+        asr_model=asr_model_raw.strip() or None,
+        require_text_metrics=require_text_metrics,
     )
     print("\nBenchmark completed.")
     print(f"Metrics: {artifacts.metrics_json}")

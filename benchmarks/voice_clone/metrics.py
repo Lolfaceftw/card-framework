@@ -215,3 +215,24 @@ def write_pair_scores_csv(rows: list[PairScoreRow], output_path: Path) -> None:
                 }
             )
 
+
+def compute_macro_speaker_metrics(
+    rows: list[PairScoreRow],
+) -> tuple[float, float] | None:
+    """Compute speaker-balanced macro means for cosine and top-1 accuracy."""
+    if not rows:
+        return None
+    grouped: dict[str, list[PairScoreRow]] = {}
+    for row in rows:
+        grouped.setdefault(row.speaker_id, []).append(row)
+    if not grouped:
+        return None
+
+    speaker_cosine_means: list[float] = []
+    speaker_top1_means: list[float] = []
+    for speaker_rows in grouped.values():
+        cosine_values = [row.same_item_cosine for row in speaker_rows]
+        top1_values = [1.0 if row.top1_correct else 0.0 for row in speaker_rows]
+        speaker_cosine_means.append(float(np.mean(cosine_values)))
+        speaker_top1_means.append(float(np.mean(top1_values)))
+    return float(np.mean(speaker_cosine_means)), float(np.mean(speaker_top1_means))

@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import wave
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from benchmarks.voice_clone.manifest import load_manifest
+from benchmarks.voice_clone.manifest import load_manifest, validate_holdout_integrity
+from benchmarks.voice_clone.holdout_wizard import create_split_prompt_holdout_clips
 from benchmarks.voice_clone.metrics import compute_eer
 from benchmarks.voice_clone.runner import run_benchmark
-from benchmarks.voice_clone.types import SpeakerEmbedderProtocol, TTSEngineProtocol
+from benchmarks.voice_clone.types import (
+    SpeakerEmbedderProtocol,
+    SpeechTranscriberProtocol,
+    TTSEngineProtocol,
+)
 from benchmarks.voice_clone.wizard import build_manifest_from_summary
 
 
@@ -96,6 +103,26 @@ class FakeEmbedder(SpeakerEmbedderProtocol):
         return np.array([0.5, 0.5], dtype=np.float64)
 
 
+class FakeTranscriber(SpeechTranscriberProtocol):
+    """ASR stub that returns deterministic transcript text."""
+
+    def transcribe(self, wav_path: Path) -> str:
+        stem = wav_path.stem.lower()
+        if "spk_a" in stem:
+            return "hello from speaker a"
+        if "spk_b" in stem:
+            return "hello from speaker b"
+        return "generic hypothesis"
+
+
+class FailingTranscriber(SpeechTranscriberProtocol):
+    """ASR stub that raises to simulate backend failures."""
+
+    def transcribe(self, wav_path: Path) -> str:
+        del wav_path
+        raise RuntimeError("asr backend unavailable")
+
+
 def test_load_manifest_resolves_paths(tmp_path: Path) -> None:
     """Resolve relative paths and normalize optional fields."""
     manifest_path = _build_manifest(tmp_path)
@@ -104,6 +131,25 @@ def test_load_manifest_resolves_paths(tmp_path: Path) -> None:
     assert items[0].prompt_wav.exists()
     assert items[0].reference_wav.exists()
     assert 0.0 <= items[0].emo_alpha <= 1.0
+
+
+def test_validate_holdout_integrity_rejects_prompt_reference_overlap(tmp_path: Path) -> None:
+    """Reject manifest rows that use the same file for prompt and reference."""
+    overlap_manifest = [
+        {
+            "speaker_id": "spk_a",
+            "prompt_wav": "same.wav",
+            "reference_wav": "same.wav",
+            "text": "Hello overlap.",
+        }
+    ]
+    _write_silent_wav(tmp_path / "same.wav")
+    manifest_path = tmp_path / "overlap_manifest.json"
+    manifest_path.write_text(json.dumps(overlap_manifest), encoding="utf-8")
+    items = load_manifest(manifest_path)
+
+    with pytest.raises(ValueError):
+        validate_holdout_integrity(items=items, allow_prompt_reference_overlap=False)
 
 
 def test_compute_eer_separable_scores_is_zero() -> None:
@@ -136,18 +182,33 @@ def test_run_benchmark_writes_artifacts(tmp_path: Path) -> None:
         prepare_mos_kit=True,
         tts_engine=FakeTTSEngine(),
         embedder=FakeEmbedder(),
+        transcriber=FakeTranscriber(),
     )
 
     assert artifacts.metrics_json.exists()
     assert artifacts.pair_scores_csv.exists()
     assert artifacts.run_log.exists()
     assert artifacts.mos_dir is not None
+    assert (artifacts.output_dir / "text_scores.csv").exists()
     assert (artifacts.mos_dir / "mos_pairs.csv").exists()
+    assert (artifacts.mos_dir / "mos_key_internal.csv").exists()
     assert (artifacts.mos_dir / "ratings_template.csv").exists()
+
+    with (artifacts.mos_dir / "mos_pairs.csv").open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        assert "generated_side" not in fieldnames
+        assert "a_label" not in fieldnames
+        assert "b_label" not in fieldnames
 
     summary = json.loads(artifacts.metrics_json.read_text(encoding="utf-8"))
     assert summary["dataset"]["item_count"] == 2
     assert summary["metrics"]["top1_speaker_acc"] == 1.0
+    assert summary["metrics"]["ss_cosine_macro_mean"] is not None
+    assert summary["metrics"]["top1_speaker_macro_acc"] is not None
+    assert summary["metrics"]["text_metric_status"] == "ok"
+    assert summary["metrics"]["wer_mean"] is not None
+    assert summary["metrics"]["cer_mean"] is not None
 
 
 def test_run_benchmark_single_speaker_eer_none(tmp_path: Path) -> None:
@@ -168,6 +229,26 @@ def test_run_benchmark_single_speaker_eer_none(tmp_path: Path) -> None:
     summary = json.loads(artifacts.metrics_json.read_text(encoding="utf-8"))
     assert summary["dataset"]["speaker_count"] == 1
     assert summary["metrics"]["asv_eer"] is None
+
+
+def test_run_benchmark_require_text_metrics_raises_on_asr_failure(tmp_path: Path) -> None:
+    """Raise when text metrics are required but ASR backend fails."""
+    manifest_path = _build_manifest(tmp_path)
+    with pytest.raises(RuntimeError):
+        run_benchmark(
+            manifest_path=manifest_path,
+            cfg_path=tmp_path / "cfg.yaml",
+            model_dir=tmp_path,
+            device="cpu",
+            output_dir=tmp_path / "failed_text_metrics_run",
+            max_items=None,
+            seed=19,
+            prepare_mos_kit=False,
+            require_text_metrics=True,
+            tts_engine=FakeTTSEngine(),
+            embedder=FakeEmbedder(),
+            transcriber=FailingTranscriber(),
+        )
 
 
 def test_build_manifest_from_summary_uses_holdout_when_available(tmp_path: Path) -> None:
@@ -216,3 +297,69 @@ def test_build_manifest_from_summary_uses_holdout_when_available(tmp_path: Path)
     assert Path(manifest_rows[1]["reference_wav"]).resolve() == (
         tmp_path / "SPEAKER_01.wav"
     ).resolve()
+
+
+def test_build_manifest_from_summary_prefers_prompt_dir_when_available(tmp_path: Path) -> None:
+    """Prefer prompt_dir WAVs and count fallback rows when missing."""
+    summary_payload = [
+        {
+            "speaker": "SPEAKER_00",
+            "voice_sample": "SPEAKER_00.wav",
+            "text": "Line A",
+            "use_emo_text": True,
+            "emo_text": "calm",
+            "emo_alpha": 0.6,
+        },
+        {
+            "speaker": "SPEAKER_01",
+            "voice_sample": "SPEAKER_01.wav",
+            "text": "Line B",
+            "use_emo_text": False,
+            "emo_text": "",
+            "emo_alpha": 0.4,
+        },
+    ]
+    summary_path = tmp_path / "sample_summary.json"
+    summary_path.write_text(json.dumps(summary_payload), encoding="utf-8")
+    _write_silent_wav(tmp_path / "SPEAKER_00.wav")
+    _write_silent_wav(tmp_path / "SPEAKER_01.wav")
+
+    prompt_dir = tmp_path / "prompt"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    _write_silent_wav(prompt_dir / "SPEAKER_00.wav")
+
+    manifest_path = tmp_path / "prompt_manifest.json"
+    result = build_manifest_from_summary(
+        summary_json_path=summary_path,
+        manifest_path=manifest_path,
+        prompt_dir=prompt_dir,
+    )
+
+    manifest_rows = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result.item_count == 2
+    assert result.fallback_prompt_count == 1
+    assert Path(manifest_rows[0]["prompt_wav"]).resolve() == (
+        prompt_dir / "SPEAKER_00.wav"
+    ).resolve()
+    assert Path(manifest_rows[1]["prompt_wav"]).resolve() == (
+        tmp_path / "SPEAKER_01.wav"
+    ).resolve()
+
+
+def test_create_split_prompt_holdout_clips_writes_distinct_outputs(tmp_path: Path) -> None:
+    """Write per-speaker split prompt/holdout clips from source samples."""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    _write_silent_wav(source_dir / "SPEAKER_00.wav", duration_ms=12000)
+
+    output_map = create_split_prompt_holdout_clips(
+        speaker_sources={"SPEAKER_00": source_dir / "SPEAKER_00.wav"},
+        prompt_dir=tmp_path / "prompt",
+        holdout_dir=tmp_path / "holdout",
+        target_clip_seconds=4.0,
+        min_clip_seconds=2.0,
+    )
+    prompt_path, holdout_path = output_map["SPEAKER_00"]
+    assert prompt_path.exists()
+    assert holdout_path.exists()
+    assert prompt_path != holdout_path
