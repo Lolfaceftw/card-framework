@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ..speaker_validation import TranscriptSegment
 from .constants import (
     AgentToolMode,
@@ -116,7 +118,12 @@ def _build_system_prompt(
             tool_loop_clause = (
                 f"- {tool_mode_note}\n"
                 f"- Read transcript slices with `{READ_TRANSCRIPT_LINES_TOOL_NAME}` before drafting.\n"
+                "- Prioritize broad transcript coverage early using large contiguous slices before micro-edits.\n"
                 f"- Use `{COUNT_WORDS_TOOL_NAME}` with batched `lines` payloads for counting; do not self-count.\n"
+                f"- Run `{COUNT_WORDS_TOOL_NAME}` over the full candidate dialogue list before each material revision checkpoint.\n"
+                "- If under the configured lower word bound, add grounded lines and re-count before final evaluation.\n"
+                "- If above the configured upper word bound, compress/remove lines and re-count before final evaluation.\n"
+                "- Prefer one material rewrite over many tiny append-only edits when far from target word count.\n"
                 f"- Stage output JSON with `{WRITE_OUTPUT_SEGMENT_TOOL_NAME}` in chunks (overwrite first, append next).\n"
                 f"- Do not repeat identical overwrite writes more than {max_repeated_write_overwrites} times in a row; revise then re-evaluate.\n"
                 f"- You must call `{EVALUATE_SCRIPT_TOOL_NAME}` before finalizing JSON.\n"
@@ -251,6 +258,9 @@ def _build_retry_instruction(context: RetryContext) -> str:
         "- Fix the exact issue and regenerate a complete STRICT JSON object only.\n"
         "- Do not include markdown, explanations, or trailing text.\n"
     )
+    budget_gap_guidance = _build_budget_gap_guidance(context.error_digest)
+    if budget_gap_guidance:
+        message = f"{message}- Budget recovery priority: {budget_gap_guidance}\n"
     continuation = context.continuation
     if continuation is None:
         return message
@@ -269,6 +279,49 @@ def _build_retry_instruction(context: RetryContext) -> str:
         "- Do not reread transcript lines from index 0 unless unresolved validation "
         "issues require it.\n"
         "- Stage JSON with write_output_segment before extensive redrafting.\n"
+    )
+
+
+def _build_budget_gap_guidance(error_digest: str) -> str | None:
+    """Derive concrete budget-recovery guidance from retry error digest text."""
+    normalized_digest = error_digest.strip()
+    if not normalized_digest:
+        return None
+
+    compact_match = re.search(
+        r"word_budget_out_of_range\s+total=(\d+)\s+target=(\d+)\s+range=\[(\d+),(\d+)\]",
+        normalized_digest,
+        flags=re.IGNORECASE,
+    )
+    if compact_match is None:
+        compact_match = re.search(
+            r"Word budget out of range:\s*total=(\d+)\s*target=(\d+)\s*range=\[(\d+),\s*(\d+)\]",
+            normalized_digest,
+            flags=re.IGNORECASE,
+        )
+    if compact_match is None:
+        return None
+
+    total_words = int(compact_match.group(1))
+    target_words = int(compact_match.group(2))
+    lower_bound = int(compact_match.group(3))
+    upper_bound = int(compact_match.group(4))
+
+    if total_words < lower_bound:
+        words_to_add = lower_bound - total_words
+        return (
+            f"add at least {words_to_add} dialogue words "
+            f"(current={total_words}, lower_bound={lower_bound}, target={target_words})."
+        )
+    if total_words > upper_bound:
+        words_to_remove = total_words - upper_bound
+        return (
+            f"remove at least {words_to_remove} dialogue words "
+            f"(current={total_words}, upper_bound={upper_bound}, target={target_words})."
+        )
+    return (
+        "recount full dialogue words before evaluate_script_constraints and ensure "
+        f"total remains within [{lower_bound}, {upper_bound}] around target={target_words}."
     )
 
 def _format_retry_read_ranges(read_ranges: list[tuple[int, int]]) -> str:

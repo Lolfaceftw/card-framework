@@ -219,6 +219,25 @@ def test_build_retry_instruction_includes_previous_attempt_context() -> None:
     assert "max_read_index=40" in instruction
 
 
+def test_build_retry_instruction_includes_budget_gap_guidance() -> None:
+    """Add explicit add/remove guidance when retry digest includes budget details."""
+    context = deepseek_summary.RetryContext(
+        attempt_index=1,
+        endpoint_mode="beta",
+        error_type="schema_validation",
+        error_digest=(
+            "word_budget_out_of_range total=274 target=426 "
+            "range=[404,447] delta=-152"
+        ),
+        continuation=None,
+    )
+
+    instruction = deepseek_summary._build_retry_instruction(context)  # noqa: SLF001
+
+    assert "Budget recovery priority" in instruction
+    assert "add at least 130 dialogue words" in instruction
+
+
 def test_default_model_constant_uses_reasoner() -> None:
     """Default model should be reasoner for larger output headroom."""
     assert deepseek_summary.DEEPSEEK_MODEL == "deepseek-reasoner"

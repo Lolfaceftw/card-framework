@@ -220,3 +220,36 @@ def test_stage3_runtime_output_is_captured_into_dashboard(
     assert duration_seconds == pytest.approx(4.2)
     assert any("starting inference" in line for line in fake_dashboard.lines)
     assert any("Ninja is required" in line for line in fake_dashboard.lines)
+
+
+def test_stage175_runtime_output_is_captured_into_dashboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route Stage 1.75 stdout/stderr lines into dashboard output when enabled."""
+
+    class _FakeDashboard:
+        """Capture output lines sent to dashboard logs."""
+
+        enabled = True
+
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def log(self, message: str) -> None:
+            self.lines.append(message)
+
+    fake_dashboard = _FakeDashboard()
+    monkeypatch.setattr(run_pipeline, "_ACTIVE_DASHBOARD", fake_dashboard)
+
+    with run_pipeline._capture_stage175_output_lines(enabled=True):  # noqa: SLF001
+        print(">> starting inference...")
+        sys.stderr.write("RuntimeError('Ninja is required')\n")
+
+    assert any(
+        line.startswith("[INDEXTTS2]") and "starting inference" in line
+        for line in fake_dashboard.lines
+    )
+    assert any(
+        line.startswith("[WARNING] [INDEXTTS2]") and "Ninja is required" in line
+        for line in fake_dashboard.lines
+    )
