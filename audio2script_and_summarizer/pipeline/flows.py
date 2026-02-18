@@ -666,6 +666,8 @@ def run_pipeline_modes(
             diarize_cmd.append("--no-stem")
         if args.show_deprecation_warnings:
             diarize_cmd.append("--show-deprecation-warnings")
+        if args.plain_ui:
+            diarize_cmd.append("--plain-ui")
         if args.no_progress or dashboard.enabled:
             diarize_cmd.append("--no-progress")
         if dashboard.enabled:

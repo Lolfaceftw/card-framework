@@ -294,16 +294,17 @@ class RichPipelineProgress:
         self._progress.stop()
 
 
-def _build_pipeline_progress(disable: bool) -> ProgressReporter:
+def _build_pipeline_progress(disable: bool, plain_ui: bool) -> ProgressReporter:
     """Create a stage-level progress tracker.
 
     Args:
         disable: Disable visual progress output when True.
+        plain_ui: Force plain progress rendering when True.
 
     Returns:
         A progress reporter implementation.
     """
-    if RICH_AVAILABLE:
+    if RICH_AVAILABLE and not plain_ui:
         return RichPipelineProgress(disable=disable)
 
     return TqdmPipelineProgress(
@@ -321,6 +322,7 @@ def _collect_transcript_text(
     transcript_segments: Iterable[Any],
     total_duration_seconds: float | None,
     disable_progress: bool,
+    plain_ui: bool,
 ) -> str:
     """Collect transcription text while reporting progress.
 
@@ -328,6 +330,7 @@ def _collect_transcript_text(
         transcript_segments: Iterable of Faster-Whisper segment objects.
         total_duration_seconds: Audio duration in seconds when available.
         disable_progress: Disable visual progress output when True.
+        plain_ui: Force plain progress rendering when True.
 
     Returns:
         Concatenated transcript text.
@@ -335,7 +338,7 @@ def _collect_transcript_text(
     if disable_progress:
         return "".join(segment.text for segment in transcript_segments)
 
-    if RICH_AVAILABLE:
+    if RICH_AVAILABLE and not plain_ui:
         progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -451,6 +454,12 @@ parser.add_argument(
     help="Disable stage and transcription progress bars.",
 )
 parser.add_argument(
+    "--plain-ui",
+    action="store_true",
+    default=False,
+    help="Disable rich progress rendering and use plain terminal progress output.",
+)
+parser.add_argument(
     "--log-level",
     default=os.getenv("AUDIO2SCRIPT_LOG_LEVEL", "INFO").upper(),
     type=str.upper,
@@ -468,7 +477,10 @@ language = process_language_arg(args.language, args.model_name)
 _apply_deprecation_warning_filters(
     show_deprecation_warnings=args.show_deprecation_warnings
 )
-pipeline_progress = _build_pipeline_progress(disable=args.no_progress)
+pipeline_progress = _build_pipeline_progress(
+    disable=args.no_progress,
+    plain_ui=args.plain_ui,
+)
 pipeline_progress.advance("Setup complete")
 
 if args.stemming:
@@ -563,6 +575,7 @@ full_transcript = _collect_transcript_text(
     transcript_segments=transcript_segments,
     total_duration_seconds=float(getattr(info, "duration", 0.0) or 0.0),
     disable_progress=args.no_progress,
+    plain_ui=args.plain_ui,
 )
 pipeline_progress.advance("Whisper transcription")
 
