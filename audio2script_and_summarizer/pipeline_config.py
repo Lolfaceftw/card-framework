@@ -18,6 +18,7 @@ DeepseekAgentToolMode = Literal["constraints_only", "full_agentic"]
 DeepseekLoopExhaustionPolicy = Literal["auto_salvage", "fail_fast"]
 DeepseekBudgetFailurePolicy = Literal["degraded_success", "strict_fail"]
 WpmSource = Literal["tts_preflight", "indextts", "transcript"]
+WpmCalibrationCacheMode = Literal["auto", "off", "refresh"]
 
 VALID_LOG_LEVELS: Final[set[str]] = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 VALID_LLM_PROVIDERS: Final[set[str]] = {"openai", "deepseek"}
@@ -34,6 +35,7 @@ VALID_DEEPSEEK_BUDGET_FAILURE_POLICIES: Final[set[str]] = {
     "strict_fail",
 }
 VALID_WPM_SOURCES: Final[set[str]] = {"tts_preflight", "indextts", "transcript"}
+VALID_WPM_CALIBRATION_CACHE_MODES: Final[set[str]] = {"auto", "off", "refresh"}
 
 DEFAULT_DURATION_TOLERANCE_SECONDS: Final[float] = 3.0
 DEFAULT_MAX_DURATION_CORRECTION_PASSES: Final[int] = 1
@@ -50,6 +52,7 @@ _YAML_PATH_FIELDS: Final[set[str]] = {
     "summary_json",
     "stage3_output",
     "calibration_presets_path",
+    "wpm_calibration_cache_dir",
 }
 _YAML_ALLOWED_TOP_LEVEL_FIELDS: Final[set[str]] = {
     "input",
@@ -78,6 +81,8 @@ _YAML_ALLOWED_TOP_LEVEL_FIELDS: Final[set[str]] = {
     "deepseek_budget_failure_policy",
     "wpm_source",
     "calibration_presets_path",
+    "wpm_calibration_cache_mode",
+    "wpm_calibration_cache_dir",
     "no_stem",
     "show_deprecation_warnings",
     "no_progress",
@@ -104,6 +109,7 @@ _YAML_SECTION_FIELDS: Final[dict[str, set[str]]] = {
         "deepseek_agent_loop_exhaustion_policy",
         "deepseek_budget_failure_policy",
         "wpm_source",
+        "wpm_calibration_cache_mode",
     },
     "duration": {
         "duration_tolerance_seconds",
@@ -120,6 +126,7 @@ _YAML_SECTION_FIELDS: Final[dict[str, set[str]]] = {
         "summary_json",
         "stage3_output",
         "calibration_presets_path",
+        "wpm_calibration_cache_dir",
     },
     "skip_modes": {
         "skip_a2s",
@@ -176,6 +183,7 @@ class LLMConfig:
     deepseek_agent_loop_exhaustion_policy: DeepseekLoopExhaustionPolicy
     deepseek_budget_failure_policy: DeepseekBudgetFailurePolicy
     wpm_source: WpmSource
+    wpm_calibration_cache_mode: WpmCalibrationCacheMode
 
 
 @dataclass(slots=True, frozen=True)
@@ -212,6 +220,7 @@ class PathsConfig:
     config: str | None
     voice_dir: str | None
     calibration_presets_path: str
+    wpm_calibration_cache_dir: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -332,6 +341,11 @@ class PipelineConfig:
         return self.llm.wpm_source
 
     @property
+    def wpm_calibration_cache_mode(self) -> WpmCalibrationCacheMode:
+        """Return compatibility accessor for calibration cache mode."""
+        return self.llm.wpm_calibration_cache_mode
+
+    @property
     def duration_tolerance_seconds(self) -> float:
         """Return compatibility accessor for duration tolerance."""
         return self.duration.duration_tolerance_seconds
@@ -385,6 +399,11 @@ class PipelineConfig:
     def calibration_presets_path(self) -> str:
         """Return compatibility accessor for calibration preset path."""
         return self.paths.calibration_presets_path
+
+    @property
+    def wpm_calibration_cache_dir(self) -> str:
+        """Return compatibility accessor for calibration cache directory."""
+        return self.paths.wpm_calibration_cache_dir
 
     @property
     def config(self) -> str | None:
@@ -583,6 +602,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to emotion pacing presets JSON used by --wpm-source "
             "tts_preflight."
+        ),
+    )
+    parser.add_argument(
+        "--wpm-calibration-cache-mode",
+        choices=sorted(VALID_WPM_CALIBRATION_CACHE_MODES),
+        default=argparse.SUPPRESS,
+        help=(
+            "Stage 1.75 calibration cache policy: 'auto' reuses by input "
+            "fingerprint, 'refresh' recalibrates and overwrites cache, and "
+            "'off' disables cache usage."
+        ),
+    )
+    parser.add_argument(
+        "--wpm-calibration-cache-dir",
+        default=argparse.SUPPRESS,
+        help=(
+            "Directory where Stage 1.75 calibration cache JSON files are stored "
+            "(default: artifacts/cache/wpm_calibration)."
         ),
     )
     parser.add_argument(
@@ -808,6 +845,14 @@ def load_env_overrides() -> dict[str, Any]:
         ),
         "CARD_WPM_SOURCE": ("wpm_source", _parse_env_str),
         "CARD_CALIBRATION_PRESETS_PATH": ("calibration_presets_path", _parse_env_str),
+        "CARD_WPM_CALIBRATION_CACHE_MODE": (
+            "wpm_calibration_cache_mode",
+            _parse_env_str,
+        ),
+        "CARD_WPM_CALIBRATION_CACHE_DIR": (
+            "wpm_calibration_cache_dir",
+            _parse_env_str,
+        ),
         "CARD_NO_STEM": ("no_stem", _parse_env_bool),
         "CARD_SHOW_DEPRECATION_WARNINGS": (
             "show_deprecation_warnings",
@@ -875,6 +920,8 @@ def _default_flat_values() -> dict[str, Any]:
         "calibration_presets_path": str(
             Path(__file__).resolve().with_name("emotion_pacing_presets.json")
         ),
+        "wpm_calibration_cache_mode": "auto",
+        "wpm_calibration_cache_dir": "artifacts/cache/wpm_calibration",
         "no_stem": False,
         "show_deprecation_warnings": False,
         "no_progress": False,
@@ -990,6 +1037,12 @@ def _normalize_values(flat_values: dict[str, Any]) -> dict[str, Any]:
     normalized["calibration_presets_path"] = str(
         normalized.get("calibration_presets_path")
     ).strip()
+    normalized["wpm_calibration_cache_mode"] = str(
+        normalized.get("wpm_calibration_cache_mode")
+    ).strip().lower()
+    normalized["wpm_calibration_cache_dir"] = str(
+        normalized.get("wpm_calibration_cache_dir")
+    ).strip()
     normalized["no_stem"] = _to_bool(normalized.get("no_stem"), "no_stem")
     normalized["show_deprecation_warnings"] = _to_bool(
         normalized.get("show_deprecation_warnings"),
@@ -1036,6 +1089,13 @@ def _validate_values(flat_values: dict[str, Any]) -> None:
         raise ConfigValidationError(
             "Field 'wpm_source' must be tts_preflight, indextts, or transcript."
         )
+    if (
+        flat_values["wpm_calibration_cache_mode"]
+        not in VALID_WPM_CALIBRATION_CACHE_MODES
+    ):
+        raise ConfigValidationError(
+            "Field 'wpm_calibration_cache_mode' must be auto, off, or refresh."
+        )
     if flat_values["heartbeat_seconds"] < 0:
         raise ConfigValidationError("--heartbeat-seconds must be >= 0.")
     if flat_values["deepseek_max_completion_tokens"] <= 0:
@@ -1071,6 +1131,10 @@ def _validate_values(flat_values: dict[str, Any]) -> None:
         raise ConfigValidationError("Field 'mistral_model_id' cannot be empty.")
     if not flat_values["calibration_presets_path"]:
         raise ConfigValidationError("Field 'calibration_presets_path' cannot be empty.")
+    if not flat_values["wpm_calibration_cache_dir"]:
+        raise ConfigValidationError(
+            "Field 'wpm_calibration_cache_dir' cannot be empty."
+        )
 
 
 def _build_dataclass_config(flat_values: dict[str, Any]) -> PipelineConfig:
@@ -1104,6 +1168,7 @@ def _build_dataclass_config(flat_values: dict[str, Any]) -> PipelineConfig:
             ],
             deepseek_budget_failure_policy=flat_values["deepseek_budget_failure_policy"],
             wpm_source=flat_values["wpm_source"],
+            wpm_calibration_cache_mode=flat_values["wpm_calibration_cache_mode"],
         ),
         duration=DurationConfig(
             duration_tolerance_seconds=flat_values["duration_tolerance_seconds"],
@@ -1124,6 +1189,7 @@ def _build_dataclass_config(flat_values: dict[str, Any]) -> PipelineConfig:
             config=flat_values["config"],
             voice_dir=flat_values["voice_dir"],
             calibration_presets_path=flat_values["calibration_presets_path"],
+            wpm_calibration_cache_dir=flat_values["wpm_calibration_cache_dir"],
         ),
     )
 

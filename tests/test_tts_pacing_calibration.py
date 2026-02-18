@@ -169,3 +169,24 @@ def test_estimate_summary_duration_seconds(tmp_path: Path) -> None:
     )
 
     assert duration == pytest.approx(5.1, rel=1e-4)
+
+
+def test_tts_pacing_calibration_serialization_round_trip() -> None:
+    """Round-trip ``TTSPacingCalibration`` through ``to_dict`` and ``from_dict``."""
+    presets = tts_pacing_calibration.load_emotion_pacing_presets(None)
+    calibration = tts_pacing_calibration.TTSPacingCalibration(
+        presets=presets,
+        seconds_per_word_by_speaker_preset={
+            "SPEAKER_00": {"neutral": 0.5, "excited_fast": 0.4},
+            "SPEAKER_01": {"neutral": 1.0, "excited_fast": 0.8},
+        },
+        speaker_default_seconds_per_word={"SPEAKER_00": 0.5, "SPEAKER_01": 1.0},
+        global_default_seconds_per_word=0.75,
+    )
+
+    payload = calibration.to_dict()
+    restored = tts_pacing_calibration.TTSPacingCalibration.from_dict(payload)
+
+    assert restored.global_default_seconds_per_word == pytest.approx(0.75)
+    assert restored.get_seconds_per_word("SPEAKER_00", "neutral") == pytest.approx(0.5)
+    assert restored.get_seconds_per_word("SPEAKER_01", "neutral") == pytest.approx(1.0)

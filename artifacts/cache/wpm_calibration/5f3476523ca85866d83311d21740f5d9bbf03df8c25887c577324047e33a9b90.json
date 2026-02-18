@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "fingerprint": "5f3476523ca85866d83311d21740f5d9bbf03df8c25887c577324047e33a9b90",
+  "generated_at_utc": "2026-02-18T06:51:14Z",
+  "calibration": {
+    "presets": [
+      {
+        "name": "empathetic",
+        "emo_text": "Empathetic, supportive, warm and thoughtful",
+        "emo_alpha": 0.65,
+        "calibration_text": "I understand why this situation can feel difficult. Let us walk through it with a warm and thoughtful tone.",
+        "keywords": [
+          "empathetic",
+          "supportive",
+          "warm",
+          "thoughtful",
+          "gentle"
+        ]
+      },
+      {
+        "name": "excited_fast",
+        "emo_text": "Excited, energetic, fast-paced",
+        "emo_alpha": 0.7,
+        "calibration_text": "This is exciting news and everything is moving quickly. The energy is high and the pace feels lively.",
+        "keywords": [
+          "excited",
+          "energetic",
+          "fast",
+          "upbeat",
+          "lively"
+        ]
+      },
+      {
+        "name": "inquisitive",
+        "emo_text": "Curious, inquisitive, reflective",
+        "emo_alpha": 0.6,
+        "calibration_text": "That is an interesting question and it is worth exploring. Let us think through the key details together.",
+        "keywords": [
+          "curious",
+          "inquisitive",
+          "reflective",
+          "questioning"
+        ]
+      },
+      {
+        "name": "neutral",
+        "emo_text": "Neutral, clear, steady delivery",
+        "emo_alpha": 0.6,
+        "calibration_text": "Today we are reviewing a practical topic. The explanation should sound clear and balanced.",
+        "keywords": [
+          "neutral",
+          "clear",
+          "steady",
+          "balanced"
+        ]
+      },
+      {
+        "name": "serious_slow",
+        "emo_text": "Serious, deliberate, measured and slower",
+        "emo_alpha": 0.65,
+        "calibration_text": "This section requires careful reasoning and a measured pace. Each point should be delivered deliberately.",
+        "keywords": [
+          "serious",
+          "deliberate",
+          "measured",
+          "slow",
+          "calm"
+        ]
+      }
+    ],
+    "seconds_per_word_by_speaker_preset": {
+      "SPEAKER_00": {
+        "empathetic": 0.2731578947368421,
+        "excited_fast": 0.24061111111111114,
+        "inquisitive": 0.2857222222222222,
+        "neutral": 0.3765,
+        "serious_slow": 0.3761333333333334
+      },
+      "SPEAKER_01": {
+        "empathetic": 0.28110526315789475,
+        "excited_fast": 0.298,
+        "inquisitive": 0.3005555555555556,
+        "neutral": 0.47435714285714287,
+        "serious_slow": 0.4419333333333333
+      },
+      "SPEAKER_02": {
+        "empathetic": 0.2645789473684211,
+        "excited_fast": 0.26894444444444443,
+        "inquisitive": 0.31155555555555553,
+        "neutral": 0.3831428571428571,
+        "serious_slow": 0.3661333333333333
+      },
+      "SPEAKER_03": {
+        "empathetic": 0.25605263157894737,
+        "excited_fast": 0.27605555555555555,
+        "inquisitive": 0.2902222222222222,
+        "neutral": 0.32092857142857145,
+        "serious_slow": 0.38853333333333334
+      }
+    },
+    "speaker_default_seconds_per_word": {
+      "SPEAKER_00": 0.3765,
+      "SPEAKER_01": 0.47435714285714287,
+      "SPEAKER_02": 0.3831428571428571,
+      "SPEAKER_03": 0.32092857142857145
+    },
+    "global_default_seconds_per_word": 0.38873214285714286
+  }
+}

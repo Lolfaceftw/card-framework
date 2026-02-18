@@ -45,6 +45,8 @@ You must provide:
 By default, the pipeline runs an emotion-aware IndexTTS2 preflight calibration
 pass on extracted speaker samples to estimate WPM, then converts your target
 minutes into a strict word budget for the summarizer.
+Stage 1.75 now reuses calibration results from an input-keyed cache by default
+to avoid repeating identical preflight work across runs.
 You can optionally derive WPM directly from transcript timestamps with
 `--wpm-source transcript`.
 
@@ -113,6 +115,8 @@ uv run --extra audio2script python -m audio2script_and_summarizer.run_pipeline \
 | `--duration-tolerance-seconds` | Allowed Stage 3 duration delta in seconds | `3.0` |
 | `--max-duration-correction-passes` | Number of closed-loop Stage 2/3 correction passes | `1` |
 | `--calibration-presets-path` | Emotion preset config JSON for TTS preflight | `audio2script_and_summarizer/emotion_pacing_presets.json` |
+| `--wpm-calibration-cache-mode` | Stage 1.75 cache policy (`auto`, `refresh`, `off`) | `auto` |
+| `--wpm-calibration-cache-dir` | Stage 1.75 calibration cache directory | `artifacts/cache/wpm_calibration` |
 | `--llm-provider` | `openai` or `deepseek` | Prompted |
 | `--word-budget-tolerance` | Allowed deviation ratio (e.g. 0.05 = +/-5%) | `0.05` |
 | `--skip-a2s` | Skip Stage 1/1.5 and choose an existing transcript JSON for direct DeepSeek summarization | `false` |

@@ -40,6 +40,8 @@ def test_build_pipeline_config_defaults_to_plain_ui() -> None:
     """Run in plain console mode by default unless UI opt-in is provided."""
     cfg = build_pipeline_config([])
     assert cfg.plain_ui is True
+    assert cfg.wpm_calibration_cache_mode == "auto"
+    assert cfg.wpm_calibration_cache_dir == "artifacts/cache/wpm_calibration"
 
 
 def test_build_pipeline_config_requires_cli_flag_for_experimental_ui(
@@ -147,3 +149,17 @@ def test_build_pipeline_config_rejects_conflicting_skip_modes() -> None:
     """Fail validation when mutually exclusive skip flags are both enabled."""
     with pytest.raises(ConfigValidationError):
         build_pipeline_config(["--skip-a2s", "--skip-a2s-summary"])
+
+
+def test_build_pipeline_config_parses_stage175_cache_cli_values() -> None:
+    """Accept explicit Stage 1.75 cache controls from CLI flags."""
+    cfg = build_pipeline_config(
+        [
+            "--wpm-calibration-cache-mode",
+            "refresh",
+            "--wpm-calibration-cache-dir",
+            "tmp/calibration-cache",
+        ]
+    )
+    assert cfg.wpm_calibration_cache_mode == "refresh"
+    assert cfg.wpm_calibration_cache_dir == "tmp/calibration-cache"

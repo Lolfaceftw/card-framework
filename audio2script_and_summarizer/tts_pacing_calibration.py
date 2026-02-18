@@ -16,7 +16,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Callable, Literal, Mapping, TypedDict
 
 from pydub import AudioSegment
 
@@ -41,6 +41,15 @@ class EmotionPacingPresetPayload(TypedDict):
     emo_alpha: float
     calibration_text: str
     keywords: list[str]
+
+
+class TTSPacingCalibrationPayload(TypedDict):
+    """Represent serialized ``TTSPacingCalibration`` payload."""
+
+    presets: list[EmotionPacingPresetPayload]
+    seconds_per_word_by_speaker_preset: dict[str, dict[str, float]]
+    speaker_default_seconds_per_word: dict[str, float]
+    global_default_seconds_per_word: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -110,6 +119,170 @@ class TTSPacingCalibration:
     seconds_per_word_by_speaker_preset: dict[str, dict[str, float]]
     speaker_default_seconds_per_word: dict[str, float]
     global_default_seconds_per_word: float
+
+    def to_dict(self) -> TTSPacingCalibrationPayload:
+        """Serialize calibration payload into JSON-safe primitives.
+
+        Returns:
+            Dictionary payload suitable for JSON persistence.
+        """
+        presets_payload: list[EmotionPacingPresetPayload] = []
+        for preset_name, preset in sorted(self.presets.items()):
+            presets_payload.append(
+                EmotionPacingPresetPayload(
+                    name=preset_name,
+                    emo_text=preset.emo_text,
+                    emo_alpha=float(preset.emo_alpha),
+                    calibration_text=preset.calibration_text,
+                    keywords=list(preset.keywords),
+                )
+            )
+        return TTSPacingCalibrationPayload(
+            presets=presets_payload,
+            seconds_per_word_by_speaker_preset={
+                speaker: {
+                    preset_name: float(seconds_per_word)
+                    for preset_name, seconds_per_word in sorted(preset_rates.items())
+                }
+                for speaker, preset_rates in sorted(
+                    self.seconds_per_word_by_speaker_preset.items()
+                )
+            },
+            speaker_default_seconds_per_word={
+                speaker: float(seconds_per_word)
+                for speaker, seconds_per_word in sorted(
+                    self.speaker_default_seconds_per_word.items()
+                )
+            },
+            global_default_seconds_per_word=float(self.global_default_seconds_per_word),
+        )
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> TTSPacingCalibration:
+        """Deserialize calibration payload from ``to_dict`` representation.
+
+        Args:
+            payload: Raw dictionary payload loaded from JSON.
+
+        Returns:
+            Reconstructed calibration object.
+
+        Raises:
+            ValueError: Payload format is invalid or incomplete.
+        """
+        raw_presets = payload.get("presets")
+        if not isinstance(raw_presets, list):
+            raise ValueError("Field 'presets' must be a list.")
+        presets: dict[str, EmotionPacingPreset] = {}
+        for raw_preset in raw_presets:
+            if not isinstance(raw_preset, dict):
+                raise ValueError("Each preset payload must be an object.")
+            name = str(raw_preset.get("name", "")).strip().lower()
+            emo_text = str(raw_preset.get("emo_text", "")).strip()
+            calibration_text = str(raw_preset.get("calibration_text", "")).strip()
+            if not name or not emo_text or not calibration_text:
+                raise ValueError("Preset payload is missing required non-empty fields.")
+            try:
+                emo_alpha = float(raw_preset.get("emo_alpha", 0.6))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Field 'emo_alpha' must be numeric.") from exc
+            raw_keywords = raw_preset.get("keywords", [])
+            if not isinstance(raw_keywords, list):
+                raise ValueError("Field 'keywords' must be a list.")
+            keywords = tuple(
+                str(keyword).strip().lower()
+                for keyword in raw_keywords
+                if str(keyword).strip()
+            )
+            presets[name] = EmotionPacingPreset(
+                name=name,
+                emo_text=emo_text,
+                emo_alpha=max(0.0, min(1.0, emo_alpha)),
+                calibration_text=calibration_text,
+                keywords=keywords,
+            )
+        if not presets:
+            raise ValueError("Field 'presets' cannot be empty.")
+
+        raw_seconds_mapping = payload.get("seconds_per_word_by_speaker_preset")
+        if not isinstance(raw_seconds_mapping, dict):
+            raise ValueError(
+                "Field 'seconds_per_word_by_speaker_preset' must be an object."
+            )
+        seconds_per_word_by_speaker_preset: dict[str, dict[str, float]] = {}
+        for raw_speaker, raw_preset_rates in raw_seconds_mapping.items():
+            speaker = str(raw_speaker).strip()
+            if not speaker:
+                continue
+            if not isinstance(raw_preset_rates, dict):
+                raise ValueError("Speaker preset rates must be an object.")
+            parsed_rates: dict[str, float] = {}
+            for raw_preset_name, raw_seconds_per_word in raw_preset_rates.items():
+                preset_name = str(raw_preset_name).strip()
+                if not preset_name:
+                    continue
+                try:
+                    seconds_per_word = float(raw_seconds_per_word)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Speaker preset seconds-per-word values must be numeric."
+                    ) from exc
+                if seconds_per_word <= 0.0:
+                    raise ValueError(
+                        "Speaker preset seconds-per-word values must be positive."
+                    )
+                parsed_rates[preset_name] = seconds_per_word
+            if parsed_rates:
+                seconds_per_word_by_speaker_preset[speaker] = parsed_rates
+        if not seconds_per_word_by_speaker_preset:
+            raise ValueError("No valid speaker preset rates in payload.")
+
+        raw_speaker_defaults = payload.get("speaker_default_seconds_per_word")
+        if not isinstance(raw_speaker_defaults, dict):
+            raise ValueError("Field 'speaker_default_seconds_per_word' must be an object.")
+        speaker_default_seconds_per_word: dict[str, float] = {}
+        for raw_speaker, raw_seconds_per_word in raw_speaker_defaults.items():
+            speaker = str(raw_speaker).strip()
+            if not speaker:
+                continue
+            try:
+                seconds_per_word = float(raw_seconds_per_word)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Speaker default seconds-per-word values must be numeric."
+                ) from exc
+            if seconds_per_word <= 0.0:
+                raise ValueError(
+                    "Speaker default seconds-per-word values must be positive."
+                )
+            speaker_default_seconds_per_word[speaker] = seconds_per_word
+        if not speaker_default_seconds_per_word:
+            raise ValueError("No valid speaker default rates in payload.")
+
+        raw_global_default_seconds_per_word = payload.get(
+            "global_default_seconds_per_word"
+        )
+        if not isinstance(raw_global_default_seconds_per_word, (int, float, str)):
+            raise ValueError(
+                "Field 'global_default_seconds_per_word' must be numeric."
+            )
+        try:
+            global_default_seconds_per_word = float(
+                raw_global_default_seconds_per_word
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Field 'global_default_seconds_per_word' must be numeric."
+            ) from exc
+        if global_default_seconds_per_word <= 0.0:
+            raise ValueError("Field 'global_default_seconds_per_word' must be positive.")
+
+        return cls(
+            presets=presets,
+            seconds_per_word_by_speaker_preset=seconds_per_word_by_speaker_preset,
+            speaker_default_seconds_per_word=speaker_default_seconds_per_word,
+            global_default_seconds_per_word=global_default_seconds_per_word,
+        )
 
     def get_seconds_per_word(self, speaker: str, preset_name: str) -> float:
         """Resolve seconds-per-word with robust fallback order.
