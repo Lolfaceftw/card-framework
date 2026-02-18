@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, cast
@@ -16,6 +18,20 @@ ERROR_DIGEST_MAX_CHARS = 280
 TOOL_EVENT_DETAILS_MAX_CHARS = 1200
 CONTEXT_WINDOW_ROLLOVER_LEFT_RATIO = 0.30
 DEEPSEEK_STREAM_EVENT_PREFIX = "[DEEPSEEK_STREAM] "
+DEEPSEEK_STREAM_OUTPUT_MODE_ENV = "CARD_DEEPSEEK_STREAM_OUTPUT"
+
+StreamOutputMode = Literal["auto", "marker", "plain"]
+
+
+@dataclass(slots=True)
+class _PlainStreamRenderState:
+    """Track current plain-stream rendering state across token events."""
+
+    active_phase: str | None = None
+    line_open: bool = False
+
+
+_PLAIN_STREAM_RENDER_STATE = _PlainStreamRenderState()
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,9 +62,108 @@ def _error_digest(error: Exception) -> str:
 
 
 def _emit_deepseek_stream_event(payload: dict[str, object]) -> None:
-    """Emit a structured stream event for the parent pipeline dashboard."""
-    marker = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    print(f"{DEEPSEEK_STREAM_EVENT_PREFIX}{marker}", flush=True)
+    """Emit stream event as marker JSON or plain coalesced token text.
+
+    Marker JSON is retained for non-TTY/piped output (used by pipeline dashboard
+    parsing). Plain mode is used for interactive terminals so token fragments are
+    rendered as connected streaming text.
+    """
+    output_mode = _resolve_stream_output_mode()
+    if _should_emit_marker(output_mode):
+        marker = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        print(f"{DEEPSEEK_STREAM_EVENT_PREFIX}{marker}", flush=True)
+        return
+    _emit_plain_stream_event(payload)
+
+
+def _resolve_stream_output_mode() -> StreamOutputMode:
+    """Resolve stream output mode from environment and terminal capabilities."""
+    raw_mode = os.getenv(DEEPSEEK_STREAM_OUTPUT_MODE_ENV, "auto").strip().lower()
+    if raw_mode in {"marker", "plain", "auto"}:
+        return cast(StreamOutputMode, raw_mode)
+    return "auto"
+
+
+def _should_emit_marker(mode: StreamOutputMode) -> bool:
+    """Return True when stream events should be printed as marker JSON lines."""
+    if mode == "marker":
+        return True
+    if mode == "plain":
+        return False
+    return not sys.stdout.isatty()
+
+
+def _plain_write(text: str) -> None:
+    """Write raw text to stdout and flush immediately for streaming UX."""
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def _plain_close_line_if_open() -> None:
+    """Close any in-progress streaming line before status/event output."""
+    if not _PLAIN_STREAM_RENDER_STATE.line_open:
+        return
+    _plain_write("\n")
+    _PLAIN_STREAM_RENDER_STATE.line_open = False
+    _PLAIN_STREAM_RENDER_STATE.active_phase = None
+
+
+def _emit_plain_stream_event(payload: dict[str, object]) -> None:
+    """Render stream events as human-readable terminal output."""
+    event_name = str(payload.get("event", "")).strip().lower()
+    if not event_name:
+        return
+
+    if event_name == "start":
+        model_name = str(payload.get("model", "deepseek-reasoner")).strip()
+        _plain_close_line_if_open()
+        _plain_write(f"[DEEPSEEK STATUS] Streaming response from {model_name}\n")
+        return
+
+    if event_name == "token":
+        text_value = payload.get("text")
+        if not isinstance(text_value, str) or not text_value:
+            return
+        phase = str(payload.get("phase", "answer")).strip().lower()
+        if phase in {"reasoning", "answer"}:
+            if (
+                not _PLAIN_STREAM_RENDER_STATE.line_open
+                or _PLAIN_STREAM_RENDER_STATE.active_phase != phase
+            ):
+                _plain_close_line_if_open()
+                phase_label = "REASONING" if phase == "reasoning" else "ANSWER"
+                _plain_write(f"[DEEPSEEK {phase_label}] ")
+                _PLAIN_STREAM_RENDER_STATE.line_open = True
+                _PLAIN_STREAM_RENDER_STATE.active_phase = phase
+            _plain_write(text_value)
+            return
+
+        _plain_close_line_if_open()
+        phase_label = phase.upper() if phase else "TOKEN"
+        _plain_write(f"[DEEPSEEK {phase_label}] {text_value}\n")
+        return
+
+    if event_name == "summary_json_ready":
+        output_path = str(payload.get("path", "")).strip()
+        _plain_close_line_if_open()
+        if output_path:
+            _plain_write(
+                "[DEEPSEEK STATUS] Summary JSON ready; finalizing subprocess "
+                f"(output={output_path}).\n"
+            )
+        else:
+            _plain_write(
+                "[DEEPSEEK STATUS] Summary JSON ready; finalizing subprocess.\n"
+            )
+        return
+
+    if event_name == "done":
+        _plain_close_line_if_open()
+        _plain_write("[DEEPSEEK STATUS] Stream finished for current DeepSeek call.\n")
+        return
+
+    if event_name == "context_usage":
+        return
 
 
 def _should_persist_stream_event(payload: dict[str, object]) -> bool:
@@ -440,4 +555,3 @@ def _stream_assistant_turn(
         tool_calls=normalized_tool_calls,
         usage_total_tokens=usage_total_tokens,
     )
-
