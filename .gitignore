@@ -117,8 +117,10 @@ models/*
 /tmp/
 /deepseek_chat_logs/
 /artifacts/quality/
+/artifacts/cache/
 /voice-cloner-and-interjector/indextts/utils/maskgct/models/tts/maskgct/ckpt/
 /voice-cloner-and-interjector/assets/IndexTTS2.mp4
+/uv
 
 # Generated artifacts
 *.agent_buffer
