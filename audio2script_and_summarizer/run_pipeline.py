@@ -1,4 +1,3 @@
-import argparse
 import contextlib
 import io
 import json
@@ -23,6 +22,7 @@ if __package__:
         route_deepseek_stream_event as _route_deepseek_stream_event,
     )
     from .logging_utils import configure_logging
+    from .pipeline_config import ConfigValidationError, build_pipeline_config
 else:
     # Allow `python path/to/run_pipeline.py` by bootstrapping repo root into sys.path.
     repo_root = Path(__file__).resolve().parent.parent
@@ -34,6 +34,10 @@ else:
         route_deepseek_stream_event as _route_deepseek_stream_event,
     )
     from audio2script_and_summarizer.logging_utils import configure_logging
+    from audio2script_and_summarizer.pipeline_config import (
+        ConfigValidationError,
+        build_pipeline_config,
+    )
 
 torch_module: ModuleType | None
 try:
@@ -2430,240 +2434,30 @@ def _run_stage3_from_summary(
     )
 
 
-def main() -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    forced_llm_provider: Literal["deepseek"] | None = None,
+) -> int:
     """Run CARD Audio2Script, summarization, and Stage 3 resynthesis pipeline."""
-    parser = argparse.ArgumentParser(description="CARD Audio2Script and Summarizer")
-    parser.add_argument("--input", required=False, help="Path to input podcast audio")
-    parser.add_argument(
-        "--device",
-        default=DEFAULT_DEVICE,
-        help=f"Device to run on (cuda/cpu, default: {DEFAULT_DEVICE})",
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    requested_experimental_ui = "--experimental-ui" in raw_argv
+    requested_plain_ui = "--plain-ui" in raw_argv
+    config_error_rich = (
+        RICH_AVAILABLE
+        and requested_experimental_ui
+        and not requested_plain_ui
+        and sys.stdout.isatty()
     )
-    parser.add_argument(
-        "--openai-key",
-        "--api-key",
-        dest="openai_key",
-        help="OpenAI API key (alias: --api-key)",
-    )
-    parser.add_argument(
-        "--llm-provider",
-        choices=["openai", "deepseek"],
-        default=None,
-        help="LLM provider to use (openai or deepseek). If omitted, prompt at runtime.",
-    )
-    parser.add_argument(
-        "--target-minutes",
-        type=float,
-        default=None,
-        help="Target summary duration in minutes (prompted if omitted).",
-    )
-    parser.add_argument(
-        "--duration-tolerance-seconds",
-        type=float,
-        default=DEFAULT_DURATION_TOLERANCE_SECONDS,
-        help=(
-            "Allowed absolute delta between target and measured Stage 3 duration "
-            f"in seconds (default: {DEFAULT_DURATION_TOLERANCE_SECONDS})."
-        ),
-    )
-    parser.add_argument(
-        "--max-duration-correction-passes",
-        type=int,
-        default=DEFAULT_MAX_DURATION_CORRECTION_PASSES,
-        help=(
-            "Maximum closed-loop duration correction passes that re-run Stage 2/3 "
-            f"(default: {DEFAULT_MAX_DURATION_CORRECTION_PASSES})."
-        ),
-    )
-    parser.add_argument(
-        "--word-budget-tolerance",
-        type=float,
-        default=0.05,
-        help="Tolerance ratio for word budget (default: 0.05 = +/-5%%)",
-    )
-    parser.add_argument(
-        "--voice-dir",
-        default=None,
-        help="Directory for speaker samples (default: <input_basename>_voices)",
-    )
-    parser.add_argument(
-        "--skip-a2s",
-        action="store_true",
-        default=False,
-        help=(
-            "Skip Stage 1/1.5 Audio2Script processing and jump to DeepSeek "
-            "summarization using a selected existing transcript JSON."
-        ),
-    )
-    parser.add_argument(
-        "--skip-a2s-summary",
-        action="store_true",
-        default=False,
-        help=(
-            "Skip Stage 1/1.5/1.75/2 and run Stage 3 voice cloning + interjections "
-            "using an existing summary JSON."
-        ),
-    )
-    parser.add_argument(
-        "--skip-a2s-search-root",
-        default=".",
-        help=(
-            "Root directory used by --skip-a2s when searching for transcript "
-            "JSON files (default: current directory)."
-        ),
-    )
-    parser.add_argument(
-        "--summary-json",
-        default=None,
-        help=(
-            "Optional Stage 2 summary JSON path. If omitted with --skip-a2s-summary, "
-            "the newest *_summary.json under --skip-a2s-search-root is used."
-        ),
-    )
-    parser.add_argument(
-        "--stage3-output",
-        default=None,
-        help="Optional final Stage 3 output WAV path.",
-    )
-    parser.add_argument(
-        "--skip-stage3",
-        action="store_true",
-        default=False,
-        help="Skip Stage 3 voice cloning and interjection synthesis.",
-    )
-    parser.add_argument(
-        "--interjection-max-ratio",
-        type=float,
-        default=0.35,
-        help="Maximum ratio of eligible segments that receive interjections.",
-    )
-    parser.add_argument(
-        "--mistral-model-id",
-        default="mistralai/Mistral-7B-Instruct-v0.3",
-        help="Hugging Face model id for Stage 3 interjection planning.",
-    )
-    parser.add_argument(
-        "--mistral-max-new-tokens",
-        type=int,
-        default=64,
-        help="Maximum generation tokens per Stage 3 interjection-planner call.",
-    )
-    parser.add_argument(
-        "--deepseek-max-completion-tokens",
-        type=int,
-        default=DEFAULT_DEEPSEEK_HARD_CEILING_TOKENS,
-        help=(
-            "Hard output token ceiling forwarded to DeepSeek summarizer "
-            f"(default: {DEFAULT_DEEPSEEK_HARD_CEILING_TOKENS})."
-        ),
-    )
-    parser.add_argument(
-        "--deepseek-agent-tool-mode",
-        choices=["constraints_only", "full_agentic"],
-        default="full_agentic",
-        help=(
-            "DeepSeek summarizer agentic tool profile: constraints_only "
-            "or full_agentic (default: full_agentic)."
-        ),
-    )
-    parser.add_argument(
-        "--deepseek-agent-read-max-lines",
-        type=int,
-        default=120,
-        help=(
-            "Maximum transcript lines returned in each DeepSeek read tool call "
-            "(default: 120)."
-        ),
-    )
-    parser.add_argument(
-        "--deepseek-agent-max-tool-rounds",
-        type=int,
-        default=DEFAULT_DEEPSEEK_AGENT_MAX_TOOL_ROUNDS,
-        help=(
-            "DeepSeek max agentic tool rounds per attempt. Use 0 for adaptive "
-            f"auto-scaling (default: {DEFAULT_DEEPSEEK_AGENT_MAX_TOOL_ROUNDS})."
-        ),
-    )
-    parser.add_argument(
-        "--deepseek-agent-loop-exhaustion-policy",
-        choices=["auto_salvage", "fail_fast"],
-        default=DEFAULT_DEEPSEEK_AGENT_LOOP_EXHAUSTION_POLICY,
-        help=(
-            "DeepSeek tool-loop exhaustion policy forwarded to Stage 2 "
-            "(default: auto_salvage)."
-        ),
-    )
-    parser.add_argument(
-        "--deepseek-budget-failure-policy",
-        choices=["degraded_success", "strict_fail"],
-        default=DEFAULT_DEEPSEEK_BUDGET_FAILURE_POLICY,
-        help=(
-            "DeepSeek budget failure policy forwarded to Stage 2 "
-            "(default: degraded_success)."
-        ),
-    )
-    parser.add_argument(
-        "--wpm-source",
-        choices=["tts_preflight", "indextts", "transcript"],
-        default="tts_preflight",
-        help=(
-            "Source for Stage 1.75 word-rate estimation: "
-            "'tts_preflight' runs emotion-aware IndexTTS preflight calibration "
-            "(default), 'transcript' computes from diarized transcript timestamps. "
-            "'indextts' is kept as a compatibility alias for 'tts_preflight'."
-        ),
-    )
-    parser.add_argument(
-        "--calibration-presets-path",
-        default=str(
-            Path(__file__).resolve().with_name("emotion_pacing_presets.json")
-        ),
-        help=(
-            "Path to emotion pacing presets JSON used by --wpm-source "
-            "tts_preflight."
-        ),
-    )
-    parser.add_argument(
-        "--no-stem",
-        action="store_true",
-        default=False,
-        help="Skip Demucs source separation in diarization stage.",
-    )
-    parser.add_argument(
-        "--show-deprecation-warnings",
-        action="store_true",
-        default=False,
-        help="Show third-party deprecation warnings from diarization dependencies.",
-    )
-    parser.add_argument(
-        "--no-progress",
-        action="store_true",
-        default=False,
-        help="Disable progress bars in child pipeline stages.",
-    )
-    parser.add_argument(
-        "--plain-ui",
-        action="store_true",
-        default=False,
-        help="Disable rich terminal UI even when rich is installed.",
-    )
-    parser.add_argument(
-        "--heartbeat-seconds",
-        type=float,
-        default=DEFAULT_HEARTBEAT_SECONDS,
-        help=(
-            "Heartbeat interval for status updates during silent child process periods "
-            "(dashboard mode only)."
-        ),
-    )
-    parser.add_argument(
-        "--log-level",
-        default=os.getenv("AUDIO2SCRIPT_LOG_LEVEL", "INFO").upper(),
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        type=str.upper,
-        help="Console log level propagated to child processes.",
-    )
-    args = parser.parse_args()
+    try:
+        args = build_pipeline_config(
+            raw_argv,
+            forced_llm_provider=forced_llm_provider,
+        )
+    except ConfigValidationError as exc:
+        _print_error(f"[ERROR] {exc}", use_rich=config_error_rich)
+        return 1
+
     log_file = configure_logging(
         level=args.log_level,
         component="run_pipeline",
@@ -2671,63 +2465,6 @@ def main() -> int:
     )
     os.environ["AUDIO2SCRIPT_LOG_LEVEL"] = args.log_level
     use_rich = RICH_AVAILABLE and not args.plain_ui and sys.stdout.isatty()
-    if args.heartbeat_seconds < 0:
-        _print_error("[ERROR] --heartbeat-seconds must be >= 0.", use_rich=use_rich)
-        return 1
-    if args.deepseek_max_completion_tokens <= 0:
-        _print_error(
-            "[ERROR] --deepseek-max-completion-tokens must be > 0.",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.deepseek_agent_read_max_lines <= 0:
-        _print_error(
-            "[ERROR] --deepseek-agent-read-max-lines must be > 0.",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.deepseek_agent_max_tool_rounds < 0:
-        _print_error(
-            "[ERROR] --deepseek-agent-max-tool-rounds must be >= 0.",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.duration_tolerance_seconds < 0:
-        _print_error(
-            "[ERROR] --duration-tolerance-seconds must be >= 0.",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.max_duration_correction_passes < 0:
-        _print_error(
-            "[ERROR] --max-duration-correction-passes must be >= 0.",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.interjection_max_ratio < 0 or args.interjection_max_ratio > 1:
-        _print_error(
-            "[ERROR] --interjection-max-ratio must be within [0, 1].",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.mistral_max_new_tokens <= 0:
-        _print_error(
-            "[ERROR] --mistral-max-new-tokens must be > 0.",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.skip_a2s and args.skip_a2s_summary:
-        _print_error(
-            "[ERROR] --skip-a2s and --skip-a2s-summary are mutually exclusive.",
-            use_rich=use_rich,
-        )
-        return 1
-    if args.skip_a2s_summary and args.skip_stage3:
-        _print_error(
-            "[ERROR] --skip-a2s-summary requires Stage 3 and cannot be used with --skip-stage3.",
-            use_rich=use_rich,
-        )
-        return 1
 
     dashboard = _PipelineDashboard(enabled=use_rich)
     global _ACTIVE_DASHBOARD
