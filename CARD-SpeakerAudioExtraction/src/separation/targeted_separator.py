@@ -21,7 +21,6 @@ import torch
 import torchaudio
 
 from .crossfade import concatenate_with_crossfade
-from .diarization_separator import DiarizationSegment, OverlapRegion
 from .enrollment import EnrollmentEmbeddingExtractor, SpeakerAssigner
 from .separator import SpeechSeparator
 from .utils import ensure_output_directory
@@ -92,9 +91,9 @@ class TargetedSpeakerSeparator:
         self.speaker_assigner = SpeakerAssigner(threshold=similarity_threshold)
         
         # Lazy-load SepFormer only when needed
-        self.sepformer = None
+        self.sepformer: Optional[SpeechSeparator] = None
         
-        logger.info(f"Initialized TargetedSpeakerSeparator")
+        logger.info("Initialized TargetedSpeakerSeparator")
         logger.info(f"  Sample rate: {sample_rate}Hz")
         logger.info(f"  Similarity threshold: {similarity_threshold}")
         logger.info(f"  Cross-fade: {crossfade_ms}ms")
@@ -178,7 +177,7 @@ class TargetedSpeakerSeparator:
         # Sort segments by start time
         sorted_segments = sorted(segments, key=lambda s: s['start'])
         
-        overlaps = []
+        overlaps: List[dict] = []
         active_segments: List[dict] = []
         
         # Create events for segment starts and ends
@@ -254,7 +253,7 @@ class TargetedSpeakerSeparator:
         """
         logger.info("Extracting non-overlapping segments...")
         
-        speaker_segments = {}
+        speaker_segments: Dict[str, List[np.ndarray]] = {}
         
         for segment in segments:
             speaker = segment['speaker']
@@ -361,6 +360,8 @@ class TargetedSpeakerSeparator:
         window_tensor = torch.from_numpy(window).float().unsqueeze(0)
         
         # Run separation using the public method
+        if self.sepformer is None:
+            raise RuntimeError("SepFormer model is not loaded.")
         separated = self.sepformer._separate_chunk(window_tensor)
         
         # Extract embeddings for each separated source
@@ -594,7 +595,7 @@ class TargetedSpeakerSeparator:
                 continue
             
             # Normalize audio
-            max_val = np.max(np.abs(audio_data))
+            max_val: float = float(np.max(np.abs(audio_data)))
             if max_val > 0:
                 audio_data = audio_data / max_val * NORMALIZATION_FACTOR
             

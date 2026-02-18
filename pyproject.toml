@@ -134,6 +134,7 @@ dev = [
   "pytest>=9.0.0",
   "pytest-cov>=6.0.0",
   "ruff>=0.6.9",
+  "vulture>=2.14",
 ]
 
 [project.urls]

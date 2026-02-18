@@ -473,8 +473,8 @@ def _prompt_for_transcript_json(search_root: Path, use_rich: bool) -> Path:
         )
 
     print("Select transcript JSON file:")
-    for idx, display_path in enumerate(display_options, start=1):
-        print(f"  {idx}. {display_path}")
+    for idx, display_label in enumerate(display_options, start=1):
+        print(f"  {idx}. {display_label}")
 
     while True:
         raw = input(f"Enter choice [1-{len(candidates)}] (default 1): ").strip()

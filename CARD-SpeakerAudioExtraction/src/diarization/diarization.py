@@ -1,13 +1,12 @@
 import torch
 import numpy as np
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional, cast
 from pathlib import Path
 import whisper
 import ssl
-import urllib.request
 
 # Fix SSL certificate verification issues
-ssl._create_default_https_context = ssl._create_unverified_context
+ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment]
 
 # Use new SpeechBrain import (v1.0+)
 try:
@@ -79,9 +78,9 @@ class SpeakerDiarization:
         )
         
         # Speaker profile storage
-        self.speaker_profiles = []
-        self.speaker_counts = []
-        self.all_embeddings = []
+        self.speaker_profiles: List[np.ndarray] = []
+        self.speaker_counts: List[int] = []
+        self.all_embeddings: List[np.ndarray] = []
         
     def extract_segments(self, audio_path: str) -> List[Dict]:
         """
@@ -149,13 +148,13 @@ class SpeakerDiarization:
         # Normalize embedding
         embedding = embedding / (np.linalg.norm(embedding) + 1e-8)
         
-        return embedding
+        return cast(np.ndarray, embedding)
     
     def cosine_similarity(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
         """
         Compute cosine similarity between two embeddings.
         """
-        return np.dot(emb1, emb2)
+        return float(np.dot(emb1, emb2))
     
     def assign_speaker(self, embedding: np.ndarray) -> int:
         """
@@ -173,7 +172,7 @@ class SpeakerDiarization:
         ]
         
         max_similarity = max(similarities)
-        best_speaker_id = np.argmax(similarities)
+        best_speaker_id = int(np.argmax(similarities))
         
         # Dynamic threshold: lower threshold if we have too many speakers
         dynamic_threshold = self.similarity_threshold
@@ -256,7 +255,7 @@ class SpeakerDiarization:
                 result['speaker'] = f"SPEAKER_{new_id:02d}"
         
         # Count speakers in final results
-        final_speaker_counts = {}
+        final_speaker_counts: Dict[str, int] = {}
         for result in results:
             speaker = result['speaker']
             final_speaker_counts[speaker] = final_speaker_counts.get(speaker, 0) + 1
@@ -325,7 +324,7 @@ class SpeakerDiarization:
         rtf = elapsed_time / audio_duration if audio_duration > 0 else 0
         
         # Print final speaker statistics
-        final_speaker_counts = {}
+        final_speaker_counts: Dict[str, int] = {}
         for result in results:
             speaker = result['speaker']
             final_speaker_counts[speaker] = final_speaker_counts.get(speaker, 0) + 1
@@ -335,7 +334,7 @@ class SpeakerDiarization:
             count = final_speaker_counts[speaker]
             print(f"  {speaker}: {count} segments")
         
-        print(f"\n[Performance]")
+        print("\n[Performance]")
         print(f"  Processing time: {elapsed_time:.1f}s")
         print(f"  Audio duration: {audio_duration:.1f}s")
         print(f"  Real-time factor: {rtf:.2f}x")

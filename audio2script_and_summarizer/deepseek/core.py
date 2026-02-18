@@ -817,12 +817,12 @@ def _request_deepseek_completion(
                                 mode_arg = decoded_args.get("mode", "append")
                                 content_arg = decoded_args.get("content", "")
                                 mode = str(mode_arg) if mode_arg is not None else "append"
-                                content = (
+                                segment_content = (
                                     str(content_arg) if content_arg is not None else ""
                                 )
                                 normalized_mode = mode.strip().lower()
                                 if normalized_mode == "overwrite":
-                                    overwrite_hash = _hash_text(content)
+                                    overwrite_hash = _hash_text(segment_content)
                                     same_as_previous = overwrite_hash == last_overwrite_hash
                                     next_repeated_count = (
                                         repeated_overwrite_count + 1
@@ -843,8 +843,8 @@ def _request_deepseek_completion(
                                             "status": "fail",
                                             "mode": normalized_mode,
                                             "path": tool_output_staging_path,
-                                            "chunk_chars": len(content),
-                                            "total_chars": len(content),
+                                            "chunk_chars": len(segment_content),
+                                            "total_chars": len(segment_content),
                                             "hints": [
                                                 (
                                                     "Repeated overwrite detected for identical JSON "
@@ -857,7 +857,7 @@ def _request_deepseek_completion(
                                         write_result = _write_output_segment_tool(
                                             staging_path=tool_output_staging_path,
                                             mode=mode,
-                                            content=content,
+                                            content=segment_content,
                                             max_chunk_chars=DEFAULT_AGENT_WRITE_MAX_CHARS,
                                             max_file_chars=DEFAULT_AGENT_WRITE_MAX_FILE_CHARS,
                                         )
@@ -870,7 +870,7 @@ def _request_deepseek_completion(
                                     write_result = _write_output_segment_tool(
                                         staging_path=tool_output_staging_path,
                                         mode=mode,
-                                        content=content,
+                                        content=segment_content,
                                         max_chunk_chars=DEFAULT_AGENT_WRITE_MAX_CHARS,
                                         max_file_chars=DEFAULT_AGENT_WRITE_MAX_FILE_CHARS,
                                     )
@@ -891,9 +891,7 @@ def _request_deepseek_completion(
                                 word_budget_tolerance=word_budget_tolerance,
                                 source_word_count=source_word_count,
                             )
-                            latest_tool_status = cast(
-                                Literal["pass", "fail"], constraint_result["status"]
-                            )
+                            latest_tool_status = constraint_result["status"]
                             tool_result = cast(dict[str, object], constraint_result)
                             logger.info(
                                 "Tool evaluation result: status=%s total_words=%d target=%s natural=%s",
@@ -1252,7 +1250,6 @@ def _request_deepseek_completion(
     request_payload: dict[str, Any] = dict(base_request_payload)
     request_payload["response_format"] = cast(Any, {"type": "json_object"})
 
-    content: str
     if _is_reasoner_model(settings.model):
         _rollover_conversation_if_needed()
         request_payload["messages"] = cast(Any, messages)
@@ -1276,7 +1273,7 @@ def _request_deepseek_completion(
             )
         streamed_answer_parts: list[str] = []
         streamed_reasoning_parts: list[str] = []
-        finish_reason: str | None = None
+        stream_finish_reason: str | None = None
         usage_total_tokens: int | None = None
         stream_call_status: Literal["ok", "error"] = "ok"
         stream_call_error: str | None = None
@@ -1303,7 +1300,9 @@ def _request_deepseek_completion(
                 if not choices:
                     continue
                 choice = choices[0]
-                finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                stream_finish_reason = (
+                    getattr(choice, "finish_reason", None) or stream_finish_reason
+                )
                 delta = getattr(choice, "delta", None)
                 if delta is None:
                     continue
@@ -1352,18 +1351,18 @@ def _request_deepseek_completion(
                 chat_log_writer.finish_call(
                     reasoner_call_log_id,
                     status=stream_call_status,
-                    finish_reason=finish_reason,
+                    finish_reason=stream_finish_reason,
                     usage_total_tokens=usage_total_tokens,
                     error=stream_call_error,
                     metadata={"assistant_tool_call_count": 0},
                 )
         _record_context_usage(usage_total_tokens)
-        if finish_reason == "length":
+        if stream_finish_reason == "length":
             if reasoner_call_log_id is not None and chat_log_writer is not None:
                 chat_log_writer.finish_call(
                     reasoner_call_log_id,
                     status="error",
-                    finish_reason=finish_reason,
+                    finish_reason=stream_finish_reason,
                     usage_total_tokens=usage_total_tokens,
                     error="DeepSeek response truncated by max_tokens.",
                 )
@@ -1371,12 +1370,12 @@ def _request_deepseek_completion(
                 "DeepSeek response truncated by max_tokens (finish_reason=length)."
             )
         content = "".join(streamed_answer_parts)
-        assistant_message: dict[str, Any] = {"role": "assistant"}
+        stream_assistant_message: dict[str, Any] = {"role": "assistant"}
         if content:
-            assistant_message["content"] = content
+            stream_assistant_message["content"] = content
         if streamed_reasoning_parts and persist_reasoning_for_replay:
-            assistant_message["reasoning_content"] = "".join(streamed_reasoning_parts)
-        messages.append(assistant_message)
+            stream_assistant_message["reasoning_content"] = "".join(streamed_reasoning_parts)
+        messages.append(stream_assistant_message)
         _write_call_event(
             reasoner_call_log_id,
             {
@@ -1389,7 +1388,7 @@ def _request_deepseek_completion(
             chat_log_writer.finish_call(
                 reasoner_call_log_id,
                 status="ok",
-                finish_reason=finish_reason,
+                finish_reason=stream_finish_reason,
                 usage_total_tokens=usage_total_tokens,
                 metadata={"assistant_tool_call_count": 0},
             )
@@ -2201,21 +2200,21 @@ def main() -> int:
             )
             selected_tool_rounds = generation_result.tool_rounds
             selected_tool_calls_by_name = generation_result.tool_call_counts or {}
-            diagnostics = generation_result.tool_loop_diagnostics
-            if diagnostics is not None:
-                selected_tool_loop_exhausted = diagnostics["tool_loop_exhausted"]
-                selected_tool_loop_exhaustion_reason = diagnostics[
+            generation_diagnostics = generation_result.tool_loop_diagnostics
+            if generation_diagnostics is not None:
+                selected_tool_loop_exhausted = generation_diagnostics["tool_loop_exhausted"]
+                selected_tool_loop_exhaustion_reason = generation_diagnostics[
                     "tool_loop_exhaustion_reason"
                 ]
-                selected_tool_round_limit = diagnostics["tool_round_limit"]
-                selected_repeated_overwrite_count = diagnostics[
+                selected_tool_round_limit = generation_diagnostics["tool_round_limit"]
+                selected_repeated_overwrite_count = generation_diagnostics[
                     "repeated_overwrite_count"
                 ]
-                selected_staged_output_present = diagnostics["staged_output_present"]
-                selected_staged_output_valid_json = diagnostics[
+                selected_staged_output_present = generation_diagnostics["staged_output_present"]
+                selected_staged_output_valid_json = generation_diagnostics[
                     "staged_output_valid_json"
                 ]
-                selected_last_validation_issues = diagnostics[
+                selected_last_validation_issues = generation_diagnostics[
                     "last_validation_issues"
                 ][:]
             else:

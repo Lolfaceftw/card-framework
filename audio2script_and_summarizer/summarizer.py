@@ -9,7 +9,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, Sequence, TypedDict, cast
 
 from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .logging_utils import configure_logging
 from .speaker_validation import (
     DialogueLinePayload,
+    TranscriptSegment,
     ValidatedDialogueLine,
     build_segment_speaker_map,
     collect_allowed_speakers,
@@ -342,7 +343,7 @@ def generate_summary(
     parsed = choice.message.parsed
     if parsed is None:
         raise ValueError("OpenAI returned no parsed content.")
-    return parsed
+    return cast(PodcastScript, parsed)
 
 
 def post_process_script(
@@ -392,7 +393,9 @@ def _count_words(lines: list[ValidatedDialogueLine]) -> int:
     return sum(len(line.text.split()) for line in lines)
 
 
-def _count_words_from_segments(segments: list[dict]) -> int:
+def _count_words_from_segments(
+    segments: Sequence[dict[str, Any] | TranscriptSegment],
+) -> int:
     """Count words across transcript segments."""
     total = 0
     for seg in segments:

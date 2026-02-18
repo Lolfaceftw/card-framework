@@ -6,8 +6,9 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any, Sequence
 
-from ..speaker_validation import ValidatedDialogueLine
+from ..speaker_validation import TranscriptSegment, ValidatedDialogueLine
 from .constants import (
     DISFLUENCY_PATTERN,
     SUMMARY_LINE_COUNT_MAX,
@@ -110,7 +111,9 @@ def _naturalness_metrics_from_validated_lines(
         "line_count": len(texts),
     }
 
-def _count_words_from_segments(segments: list[dict]) -> int:
+def _count_words_from_segments(
+    segments: Sequence[dict[str, Any] | TranscriptSegment],
+) -> int:
     """Count words across transcript segments."""
     total = 0
     for seg in segments:

@@ -32,7 +32,7 @@ def run_stage_command(
     model_info: str,
     active_dashboard: Any | None,
     parse_stream_event_line: Callable[[str], dict[str, Any] | None],
-    route_stream_event: Callable[[Any, dict[str, Any]], None],
+    route_stream_event: Callable[[Any, dict[str, Any]], bool],
     logger: logging.Logger,
     subprocess_module: Any = subprocess,
 ) -> None:

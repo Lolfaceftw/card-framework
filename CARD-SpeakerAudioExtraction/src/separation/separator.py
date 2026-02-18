@@ -9,7 +9,7 @@ SepFormer with chunked processing is recommended for long audio files.
 
 import logging
 import os
-from typing import Optional, Tuple, Any
+from typing import Any, Optional, cast
 
 import numpy as np
 import soundfile as sf
@@ -72,8 +72,8 @@ class SpeechSeparator:
 
         self.model_name = model_name
         self.device = self._resolve_device(device)
-        self.model = None
-        self._sepformer_inference = None  # SpeechBrain inference wrapper for SepFormer
+        self.model: Any | None = None
+        self._sepformer_inference: Any | None = None  # SpeechBrain inference wrapper for SepFormer
         # SepFormer and DPRNN-TasNet use 16kHz, Conv-TasNet uses 8kHz
         if model_name == 'conv-tasnet':
             self._sample_rate = 8000
@@ -134,6 +134,8 @@ class SpeechSeparator:
                     self._sepformer_inference = self._sepformer_inference.to(self.device)
             else:
                 # Asteroid models use standard PyTorch device transfer
+                if self.model is None:
+                    raise RuntimeError("Separation model did not initialize.")
                 self.model = self.model.to(self.device)
                 self.model.eval()
 
@@ -204,6 +206,8 @@ class SpeechSeparator:
             # Note: We access .mods which is SpeechBrain's internal module container.
             # This is used only as a flag to indicate the model is loaded.
             # The actual inference uses self._sepformer_inference.separate_batch()
+            if self._sepformer_inference is None:
+                raise RuntimeError("SepFormer inference wrapper did not initialize.")
             self.model = self._sepformer_inference.mods
             logger.info(f"SepFormer loaded from: {model_path}")
         except Exception as e:
@@ -309,7 +313,7 @@ class SpeechSeparator:
 
         logger.info(f"Separated {separated.shape[0]} sources")
 
-        return separated
+        return cast(np.ndarray, separated)
 
     def separate_chunked(
         self,
@@ -406,7 +410,7 @@ class SpeechSeparator:
 
             logger.info(f"Processed chunk {i+1}/{num_chunks}")
 
-        return np.array(separated_sources)
+        return cast(np.ndarray, np.array(separated_sources))
 
     def _separate_chunk(self, chunk: torch.Tensor) -> np.ndarray:
         """
@@ -438,7 +442,7 @@ class SpeechSeparator:
         if separated.ndim == 3:
             separated = separated.squeeze(0)
 
-        return separated
+        return cast(np.ndarray, separated)
 
     def _run_separation(self, waveform: torch.Tensor) -> torch.Tensor:
         """
@@ -472,6 +476,8 @@ class SpeechSeparator:
                     separated = separated.permute(0, 2, 1)
             else:
                 # Asteroid models (DPRNN-TasNet, Conv-TasNet) use direct call
+                if self.model is None:
+                    raise RuntimeError("Separation model not loaded.")
                 separated = self.model(waveform)
 
         return separated

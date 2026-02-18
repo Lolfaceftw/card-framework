@@ -9,7 +9,7 @@ ensuring output directories exist.
 import json
 import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import soundfile as sf
@@ -106,7 +106,7 @@ def save_separated_audio(
         source_audio = sources[i]
 
         # Normalize to prevent clipping
-        max_val = np.max(np.abs(source_audio))
+        max_val: float = float(np.max(np.abs(source_audio)))
         if max_val > 0:
             source_audio = source_audio / max_val * 0.95
 
@@ -174,11 +174,11 @@ def get_audio_duration(path: str) -> float:
 
     try:
         info = torchaudio.info(path)
-        return info.num_frames / info.sample_rate
+        return float(info.num_frames) / float(info.sample_rate)
     except Exception:
         # Fallback to soundfile
         try:
             data, sample_rate = sf.read(path)
-            return len(data) / sample_rate
+            return float(len(data)) / float(sample_rate)
         except Exception as e:
             raise RuntimeError(f"Failed to get audio duration: {path}. Error: {e}")

@@ -6,7 +6,7 @@ to avoid clicks and pops when joining speaker segments.
 """
 
 import logging
-from typing import List
+from typing import List, cast
 
 import numpy as np
 
@@ -53,7 +53,7 @@ def apply_crossfade(
     
     # If segments are too short for cross-fade, just concatenate
     if fade_samples <= 1:
-        return np.concatenate([audio1, audio2])
+        return cast(np.ndarray, np.concatenate([audio1, audio2]))
     
     # Create fade curves
     fade_out = np.linspace(1.0, 0.0, fade_samples)
@@ -75,7 +75,7 @@ def apply_crossfade(
     # Concatenate all parts
     result = np.concatenate([part1, fade_region, part3])
     
-    return result
+    return cast(np.ndarray, result)
 
 
 def concatenate_with_crossfade(
@@ -95,7 +95,7 @@ def concatenate_with_crossfade(
         Concatenated audio with cross-fades between all segments.
     """
     if not segments:
-        return np.array([], dtype=np.float32)
+        return cast(np.ndarray, np.array([], dtype=np.float32))
     
     if len(segments) == 1:
         return segments[0].copy()

@@ -235,7 +235,7 @@ def main():
         print("=" * 80)
 
         try:
-            separator = TargetedSpeakerSeparator(
+            targeted_separator = TargetedSpeakerSeparator(
                 sample_rate=16000,
                 similarity_threshold=args.similarity_threshold,
                 crossfade_ms=args.crossfade_ms,
@@ -247,7 +247,7 @@ def main():
                 device=args.device
             )
 
-            saved_paths = separator.process_and_save(
+            saved_paths = targeted_separator.process_and_save(
                 audio_path=args.audio,
                 diarization_path=args.diarization,
                 output_dir=args.output_dir,
@@ -278,14 +278,14 @@ def main():
         print("=" * 80)
 
         try:
-            separator = DiarizationGuidedSeparator(
+            diarization_separator = DiarizationGuidedSeparator(
                 sample_rate=16000,
                 handle_overlap=args.handle_overlap,
                 preserve_timing=preserve_timing,
                 min_segment_duration=args.min_segment_duration
             )
 
-            saved_paths = separator.process_and_save(
+            saved_paths = diarization_separator.process_and_save(
                 audio_path=args.audio,
                 diarization_path=args.diarization,
                 output_dir=args.output_dir
@@ -329,7 +329,7 @@ def main():
 
         # Initialize separator
         try:
-            separator = SpeechSeparator(
+            blind_separator = SpeechSeparator(
                 model_name=args.model,
                 device=args.device
             )
@@ -339,14 +339,14 @@ def main():
 
         # Load model
         try:
-            separator.load_model()
+            blind_separator.load_model()
         except RuntimeError as e:
             logger.error(f"Failed to load model: {e}")
             sys.exit(1)
 
         # Run separation
         try:
-            saved_paths = separator.process_and_save(
+            saved_paths = blind_separator.process_and_save(
                 audio_path=args.audio,
                 output_dir=args.output_dir,
                 num_speakers=num_speakers,

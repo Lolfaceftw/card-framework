@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 from pydantic import BaseModel, Field
 
@@ -237,11 +237,12 @@ class DeepSeekRequestSettings:
     temperature: float | None
     auto_beta: bool = True
     agent_tool_loop: bool = False
-    agent_tool_mode: AgentToolMode = DEFAULT_AGENT_TOOL_MODE
+    agent_tool_mode: AgentToolMode = cast(AgentToolMode, DEFAULT_AGENT_TOOL_MODE)
     agent_max_tool_rounds: int = DEFAULT_AGENT_MAX_TOOL_ROUNDS
     agent_read_max_lines: int = DEFAULT_AGENT_READ_MAX_LINES
-    agent_loop_exhaustion_policy: AgentLoopExhaustionPolicy = (
-        DEFAULT_AGENT_LOOP_EXHAUSTION_POLICY
+    agent_loop_exhaustion_policy: AgentLoopExhaustionPolicy = cast(
+        AgentLoopExhaustionPolicy,
+        DEFAULT_AGENT_LOOP_EXHAUSTION_POLICY,
     )
     agent_max_repeated_write_overwrites: int = (
         DEFAULT_AGENT_MAX_REPEATED_WRITE_OVERWRITES

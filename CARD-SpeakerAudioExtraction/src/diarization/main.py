@@ -16,7 +16,7 @@ def main():
         print(f"[ERROR] Input file not found: {input_path}")
         sys.exit(1)
 
-    print(f"--- STARTING CARD AUDIO PIPELINE ---")
+    print("--- STARTING CARD AUDIO PIPELINE ---")
     print(f"Input: {input_path}")
     print(f"Hardware Mode: {args.device} (Batch: {args.batch_size})")
 
@@ -52,8 +52,8 @@ def main():
     try:
         # Pass 'env=current_env' so the child process sees the libraries immediately
         subprocess.run(cmd, check=True, env=current_env)
-        print(f"\n[SUCCESS] Processing complete.")
-        print(f"Check the input folder for .txt and .srt outputs.")
+        print("\n[SUCCESS] Processing complete.")
+        print("Check the input folder for .txt and .srt outputs.")
     except subprocess.CalledProcessError as e:
         print(f"\n[FAILURE] The pipeline crashed with error code {e.returncode}.")
         print("Tip: If it was an OOM (Out of Memory) error, try running with --batch-size 1")

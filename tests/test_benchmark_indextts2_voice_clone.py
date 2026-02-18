@@ -6,6 +6,7 @@ import csv
 import json
 import wave
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -93,14 +94,14 @@ class FakeEmbedder(SpeakerEmbedderProtocol):
     def embed(self, wav_path: Path) -> np.ndarray:
         stem = wav_path.stem.lower()
         if "spk_a" in stem:
-            return np.array([1.0, 0.0], dtype=np.float64)
+            return cast(np.ndarray, np.array([1.0, 0.0], dtype=np.float64))
         if "spk_b" in stem:
-            return np.array([0.0, 1.0], dtype=np.float64)
+            return cast(np.ndarray, np.array([0.0, 1.0], dtype=np.float64))
         if "speaker_00" in stem:
-            return np.array([1.0, 0.0], dtype=np.float64)
+            return cast(np.ndarray, np.array([1.0, 0.0], dtype=np.float64))
         if "speaker_01" in stem:
-            return np.array([0.0, 1.0], dtype=np.float64)
-        return np.array([0.5, 0.5], dtype=np.float64)
+            return cast(np.ndarray, np.array([0.0, 1.0], dtype=np.float64))
+        return cast(np.ndarray, np.array([0.5, 0.5], dtype=np.float64))
 
 
 class FakeTranscriber(SpeechTranscriberProtocol):

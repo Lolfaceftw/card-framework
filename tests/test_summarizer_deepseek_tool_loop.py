@@ -1231,7 +1231,7 @@ def test_request_completion_rolls_over_context_when_low(
 
     assert parsed_script.dialogue[0].text == "hello world"
     assert completions.seen_messages is not None
-    assert completions.seen_messages[1]["content"].startswith(
+    assert str(completions.seen_messages[1]["content"]).startswith(
         "Summarized context from previous conversation window:"
     )
     assert conversation_state.rollover_count == 1

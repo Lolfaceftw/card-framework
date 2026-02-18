@@ -73,7 +73,7 @@ def _summarize_conversation_context_via_deepseek(
         ]
     )
     call_log_id: str | None = None
-    response: object | None = None
+    response: Any | None = None
     if chat_log_writer is not None:
         call_log_id = chat_log_writer.start_call(
             call_type="context_rollover_summary",

@@ -1501,7 +1501,7 @@ class _PipelineDashboard:
             self._keyboard_status_text = "Windows keyboard capture only"
             return
         try:
-            import msvcrt  # type: ignore[attr-defined]
+            import msvcrt
         except ImportError:
             self._keyboard_enabled = False
             self._keyboard_status_text = "msvcrt unavailable"

@@ -13,7 +13,7 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypedDict
+from typing import Any, Protocol, TypedDict, cast
 
 from pydub import AudioSegment
 
@@ -543,8 +543,8 @@ class MistralInterjectionPlanner:
         try:
             import torch
 
-            tokenizer = self._tokenizer
-            model = self._model
+            tokenizer = cast(Any, self._tokenizer)
+            model = cast(Any, self._model)
             messages = self._build_prompt(request)
             try:
                 prompt_text = tokenizer.apply_chat_template(

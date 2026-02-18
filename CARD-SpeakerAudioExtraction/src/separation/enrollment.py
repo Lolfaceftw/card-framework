@@ -9,7 +9,7 @@ This module provides functionality to:
 
 import logging
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 import numpy as np
 import torch
@@ -49,10 +49,10 @@ class EnrollmentEmbeddingExtractor:
         """
         self.sample_rate = sample_rate
         self.device = self._resolve_device(device)
-        self.model = None
+        self.model: Any | None = None
         self._load_model()
         
-        logger.info(f"Initialized EnrollmentEmbeddingExtractor")
+        logger.info("Initialized EnrollmentEmbeddingExtractor")
         logger.info(f"  Device: {self.device}")
         logger.info(f"  Sample rate: {sample_rate}Hz")
     
@@ -147,7 +147,7 @@ class EnrollmentEmbeddingExtractor:
         min_duration, max_duration = duration_range
         
         # Group segments by speaker
-        speaker_segments = {}
+        speaker_segments: Dict[str, List[dict]] = {}
         for seg in segments:
             speaker = seg['speaker']
             if speaker not in speaker_segments:
@@ -238,11 +238,13 @@ class EnrollmentEmbeddingExtractor:
         audio_tensor = audio_tensor.to(self.device)
         
         # Extract embedding
+        if self.model is None:
+            raise RuntimeError("Enrollment model is not loaded.")
         with torch.no_grad():
             embedding = self.model.encode_batch(audio_tensor)
             embedding = embedding.squeeze().cpu().numpy()
         
-        return embedding
+        return cast(np.ndarray, embedding)
     
     def normalize_embedding(self, embedding: np.ndarray) -> np.ndarray:
         """
@@ -256,7 +258,7 @@ class EnrollmentEmbeddingExtractor:
         """
         norm = np.linalg.norm(embedding)
         if norm > 0:
-            return embedding / norm
+            return cast(np.ndarray, embedding / norm)
         return embedding
     
     def create_enrollment_embeddings(
@@ -340,7 +342,7 @@ class EnrollmentEmbeddingExtractor:
         Returns:
             Dictionary of speaker embeddings.
         """
-        embeddings = np.load(path, allow_pickle=True).item()
+        embeddings = cast(Dict[str, np.ndarray], np.load(path, allow_pickle=True).item())
         logger.info(f"Loaded embeddings from: {path}")
         return embeddings
 

@@ -107,7 +107,7 @@ class DiarizationGuidedSeparator:
         self.preserve_timing = preserve_timing
         self.min_segment_duration = min_segment_duration
 
-        logger.info(f"Initialized DiarizationGuidedSeparator")
+        logger.info("Initialized DiarizationGuidedSeparator")
         logger.info(f"  Sample rate: {sample_rate}")
         logger.info(f"  Overlap handling: {handle_overlap}")
         logger.info(f"  Preserve timing: {preserve_timing}")
@@ -200,7 +200,7 @@ class DiarizationGuidedSeparator:
         # Sort segments by start time
         sorted_segments = sorted(segments, key=lambda s: s.start)
 
-        overlaps = []
+        overlaps: List[OverlapRegion] = []
         active_segments: List[DiarizationSegment] = []
 
         # Create events for segment starts and ends
@@ -370,9 +370,6 @@ class DiarizationGuidedSeparator:
         # Detect overlaps
         overlaps = self.detect_overlaps(segments)
 
-        # Get audio duration
-        audio_duration = len(audio) / self.sample_rate
-
         # Initialize output arrays for each speaker
         if self.preserve_timing:
             speaker_audio = {
@@ -497,7 +494,7 @@ class DiarizationGuidedSeparator:
                 continue
 
             # Normalize audio
-            max_val = np.max(np.abs(audio_data))
+            max_val: float = float(np.max(np.abs(audio_data)))
             if max_val > 0:
                 audio_data = audio_data / max_val * NORMALIZATION_FACTOR
 

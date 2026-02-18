@@ -38,6 +38,38 @@ class DeepSeekStreamDashboard(Protocol):
         """Append a line into the output log panel."""
 
 
+def _coerce_nonnegative_int(value: Any, *, minimum: int = 0) -> int:
+    """Coerce a payload field to a bounded non-negative integer."""
+    if value is None:
+        raise ValueError("missing integer value")
+    if isinstance(value, bool):
+        coerced = int(value)
+    elif isinstance(value, int):
+        coerced = value
+    elif isinstance(value, float):
+        coerced = int(value)
+    elif isinstance(value, str):
+        coerced = int(value.strip())
+    else:
+        raise ValueError("unsupported integer type")
+    return max(minimum, coerced)
+
+
+def _coerce_unit_float(value: Any) -> float:
+    """Coerce a payload field to a float clamped to [0.0, 1.0]."""
+    if value is None:
+        raise ValueError("missing float value")
+    if isinstance(value, bool):
+        coerced = float(value)
+    elif isinstance(value, (int, float)):
+        coerced = float(value)
+    elif isinstance(value, str):
+        coerced = float(value.strip())
+    else:
+        raise ValueError("unsupported float type")
+    return max(0.0, min(1.0, coerced))
+
+
 def parse_deepseek_stream_event_line(line: str) -> dict[str, Any] | None:
     """Parse a DeepSeek stream event marker from subprocess output."""
     if not line.startswith(DEEPSEEK_STREAM_EVENT_PREFIX):
@@ -92,11 +124,11 @@ def route_deepseek_stream_event(
         percent_left_raw = payload.get("percent_left")
         rollover_count_raw = payload.get("rollover_count", 0)
         try:
-            tokens_used = max(0, int(tokens_used_raw))
-            tokens_limit = max(1, int(tokens_limit_raw))
-            tokens_left = max(0, int(tokens_left_raw))
-            percent_left = max(0.0, min(1.0, float(percent_left_raw)))
-            rollover_count = max(0, int(rollover_count_raw))
+            tokens_used = _coerce_nonnegative_int(tokens_used_raw)
+            tokens_limit = _coerce_nonnegative_int(tokens_limit_raw, minimum=1)
+            tokens_left = _coerce_nonnegative_int(tokens_left_raw)
+            percent_left = _coerce_unit_float(percent_left_raw)
+            rollover_count = _coerce_nonnegative_int(rollover_count_raw)
         except (TypeError, ValueError):
             logger.warning(
                 "Invalid DeepSeek context usage payload: %s",

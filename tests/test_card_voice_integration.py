@@ -11,7 +11,7 @@ Run with: uv run pytest tests/test_card_voice_integration.py -v
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -32,7 +32,6 @@ TEST_DIR = Path(__file__).parent
 TEST_DIARIZATION = TEST_DIR / "test_diarization.json"
 TEST_PODCAST_INPUT = TEST_DIR / "test_podcast_input.json"
 TEST_OUTPUT_DIR = TEST_DIR / "outputs"
-SAMPLE_PROMPT = TEST_DIR / "sample_prompt.wav"
 
 
 # =============================================================================
@@ -43,14 +42,14 @@ SAMPLE_PROMPT = TEST_DIR / "sample_prompt.wav"
 def test_diarization_data() -> List[Dict[str, Any]]:
     """Load test diarization data."""
     with open(TEST_DIARIZATION, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return cast(List[Dict[str, Any]], json.load(f))
 
 
 @pytest.fixture
 def test_podcast_data() -> List[Dict[str, Any]]:
     """Load test podcast input data."""
     with open(TEST_PODCAST_INPUT, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return cast(List[Dict[str, Any]], json.load(f))
 
 
 @pytest.fixture
@@ -69,7 +68,7 @@ def sample_audio_array() -> np.ndarray:
     t = np.linspace(0, duration, int(sample_rate * duration), dtype=np.float32)
     # Mix of two frequencies to simulate speech-like content
     audio = 0.5 * np.sin(2 * np.pi * 440 * t) + 0.3 * np.sin(2 * np.pi * 880 * t)
-    return audio.astype(np.float32)
+    return cast(np.ndarray, audio.astype(np.float32))
 
 
 # =============================================================================
@@ -246,7 +245,7 @@ class TestCARDCrossfade:
                 sample_audio_array[15600:32000],
                 sample_audio_array[31600:48000],
             ]
-            result = concatenate_with_crossfade(segments, crossfade_samples=400)
+            result = concatenate_with_crossfade(segments, fade_duration_ms=25.0)
             assert result is not None
             assert len(result) > 0
             print(f"\n✓ Concatenated {len(segments)} segments, result length: {len(result)}")
@@ -510,8 +509,8 @@ class TestCardPipeline:
     def test_pipeline_initialization_mock(
         self,
         mock_audio: MagicMock,
-        mock_tts: MagicMock,
-        mock_llm: MagicMock,
+        _mock_tts: MagicMock,
+        _mock_llm: MagicMock,
     ) -> None:
         """Test CardPipeline initializes with mocked services."""
         try:
