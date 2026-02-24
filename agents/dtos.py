@@ -57,3 +57,40 @@ class CriticTaskResponse(BaseModel):
     status: str
     word_count: int
     feedback: str
+
+
+# Common LLM DTOs
+class Function(BaseModel):
+    name: str
+    arguments: str
+
+
+class ToolCall(BaseModel):
+    id: str
+    type: str = "function"
+    function: Function
+
+    def model_dump(self, *args, **kwargs) -> dict:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "function": {
+                "name": self.function.name,
+                "arguments": self.function.arguments,
+            },
+        }
+
+
+class AssistantMessage(BaseModel):
+    role: str = "assistant"
+    content: str = ""
+    tool_calls: List[ToolCall] | None = None
+    reasoning_content: str | None = None
+
+    def model_dump(self, *args, **kwargs) -> dict:
+        d = {"role": self.role, "content": self.content}
+        if self.tool_calls:
+            d["tool_calls"] = [tc.model_dump() for tc in self.tool_calls]
+        if self.reasoning_content:
+            d["reasoning_content"] = self.reasoning_content
+        return d
