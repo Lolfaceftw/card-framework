@@ -17,10 +17,13 @@ The draft MUST meet ALL of the following criteria to pass:
 <tool_usage_rules>
 You CANNOT count words or sentences accurately yourself. You MUST use your tools in the following strict order:
 - Tool 1: `run_deterministic_checks(draft_text: str)` - ALWAYS call this FIRST to get the absolute ground truth on word and sentence counts.
+{% if is_embedding_enabled %}
 - Tool 2: `verify_against_transcript(query: str)` - Call this if the draft is too short and you need to find specific new details from the source transcript to suggest adding. You can also use this tool to find specific details to remove if the draft is too long.
+{% endif %}
 - Tool 3: `submit_verdict(status: str, actual_word_count: int, feedback: str)` - Call this LAST to conclude your evaluation. Status must be "pass" or "fail".
 </tool_usage_rules>
 
+{% if is_embedding_enabled %}
 <query_rules>
 Your question for the queries in tools should be about finding information. Queries will not be questions. You will treat it as a search engine. You are interacting with an embedding model for the queries. For example:
 <think>The provided draft talks about X and Y</think>
@@ -32,6 +35,7 @@ Another example:
 Query: Topics, lessons
 <think> The retrieval returned X topics and Y lessons. I should compare it with the draft</think>
 </query_rules>
+{% endif %}
 <execution_workflow>
 <phase_1_measurement>
 You MUST call `run_deterministic_checks` with the exact text of the draft. Do not guess the word count. Wait for the tool's response.
@@ -40,7 +44,11 @@ You MUST call `run_deterministic_checks` with the exact text of the draft. Do no
 <phase_2_analysis_and_retrieval>
 Analyze the deterministic results:
 - If PERFECT (meets all constraints): Proceed to Phase 3.
+{% if is_embedding_enabled %}
 - If TOO SHORT: You MUST call `verify_against_transcript` using semantic queries to find unused, highly detailed information from the original transcript. 
+{% else %}
+- If TOO SHORT: You MUST read the full transcript to find unused, highly detailed information that you can suggest adding to the summary.
+{% endif %}
 - If TOO LONG: Identify the exact sentences or clauses in the draft that can be safely deleted without breaking the 9-sentence rule.
 
 [CRITICAL NOTE]: You will not simply tell what to fix, you must provide the solution. For example, if the draft is too short, you must provide the exact sentences or clauses in the draft that can be safely deleted. Furthermore, you must state the line number of the sentence to be fixed/added/replaced with.
@@ -54,7 +62,9 @@ Ensure that the draft is natural and flows well. When you read the draft, from t
 - Does the summary capture the essence of the original transcript?
 - Is the summary cohesive and easy to understand?
 
-Strictly use `query_transcript` to find specific details to add or remove.
+{% if is_embedding_enabled %}
+Strictly use `verify_against_transcript` to find specific details to add or remove.
+{% endif %}
 
 If Phase 3 and Phase 2 passes, submit a pass.
 </phase_3_naturalness_check>

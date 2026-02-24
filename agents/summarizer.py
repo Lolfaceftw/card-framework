@@ -30,11 +30,13 @@ class SummarizerExecutor(BaseA2AExecutor):
         llm: LLMProvider,
         retrieval_port: int,
         max_tool_turns: int,
+        is_embedding_enabled: bool = True,
     ) -> None:
         super().__init__("Summarizer")
         self.llm = llm
         self.retrieval_port = retrieval_port
         self.max_tool_turns = max_tool_turns
+        self.is_embedding_enabled = is_embedding_enabled
 
     async def handle_task(
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
@@ -47,6 +49,7 @@ class SummarizerExecutor(BaseA2AExecutor):
         feedback = req.feedback
         retrieval_port = req.retrieval_port
         previous_draft = req.previous_draft
+        full_transcript = req.full_transcript
 
         revise_mode = bool(previous_draft and feedback)
 
@@ -57,7 +60,11 @@ class SummarizerExecutor(BaseA2AExecutor):
             # Pre-load the registry from the previous draft XML
             self._load_draft_into_registry(registry, previous_draft)
             tool_registry = build_revise_tools(
-                registry, retrieval_port, min_words, max_words
+                registry,
+                retrieval_port,
+                min_words,
+                max_words,
+                self.is_embedding_enabled,
             )
             event_bus.publish(
                 "system_message",
@@ -65,50 +72,71 @@ class SummarizerExecutor(BaseA2AExecutor):
             )
         else:
             tool_registry = build_summarizer_tools(
-                registry, retrieval_port, min_words, max_words
+                registry,
+                retrieval_port,
+                min_words,
+                max_words,
+                self.is_embedding_enabled,
             )
 
-        # ── Dynamically generate query for the Info Retrieval Agent ──
-        query_sys_prompt = PromptManager.get_prompt("query_generation_system")
-        query_user_prompt = (
-            f"Goal: Find main topics, key arguments, and important lessons for a {min_words}-{max_words} word summary.\n"
-            f"Feedback from previous attempt: {feedback if feedback else 'None'}"
-        )
-        event_bus.publish(
-            "system_message", "Generating dynamic retrieval query via LLM..."
-        )
-        retrieve_query = self.llm.generate(
-            system_prompt=query_sys_prompt, user_prompt=query_user_prompt, max_tokens=64
-        ).strip()
-        event_bus.publish("system_message", f"Generated query: {retrieve_query}")
-
-        retrieve_task = RetrieveTaskRequest(
-            action="retrieve", query=retrieve_query, top_k=20
-        )
-
-        event_bus.publish(
-            "system_message",
-            message=f"Querying Info Retrieval Agent (port {retrieval_port})...",
-        )
-
-        retrieval_response_raw = await agent_client.send_task(
-            retrieval_port, retrieve_task, timeout=60.0
-        )
-
-        retrieval_data = json.loads(retrieval_response_raw)
-        segments = retrieval_data.get("segments", [])
-        total_words = retrieval_data.get("total_words", 0)
-        event_bus.publish(
-            "system_message",
-            f"Retrieved {len(segments)} segments ({total_words} words)",
-        )
-
-        # ── Format retrieved segments ──
         transcript_excerpt = ""
-        for seg in segments:
-            speaker = seg.get("speaker", "UNKNOWN")
-            text = seg.get("text", "")
-            transcript_excerpt += f"[{speaker}]: {text}\n"
+        total_words = 0
+        num_segments = 0
+
+        if self.is_embedding_enabled:
+            # ── Dynamically generate query for the Info Retrieval Agent ──
+            query_sys_prompt = PromptManager.get_prompt("query_generation_system")
+            query_user_prompt = (
+                f"Goal: Find main topics, key arguments, and important lessons for a {min_words}-{max_words} word summary.\n"
+                f"Feedback from previous attempt: {feedback if feedback else 'None'}"
+            )
+            event_bus.publish(
+                "system_message", "Generating dynamic retrieval query via LLM..."
+            )
+            retrieve_query = self.llm.generate(
+                system_prompt=query_sys_prompt,
+                user_prompt=query_user_prompt,
+                max_tokens=64,
+            ).strip()
+            event_bus.publish("system_message", f"Generated query: {retrieve_query}")
+
+            retrieve_task = RetrieveTaskRequest(
+                action="retrieve", query=retrieve_query, top_k=20
+            )
+
+            event_bus.publish(
+                "system_message",
+                message=f"Querying Info Retrieval Agent (port {retrieval_port})...",
+            )
+
+            retrieval_response_raw = await agent_client.send_task(
+                retrieval_port, retrieve_task, timeout=60.0
+            )
+
+            retrieval_data = json.loads(retrieval_response_raw)
+            segments = retrieval_data.get("segments", [])
+            total_words = retrieval_data.get("total_words", 0)
+            num_segments = len(segments)
+            event_bus.publish(
+                "system_message",
+                f"Retrieved {num_segments} segments ({total_words} words)",
+            )
+
+            # ── Format retrieved segments ──
+            for seg in segments:
+                speaker = seg.get("speaker", "UNKNOWN")
+                text = seg.get("text", "")
+                transcript_excerpt += f"[{speaker}]: {text}\n"
+        else:
+            transcript_excerpt = full_transcript
+            event_bus.publish(
+                "system_message",
+                "Using full transcript directly (embeddings disabled).",
+            )
+            # We don't have segment counts/word counts directly here easily without parsing again,
+            # but we can just say "all" or pass some defaults if needed.
+            total_words = len(full_transcript.split())
+            num_segments = full_transcript.count("\n")
 
         # ── Build system prompt ──
         if revise_mode:
@@ -119,10 +147,14 @@ class SummarizerExecutor(BaseA2AExecutor):
                 previous_draft=previous_draft,
                 draft_line_map=json.dumps(registry.snapshot(), indent=2),
                 feedback=feedback,
+                is_embedding_enabled=self.is_embedding_enabled,
             )
         else:
             system_prompt = PromptManager.get_prompt(
-                "summarizer_system", min_words=min_words, max_words=max_words
+                "summarizer_system",
+                min_words=min_words,
+                max_words=max_words,
+                is_embedding_enabled=self.is_embedding_enabled,
             )
 
         messages = [
@@ -131,7 +163,7 @@ class SummarizerExecutor(BaseA2AExecutor):
                 "role": "user",
                 "content": PromptManager.get_prompt(
                     "summarizer_user",
-                    num_segments=len(segments),
+                    num_segments=num_segments,
                     total_words=total_words,
                     transcript_excerpt=transcript_excerpt,
                     feedback_block=f"\n\n--- CRITIC FEEDBACK ---\n{feedback}"

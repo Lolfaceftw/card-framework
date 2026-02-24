@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+import threading
 
 import httpx
 
@@ -13,17 +14,42 @@ class AgentClient:
 
     def __init__(self):
         self.limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
-        self._client = None
+        self._clients = {}
+        self._lock = threading.Lock()
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(limits=self.limits)
-        return self._client
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        with self._lock:
+            # Prune closed loops to prevent memory leaks if many run_until_complete cycles happen
+            closed_loops = [
+                loop_obj
+                for loop_obj in self._clients
+                if loop_obj is not None and loop_obj.is_closed()
+            ]
+            for loop_obj in closed_loops:
+                self._clients.pop(loop_obj, None)
+
+            client = self._clients.get(loop)
+            if client is None or client.is_closed:
+                client = httpx.AsyncClient(limits=self.limits)
+                self._clients[loop] = client
+            return client
 
     async def close(self):
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        with self._lock:
+            client = self._clients.pop(loop, None)
+
+        if client is not None:
+            await client.aclose()
 
     async def send_task(
         self,

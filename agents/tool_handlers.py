@@ -411,6 +411,7 @@ def build_summarizer_tools(
     retrieval_port: int,
     min_words: int,
     max_words: int,
+    is_embedding_enabled: bool = True,
 ) -> ToolRegistry:
     """Factory: wires up all summariser tool handlers against *registry*."""
     budget = BudgetContext(registry, min_words, max_words)
@@ -419,7 +420,8 @@ def build_summarizer_tools(
     tool_registry.register(CountWordsHandler(registry, budget))
     tool_registry.register(EditMessageHandler(registry, budget))
     tool_registry.register(RemoveMessageHandler(registry, budget))
-    tool_registry.register(QueryTranscriptHandler(retrieval_port))
+    if is_embedding_enabled:
+        tool_registry.register(QueryTranscriptHandler(retrieval_port))
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))
     return tool_registry
@@ -430,6 +432,7 @@ def build_revise_tools(
     retrieval_port: int,
     min_words: int,
     max_words: int,
+    is_embedding_enabled: bool = True,
 ) -> ToolRegistry:
     """Factory: revise-mode tools — edit/remove only, no add_speaker_message."""
     budget = BudgetContext(registry, min_words, max_words)
@@ -437,7 +440,8 @@ def build_revise_tools(
     tool_registry.register(CountWordsHandler(registry, budget))
     tool_registry.register(EditMessageHandler(registry, budget))
     tool_registry.register(RemoveMessageHandler(registry, budget))
-    tool_registry.register(QueryTranscriptHandler(retrieval_port))
+    if is_embedding_enabled:
+        tool_registry.register(QueryTranscriptHandler(retrieval_port))
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))
     return tool_registry

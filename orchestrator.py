@@ -56,7 +56,11 @@ class Orchestrator:
             return 0
 
     async def run_loop(
-        self, min_words: int, max_words: int, max_iterations: int
+        self,
+        min_words: int,
+        max_words: int,
+        max_iterations: int,
+        full_transcript_text: str = "",
     ) -> str | None:
         feedback = ""
         draft = ""
@@ -72,6 +76,7 @@ class Orchestrator:
                 retrieval_port=self.retrieval_port,
                 feedback=feedback,
                 previous_draft=draft if feedback else "",
+                full_transcript=full_transcript_text,
             )
             draft = await agent_client.send_task(
                 self.summarizer_port,
@@ -84,6 +89,7 @@ class Orchestrator:
                 draft=draft,
                 min_words=min_words,
                 max_words=max_words,
+                full_transcript=full_transcript_text,
             )
             critic_response_raw = await agent_client.send_task(
                 self.critic_port, critic_task, timeout=self.timeouts["critic"]

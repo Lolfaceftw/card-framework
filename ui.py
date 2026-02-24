@@ -83,6 +83,9 @@ class ConsoleManager:
         """
         Prints an agent's response in a stylised chat-like Panel.
         """
+        if not message or not message.strip():
+            return
+
         # Pick color based on agent name, default to white
         border_style = (
             agent_name
@@ -138,9 +141,15 @@ class ConsoleManager:
 
             def __exit__(self, exc_type, exc_val, exc_tb):
                 self.live.__exit__(exc_type, exc_val, exc_tb)
-                self.console.print()
+                if self.full_content.strip() or self.full_thought.strip():
+                    self.console.print()
 
             def _build_panel(self):
+                if not self.full_thought.strip() and not self.full_content.strip():
+                    from rich.console import Group
+
+                    return Group()
+
                 text = Text()
                 if self.full_thought.strip():
                     text.append("💭 Thinking...\n", style="bold yellow")
@@ -149,8 +158,6 @@ class ConsoleManager:
 
                 if self.full_content:
                     text.append(self.full_content)
-                elif not self.full_thought.strip():
-                    text.append("Thinking...", style="dim")
 
                 return Panel(
                     text,

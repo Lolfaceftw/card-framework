@@ -38,6 +38,7 @@ class SummarizerTaskRequest(BaseModel):
     retrieval_port: int
     feedback: str = ""
     previous_draft: str = ""
+    full_transcript: str = ""
 
 
 class SummarizerTaskResponse(BaseModel):
@@ -49,6 +50,7 @@ class CriticTaskRequest(BaseModel):
     draft: str
     min_words: int = 50
     max_words: int = 100
+    full_transcript: str = ""
 
 
 class CriticTaskResponse(BaseModel):

@@ -20,12 +20,17 @@ class CriticExecutor(BaseA2AExecutor):
     """
 
     def __init__(
-        self, llm: LLMProvider, max_tool_turns: int = 5, retrieval_port: int = 9012
+        self,
+        llm: LLMProvider,
+        max_tool_turns: int = 5,
+        retrieval_port: int = 9012,
+        is_embedding_enabled: bool = True,
     ):
         super().__init__("Critic")
         self.llm = llm
         self.max_tool_turns = max_tool_turns
         self.retrieval_port = retrieval_port
+        self.is_embedding_enabled = is_embedding_enabled
 
     def _run_deterministic_checks(
         self, draft: str, min_words: int, max_words: int
@@ -73,11 +78,15 @@ class CriticExecutor(BaseA2AExecutor):
         draft = req.draft
         min_words = req.min_words
         max_words = req.max_words
+        full_transcript = req.full_transcript
 
         event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
 
         system_prompt = PromptManager.get_prompt(
-            "critic_system", min_words=min_words, max_words=max_words
+            "critic_system",
+            min_words=min_words,
+            max_words=max_words,
+            is_embedding_enabled=self.is_embedding_enabled,
         )
 
         tools = [
@@ -95,23 +104,30 @@ class CriticExecutor(BaseA2AExecutor):
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "verify_against_transcript",
-                    "description": "Retrieves original transcript segments matching a semantic query for factual verification.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The semantic query (e.g., 'details about server architecture').",
+        ]
+
+        if self.is_embedding_enabled:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "verify_against_transcript",
+                        "description": "Retrieves original transcript segments matching a semantic query for factual verification.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "The semantic query (e.g., 'details about server architecture').",
+                                },
                             },
+                            "required": ["query"],
                         },
-                        "required": ["query"],
                     },
-                },
-            },
+                }
+            )
+
+        tools.append(
             {
                 "type": "function",
                 "function": {
@@ -127,14 +143,18 @@ class CriticExecutor(BaseA2AExecutor):
                         "required": ["status", "actual_word_count", "feedback"],
                     },
                 },
-            },
-        ]
+            }
+        )
+
+        user_content = PromptManager.get_prompt("critic_user", draft=draft)
+        if not self.is_embedding_enabled:
+            user_content += f"\n\n--- FULL TRANSCRIPT ---\n{full_transcript}"
 
         messages = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": PromptManager.get_prompt("critic_user", draft=draft),
+                "content": user_content,
             },
         ]
 
