@@ -12,7 +12,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llm_provider import LLMProvider
-from ui import ui
+from events import event_bus
 
 
 class TransformersProvider(LLMProvider):
@@ -41,7 +41,7 @@ class TransformersProvider(LLMProvider):
             else torch.float32
         )
 
-        ui.print_system(
+        event_bus.publish("system_message", 
             f"Loading local Transformers model '{self.model_name}' (device_map={device_map}, dtype={torch_dtype})..."
         )
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -49,7 +49,7 @@ class TransformersProvider(LLMProvider):
             self.model_name, torch_dtype=dtype, device_map=device_map
         )
 
-        ui.print_system(f"Successfully loaded model '{self.model_name}'.")
+        event_bus.publish("system_message", f"Successfully loaded model '{self.model_name}'.")
 
     # ── LLMProvider interface ─────────────────────────────────────────────
 

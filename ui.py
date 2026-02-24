@@ -39,6 +39,16 @@ class ConsoleManager:
         )
         self.console = Console(theme=custom_theme)
 
+        from events import event_bus
+
+        event_bus.subscribe("system_message", self.print_system)
+        event_bus.subscribe("status_message", self.print_status)
+        event_bus.subscribe("error_message", self.print_error)
+        event_bus.subscribe("agent_message", self.print_agent_message)
+        event_bus.subscribe("agent_thought", self.print_thought)
+        event_bus.subscribe("tool_invocation", self.print_tool_invocation)
+        event_bus.subscribe("tool_result", self.print_tool_result)
+
     def print_system(self, message: str):
         """Prints a dim/italic system-level message."""
         self.console.print(f"[system]{message}[/system]")
@@ -132,14 +142,14 @@ class ConsoleManager:
 
             def _build_panel(self):
                 text = Text()
-                if self.full_thought:
+                if self.full_thought.strip():
                     text.append("💭 Thinking...\n", style="bold yellow")
                     text.append(self.full_thought, style="thought")
                     text.append("\n" + "─" * 40 + "\n", style="dim")
 
                 if self.full_content:
                     text.append(self.full_content)
-                elif not self.full_thought:
+                elif not self.full_thought.strip():
                     text.append("Thinking...", style="dim")
 
                 return Panel(
@@ -162,6 +172,8 @@ class ConsoleManager:
 
     def print_thought(self, agent_name: str, thought: str):
         """Prints the model's 'thinking' or scratchpad content."""
+        if not thought.strip():
+            return
         content = self._truncate_text(thought, max_lines=10)
         panel = Panel(
             Text(content, style="thought"),

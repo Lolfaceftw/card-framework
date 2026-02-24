@@ -8,6 +8,7 @@ import sys
 
 from zai import ZaiClient
 
+from events import event_bus
 from llm_provider import LLMProvider
 from ui import ui
 
@@ -30,7 +31,9 @@ class GLMProvider(LLMProvider):
         self.model = model
         self._client = ZaiClient(api_key=self.api_key)
 
-        ui.print_system(f"Connected to GLM (ZAI) -> model={self.model}")
+        event_bus.publish(
+            "system_message", f"Connected to GLM (ZAI) -> model={self.model}"
+        )
 
     # ── LLMProvider interface ─────────────────────────────────────────────
 

@@ -1,6 +1,8 @@
 import logging
 from logging.handlers import RotatingFileHandler
 
+from events import event_bus
+
 
 def setup_logger(name: str, level=logging.INFO):
     """Set up a base logger without handlers."""
@@ -54,3 +56,40 @@ def configure_logger(cfg):
 
 # Global instance for easier access
 logger = setup_logger("AgentLogger")
+
+
+def _on_system_message(message: str):
+    logger.info(f"[System] {message}")
+
+
+def _on_status_message(message: str):
+    logger.info(f"[Status] {message}")
+
+
+def _on_error_message(message: str):
+    logger.error(f"[Error] {message}")
+
+
+def _on_agent_message(agent_name: str, message: str, **kwargs):
+    logger.info(f"[{agent_name}] {message}")
+
+
+def _on_agent_thought(agent_name: str, thought: str):
+    logger.debug(f"[{agent_name} Thought] {thought}")
+
+
+def _on_tool_invocation(tool_name: str, arguments: dict):
+    logger.info(f"[Tool Invocation] {tool_name} with {arguments}")
+
+
+def _on_tool_result(tool_name: str, result: str):
+    logger.info(f"[Tool Result] {tool_name}: {str(result)[:500]}")
+
+
+event_bus.subscribe("system_message", _on_system_message)
+event_bus.subscribe("status_message", _on_status_message)
+event_bus.subscribe("error_message", _on_error_message)
+event_bus.subscribe("agent_message", _on_agent_message)
+event_bus.subscribe("agent_thought", _on_agent_thought)
+event_bus.subscribe("tool_invocation", _on_tool_invocation)
+event_bus.subscribe("tool_result", _on_tool_result)

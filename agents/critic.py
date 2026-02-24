@@ -5,11 +5,12 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 
 from agents.base import BaseA2AExecutor
-from agents.client import a2a_send_task
+from agents.client import agent_client
+from agents.dtos import RetrieveTaskRequest
 from agents.utils import count_words
+from events import event_bus
 from llm_provider import LLMProvider
 from prompt_manager import PromptManager
-from ui import ui
 
 
 class CriticExecutor(BaseA2AExecutor):
@@ -66,11 +67,14 @@ class CriticExecutor(BaseA2AExecutor):
     async def handle_task(
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
-        draft = task_data.get("draft", "")
-        min_words = task_data.get("min_words", 50)
-        max_words = task_data.get("max_words", 100)
+        from agents.dtos import CriticTaskRequest
 
-        ui.print_system("Evaluating draft using LLM Critic Loop...")
+        req = CriticTaskRequest.model_validate(task_data)
+        draft = req.draft
+        min_words = req.min_words
+        max_words = req.max_words
+
+        event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
 
         system_prompt = PromptManager.get_prompt(
             "critic_system", min_words=min_words, max_words=max_words
@@ -134,139 +138,14 @@ class CriticExecutor(BaseA2AExecutor):
             },
         ]
 
-        final_verdict = None
-
-        # Loop for up to max_tool_turns to allow for check -> thought -> verdict
-        for _ in range(self.max_tool_turns):
-            response = self.llm.chat(messages=messages, tools=tools)
-
-            # Convert to dict for logging and subsequent calls to avoid serialization errors
-            if hasattr(response, "model_dump"):
-                msg_dict = response.model_dump()
-                msg_dict = {
-                    k: v
-                    for k, v in msg_dict.items()
-                    if k in ("role", "content", "tool_calls")
-                }
-            else:
-                msg_dict = {
-                    "role": response.role,
-                    "content": response.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": tc.type,
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in (response.tool_calls or [])
-                    ]
-                    if hasattr(response, "tool_calls") and response.tool_calls
-                    else None,
-                }
-            messages.append(msg_dict)
-
-            # Log tool calls if any
-            if msg_dict.get("tool_calls"):
-                for tc in msg_dict["tool_calls"]:
-                    ui.print_tool_invocation(
-                        tc["function"]["name"], tc["function"]["arguments"]
-                    )
-
-            # Manual tool parsing for vLLM/DeepSeek consistency
-            tool_calls = []
-
-            if msg_dict.get("tool_calls"):
-                for tc in msg_dict["tool_calls"]:
-                    func = tc.get("function", {})
-                    tool_calls.append(
-                        {
-                            "id": tc.get("id", "unknown"),
-                            "name": func.get("name"),
-                            "arguments": json.loads(func.get("arguments", "{}")),
-                        }
-                    )
-            # Check for XML tool calls in content
-            elif msg_dict.get("content"):
-                matches = re.findall(
-                    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
-                    msg_dict["content"],
-                    re.DOTALL,
-                )
-                for m in matches:
-                    try:
-                        parsed = json.loads(m)
-                        tool_calls.append(
-                            {
-                                "id": "unknown",
-                                "name": parsed["name"],
-                                "arguments": parsed["arguments"]
-                                if isinstance(parsed["arguments"], dict)
-                                else json.loads(parsed["arguments"]),
-                            }
-                        )
-                    except (json.JSONDecodeError, KeyError):
-                        pass
-
-            if not tool_calls:
-                # If no tools called, we might be stuck or the LLM is just talking.
-                # In a production agent, we'd nudge it to use tools.
-                continue
-
-            for tc in tool_calls:
-                name = tc["name"]
-                args = tc["arguments"]
-
-                if name == "run_deterministic_checks":
-                    results = self._run_deterministic_checks(
-                        args.get("draft_text", draft), min_words, max_words
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "name": name,
-                            "content": json.dumps(results),
-                        }
-                    )
-                    ui.print_tool_result(
-                        "run_deterministic_checks",
-                        f"Status: {results.get('status')} ({len(results.get('failures', []))} failures)",
-                    )
-                elif name == "verify_against_transcript":
-                    query_text = args.get("query", "")
-                    retrieve_task = json.dumps(
-                        {
-                            "action": "retrieve",
-                            "query": query_text,
-                            "top_k": 10,
-                        }
-                    )
-                    raw_resp = await a2a_send_task(self.retrieval_port, retrieve_task)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "name": name,
-                            "content": raw_resp,
-                        }
-                    )
-                    ui.print_tool_result(
-                        "verify_against_transcript",
-                        "Retrieved segments for verification.",
-                    )
-                elif name == "submit_verdict":
-                    final_verdict = {
-                        "status": args["status"],
-                        "word_count": args["actual_word_count"],
-                        "feedback": args["feedback"],
-                    }
-                    break
-
-            if final_verdict:
-                break
+        context_data = {
+            "draft": draft,
+            "min_words": min_words,
+            "max_words": max_words,
+        }
+        final_verdict = await self.run_agent_loop(
+            messages, tools, self.max_tool_turns, context_data
+        )
 
         if not final_verdict:
             # Fallback if LLM failed to call submit_verdict
@@ -280,8 +159,74 @@ class CriticExecutor(BaseA2AExecutor):
 
         result_json = json.dumps(final_verdict)
         if final_verdict.get("status") == "pass":
-            ui.print_status(f"Final Verdict: {result_json}")
+            event_bus.publish("status_message", message=f"Final Verdict: {result_json}")
         else:
-            ui.print_agent_message(self.name, f"Final Verdict: {result_json}")
+            event_bus.publish(
+                "agent_message",
+                agent_name=self.name,
+                message=f"Final Verdict: {result_json}",
+            )
 
         await self.send_response(result_json, event_queue)
+
+    async def process_tool_calls(
+        self, tool_calls: list[dict], messages: list, context_data: dict
+    ) -> tuple[bool, dict | None]:
+        draft = context_data["draft"]
+        min_words = context_data["min_words"]
+        max_words = context_data["max_words"]
+        final_verdict = None
+
+        for tc in tool_calls:
+            name = tc["name"]
+            args = tc["arguments"]
+
+            if name == "run_deterministic_checks":
+                results = self._run_deterministic_checks(
+                    args.get("draft_text", draft), min_words, max_words
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "content": json.dumps(results),
+                    }
+                )
+                event_bus.publish(
+                    "tool_result",
+                    tool_name="run_deterministic_checks",
+                    result=f"Status: {results.get('status')} ({len(results.get('failures', []))} failures)",
+                )
+            elif name == "verify_against_transcript":
+                query_text = args.get("query", "")
+                retrieve_task = RetrieveTaskRequest(
+                    action="retrieve", query=query_text, top_k=10
+                )
+                raw_resp = await agent_client.send_task(
+                    self.retrieval_port, retrieve_task
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "content": raw_resp,
+                    }
+                )
+                event_bus.publish(
+                    "tool_result",
+                    tool_name="verify_against_transcript",
+                    result="Retrieved segments for verification.",
+                )
+            elif name == "submit_verdict":
+                final_verdict = {
+                    "status": args["status"],
+                    "word_count": args["actual_word_count"],
+                    "feedback": args["feedback"],
+                }
+                break
+
+        if final_verdict:
+            return True, final_verdict
+        return False, None

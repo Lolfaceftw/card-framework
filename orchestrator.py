@@ -1,7 +1,13 @@
 import json
 
-from agents.client import a2a_send_task
-from ui import ui
+from agents.client import agent_client
+from agents.dtos import (
+    CriticTaskRequest,
+    CriticTaskResponse,
+    IndexTaskRequest,
+    SummarizerTaskRequest,
+)
+from events import event_bus
 
 
 class Orchestrator:
@@ -30,18 +36,23 @@ class Orchestrator:
 
     async def index_transcript(self, transcript_json: dict) -> int:
         segments = transcript_json.get("segments", [])
-        index_task = json.dumps({"action": "index", "segments": segments})
-        ui.print_system(f"Indexing {len(segments)} segments in Retrieval Agent...")
-        index_response_raw = await a2a_send_task(
+        index_task = IndexTaskRequest(action="index", segments=segments)
+        event_bus.publish(
+            "system_message",
+            message=f"Indexing {len(segments)} segments in Retrieval Agent...",
+        )
+        index_response_raw = await agent_client.send_task(
             self.retrieval_port, index_task, timeout=self.timeouts["index"]
         )
         try:
             index_result = json.loads(index_response_raw)
             count = index_result.get("count", 0)
-            ui.print_status(f"Indexed {count} segments")
+            event_bus.publish("status_message", f"Indexed {count} segments")
             return count
         except json.JSONDecodeError:
-            ui.print_error(f"Index response: {index_response_raw[:200]}")
+            event_bus.publish(
+                "error_message", f"Index response: {index_response_raw[:200]}"
+            )
             return 0
 
     async def run_loop(
@@ -50,58 +61,64 @@ class Orchestrator:
         feedback = ""
         draft = ""
         for iteration in range(1, max_iterations + 1):
-            ui.print_system(f"--- Iteration {iteration}/{max_iterations} ---")
+            event_bus.publish(
+                "system_message", f"--- Iteration {iteration}/{max_iterations} ---"
+            )
 
             # ── Summarizer ──
-            summarizer_task = json.dumps(
-                {
-                    "min_words": min_words,
-                    "max_words": max_words,
-                    "retrieval_port": self.retrieval_port,
-                    "feedback": feedback,
-                    "previous_draft": draft if feedback else "",
-                }
+            summarizer_task = SummarizerTaskRequest(
+                min_words=min_words,
+                max_words=max_words,
+                retrieval_port=self.retrieval_port,
+                feedback=feedback,
+                previous_draft=draft if feedback else "",
             )
-            draft = await a2a_send_task(
+            draft = await agent_client.send_task(
                 self.summarizer_port,
                 summarizer_task,
                 timeout=self.timeouts["summarizer"],
             )
 
             # ── Critic ──
-            critic_task = json.dumps(
-                {
-                    "draft": draft,
-                    "min_words": min_words,
-                    "max_words": max_words,
-                }
+            critic_task = CriticTaskRequest(
+                draft=draft,
+                min_words=min_words,
+                max_words=max_words,
             )
-            critic_response_raw = await a2a_send_task(
+            critic_response_raw = await agent_client.send_task(
                 self.critic_port, critic_task, timeout=self.timeouts["critic"]
             )
 
             try:
-                critic_verdict = json.loads(critic_response_raw)
-            except json.JSONDecodeError:
-                ui.print_error("Could not parse critic response, retrying...")
+                critic_verdict = CriticTaskResponse.model_validate_json(
+                    critic_response_raw
+                )
+            except Exception:
+                event_bus.publish(
+                    "error_message", "Could not parse critic response, retrying..."
+                )
                 feedback = "Previous attempt could not be evaluated. Please try again."
                 continue
 
-            status = critic_verdict.get("status", "fail")
-            word_count = critic_verdict.get("word_count", 0)
-            critic_feedback = critic_verdict.get("feedback", "")
+            status = critic_verdict.status
+            word_count = critic_verdict.word_count
+            critic_feedback = critic_verdict.feedback
 
             if status == "pass":
-                ui.print_status(
-                    f"✅ CONVERGENCE at iteration {iteration} (Word count: {word_count})"
+                event_bus.publish(
+                    "status_message",
+                    message=f"✅ CONVERGENCE at iteration {iteration} (Word count: {word_count})",
                 )
                 return draft
 
             feedback = critic_feedback
-            ui.print_system(
-                f"Iteration {iteration} — not converged ({word_count} words)."
+            event_bus.publish(
+                "system_message",
+                f"Iteration {iteration} — not converged ({word_count} words).",
             )
-            ui.print_agent_message("Critic Feedback", critic_feedback)
+            event_bus.publish("agent_message", "Critic Feedback", critic_feedback)
 
-        ui.print_error(f"Max iterations ({max_iterations}) reached.")
+        event_bus.publish(
+            "error_message", f"Max iterations ({max_iterations}) reached."
+        )
         return None

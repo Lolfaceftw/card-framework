@@ -10,7 +10,7 @@ from google import genai
 from google.genai import types
 
 from llm_provider import LLMProvider
-from ui import ui
+from events import event_bus
 
 
 class GoogleGenAIProvider(LLMProvider):
@@ -31,7 +31,7 @@ class GoogleGenAIProvider(LLMProvider):
         self.model = model
         self._client = genai.Client(api_key=self.api_key)
 
-        ui.print_system(f"Connected to Google Gen AI -> model={self.model}")
+        event_bus.publish("system_message", f"Connected to Google Gen AI -> model={self.model}")
 
     # ── LLMProvider interface ─────────────────────────────────────────────
 

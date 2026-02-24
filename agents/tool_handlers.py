@@ -12,7 +12,7 @@ the retrieval agent) work seamlessly alongside synchronous ones.
 import json
 from abc import ABC, abstractmethod
 
-from agents.client import a2a_send_task
+from agents.client import agent_client
 from agents.message_registry import MessageRegistry
 
 
@@ -318,12 +318,12 @@ class QueryTranscriptHandler(ToolHandler):
         }
 
     async def execute(self, arguments: dict) -> dict:
+        from agents.dtos import RetrieveTaskRequest
+
         query = arguments["query"]
         top_k = arguments.get("top_k", 5)
-        retrieve_task = json.dumps(
-            {"action": "retrieve", "query": query, "top_k": top_k}
-        )
-        raw_response = await a2a_send_task(
+        retrieve_task = RetrieveTaskRequest(action="retrieve", query=query, top_k=top_k)
+        raw_response = await agent_client.send_task(
             self._retrieval_port, retrieve_task, timeout=30.0
         )
         try:

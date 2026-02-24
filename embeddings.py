@@ -13,7 +13,7 @@ import re
 import numpy as np
 
 from llm_provider import EmbeddingProvider
-from ui import ui
+from events import event_bus
 
 
 class TranscriptIndex:
@@ -29,11 +29,11 @@ class TranscriptIndex:
         self.segments = segments
         texts = [seg.get("text", "") for seg in segments]
 
-        ui.print_system(f"Embedding {len(texts)} segments...")
+        event_bus.publish("system_message", f"Embedding {len(texts)} segments...")
         self.embeddings = self.provider.encode(
             texts, normalize=True, show_progress=True
         )
-        ui.print_system(f"Embedded {len(texts)} segments")
+        event_bus.publish("system_message", f"Embedded {len(texts)} segments")
         return len(texts)
 
     def retrieve_mmr(
@@ -104,7 +104,7 @@ class TranscriptIndex:
             len(re.sub(r"<[^>]+>", "", seg.get("text", "")).split())
             for seg in selected_segments
         )
-        ui.print_system(
+        event_bus.publish("system_message", 
             f"MMR selected {len(selected_segments)} segments "
             f"({total_words} words) from {n} total"
         )

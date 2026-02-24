@@ -11,7 +11,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from llm_provider import EmbeddingProvider
-from ui import ui
+from events import event_bus
 
 
 class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
@@ -51,7 +51,7 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
             )
 
         resolved_dtype = self._DTYPE_MAP.get(torch_dtype, torch.float32)
-        ui.print_system(
+        event_bus.publish("system_message", 
             f"Loading {model_name} on {device} (dtype={resolved_dtype}, batch_size={batch_size})..."
         )
         t0 = time.time()
@@ -60,7 +60,7 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
             model_kwargs={"device_map": device, "torch_dtype": resolved_dtype},
             tokenizer_kwargs={"padding_side": "left"},
         )
-        ui.print_system(f"Model loaded in {time.time() - t0:.1f}s")
+        event_bus.publish("system_message", f"Model loaded in {time.time() - t0:.1f}s")
 
     # ── EmbeddingProvider interface ───────────────────────────────────────
 

@@ -19,18 +19,18 @@ from logger_utils import configure_logger
 from main import _build_a2a_app, _run_server_in_thread
 from orchestrator import Orchestrator
 from providers.logging_provider import LoggingLLMProvider
-from ui import ui
+from events import event_bus
 
 
 def prepare_datasets(num_samples: int = 1) -> List[Dict[str, Any]]:
     """Download AMI and QMSum and format them into transcript segments."""
     eval_samples = []
 
-    ui.print_system("Downloading QMSum dataset (test split)...")
+    event_bus.publish("system_message", "Downloading QMSum dataset (test split)...")
     try:
         # Fallback to Yale-LILY/QMSum using streaming
         qmsum = load_dataset("Yale-LILY/QMSum", split="test", streaming=True)
-        ui.print_status("QMSum stream connected.")
+        event_bus.publish("status_message", "QMSum stream connected.")
 
         qmsum_iter = iter(qmsum)
         for i in range(num_samples):
@@ -56,13 +56,13 @@ def prepare_datasets(num_samples: int = 1) -> List[Dict[str, Any]]:
                 )
 
     except Exception as e:
-        ui.print_error(f"Failed to load QMSum: {e}")
+        event_bus.publish("error_message", f"Failed to load QMSum: {e}")
 
-    ui.print_system("Downloading AMI dataset (test split)...")
+    event_bus.publish("system_message", "Downloading AMI dataset (test split)...")
     try:
         # Load AMI meeting corpus from HF using 'ihm' subset with streaming
         ami = load_dataset("edinburghcstr/ami", "ihm", split="test", streaming=True)
-        ui.print_status("AMI stream connected.")
+        event_bus.publish("status_message", "AMI stream connected.")
 
         ami_iter = iter(ami)
         for i in range(num_samples):
@@ -91,11 +91,11 @@ def prepare_datasets(num_samples: int = 1) -> List[Dict[str, Any]]:
             except Exception:
                 break
     except Exception as e:
-        ui.print_error(f"Failed to load AMI: {e}")
+        event_bus.publish("error_message", f"Failed to load AMI: {e}")
 
     # Fallback to local transcript if datasets fail
     if not eval_samples:
-        ui.print_error(
+        event_bus.publish("error_message", 
             "Failed to load HuggingFace datasets. Falling back to local summary.json..."
         )
         try:
@@ -112,16 +112,16 @@ def prepare_datasets(num_samples: int = 1) -> List[Dict[str, Any]]:
                         }
                     )
             else:
-                ui.print_error("summary.json not found.")
+                event_bus.publish("error_message", "summary.json not found.")
         except Exception as e:
-            ui.print_error(f"Failed to load local summary.json: {e}")
+            event_bus.publish("error_message", f"Failed to load local summary.json: {e}")
 
     return eval_samples
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
-    ui.print_system("Initializing evaluation script...")
+    event_bus.publish("system_message", "Initializing evaluation script...")
 
     # ── 1. Configure Logging ──
     configure_logger(cfg.logging)
@@ -130,7 +130,7 @@ def main(cfg: DictConfig) -> None:
             logging.getLogger(logger_name).propagate = False
 
     # ── 2. Instantiate providers ──
-    ui.print_system("Instantiating providers...")
+    event_bus.publish("system_message", "Instantiating providers...")
     llm: LLMProvider = hydra.utils.instantiate(cfg.llm)
     if cfg.get("logging", {}).get("enabled", False):
         llm = LoggingLLMProvider(inner_provider=llm)
@@ -144,7 +144,7 @@ def main(cfg: DictConfig) -> None:
     summarizer_port = cfg.ports.summarizer
     critic_port = cfg.ports.critic
 
-    ui.print_system(
+    event_bus.publish("system_message", 
         f"Starting A2A servers (R:{retrieval_port} S:{summarizer_port} C:{critic_port})..."
     )
 
@@ -184,7 +184,7 @@ def main(cfg: DictConfig) -> None:
     )
     _run_server_in_thread("critic-a2a", critic_app, critic_port)
 
-    ui.print_system("Waiting for A2A servers to start...")
+    event_bus.publish("system_message", "Waiting for A2A servers to start...")
     time.sleep(2)
 
     for name, port in [
@@ -198,7 +198,7 @@ def main(cfg: DictConfig) -> None:
             )
             r.raise_for_status()
         except Exception as e:
-            ui.print_error(f"[ERR] {name} server not responding: {e}")
+            event_bus.publish("error_message", f"[ERR] {name} server not responding: {e}")
             sys.exit(1)
 
     # ── 4. Prepare Evaluation Data ──
@@ -206,7 +206,7 @@ def main(cfg: DictConfig) -> None:
     samples = prepare_datasets(num_samples=num_samples)
 
     if not samples:
-        ui.print_error("No samples loaded. Aborting evaluation.")
+        event_bus.publish("error_message", "No samples loaded. Aborting evaluation.")
         sys.exit(1)
 
     # ── 5. Run Orchestration Loop for Each Sample ──
@@ -225,10 +225,10 @@ def main(cfg: DictConfig) -> None:
             sample_id = sample["id"]
             transcript = sample["transcript"]
 
-            ui.print_status(
+            event_bus.publish("status_message", 
                 f"\nEvaluating Sample {i + 1}/{len(samples)}: [{dataset_name}] ID: {sample_id}"
             )
-            ui.print_system(f"Segments: {len(transcript.get('segments', []))}")
+            event_bus.publish("system_message", f"Segments: {len(transcript.get('segments', []))}")
 
             # Override parameters if needed for testing bounds
             min_w = cfg.orchestrator.min_words
@@ -236,7 +236,7 @@ def main(cfg: DictConfig) -> None:
             max_iter = cfg.orchestrator.max_iterations
 
             index_count = await orchestrator.index_transcript(transcript)
-            ui.print_system(f"Indexed {index_count} segments for {sample_id}.")
+            event_bus.publish("system_message", f"Indexed {index_count} segments for {sample_id}.")
 
             t0 = time.time()
             # To track iterations, we slightly hook into the loop or just read the console out.
@@ -263,7 +263,7 @@ def main(cfg: DictConfig) -> None:
                 }
             )
 
-            ui.print_status(f"Finished evaluating {sample_id}. Passed: {passed}.")
+            event_bus.publish("status_message", f"Finished evaluating {sample_id}. Passed: {passed}.")
 
     asyncio.run(run_evals())
 
@@ -272,10 +272,10 @@ def main(cfg: DictConfig) -> None:
     with open(report_file, "w", encoding="utf-8") as f:
         json.dump(eval_report, f, indent=2)
 
-    ui.print_status(f"\nEvaluation complete. Report saved to {report_file}.")
+    event_bus.publish("status_message", f"\nEvaluation complete. Report saved to {report_file}.")
 
     passes = sum(1 for r in eval_report["results"] if r["passed"])
-    ui.print_status(f"Overall Pass Rate: {passes}/{len(samples)}")
+    event_bus.publish("status_message", f"Overall Pass Rate: {passes}/{len(samples)}")
 
 
 if __name__ == "__main__":

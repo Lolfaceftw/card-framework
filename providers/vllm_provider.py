@@ -11,7 +11,7 @@ import requests
 from openai import OpenAI
 
 from llm_provider import LLMProvider
-from ui import ui
+from events import event_bus
 
 
 class VLLMProvider(LLMProvider):
@@ -30,7 +30,7 @@ class VLLMProvider(LLMProvider):
 
         # Resolve model id from the server on startup
         self.model_id = self._fetch_model_id()
-        ui.print_system(
+        event_bus.publish("system_message", 
             f"Connected to VLLM → model={self.model_id}, url={self.base_url}"
         )
 

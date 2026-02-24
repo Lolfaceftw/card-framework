@@ -5,12 +5,13 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 
 from agents.base import BaseA2AExecutor
-from agents.client import a2a_send_task
+from agents.client import agent_client
+from agents.dtos import RetrieveTaskRequest
 from agents.message_registry import MessageRegistry
 from agents.tool_handlers import build_revise_tools, build_summarizer_tools
+from events import event_bus
 from llm_provider import LLMProvider
 from prompt_manager import PromptManager
-from ui import ui
 
 
 class SummarizerExecutor(BaseA2AExecutor):
@@ -38,11 +39,14 @@ class SummarizerExecutor(BaseA2AExecutor):
     async def handle_task(
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
-        min_words = task_data.get("min_words", 50)
-        max_words = task_data.get("max_words", 100)
-        feedback = task_data.get("feedback", "")
-        retrieval_port = task_data.get("retrieval_port", self.retrieval_port)
-        previous_draft = task_data.get("previous_draft", "")
+        from agents.dtos import SummarizerTaskRequest
+
+        req = SummarizerTaskRequest.model_validate(task_data)
+        min_words = req.min_words
+        max_words = req.max_words
+        feedback = req.feedback
+        retrieval_port = req.retrieval_port
+        previous_draft = req.previous_draft
 
         revise_mode = bool(previous_draft and feedback)
 
@@ -55,8 +59,9 @@ class SummarizerExecutor(BaseA2AExecutor):
             tool_registry = build_revise_tools(
                 registry, retrieval_port, min_words, max_words
             )
-            ui.print_system(
-                f"🔄 REVISE MODE — loaded {len(registry)} messages from previous draft"
+            event_bus.publish(
+                "system_message",
+                f"🔄 REVISE MODE — loaded {len(registry)} messages from previous draft",
             )
         else:
             tool_registry = build_summarizer_tools(
@@ -69,30 +74,34 @@ class SummarizerExecutor(BaseA2AExecutor):
             f"Goal: Find main topics, key arguments, and important lessons for a {min_words}-{max_words} word summary.\n"
             f"Feedback from previous attempt: {feedback if feedback else 'None'}"
         )
-        ui.print_system("Generating dynamic retrieval query via LLM...")
+        event_bus.publish(
+            "system_message", "Generating dynamic retrieval query via LLM..."
+        )
         retrieve_query = self.llm.generate(
             system_prompt=query_sys_prompt, user_prompt=query_user_prompt, max_tokens=64
         ).strip()
-        ui.print_system(f"Generated query: {retrieve_query}")
+        event_bus.publish("system_message", f"Generated query: {retrieve_query}")
 
-        retrieve_task = json.dumps(
-            {
-                "action": "retrieve",
-                "query": retrieve_query,
-                "top_k": 20,
-            }
+        retrieve_task = RetrieveTaskRequest(
+            action="retrieve", query=retrieve_query, top_k=20
         )
 
-        ui.print_system(f"Querying Info Retrieval Agent (port {retrieval_port})...")
+        event_bus.publish(
+            "system_message",
+            message=f"Querying Info Retrieval Agent (port {retrieval_port})...",
+        )
 
-        retrieval_response_raw = await a2a_send_task(
+        retrieval_response_raw = await agent_client.send_task(
             retrieval_port, retrieve_task, timeout=60.0
         )
 
         retrieval_data = json.loads(retrieval_response_raw)
         segments = retrieval_data.get("segments", [])
         total_words = retrieval_data.get("total_words", 0)
-        ui.print_system(f"Retrieved {len(segments)} segments ({total_words} words)")
+        event_bus.publish(
+            "system_message",
+            f"Retrieved {len(segments)} segments ({total_words} words)",
+        )
 
         # ── Format retrieved segments ──
         transcript_excerpt = ""
@@ -133,104 +142,21 @@ class SummarizerExecutor(BaseA2AExecutor):
         ]
 
         mode_label = "revise" if revise_mode else "incremental"
-        ui.print_system(f"Generating summary using {mode_label} tool loop...")
+        event_bus.publish(
+            "system_message", f"Generating summary using {mode_label} tool loop..."
+        )
 
-        finalized = False
-
-        for _ in range(self.max_tool_turns):
-            response_message = self.llm.chat(
-                messages=messages,
-                tools=tool_registry.get_tool_schemas(),
-            )
-
-            # ── Normalise to dict ──
-            msg_dict = self._to_dict(response_message)
-            messages.append(msg_dict)
-
-            # ── Collect tool calls (structured or XML-fallback) ──
-            tool_calls = self._extract_tool_calls(msg_dict)
-
-            if not tool_calls:
-                continue
-
-            # Log invocations
-            for tc in tool_calls:
-                ui.print_tool_invocation(tc["name"], json.dumps(tc["arguments"]))
-
-            # ── Dispatch each tool call via the registry ──
-            for tc in tool_calls:
-                name = tc["name"]
-                args = tc["arguments"]
-                result = await tool_registry.dispatch(name, args)
-
-                if result is None:
-                    result = {"error": f"Unknown tool: {name}"}
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", "unknown"),
-                        "name": name,
-                        "content": json.dumps(result),
-                    }
-                )
-                ui.print_tool_result(name, json.dumps(result, indent=2))
-
-                # ── Auto count_words after any registry-modifying tool ──
-                _registry_tools = {
-                    "add_speaker_message",
-                    "edit_message",
-                    "remove_message",
-                }
-                if name in _registry_tools and "error" not in result:
-                    count_result = await tool_registry.dispatch("count_words", {})
-                    auto_id = f"auto_count_{tc.get('id', 'unknown')}"
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": auto_id,
-                            "name": "count_words",
-                            "content": json.dumps(count_result),
-                        }
-                    )
-                    total_wc = count_result["total_word_count"]
-                    ui.print_tool_result(
-                        "count_words (auto)", f"Total: {total_wc} words"
-                    )
-
-                    # ── Notify LLM when budget is met (but don't break) ──
-                    if min_words <= total_wc <= max_words:
-                        ui.print_status(
-                            f"📋 Budget in range: {total_wc} words "
-                            f"(target {min_words}-{max_words}) — "
-                            f"waiting for LLM to call finalize_draft"
-                        )
-
-                        # Auto save_draft so the LLM can review
-                        save_result = await tool_registry.dispatch("save_draft", {})
-                        save_id = f"auto_save_{tc.get('id', 'unknown')}"
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": save_id,
-                                "name": "save_draft",
-                                "content": json.dumps(save_result),
-                            }
-                        )
-                        ui.print_tool_result(
-                            "save_draft (auto)",
-                            f"Saved {save_result.get('total_messages', 0)} messages",
-                        )
-
-                # ── Break only when LLM explicitly finalizes ──
-                if name == "finalize_draft":
-                    finalized = True
-                    ui.print_status(
-                        "✅ LLM called finalize_draft — submitting to Critic"
-                    )
-
-            if finalized:
-                break
+        context_data = {
+            "tool_registry": tool_registry,
+            "min_words": min_words,
+            "max_words": max_words,
+        }
+        await self.run_agent_loop(
+            messages,
+            tool_registry.get_tool_schemas(),
+            self.max_tool_turns,
+            context_data,
+        )
 
         # ── Assemble final XML output from registry ──
         result_xml = ""
@@ -238,8 +164,10 @@ class SummarizerExecutor(BaseA2AExecutor):
             result_xml += f"<{speaker_id}>{content}</{speaker_id}>\n"
         result_xml = result_xml.strip()
 
-        ui.print_agent_message(
-            self.name, f"Tool-generated XML output:\n```xml\n{result_xml}\n```"
+        event_bus.publish(
+            "agent_message",
+            self.name,
+            f"Tool-generated XML output:\n```xml\n{result_xml}\n```",
         )
         await self.send_response(result_xml, event_queue)
 
@@ -253,6 +181,96 @@ class SummarizerExecutor(BaseA2AExecutor):
             speaker_id = match.group(1)
             content = match.group(2).strip()
             registry.add(speaker_id, content)
+
+    async def process_tool_calls(
+        self, tool_calls: list[dict], messages: list, context_data: dict
+    ) -> tuple[bool, dict | None]:
+        tool_registry = context_data["tool_registry"]
+        min_words = context_data["min_words"]
+        max_words = context_data["max_words"]
+        finalized = False
+
+        for tc in tool_calls:
+            name = tc["name"]
+            args = tc["arguments"]
+            result = await tool_registry.dispatch(name, args)
+
+            if result is None:
+                result = {"error": f"Unknown tool: {name}"}
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", "unknown"),
+                    "name": name,
+                    "content": json.dumps(result),
+                }
+            )
+            event_bus.publish(
+                "tool_result", tool_name=name, result=json.dumps(result, indent=2)
+            )
+
+            # ── Auto count_words after any registry-modifying tool ──
+            _registry_tools = {
+                "add_speaker_message",
+                "edit_message",
+                "remove_message",
+            }
+            if name in _registry_tools and "error" not in result:
+                count_result = await tool_registry.dispatch("count_words", {})
+                auto_id = f"auto_count_{tc.get('id', 'unknown')}"
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": auto_id,
+                        "name": "count_words",
+                        "content": json.dumps(count_result),
+                    }
+                )
+                total_wc = count_result["total_word_count"]
+                event_bus.publish(
+                    "tool_result",
+                    tool_name="count_words (auto)",
+                    result=f"Total: {total_wc} words",
+                )
+
+                # ── Notify LLM when budget is met (but don't break) ──
+                if min_words <= total_wc <= max_words:
+                    event_bus.publish(
+                        "status_message",
+                        message=f"📋 Budget in range: {total_wc} words "
+                        f"(target {min_words}-{max_words}) — "
+                        f"waiting for LLM to call finalize_draft",
+                    )
+
+                    # Auto save_draft so the LLM can review
+                    save_result = await tool_registry.dispatch("save_draft", {})
+                    save_id = f"auto_save_{tc.get('id', 'unknown')}"
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": save_id,
+                            "name": "save_draft",
+                            "content": json.dumps(save_result),
+                        }
+                    )
+                    event_bus.publish(
+                        "tool_result",
+                        tool_name="save_draft (auto)",
+                        result=f"Saved {save_result.get('total_messages', 0)} messages",
+                    )
+
+            # ── Break only when LLM explicitly finalizes ──
+            if name == "finalize_draft":
+                finalized = True
+                event_bus.publish(
+                    "status_message",
+                    message="✅ LLM called finalize_draft — submitting to Critic",
+                )
+
+        if finalized:
+            return True, None
+        return False, None
 
     @staticmethod
     def _to_dict(response_message) -> dict:
@@ -280,65 +298,20 @@ class SummarizerExecutor(BaseA2AExecutor):
             else None,
         }
 
-    @staticmethod
-    def _extract_tool_calls(msg_dict: dict) -> list[dict]:
-        """Extract tool calls from structured field or XML fallback in content."""
-        calls: list[dict] = []
-
-        # 1. Structured tool calls
-        if msg_dict.get("tool_calls"):
-            for tc in msg_dict["tool_calls"]:
-                func = tc.get("function", {})
-                args = func.get("arguments", "{}")
-                if isinstance(args, str):
-                    args = json.loads(args)
-                calls.append(
-                    {
-                        "id": tc.get("id", "unknown"),
-                        "name": func.get("name"),
-                        "arguments": args,
-                    }
-                )
-            return calls
-
-        # 2. XML <tool_call> fallback (vLLM / DeepSeek)
-        content = msg_dict.get("content") or ""
-        xml_matches = re.findall(
-            r"<tool_call>\s*(\{.*?\})\s*</tool_call>", content, re.DOTALL
-        )
-        for raw in xml_matches:
-            try:
-                parsed = json.loads(raw)
-                args = parsed.get("arguments", {})
-                if isinstance(args, str):
-                    args = json.loads(args)
-                calls.append(
-                    {
-                        "id": "xml_fallback",
-                        "name": parsed["name"],
-                        "arguments": args,
-                    }
-                )
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        # 3. Plain-text function call fallback
-        if not calls:
-            fn_matches = re.findall(
-                r"add_speaker_message\s*\(\s*(SPEAKER_\d+)\s*,\s*\"(.*?)\"\s*\)",
-                content,
-                re.DOTALL,
-            )
-            for speaker_id, msg_content in fn_matches:
-                calls.append(
-                    {
-                        "id": "text_fallback",
-                        "name": "add_speaker_message",
-                        "arguments": {
-                            "speaker_id": speaker_id,
-                            "content": msg_content.replace('\\"', '"'),
-                        },
-                    }
-                )
-
-        return calls
+        return {
+            "role": response_message.role,
+            "content": response_message.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in (response_message.tool_calls or [])
+            ]
+            if hasattr(response_message, "tool_calls") and response_message.tool_calls
+            else None,
+        }

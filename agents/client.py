@@ -1,61 +1,112 @@
+import asyncio
+import json
 import uuid
 
 import httpx
 
 
-async def a2a_send_task(port: int, task_text: str, timeout: float = 120.0) -> str:
-    """Send a JSON-RPC message/send to a local A2A server and return the text result."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "message/send",
-        "params": {
-            "message": {
-                "role": "user",
-                "parts": [{"kind": "text", "text": task_text}],
-                "messageId": str(uuid.uuid4()),
-            }
-        },
-    }
-    url = f"http://127.0.0.1:{port}"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
+class AgentClient:
+    """
+    Robust HTTP client for communicating with A2A agents via JSON-RPC.
+    Features connection pooling and exponential backoff for transient errors.
+    """
 
-    data = resp.json()
+    def __init__(self):
+        self.limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        self._client = None
 
-    # Handle JSON-RPC errors
-    if "error" in data:
-        raise RuntimeError(f"A2A error: {data['error']}")
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(limits=self.limits)
+        return self._client
 
-    result = data.get("result", {})
+    async def close(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
-    # Extract text from various A2A response shapes
-    if "artifacts" in result:
-        texts = []
-        for artifact in result["artifacts"]:
-            for part in artifact.get("parts", []):
-                if part.get("kind") == "text":
-                    texts.append(part["text"])
-        if texts:
-            return "\n".join(texts)
+    async def send_task(
+        self,
+        port: int,
+        task_data: dict | str | object,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+    ) -> str:
+        """
+        Sends a task to the agent.
+        """
+        if hasattr(task_data, "model_dump_json"):
+            task_text = task_data.model_dump_json()
+        elif hasattr(task_data, "dict"):
+            task_text = json.dumps(task_data.dict())
+        elif isinstance(task_data, dict):
+            task_text = json.dumps(task_data)
+        else:
+            task_text = str(task_data)
 
-    if "parts" in result:
-        texts = []
-        for part in result["parts"]:
-            if part.get("kind") == "text":
-                texts.append(part["text"])
-        if texts:
-            return "\n".join(texts)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": task_text}],
+                    "messageId": str(uuid.uuid4()),
+                }
+            },
+        }
+        url = f"http://127.0.0.1:{port}"
 
-    if "result" in result:
-        nested = result["result"]
-        if "parts" in nested:
-            texts = []
-            for part in nested["parts"]:
-                if part.get("kind") == "text":
-                    texts.append(part["text"])
-            if texts:
-                return "\n".join(texts)
+        last_exception = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                client = self._get_client()
+                resp = await client.post(url, json=payload, timeout=timeout)
+                resp.raise_for_status()
+                data = resp.json()
 
-    return str(result)
+                if "error" in data:
+                    raise RuntimeError(f"A2A error: {data['error']}")
+
+                result = data.get("result", {})
+
+                # Extract text
+                for key in ["artifacts", "parts"]:
+                    if key in result:
+                        items = result[key]
+                        texts = (
+                            [
+                                p["text"]
+                                for i in items
+                                for p in i.get("parts", [])
+                                if p.get("kind") == "text"
+                            ]
+                            if key == "artifacts"
+                            else [p["text"] for p in items if p.get("kind") == "text"]
+                        )
+                        if texts:
+                            return "\n".join(texts)
+
+                if "result" in result and "parts" in result["result"]:
+                    texts = [
+                        p["text"]
+                        for p in result["result"]["parts"]
+                        if p.get("kind") == "text"
+                    ]
+                    if texts:
+                        return "\n".join(texts)
+
+                return str(result)
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                last_exception = e
+                if attempt < max_retries:
+                    await asyncio.sleep(2**attempt)  # Exponential backoff (2s, 4s, 8s)
+
+        raise RuntimeError(
+            f"Failed after {max_retries} attempts. Last error: {last_exception}"
+        )
+
+
+# Global connection pool instance
+agent_client = AgentClient()

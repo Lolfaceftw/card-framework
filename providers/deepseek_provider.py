@@ -9,7 +9,7 @@ import sys
 from openai import OpenAI
 
 from llm_provider import LLMProvider
-from ui import ui
+from events import event_bus
 
 
 class DeepSeekProvider(LLMProvider):
@@ -33,7 +33,7 @@ class DeepSeekProvider(LLMProvider):
         self.base_url = base_url
         self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
-        ui.print_system(
+        event_bus.publish("system_message", 
             f"Connected to DeepSeek → model={self.model}, url={self.base_url}"
         )
 

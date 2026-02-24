@@ -24,7 +24,7 @@ from llm_provider import EmbeddingProvider, LLMProvider
 from logger_utils import configure_logger
 from orchestrator import Orchestrator
 from providers.logging_provider import LoggingLLMProvider
-from ui import ui
+from events import event_bus
 
 
 def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecutor):
@@ -85,22 +85,22 @@ def main(cfg: DictConfig) -> None:
             logging.getLogger(logger_name).propagate = False
 
     # ── 2. Load transcript ──
-    ui.print_system(f"Loading transcript from {cfg.transcript_path}...")
+    event_bus.publish("system_message", f"Loading transcript from {cfg.transcript_path}...")
     transcript = load_transcript(cfg.transcript_path)
-    ui.print_system(f"Loaded {len(transcript.get('segments', []))} segments")
+    event_bus.publish("system_message", f"Loaded {len(transcript.get('segments', []))} segments")
 
     # ── 3. Instantiate providers ──
-    ui.print_system("Instantiating LLM provider...")
+    event_bus.publish("system_message", "Instantiating LLM provider...")
     llm: LLMProvider = hydra.utils.instantiate(cfg.llm)
 
     if cfg.get("logging", {}).get("enabled", False):
         llm = LoggingLLMProvider(inner_provider=llm)
 
-    ui.print_system(f"LLM provider: {type(llm).__name__}")
+    event_bus.publish("system_message", f"LLM provider: {type(llm).__name__}")
 
-    ui.print_system("Instantiating Embedding provider...")
+    event_bus.publish("system_message", "Instantiating Embedding provider...")
     embedding: EmbeddingProvider = hydra.utils.instantiate(cfg.embedding)
-    ui.print_system(f"Embedding provider: {type(embedding).__name__}")
+    event_bus.publish("system_message", f"Embedding provider: {type(embedding).__name__}")
 
     # ── 3. Build the transcript index ──
     transcript_index = TranscriptIndex(embedding_provider=embedding)
@@ -110,7 +110,7 @@ def main(cfg: DictConfig) -> None:
     summarizer_port = cfg.ports.summarizer
     critic_port = cfg.ports.critic
 
-    ui.print_system(f"Starting Info Retrieval A2A server on port {retrieval_port}...")
+    event_bus.publish("system_message", f"Starting Info Retrieval A2A server on port {retrieval_port}...")
     retrieval_app = _build_a2a_app(
         name="InfoRetrieval",
         description="Indexes transcript segments and retrieves relevant ones.",
@@ -119,7 +119,7 @@ def main(cfg: DictConfig) -> None:
     )
     _run_server_in_thread("retrieval-a2a", retrieval_app, retrieval_port)
 
-    ui.print_system(f"Starting Summarizer A2A server on port {summarizer_port}...")
+    event_bus.publish("system_message", f"Starting Summarizer A2A server on port {summarizer_port}...")
     summarizer_app = _build_a2a_app(
         name="Summarizer",
         description="Produces abstractive summaries.",
@@ -134,7 +134,7 @@ def main(cfg: DictConfig) -> None:
     )
     _run_server_in_thread("summarizer-a2a", summarizer_app, summarizer_port)
 
-    ui.print_system(f"Starting Critic A2A server on port {critic_port}...")
+    event_bus.publish("system_message", f"Starting Critic A2A server on port {critic_port}...")
     critic_app = _build_a2a_app(
         name="Critic",
         description="Evaluates summaries.",
@@ -149,7 +149,7 @@ def main(cfg: DictConfig) -> None:
     )
     _run_server_in_thread("critic-a2a", critic_app, critic_port)
 
-    ui.print_system("Waiting for A2A servers to start...")
+    event_bus.publish("system_message", "Waiting for A2A servers to start...")
     time.sleep(2)
 
     # ── 5. Verify servers are up ──
@@ -163,13 +163,13 @@ def main(cfg: DictConfig) -> None:
                 f"http://127.0.0.1:{port}/.well-known/agent.json", timeout=5
             )
             r.raise_for_status()
-            ui.print_status(f"[OK] {name} agent is up")
+            event_bus.publish("status_message", f"[OK] {name} agent is up")
         except Exception as e:
-            ui.print_error(f"[ERR] {name} server not responding: {e}")
+            event_bus.publish("error_message", f"[ERR] {name} server not responding: {e}")
             sys.exit(1)
 
     # ── 6. Run the orchestrator ──
-    ui.print_system("Starting orchestration loop...")
+    event_bus.publish("system_message", "Starting orchestration loop...")
     orchestrator = Orchestrator(
         retrieval_port=retrieval_port,
         summarizer_port=summarizer_port,
@@ -185,7 +185,7 @@ def main(cfg: DictConfig) -> None:
             max_iterations=cfg.orchestrator.max_iterations,
         )
         if result:
-            ui.print_agent_message("Orchestrator", f"Final Summary:\n\n{result}")
+            event_bus.publish("agent_message", "Orchestrator", f"Final Summary:\n\n{result}")
 
     asyncio.run(run())
 
