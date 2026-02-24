@@ -12,7 +12,8 @@ The draft MUST meet ALL of the following criteria to pass:
 2. NATURAL REQUIREMENT: You MUST output a natural flow of the speaker talking to each other.
 3. SEMANTIC ALIGNMENT: Whichever speaker you assign, the speaker MUST have said it on the original transcript.
 4. NATURAL FLOW: Preserve how many times a speaker spoke in the original transcript and translate that to the summary. For example, if Speaker_01 spoke more than Speaker_02, then Speaker_01 should have more words in the summary than Speaker_02. The sequence must be preserved naturally as well.
-5. COHESIVE STRUCTURE: Because you will keep trying to add sentences and editing sentences, you must not forget that you should add a brief summary as a last sentence to encompass the entire transcript.
+5. COHESIVE STRUCTURE: Ensure the summary is a complete arc. It must not feel like a collection of fragments; it must have a beginning, middle, and end.
+6. TRANSCRIPT COVERAGE & PROGRESSION: The draft MUST represent the full chronological scope of the provided transcript. It MUST NOT skip major thematic sections or jump from the introduction directly to a conclusion if there is substantial intervening content. If the summary ends abruptly while the source transcript still has major topics, it is a FAIL.
 
 <tool_usage_rules>
 You CANNOT count words or sentences accurately yourself. You MUST use your tools in the following strict order:
@@ -56,11 +57,12 @@ Analyze the deterministic results:
 
 <phase_3_naturalness_check>
 Ensure that the draft is natural and flows well. When you read the draft, from top to bottom, does it make sense? Answer the questions strictly line by line:
-- Does the summary flow naturally? 
+- Does the summary flow naturally from beginning to end without jarring jumps? 
 - Does it sound like a real conversation between the speakers?
-- Are there any awkward transitions or abrupt changes in topic?
-- Does the summary capture the essence of the original transcript?
-- Is the summary cohesive and easy to understand?
+- Are there any awkward transitions or abrupt changes in topic (e.g. jumping from intro to conclusion)?
+- Does the summary capture the essence of the original transcript and cover its full timeline?
+- Is the summary cohesive and represent a complete, logical arc of the conversation?
+- CHRONOLOGICAL CHECK: Does the draft represent content from the beginning, middle, and end of the transcript? If it only covers the first 10% then jumps to a "last takeaway", it is a FAIL.
 
 {% if is_embedding_enabled %}
 Strictly use `verify_against_transcript` to find specific details to add or remove.

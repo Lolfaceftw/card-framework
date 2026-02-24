@@ -109,6 +109,25 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             should_break, final_result = await self.process_tool_calls(
                 tool_calls, messages, context_data or {}
             )
+
+            # Ensure all tool calls were answered to prevent API validation errors (e.g. DeepSeek 400)
+            answered_ids = {
+                m["tool_call_id"] for m in messages if m.get("role") == "tool"
+            }
+            for tc in tool_calls:
+                if tc["id"] not in answered_ids:
+                    logger.warning(
+                        f"[{self.name}] Tool call {tc['id']} ('{tc['name']}') was not handled. Injecting fallback."
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": tc["name"],
+                            "content": f"Error: Tool '{tc['name']}' not recognized or failed to execute.",
+                        }
+                    )
+
             if should_break:
                 return final_result
 

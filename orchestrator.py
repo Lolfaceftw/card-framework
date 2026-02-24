@@ -99,11 +99,11 @@ class Orchestrator:
                 critic_verdict = CriticTaskResponse.model_validate_json(
                     critic_response_raw
                 )
-            except Exception:
+            except Exception as e:
                 event_bus.publish(
-                    "error_message", "Could not parse critic response, retrying..."
+                    "error_message", f"Critic failed or returned invalid JSON: {e}"
                 )
-                feedback = "Previous attempt could not be evaluated. Please try again."
+                feedback = "Previous attempt could not be evaluated due to a system error. Please try again."
                 continue
 
             status = critic_verdict.status
