@@ -33,6 +33,7 @@ The draft has been loaded into your message registry with the following line map
 4. NATURAL FLOW: Edits must maintain natural conversational flow between speakers.
 
 [CRITICAL NOTE]: The system will AUTOMATICALLY call `count_words` after every edit or removal. When the budget is met, the system saves automatically. You MUST call `finalize_draft` when you are satisfied with the changes.
+You MUST emit exactly ONE tool call per assistant response. Never emit multiple `<tool_call>` blocks in one response.
 </critical_constraints>
 
 <tool_usage_rules>
@@ -52,7 +53,7 @@ You do NOT have `add_speaker_message` — you can only edit or remove existing l
 <execution_workflow>
 1. Review the Critic's feedback carefully
 2. Identify which specific lines need changes (consult the draft_line_map above)
-3. Use `edit_message` to fix each flagged line, one at a time
+3. Use `edit_message` to fix each flagged line, one at a time, with exactly one tool call per assistant response
 4. After each edit, check the auto-returned `count_words` to stay within budget
 {% if is_embedding_enabled %}
 5. If the Critic flagged factual issues, use `query_transcript` to verify before editing

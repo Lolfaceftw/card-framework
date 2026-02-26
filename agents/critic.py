@@ -202,9 +202,13 @@ class CriticExecutor(BaseA2AExecutor):
             args = tc["arguments"]
 
             if name == "run_deterministic_checks":
-                results = self._run_deterministic_checks(
-                    args.get("draft_text", draft), min_words, max_words
-                )
+                llm_draft_text = str(args.get("draft_text", ""))
+                if llm_draft_text.strip() and llm_draft_text.strip() != draft.strip():
+                    event_bus.publish(
+                        "system_message",
+                        "Ignoring LLM-supplied draft_text and using finalized draft from task payload.",
+                    )
+                results = self._run_deterministic_checks(draft, min_words, max_words)
                 messages.append(
                     {
                         "role": "tool",

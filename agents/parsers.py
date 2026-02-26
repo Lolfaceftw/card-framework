@@ -3,6 +3,8 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
+from agents.tool_call_utils import dedupe_tool_calls_by_signature
+
 
 class OutputParser(ABC):
     @abstractmethod
@@ -48,7 +50,7 @@ class XMLFallbackParser(OutputParser):
         xml_matches = re.findall(
             r"<tool_call>\s*(\{.*?\})\s*</tool_call>", content, re.DOTALL
         )
-        for raw in xml_matches:
+        for idx, raw in enumerate(xml_matches):
             try:
                 parsed = json.loads(raw)
                 args = parsed.get("arguments", {})
@@ -56,7 +58,7 @@ class XMLFallbackParser(OutputParser):
                     args = json.loads(args)
                 calls.append(
                     {
-                        "id": "xml_fallback",
+                        "id": f"xml_fallback_{idx}",
                         "name": parsed["name"],
                         "arguments": args,
                     }
@@ -77,10 +79,10 @@ class TextFallbackParser(OutputParser):
             content,
             re.DOTALL,
         )
-        for speaker_id, msg_content in fn_matches:
+        for idx, (speaker_id, msg_content) in enumerate(fn_matches):
             calls.append(
                 {
-                    "id": "text_fallback",
+                    "id": f"text_fallback_{idx}",
                     "name": "add_speaker_message",
                     "arguments": {
                         "speaker_id": speaker_id,
@@ -101,7 +103,7 @@ class CompositeParser(OutputParser):
         for parser in self.parsers:
             calls = parser.parse(msg_dict)
             if calls:
-                return calls
+                return dedupe_tool_calls_by_signature(calls)
         return []
 
 

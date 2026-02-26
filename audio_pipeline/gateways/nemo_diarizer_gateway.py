@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from audio_pipeline.contracts import DiarizationTurn, SpeakerDiarizer
 from audio_pipeline.errors import (
     DependencyMissingError,
     NonRetryableAudioStageError,
 )
-from audio_pipeline.runtime import ensure_module_available, probe_audio_duration_ms
+from audio_pipeline.runtime import (
+    ensure_command_available,
+    ensure_module_available,
+    probe_audio_duration_ms,
+)
 
 
 class NemoSpeakerDiarizer(SpeakerDiarizer):
@@ -93,6 +98,9 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
 
         try:
             from nemo.collections.asr.models import ClusteringDiarizer
+            from nemo.collections.asr.models.configs.diarizer_config import (
+                NeuralDiarizerInferenceConfig,
+            )
             from omegaconf import OmegaConf
         except Exception as exc:  # pragma: no cover - runtime dependency path
             raise DependencyMissingError(
@@ -100,9 +108,13 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             ) from exc
 
         output_dir.mkdir(parents=True, exist_ok=True)
+        diarization_audio_path = self._prepare_diarization_audio(
+            audio_path=audio_path,
+            output_dir=output_dir,
+        )
         manifest_path = output_dir / "diarization_manifest.json"
         manifest_payload = {
-            "audio_filepath": str(audio_path),
+            "audio_filepath": str(diarization_audio_path),
             "offset": 0,
             "duration": None,
             "label": "infer",
@@ -116,44 +128,69 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             encoding="utf-8",
         )
 
-        cfg = OmegaConf.create(
-            {
-                "num_workers": 0,
-                "diarizer": {
-                    "manifest_filepath": str(manifest_path),
-                    "out_dir": str(output_dir),
-                    "speaker_embeddings": {
-                        "model_path": self.speaker_embedding_model,
-                    },
-                    "vad": {
-                        "model_path": self.vad_model,
-                    },
-                    "msdd_model": {
-                        "model_path": self.msdd_model,
-                    },
-                    "clustering": {
-                        "parameters": {
-                            "oracle_num_speakers": False,
-                        }
-                    },
-                },
-            }
-        )
+        cfg = OmegaConf.structured(NeuralDiarizerInferenceConfig())
+        cfg.num_workers = 0
+        cfg.batch_size = 24
+        cfg.sample_rate = 16000
+        cfg.verbose = False
+        cfg.device = "cpu" if device == "cpu" else "cuda"
+        cfg.diarizer.manifest_filepath = str(manifest_path)
+        cfg.diarizer.out_dir = str(output_dir)
+        cfg.diarizer.oracle_vad = False
+        cfg.diarizer.vad.model_path = self.vad_model
+        cfg.diarizer.vad.external_vad_manifest = None
+        cfg.diarizer.speaker_embeddings.model_path = self.speaker_embedding_model
+        cfg.diarizer.msdd_model.model_path = self.msdd_model
+        cfg.diarizer.clustering.parameters.oracle_num_speakers = False
 
         parameters = cfg.diarizer.clustering.parameters
         if self.max_speakers is not None:
             parameters.max_num_speakers = int(self.max_speakers)
         if self.min_speakers is not None:
-            parameters.min_num_speakers = int(self.min_speakers)
-        if device == "cpu":
-            cfg.diarizer.device = "cpu"
+            if "min_num_speakers" in parameters:
+                parameters.min_num_speakers = int(self.min_speakers)
 
         diarizer = ClusteringDiarizer(cfg=cfg)
         diarizer.diarize()
 
-        rttm_path = self._find_rttm(output_dir=output_dir, audio_path=audio_path)
+        rttm_path = self._find_rttm(
+            output_dir=output_dir,
+            audio_path=diarization_audio_path,
+        )
         turns = self._parse_rttm(rttm_path)
         return self._normalize_speaker_labels(turns)
+
+    def _prepare_diarization_audio(self, *, audio_path: Path, output_dir: Path) -> Path:
+        """Normalize diarization input to mono 16kHz WAV via ffmpeg."""
+        ensure_command_available("ffmpeg")
+        normalized_path = output_dir / "diarization_input_mono.wav"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-vn",
+            str(normalized_path),
+        ]
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise NonRetryableAudioStageError(
+                "Failed to prepare mono diarization audio with ffmpeg. "
+                f"Command: {' '.join(command)}. "
+                f"Stderr: {(exc.stderr or '').strip()}"
+            ) from exc
+        return normalized_path
 
     def _find_rttm(self, *, output_dir: Path, audio_path: Path) -> Path:
         """Resolve RTTM file produced by NeMo."""

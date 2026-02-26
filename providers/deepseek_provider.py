@@ -4,7 +4,10 @@ DeepSeek LLM Provider
 Uses the official OpenAI Python client pointing to DeepSeek API.
 """
 
+import json
 import sys
+from copy import deepcopy
+from typing import Any
 
 from openai import OpenAI
 
@@ -89,6 +92,50 @@ class DeepSeekProvider(LLMProvider):
         sys.stdout.flush()
         return full_content.strip()
 
+    @staticmethod
+    def _copy_message_without_reasoning(msg: dict[str, Any]) -> dict[str, Any]:
+        """Return a defensive copy of a message without stale reasoning content."""
+        msg_clean = {
+            k: deepcopy(v)
+            for k, v in msg.items()
+            if k != "reasoning_content" and v is not None
+        }
+        if msg.get("role") == "assistant" and "reasoning_content" in msg:
+            msg_clean["reasoning_content"] = msg["reasoning_content"]
+        return msg_clean
+
+    @staticmethod
+    def _tool_call_dedupe_key(tool_call: dict[str, Any]) -> str:
+        """Build a stable dedupe key for tool calls in normalized history."""
+        function = tool_call.get("function", {})
+        key_payload = {
+            "id": tool_call.get("id"),
+            "name": function.get("name"),
+            "arguments": function.get("arguments"),
+        }
+        return json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _merge_tool_calls(
+        cls,
+        existing_calls: list[dict[str, Any]] | None,
+        incoming_calls: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Merge and deduplicate tool calls without mutating source lists."""
+        merged_calls: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for source_calls in (existing_calls or [], incoming_calls or []):
+            for tool_call in source_calls:
+                copied = deepcopy(tool_call)
+                dedupe_key = cls._tool_call_dedupe_key(copied)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                merged_calls.append(copied)
+
+        return merged_calls
+
     def _normalize_messages(self, messages: list[dict]) -> list[dict]:
         """
         Cleans and normalizes message history for DeepSeek's strict validation.
@@ -101,14 +148,7 @@ class DeepSeekProvider(LLMProvider):
 
         for msg in messages:
             # Drop reasoning_content to save context space/bandwidth as per DeepSeek docs
-            msg_clean = {
-                k: v
-                for k, v in msg.items()
-                if k != "reasoning_content" and v is not None
-            }
-            # ... but preserve it for the active assistant turn if needed
-            if msg.get("role") == "assistant" and "reasoning_content" in msg:
-                msg_clean["reasoning_content"] = msg["reasoning_content"]
+            msg_clean = self._copy_message_without_reasoning(msg)
 
             # Track valid tool calls so we can detect orphans
             if msg_clean.get("role") == "assistant" and msg_clean.get("tool_calls"):
@@ -149,12 +189,13 @@ class DeepSeekProvider(LLMProvider):
                     # If we merge two assistant messages that both have tool_calls,
                     # we must combine them into one array so the subsequent tool responses
                     # aren't "split" across turns.
-                    if last_msg.get("tool_calls"):
-                        last_msg["tool_calls"].extend(msg_clean["tool_calls"])
-                    else:
-                        last_msg["tool_calls"] = msg_clean["tool_calls"].copy()
+                    merged_calls = self._merge_tool_calls(
+                        existing_calls=last_msg.get("tool_calls"),
+                        incoming_calls=msg_clean["tool_calls"],
+                    )
+                    last_msg["tool_calls"] = merged_calls
 
-                    for tc in msg_clean["tool_calls"]:
+                    for tc in merged_calls:
                         valid_tool_call_ids.add(tc["id"])
 
                 if "reasoning_content" in msg_clean:
