@@ -1,3 +1,5 @@
+import ast
+import hashlib
 import json
 from abc import ABC, abstractmethod
 from typing import Any
@@ -21,8 +23,10 @@ class BaseA2AExecutor(AgentExecutor, ABC):
     @staticmethod
     def _is_synthetic_tool_call_id(tool_call_id: str) -> bool:
         """Return True for parser-generated fallback IDs that can repeat across turns."""
-        return tool_call_id.startswith("xml_fallback_") or tool_call_id.startswith(
-            "text_fallback_"
+        return (
+            tool_call_id.startswith("xml_fallback_")
+            or tool_call_id.startswith("text_fallback_")
+            or tool_call_id.startswith("sanitized_")
         )
 
     @staticmethod
@@ -32,6 +36,88 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         if isinstance(raw_value, int) and raw_value >= 0:
             return raw_value
         return 0
+
+    @staticmethod
+    def _normalize_tool_arguments(raw_arguments: Any) -> str:
+        """
+        Normalize tool call arguments into a valid JSON object string.
+
+        Models occasionally emit python-literal fragments (single quotes) or
+        truncated payloads (e.g. "{"). We coerce unsupported forms to "{}"
+        so malformed history cannot break subsequent provider requests.
+        """
+        if raw_arguments is None:
+            return "{}"
+
+        parsed: Any
+        if isinstance(raw_arguments, str):
+            candidate = raw_arguments.strip()
+            if not candidate:
+                return "{}"
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(candidate)
+                except (SyntaxError, ValueError):
+                    return "{}"
+        else:
+            parsed = raw_arguments
+
+        if not isinstance(parsed, dict):
+            return "{}"
+
+        return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def _sanitize_assistant_tool_calls(cls, msg_dict: dict[str, Any]) -> dict[str, Any]:
+        """Return a defensively sanitized assistant message for history replay."""
+        if msg_dict.get("role") != "assistant":
+            return msg_dict
+
+        raw_tool_calls = msg_dict.get("tool_calls")
+        if not isinstance(raw_tool_calls, list):
+            return msg_dict
+
+        sanitized_tool_calls: list[dict[str, Any]] = []
+        for index, raw_call in enumerate(raw_tool_calls):
+            if not isinstance(raw_call, dict):
+                continue
+
+            raw_function = raw_call.get("function")
+            function = dict(raw_function) if isinstance(raw_function, dict) else {}
+            name = function.get("name")
+            normalized_name = str(name).strip() if name is not None else ""
+            if not normalized_name:
+                normalized_name = "unknown_tool"
+
+            normalized_arguments = cls._normalize_tool_arguments(
+                function.get("arguments")
+            )
+
+            raw_id = raw_call.get("id")
+            if isinstance(raw_id, str) and raw_id.strip():
+                tool_call_id = raw_id
+            else:
+                digest_input = (
+                    f"{normalized_name}|{normalized_arguments}|{index}"
+                ).encode("utf-8")
+                digest = hashlib.sha1(digest_input).hexdigest()[:10]
+                tool_call_id = f"sanitized_{index}_{digest}"
+
+            sanitized_tool_calls.append(
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": normalized_name,
+                        "arguments": normalized_arguments,
+                    },
+                }
+            )
+
+        msg_dict["tool_calls"] = sanitized_tool_calls if sanitized_tool_calls else None
+        return msg_dict
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         raw_input = context.get_user_input()
@@ -145,6 +231,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                     and response_message.tool_calls
                     else None,
                 }
+            msg_dict = self._sanitize_assistant_tool_calls(msg_dict)
             messages.append(msg_dict)
 
             tool_calls = parser.parse(msg_dict)

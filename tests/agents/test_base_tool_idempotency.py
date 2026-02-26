@@ -214,6 +214,83 @@ def _tool_call(tool_id: str, speaker_id: str, content: str) -> dict[str, Any]:
     }
 
 
+def _raw_tool_call(tool_id: str, name: str, arguments: Any) -> dict[str, Any]:
+    return {
+        "id": tool_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+def test_base_loop_sanitizes_python_literal_tool_arguments() -> None:
+    llm = FakeLLM(
+        responses=[
+            FakeResponse(
+                tool_calls=[
+                    _raw_tool_call(
+                        "call_1",
+                        "add_speaker_message",
+                        "{'speaker_id': 'SPEAKER_00', 'content': 'Hello world'}",
+                    )
+                ]
+            )
+        ]
+    )
+    executor = DummyExecutor(llm)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "x"}]
+
+    asyncio.run(
+        executor.run_agent_loop(
+            messages=messages,
+            tools=[],
+            max_turns=1,
+            context_data={},
+        )
+    )
+
+    assert len(executor.executed_calls) == 1
+    _call_id, _tool_name, args = executor.executed_calls[0]
+    assert args == {"speaker_id": "SPEAKER_00", "content": "Hello world"}
+
+    assistant_messages = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    stored_args = assistant_messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(stored_args) == {
+        "speaker_id": "SPEAKER_00",
+        "content": "Hello world",
+    }
+
+
+def test_base_loop_sanitizes_malformed_tool_arguments_to_empty_object() -> None:
+    llm = FakeLLM(
+        responses=[
+            FakeResponse(
+                tool_calls=[_raw_tool_call("call_1", "count_words", "{")]
+            )
+        ]
+    )
+    executor = DummyExecutor(llm)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "x"}]
+
+    asyncio.run(
+        executor.run_agent_loop(
+            messages=messages,
+            tools=[],
+            max_turns=1,
+            context_data={},
+        )
+    )
+
+    assert len(executor.executed_calls) == 1
+    _call_id, tool_name, args = executor.executed_calls[0]
+    assert tool_name == "count_words"
+    assert args == {}
+
+    assistant_messages = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
 def test_base_loop_skips_duplicate_signature_across_turns() -> None:
     llm = FakeLLM(
         responses=[
