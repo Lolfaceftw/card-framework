@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 import sys
 import threading
 import time
@@ -12,13 +13,16 @@ from a2a.server.events import InMemoryQueueManager
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from agents.critic import CriticExecutor
 from agents.retrieval import InfoRetrievalExecutor
 from agents.summarizer import SummarizerExecutor
-from agents.utils import load_transcript
 from agents.health import AgentHealthChecker
+from agents.utils import load_transcript
+from audio_pipeline import build_audio_to_script_orchestrator
+from audio_pipeline.config import should_use_audio_stage
+from audio_pipeline.runtime import resolve_device, resolve_path
 from embeddings import TranscriptIndex
 from llm_provider import EmbeddingProvider, LLMProvider
 from logger_utils import configure_logger
@@ -85,13 +89,63 @@ def main(cfg: DictConfig) -> None:
             logging.getLogger(logger_name).propagate = False
 
     # ── 2. Load transcript ──
-    event_bus.publish(
-        "system_message", f"Loading transcript from {cfg.transcript_path}..."
+    project_root = Path(hydra.utils.get_original_cwd())
+    audio_cfg = cfg.get("audio", {})
+    audio_cfg_dict = (
+        OmegaConf.to_container(audio_cfg, resolve=True)
+        if isinstance(audio_cfg, DictConfig)
+        else dict(audio_cfg)
+        if isinstance(audio_cfg, dict)
+        else {}
     )
-    transcript = load_transcript(cfg.transcript_path)
-    event_bus.publish(
-        "system_message", f"Loaded {len(transcript.get('segments', []))} segments"
-    )
+
+    transcript_path = str(cfg.transcript_path)
+    if should_use_audio_stage(audio_cfg_dict):
+        audio_path_value = str(audio_cfg_dict.get("audio_path", "")).strip()
+        if not audio_path_value:
+            raise ValueError(
+                "audio.audio_path is required when audio.input_mode=audio_first. "
+                "To skip stage 1, set audio.input_mode=auto_detect and leave audio.audio_path empty."
+            )
+
+        input_audio_path = resolve_path(audio_path_value, base_dir=project_root)
+        output_transcript_path = resolve_path(
+            str(
+                audio_cfg_dict.get(
+                    "output_transcript_path",
+                    "artifacts/transcripts/latest.transcript.json",
+                )
+            ),
+            base_dir=project_root,
+        )
+        work_dir = resolve_path(
+            str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
+            base_dir=project_root,
+        )
+        runtime_device = resolve_device(str(audio_cfg_dict.get("device", "auto")))
+        audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg_dict)
+        audio_stage_output = audio_orchestrator.run(
+            input_audio_path=input_audio_path,
+            output_transcript_path=output_transcript_path,
+            work_dir=work_dir,
+            device=runtime_device,
+            metadata_overrides={
+                "separator_model": str(
+                    audio_cfg_dict.get("separation", {}).get("model", "htdemucs")
+                ),
+                "transcriber_model": str(
+                    audio_cfg_dict.get("asr", {}).get("model", "large-v3")
+                ),
+                "diarizer_backend": str(
+                    audio_cfg_dict.get("diarization", {}).get("provider", "nemo")
+                ),
+            },
+        )
+        transcript_path = str(audio_stage_output.transcript_path)
+
+    event_bus.publish("system_message", f"Loading transcript from {transcript_path}...")
+    transcript = load_transcript(transcript_path)
+    event_bus.publish("system_message", f"Loaded {len(transcript.get('segments', []))} segments")
 
     # ── 3. Instantiate providers ──
     event_bus.publish("system_message", "Instantiating LLM provider...")

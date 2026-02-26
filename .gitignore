@@ -15,8 +15,11 @@ wheels/
 
 # Outputs and Reports
 outputs/
+artifacts/
 summary.json
 eval_report.json
 
 # Cache
 .pytest_cache/
+
+audio.wav

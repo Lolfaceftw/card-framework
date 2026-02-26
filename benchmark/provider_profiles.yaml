@@ -1,0 +1,69 @@
+providers:
+  - id: vllm_default
+    description: OpenAI-compatible vLLM endpoint running locally.
+    required_env: []
+    llm:
+      _target_: providers.vllm_provider.VLLMProvider
+      base_url: "http://127.0.0.1:8000/v1"
+      api_key: "EMPTY"
+
+  - id: transformers_local
+    description: Local Transformers backend for tool-calling compatibility checks.
+    required_env: []
+    llm:
+      _target_: providers.transformers_provider.TransformersProvider
+      model: "Salesforce/Llama-xLAM-2-3b-fc-r"
+      device_map: "auto"
+      torch_dtype: "bfloat16"
+
+  - id: deepseek_chat
+    description: DeepSeek API backend.
+    required_env: ["DEEPSEEK_API_KEY"]
+    llm:
+      _target_: providers.deepseek_provider.DeepSeekProvider
+      api_key: "sk-8e0f7389bc3f4d44bea4fdfc0a3c3d78"
+      model: "deepseek-reasoner"
+      base_url: "https://api.deepseek.com"
+
+  - id: deepseek_judge
+    description: Dedicated DeepSeek judge backend for reference-free scoring.
+    required_env: ["DEEPSEEK_API_KEY"]
+    llm:
+      _target_: providers.deepseek_provider.DeepSeekProvider
+      api_key: "$ENV{DEEPSEEK_API_KEY}"
+      model: "deepseek-chat"
+      base_url: "https://api.deepseek.com"
+
+  - id: glm_46
+    description: GLM backend via ZAI SDK.
+    required_env: ["ZAI_API_KEY"]
+    llm:
+      _target_: providers.glm_provider.GLMProvider
+      api_key: "$ENV{ZAI_API_KEY}"
+      model: "glm-4.6"
+
+  - id: google_gemini
+    description: Google GenAI backend.
+    required_env: ["GEMINI_API_KEY"]
+    llm:
+      _target_: providers.google_genai_provider.GoogleGenAIProvider
+      api_key: "$ENV{GEMINI_API_KEY}"
+      model: "gemini-2.5-pro"
+
+  - id: huggingface_toolace
+    description: Hugging Face ToolACE backend.
+    required_env: ["HF_API_TOKEN"]
+    llm:
+      _target_: providers.huggingface_provider.HuggingfaceProvider
+      api_key: "$ENV{HF_API_TOKEN}"
+      model: "Team-ACE/ToolACE-8B"
+      base_url: "https://router.huggingface.co/hf-inference/v1/"
+
+  - id: nanbeige_thinking
+    description: Nanbeige model through Hugging Face router.
+    required_env: ["HF_API_TOKEN"]
+    llm:
+      _target_: providers.nanbeige_provider.NanbeigeProvider
+      api_key: "$ENV{HF_API_TOKEN}"
+      model: "Nanbeige/Nanbeige4-3B-Thinking-2511"
+      base_url: "https://router.huggingface.co/hf-inference/v1/"

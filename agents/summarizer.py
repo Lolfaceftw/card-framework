@@ -121,6 +121,12 @@ class SummarizerExecutor(BaseA2AExecutor):
                 "system_message",
                 f"Retrieved {num_segments} segments ({total_words} words)",
             )
+            event_bus.publish(
+                "retrieval_stats",
+                source="summarizer_initial",
+                num_segments=num_segments,
+                total_words=total_words,
+            )
 
             # ── Format retrieved segments ──
             for seg in segments:
@@ -137,6 +143,12 @@ class SummarizerExecutor(BaseA2AExecutor):
             # but we can just say "all" or pass some defaults if needed.
             total_words = len(full_transcript.split())
             num_segments = full_transcript.count("\n")
+            event_bus.publish(
+                "retrieval_stats",
+                source="full_transcript_fallback",
+                num_segments=num_segments,
+                total_words=total_words,
+            )
 
         # ── Build system prompt ──
         if revise_mode:

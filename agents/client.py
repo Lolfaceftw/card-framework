@@ -2,8 +2,11 @@ import asyncio
 import json
 import uuid
 import threading
+import time
 
 import httpx
+
+from events import event_bus
 
 
 class AgentClient:
@@ -57,10 +60,14 @@ class AgentClient:
         task_data: dict | str | object,
         timeout: float = 120.0,
         max_retries: int = 3,
+        metadata: dict | None = None,
     ) -> str:
         """
         Sends a task to the agent.
         """
+        call_id = str(uuid.uuid4())
+        metadata = metadata or {}
+
         if hasattr(task_data, "model_dump_json"):
             task_text = task_data.model_dump_json()
         elif hasattr(task_data, "dict"):
@@ -84,8 +91,18 @@ class AgentClient:
         }
         url = f"http://127.0.0.1:{port}"
 
+        event_bus.publish(
+            "a2a_call_started",
+            call_id=call_id,
+            port=port,
+            timeout=timeout,
+            max_retries=max_retries,
+            **metadata,
+        )
+
         last_exception = None
         for attempt in range(1, max_retries + 1):
+            attempt_start = time.perf_counter()
             try:
                 client = self._get_client()
                 resp = await client.post(url, json=payload, timeout=timeout)
@@ -112,6 +129,15 @@ class AgentClient:
                             else [p["text"] for p in items if p.get("kind") == "text"]
                         )
                         if texts:
+                            latency_ms = int((time.perf_counter() - attempt_start) * 1000)
+                            event_bus.publish(
+                                "a2a_call_succeeded",
+                                call_id=call_id,
+                                port=port,
+                                attempt=attempt,
+                                latency_ms=latency_ms,
+                                **metadata,
+                            )
                             return "\n".join(texts)
 
                 if "result" in result and "parts" in result["result"]:
@@ -121,17 +147,51 @@ class AgentClient:
                         if p.get("kind") == "text"
                     ]
                     if texts:
+                        latency_ms = int((time.perf_counter() - attempt_start) * 1000)
+                        event_bus.publish(
+                            "a2a_call_succeeded",
+                            call_id=call_id,
+                            port=port,
+                            attempt=attempt,
+                            latency_ms=latency_ms,
+                            **metadata,
+                        )
                         return "\n".join(texts)
 
+                latency_ms = int((time.perf_counter() - attempt_start) * 1000)
+                event_bus.publish(
+                    "a2a_call_succeeded",
+                    call_id=call_id,
+                    port=port,
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                    **metadata,
+                )
                 return str(result)
             except (httpx.RequestError, httpx.HTTPStatusError) as e:
                 last_exception = e
                 if attempt < max_retries:
-                    await asyncio.sleep(2**attempt)  # Exponential backoff (2s, 4s, 8s)
+                    delay_seconds = float(2**attempt)
+                    event_bus.publish(
+                        "a2a_call_retry",
+                        call_id=call_id,
+                        port=port,
+                        attempt=attempt,
+                        delay_seconds=delay_seconds,
+                        error=str(e),
+                        **metadata,
+                    )
+                    await asyncio.sleep(delay_seconds)  # Exponential backoff (2s, 4s, 8s)
 
-        raise RuntimeError(
-            f"Failed after {max_retries} attempts. Last error: {last_exception}"
+        error_message = f"Failed after {max_retries} attempts. Last error: {last_exception}"
+        event_bus.publish(
+            "a2a_call_failed",
+            call_id=call_id,
+            port=port,
+            error=error_message,
+            **metadata,
         )
+        raise RuntimeError(error_message)
 
 
 # Global connection pool instance
