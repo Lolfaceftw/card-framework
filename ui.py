@@ -1,4 +1,6 @@
+import os
 import re
+import time
 
 from rich.console import Console
 from rich.live import Live
@@ -6,6 +8,18 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
+
+
+def _resolve_live_fps(default: int = 30) -> int:
+    """Return live-render FPS from env with safe bounds and fallback."""
+    raw_fps = os.getenv("LLM_TEST_LIVE_FPS")
+    if raw_fps is None:
+        return default
+    try:
+        parsed = int(raw_fps)
+    except ValueError:
+        return default
+    return max(1, min(parsed, 120))
 
 
 def _strip_tool_call_blocks(text: str) -> str:
@@ -187,18 +201,23 @@ class ConsoleManager:
                 self.full_content = ""
                 self.full_thought = ""
                 self.live = None
+                self._last_render_at = 0.0
+                self._live_fps = _resolve_live_fps()
+                self._min_render_interval_seconds = 1.0 / float(self._live_fps)
 
             def __enter__(self):
                 self.live = Live(
                     self._build_panel(),
                     console=self.console,
-                    refresh_per_second=10000,
-                    vertical_overflow="visible",
+                    refresh_per_second=self._live_fps,
+                    vertical_overflow="crop",
+                    auto_refresh=False,
                 )
                 self.live.__enter__()
                 return self
 
             def __exit__(self, exc_type, exc_val, exc_tb):
+                self._render(force=True)
                 self.live.__exit__(exc_type, exc_val, exc_tb)
                 if self.full_content.strip() or self.full_thought.strip():
                     self.console.print()
@@ -227,13 +246,19 @@ class ConsoleManager:
                     padding=(1, 2),
                 )
 
+            def _render(self, force: bool = False):
+                now = time.monotonic()
+                if force or (now - self._last_render_at) >= self._min_render_interval_seconds:
+                    self.live.update(self._build_panel(), refresh=True)
+                    self._last_render_at = now
+
             def update_thought(self, chunk: str):
                 self.full_thought += chunk
-                self.live.update(self._build_panel())
+                self._render()
 
             def update_content(self, chunk: str):
                 self.full_content += chunk
-                self.live.update(self._build_panel())
+                self._render()
 
         return LiveMessage(self.console, agent_name, border_style)
 
