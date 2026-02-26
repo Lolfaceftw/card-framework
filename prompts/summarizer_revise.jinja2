@@ -45,6 +45,16 @@ You are in REVISE MODE. You have these tools available:
 - `count_words()` — Check current totals. Called automatically after edits.
 {% if is_embedding_enabled %}
 - `query_transcript(query, top_k?)` — Look up original transcript for fact-checking.
+{% if staged_discovery_enabled and required_discovery_queries|int > 0 %}
+Runtime-enforced discovery policy:
+- You MUST complete at least {{ required_discovery_queries }} successful `query_transcript` calls before any `edit_message`, `remove_message`, or `finalize_draft`.
+{% if max_discovery_queries|int > 0 %}
+- You can make at most {{ max_discovery_queries }} total `query_transcript` calls, so prioritize unresolved feedback items.
+{% endif %}
+{% if require_unique_discovery_queries %}
+- Repeating the same query string is not allowed; each discovery query must target a distinct missing fact.
+{% endif %}
+{% endif %}
 {% endif %}
 - `save_draft()` — Save the revised draft. Called automatically when budget is met.
 - `finalize_draft()` — Call this ONLY when you are fully satisfied with the revised draft. This submits it to the Critic.

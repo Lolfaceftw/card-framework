@@ -30,6 +30,10 @@ class SummarizerExecutor(BaseA2AExecutor):
         "enable_stall_guidance": False,
         "enable_noop_edit_detection": False,
         "enable_extended_text_tool_parser": False,
+        "enable_staged_discovery": False,
+        "required_discovery_queries": 0,
+        "max_discovery_queries": 0,
+        "require_unique_discovery_queries": False,
         "stall_guidance_threshold_turns": 3,
         "stall_guidance_cooldown_turns": 2,
         "target_models": [],
@@ -83,6 +87,13 @@ class SummarizerExecutor(BaseA2AExecutor):
             return []
         return [str(item).strip().lower() for item in raw_values if str(item).strip()]
 
+    @staticmethod
+    def _normalize_query_text(raw_query: Any) -> str:
+        """Normalize retrieval queries for dedupe and stage-budget accounting."""
+        if raw_query is None:
+            return ""
+        return " ".join(str(raw_query).strip().lower().split())
+
     def _resolve_provider_metadata(self) -> tuple[str, str]:
         """Return provider class name and best-effort model identifier."""
         provider = self._unwrap_provider(self.llm)
@@ -129,6 +140,21 @@ class SummarizerExecutor(BaseA2AExecutor):
             else any(matcher in model_id_lc for matcher in model_matchers)
         )
         is_active = configured_enabled and provider_match and model_match
+        required_discovery_queries = self._coerce_positive_int(
+            resolved.get("required_discovery_queries"),
+            default=0,
+            minimum=0,
+        )
+        max_discovery_queries = self._coerce_positive_int(
+            resolved.get("max_discovery_queries"),
+            default=0,
+            minimum=0,
+        )
+        if (
+            max_discovery_queries > 0
+            and max_discovery_queries < required_discovery_queries
+        ):
+            max_discovery_queries = required_discovery_queries
 
         return {
             "configured_enabled": configured_enabled,
@@ -141,6 +167,12 @@ class SummarizerExecutor(BaseA2AExecutor):
             and bool(resolved.get("enable_noop_edit_detection", False)),
             "enable_extended_text_tool_parser": is_active
             and bool(resolved.get("enable_extended_text_tool_parser", False)),
+            "enable_staged_discovery": is_active
+            and bool(resolved.get("enable_staged_discovery", False)),
+            "required_discovery_queries": required_discovery_queries,
+            "max_discovery_queries": max_discovery_queries,
+            "require_unique_discovery_queries": is_active
+            and bool(resolved.get("require_unique_discovery_queries", False)),
             "stall_guidance_threshold_turns": self._coerce_positive_int(
                 resolved.get("stall_guidance_threshold_turns"),
                 default=3,
@@ -363,6 +395,13 @@ class SummarizerExecutor(BaseA2AExecutor):
                 draft_line_map=json.dumps(registry.snapshot(), indent=2),
                 feedback=feedback,
                 is_embedding_enabled=self.is_embedding_enabled,
+                staged_discovery_enabled=self.is_embedding_enabled
+                and loop_guardrails["enable_staged_discovery"],
+                required_discovery_queries=loop_guardrails["required_discovery_queries"],
+                max_discovery_queries=loop_guardrails["max_discovery_queries"],
+                require_unique_discovery_queries=loop_guardrails[
+                    "require_unique_discovery_queries"
+                ],
             )
         else:
             system_prompt = PromptManager.get_prompt(
@@ -370,6 +409,13 @@ class SummarizerExecutor(BaseA2AExecutor):
                 min_words=min_words,
                 max_words=max_words,
                 is_embedding_enabled=self.is_embedding_enabled,
+                staged_discovery_enabled=self.is_embedding_enabled
+                and loop_guardrails["enable_staged_discovery"],
+                required_discovery_queries=loop_guardrails["required_discovery_queries"],
+                max_discovery_queries=loop_guardrails["max_discovery_queries"],
+                require_unique_discovery_queries=loop_guardrails[
+                    "require_unique_discovery_queries"
+                ],
             )
 
         messages = [
@@ -426,7 +472,31 @@ class SummarizerExecutor(BaseA2AExecutor):
             "recent_line_edit_fingerprints": [],
             "loop_guardrail_provider": loop_guardrails["provider_name"],
             "loop_guardrail_model": loop_guardrails["model_id"],
+            "enable_staged_discovery": self.is_embedding_enabled
+            and loop_guardrails["enable_staged_discovery"],
+            "required_discovery_queries": loop_guardrails["required_discovery_queries"],
+            "max_discovery_queries": loop_guardrails["max_discovery_queries"],
+            "require_unique_discovery_queries": loop_guardrails[
+                "require_unique_discovery_queries"
+            ],
+            "discovery_queries_completed": 0,
+            "discovery_query_history": [],
         }
+        if context_data["enable_staged_discovery"]:
+            max_discovery_queries = int(context_data["max_discovery_queries"])
+            max_info = (
+                f", max {max_discovery_queries} total query_transcript calls"
+                if max_discovery_queries > 0
+                else ""
+            )
+            event_bus.publish(
+                "system_message",
+                (
+                    "Staged discovery enabled: require "
+                    f"{context_data['required_discovery_queries']} successful "
+                    f"query_transcript calls before mutation/finalize{max_info}."
+                ),
+            )
         await self.run_agent_loop(
             messages,
             tool_registry.get_tool_schemas(),
@@ -491,10 +561,156 @@ class SummarizerExecutor(BaseA2AExecutor):
         stagnation_reason: str | None = None
         turn_total_wc: int | None = None
         turn_signature: str | None = None
+        staged_discovery_enabled = bool(
+            context_data.get("enable_staged_discovery", False)
+        )
+        required_discovery_queries = self._coerce_positive_int(
+            context_data.get("required_discovery_queries"),
+            default=0,
+            minimum=0,
+        )
+        max_discovery_queries = self._coerce_positive_int(
+            context_data.get("max_discovery_queries"),
+            default=0,
+            minimum=0,
+        )
+        require_unique_discovery_queries = bool(
+            context_data.get("require_unique_discovery_queries", False)
+        )
+        discovery_queries_completed = self._coerce_positive_int(
+            context_data.get("discovery_queries_completed"),
+            default=0,
+            minimum=0,
+        )
+        raw_discovery_history = context_data.get("discovery_query_history", [])
+        discovery_query_history = (
+            list(raw_discovery_history) if isinstance(raw_discovery_history, list) else []
+        )
+        discovery_query_set = {
+            entry for entry in discovery_query_history if isinstance(entry, str) and entry
+        }
+        staged_blocked_tools = mutating_tools | {"finalize_draft"}
 
         for tc in tool_calls:
             name = tc["name"]
             args = tc["arguments"]
+
+            if (
+                staged_discovery_enabled
+                and name in staged_blocked_tools
+                and discovery_queries_completed < required_discovery_queries
+            ):
+                remaining_queries = required_discovery_queries - discovery_queries_completed
+                skip_result = {
+                    "status": "skipped",
+                    "reason": "discovery_phase_incomplete",
+                    "required_discovery_queries": required_discovery_queries,
+                    "completed_discovery_queries": discovery_queries_completed,
+                    "remaining_discovery_queries": remaining_queries,
+                    "message": (
+                        "Complete staged discovery first. Call query_transcript with "
+                        f"{remaining_queries} more focused query"
+                        f"{'' if remaining_queries == 1 else 'ies'} before mutating "
+                        "the draft or finalizing."
+                    ),
+                }
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", "unknown"),
+                        "name": name,
+                        "content": json.dumps(skip_result),
+                    }
+                )
+                event_bus.publish(
+                    "tool_result",
+                    tool_name=f"{name} (skipped)",
+                    result=json.dumps(skip_result, indent=2),
+                )
+                continue
+
+            normalized_query = ""
+            if staged_discovery_enabled and name == "query_transcript":
+                normalized_query = self._normalize_query_text(args.get("query", ""))
+                if not normalized_query:
+                    skip_result = {
+                        "status": "skipped",
+                        "reason": "empty_query",
+                        "message": (
+                            "query_transcript requires a non-empty query string during "
+                            "staged discovery."
+                        ),
+                    }
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", "unknown"),
+                            "name": name,
+                            "content": json.dumps(skip_result),
+                        }
+                    )
+                    event_bus.publish(
+                        "tool_result",
+                        tool_name=f"{name} (skipped)",
+                        result=json.dumps(skip_result, indent=2),
+                    )
+                    continue
+
+                if (
+                    max_discovery_queries > 0
+                    and discovery_queries_completed >= max_discovery_queries
+                ):
+                    skip_result = {
+                        "status": "skipped",
+                        "reason": "discovery_query_budget_exhausted",
+                        "max_discovery_queries": max_discovery_queries,
+                        "completed_discovery_queries": discovery_queries_completed,
+                        "message": (
+                            "Discovery query budget has been exhausted. Continue with "
+                            "drafting or refinement."
+                        ),
+                    }
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", "unknown"),
+                            "name": name,
+                            "content": json.dumps(skip_result),
+                        }
+                    )
+                    event_bus.publish(
+                        "tool_result",
+                        tool_name=f"{name} (skipped)",
+                        result=json.dumps(skip_result, indent=2),
+                    )
+                    continue
+
+                if (
+                    require_unique_discovery_queries
+                    and normalized_query in discovery_query_set
+                ):
+                    skip_result = {
+                        "status": "skipped",
+                        "reason": "duplicate_discovery_query",
+                        "message": (
+                            "Use a different query_transcript string that covers a "
+                            "new facet of the transcript."
+                        ),
+                    }
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", "unknown"),
+                            "name": name,
+                            "content": json.dumps(skip_result),
+                        }
+                    )
+                    event_bus.publish(
+                        "tool_result",
+                        tool_name=f"{name} (skipped)",
+                        result=json.dumps(skip_result, indent=2),
+                    )
+                    continue
 
             if name in mutating_tools and mutating_executed_this_turn:
                 skip_result = {
@@ -541,6 +757,38 @@ class SummarizerExecutor(BaseA2AExecutor):
             event_bus.publish(
                 "tool_result", tool_name=name, result=json.dumps(result, indent=2)
             )
+            if staged_discovery_enabled and name == "query_transcript" and "error" not in result:
+                if normalized_query:
+                    if normalized_query not in discovery_query_set:
+                        discovery_query_history.append(normalized_query)
+                        discovery_query_set.add(normalized_query)
+                    discovery_queries_completed += 1
+                    context_data["discovery_queries_completed"] = (
+                        discovery_queries_completed
+                    )
+                    context_data["discovery_query_history"] = discovery_query_history
+                    if required_discovery_queries > 0:
+                        remaining_queries = max(
+                            required_discovery_queries - discovery_queries_completed, 0
+                        )
+                        if remaining_queries == 0:
+                            event_bus.publish(
+                                "status_message",
+                                message=(
+                                    "Staged discovery complete. "
+                                    "Draft mutations are now allowed."
+                                ),
+                            )
+                        else:
+                            event_bus.publish(
+                                "status_message",
+                                message=(
+                                    "Staged discovery progress: "
+                                    f"{discovery_queries_completed}/"
+                                    f"{required_discovery_queries} required "
+                                    "query_transcript calls completed."
+                                ),
+                            )
 
             registry_mutation_tools = {
                 "add_speaker_message",
@@ -638,6 +886,8 @@ class SummarizerExecutor(BaseA2AExecutor):
                 )
 
         context_data["recent_line_edit_fingerprints"] = recent_fingerprints
+        context_data["discovery_queries_completed"] = discovery_queries_completed
+        context_data["discovery_query_history"] = discovery_query_history
         if turn_signature:
             context_data["last_mutation_signature"] = turn_signature
 

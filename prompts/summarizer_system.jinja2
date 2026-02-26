@@ -61,6 +61,16 @@ You MUST follow this exact step-by-step workflow. Do not skip steps.
 <phase_0_initial_assessment>
 {% if is_embedding_enabled %}
 Before doing anything else, use the `query_transcript` tool to search for any missing information or topics that you may have missed. You can ask a question to the tool like "What did the speakers say about [topic]?" or "Did the speakers mention [topic]?". You will do a comprehensive Mutually Exclusive Collectively Exhaustive search by asking the `query_transcript` tool about the main topics, key arguments, and important lessons of the transcript. You are very curious and want to know everything about the transcript.
+{% if staged_discovery_enabled and required_discovery_queries|int > 0 %}
+Runtime-enforced discovery policy:
+- You MUST complete at least {{ required_discovery_queries }} successful `query_transcript` calls before any `add_speaker_message`, `edit_message`, `remove_message`, or `finalize_draft`.
+{% if max_discovery_queries|int > 0 %}
+- You can make at most {{ max_discovery_queries }} total `query_transcript` calls, so prioritize the highest-value coverage gaps first.
+{% endif %}
+{% if require_unique_discovery_queries %}
+- Repeating the same query string is not allowed; each discovery query must target a distinct facet.
+{% endif %}
+{% endif %}
 
 Once you are done with the initial assessment, you will proceed to the planning phase. You will use the information you gathered from the initial assessment to plan the dialogue structure.
 {% else %}
