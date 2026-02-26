@@ -1,0 +1,173 @@
+"""Composition root for audio pipeline adapters."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from audio_pipeline.contracts import SourceSeparator, SpeakerDiarizer, SpeechTranscriber
+from audio_pipeline.eta import (
+    LinearStageEtaStrategy,
+    StageEtaStrategy,
+    StageSpeedProfile,
+    default_stage_eta_strategy,
+)
+from audio_pipeline.gateways.demucs_gateway import DemucsSourceSeparator
+from audio_pipeline.gateways.fallback_gateways import (
+    PassthroughSourceSeparator,
+    SingleSpeakerDiarizer,
+)
+from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
+from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
+from audio_pipeline.orchestrator import AudioToScriptOrchestrator
+
+
+def build_audio_to_script_orchestrator(
+    audio_cfg: Mapping[str, Any],
+) -> AudioToScriptOrchestrator:
+    """
+    Build audio-stage orchestrator from config mapping.
+
+    Args:
+        audio_cfg: ``audio`` config section.
+
+    Returns:
+        Wired ``AudioToScriptOrchestrator`` instance.
+    """
+    separation_cfg = _as_mapping(audio_cfg.get("separation", {}))
+    asr_cfg = _as_mapping(audio_cfg.get("asr", {}))
+    diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
+    retry_cfg = _as_mapping(audio_cfg.get("retry", {}))
+    eta_cfg = _as_mapping(audio_cfg.get("eta", {}))
+
+    separator = _build_separator(
+        separation_cfg=separation_cfg,
+        retry_cfg=retry_cfg,
+    )
+    transcriber = _build_transcriber(asr_cfg=asr_cfg)
+    diarizer = _build_diarizer(diarization_cfg=diarization_cfg)
+    eta_strategy = _build_eta_strategy(eta_cfg=eta_cfg)
+    return AudioToScriptOrchestrator(
+        separator=separator,
+        transcriber=transcriber,
+        diarizer=diarizer,
+        merge_gap_ms=int(audio_cfg.get("merge_gap_ms", 800)),
+        default_speaker=str(audio_cfg.get("default_speaker", "SPEAKER_00")),
+        eta_strategy=eta_strategy,
+        eta_update_interval_seconds=float(
+            eta_cfg.get("update_interval_seconds", 10.0)
+        ),
+    )
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    """Coerce nested config values into plain mapping."""
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _optional_int(value: Any) -> int | None:
+    """Return int when configured, otherwise None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return int(value)
+
+
+def _build_separator(
+    *,
+    separation_cfg: Mapping[str, Any],
+    retry_cfg: Mapping[str, Any],
+) -> SourceSeparator:
+    """Factory method for source-separation strategy."""
+    provider = str(separation_cfg.get("provider", "demucs")).strip().lower()
+    if provider == "demucs":
+        return DemucsSourceSeparator(
+            model_name=str(separation_cfg.get("model", "htdemucs")),
+            timeout_seconds=int(separation_cfg.get("timeout_seconds", 1800)),
+            max_retries=int(retry_cfg.get("attempts", 2)),
+            retry_base_seconds=float(retry_cfg.get("base_delay_seconds", 1.0)),
+        )
+    if provider in {"passthrough", "none"}:
+        return PassthroughSourceSeparator()
+    raise ValueError(f"Unsupported separation provider: {provider}")
+
+
+def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
+    """Factory method for ASR strategy."""
+    provider = str(asr_cfg.get("provider", "faster_whisper")).strip().lower()
+    if provider == "faster_whisper":
+        return FasterWhisperTranscriber(
+            model_name=str(asr_cfg.get("model", "large-v3")),
+            compute_type_cuda=str(asr_cfg.get("compute_type_cuda", "int8_float16")),
+            compute_type_cpu=str(asr_cfg.get("compute_type_cpu", "int8")),
+            beam_size=int(asr_cfg.get("beam_size", 5)),
+            vad_filter=bool(asr_cfg.get("vad_filter", True)),
+        )
+    raise ValueError(f"Unsupported ASR provider: {provider}")
+
+
+def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
+    """Factory method for diarization strategy."""
+    provider = str(diarization_cfg.get("provider", "nemo")).strip().lower()
+    if provider == "nemo":
+        return NemoSpeakerDiarizer(
+            msdd_model=str(diarization_cfg.get("nemo_model", "diar_msdd_telephonic")),
+            vad_model=str(
+                diarization_cfg.get("vad_model", "vad_multilingual_marblenet")
+            ),
+            speaker_embedding_model=str(
+                diarization_cfg.get("speaker_embedding_model", "titanet_large")
+            ),
+            min_speakers=_optional_int(diarization_cfg.get("min_speakers")),
+            max_speakers=_optional_int(diarization_cfg.get("max_speakers")),
+            allow_single_speaker_fallback=bool(
+                diarization_cfg.get("allow_single_speaker_fallback", True)
+            ),
+        )
+    if provider in {"single_speaker", "none"}:
+        return SingleSpeakerDiarizer(
+            speaker_label=str(diarization_cfg.get("fallback_speaker", "SPEAKER_00"))
+        )
+    raise ValueError(f"Unsupported diarization provider: {provider}")
+
+
+def _build_eta_strategy(*, eta_cfg: Mapping[str, Any]) -> StageEtaStrategy:
+    """Factory method for stage ETA strategy."""
+    stage_multipliers_cfg = _as_mapping(eta_cfg.get("stage_multipliers", {}))
+    if not stage_multipliers_cfg:
+        return default_stage_eta_strategy()
+
+    defaults = default_stage_eta_strategy()
+    separation_cfg = _as_mapping(stage_multipliers_cfg.get("separation", {}))
+    transcription_cfg = _as_mapping(stage_multipliers_cfg.get("transcription", {}))
+    diarization_cfg = _as_mapping(stage_multipliers_cfg.get("diarization", {}))
+
+    return LinearStageEtaStrategy(
+        separation=_resolve_stage_profile(
+            stage_cfg=separation_cfg,
+            default_profile=defaults.separation,
+        ),
+        transcription=_resolve_stage_profile(
+            stage_cfg=transcription_cfg,
+            default_profile=defaults.transcription,
+        ),
+        diarization=_resolve_stage_profile(
+            stage_cfg=diarization_cfg,
+            default_profile=defaults.diarization,
+        ),
+    )
+
+
+def _resolve_stage_profile(
+    *,
+    stage_cfg: Mapping[str, Any],
+    default_profile: StageSpeedProfile,
+) -> StageSpeedProfile:
+    """Parse stage ETA multipliers while preserving defaults."""
+    return StageSpeedProfile(
+        cpu=float(stage_cfg.get("cpu", default_profile.cpu)),
+        cuda=float(stage_cfg.get("cuda", default_profile.cuda)),
+    )

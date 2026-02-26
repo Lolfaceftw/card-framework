@@ -1,4 +1,6 @@
 import json
+import time
+from typing import TypedDict
 
 from agents.client import agent_client
 from agents.dtos import (
@@ -10,10 +12,32 @@ from agents.dtos import (
 from events import event_bus
 
 
+class IterationDiagnostic(TypedDict):
+    """Per-iteration diagnostic details emitted by the orchestrator loop."""
+
+    iteration: int
+    summarizer_latency_seconds: float
+    critic_latency_seconds: float
+    critic_status: str
+    critic_word_count: int
+    critic_feedback: str
+
+
+class LoopDiagnostics(TypedDict):
+    """Structured metadata for a full summarizer-critic loop execution."""
+
+    converged: bool
+    iterations_run: int
+    max_iterations: int
+    draft: str
+    final_status: str
+    final_word_count: int
+    final_feedback: str
+    iteration_details: list[IterationDiagnostic]
+
+
 class Orchestrator:
-    """
-    Drives the Summarizer ↔ Critic loop.
-    """
+    """Drive the Summarizer and Critic loop."""
 
     _DEFAULT_TIMEOUTS = {
         "summarizer": 180,
@@ -28,13 +52,14 @@ class Orchestrator:
         summarizer_port: int,
         critic_port: int,
         timeouts: dict | None = None,
-    ):
+    ) -> None:
         self.retrieval_port = retrieval_port
         self.summarizer_port = summarizer_port
         self.critic_port = critic_port
         self.timeouts = {**self._DEFAULT_TIMEOUTS, **(timeouts or {})}
 
     async def index_transcript(self, transcript_json: dict) -> int:
+        """Index transcript segments in retrieval service and return indexed count."""
         segments = transcript_json.get("segments", [])
         index_task = IndexTaskRequest(action="index", segments=segments)
         event_bus.publish(
@@ -42,7 +67,10 @@ class Orchestrator:
             message=f"Indexing {len(segments)} segments in Retrieval Agent...",
         )
         index_response_raw = await agent_client.send_task(
-            self.retrieval_port, index_task, timeout=self.timeouts["index"]
+            self.retrieval_port,
+            index_task,
+            timeout=self.timeouts["index"],
+            metadata={"component": "orchestrator", "stage": "index"},
         )
         try:
             index_result = json.loads(index_response_raw)
@@ -62,14 +90,61 @@ class Orchestrator:
         max_iterations: int,
         full_transcript_text: str = "",
     ) -> str | None:
+        """
+        Run the iterative summarizer-critic loop and return the converged draft.
+
+        Args:
+            min_words: Minimum accepted word count.
+            max_words: Maximum accepted word count.
+            max_iterations: Hard cap on iterations before failure.
+            full_transcript_text: Full transcript text used when retrieval is disabled.
+
+        Returns:
+            The converged XML draft, or ``None`` if convergence was not reached.
+        """
+        diagnostics = await self.run_loop_with_diagnostics(
+            min_words=min_words,
+            max_words=max_words,
+            max_iterations=max_iterations,
+            full_transcript_text=full_transcript_text,
+        )
+        if diagnostics["converged"]:
+            return diagnostics["draft"]
+        return None
+
+    async def run_loop_with_diagnostics(
+        self,
+        min_words: int,
+        max_words: int,
+        max_iterations: int,
+        full_transcript_text: str = "",
+    ) -> LoopDiagnostics:
+        """
+        Run the loop and return structured per-iteration diagnostics.
+
+        Args:
+            min_words: Minimum accepted word count.
+            max_words: Maximum accepted word count.
+            max_iterations: Hard cap on iterations before failure.
+            full_transcript_text: Full transcript text used when retrieval is disabled.
+
+        Returns:
+            A diagnostics dictionary including convergence state and iteration details.
+        """
         feedback = ""
         draft = ""
+        iteration_details: list[IterationDiagnostic] = []
+
         for iteration in range(1, max_iterations + 1):
             event_bus.publish(
                 "system_message", f"--- Iteration {iteration}/{max_iterations} ---"
             )
+            event_bus.publish(
+                "orchestrator_iteration_started",
+                iteration=iteration,
+                max_iterations=max_iterations,
+            )
 
-            # ── Summarizer ──
             summarizer_task = SummarizerTaskRequest(
                 min_words=min_words,
                 max_words=max_words,
@@ -78,53 +153,137 @@ class Orchestrator:
                 previous_draft=draft if feedback else "",
                 full_transcript=full_transcript_text,
             )
+            summarizer_started = time.perf_counter()
             draft = await agent_client.send_task(
                 self.summarizer_port,
                 summarizer_task,
                 timeout=self.timeouts["summarizer"],
+                metadata={
+                    "component": "orchestrator",
+                    "stage": "summarizer",
+                    "iteration": iteration,
+                },
             )
+            summarizer_latency = round(time.perf_counter() - summarizer_started, 3)
 
-            # ── Critic ──
             critic_task = CriticTaskRequest(
                 draft=draft,
                 min_words=min_words,
                 max_words=max_words,
                 full_transcript=full_transcript_text,
             )
+            critic_started = time.perf_counter()
             critic_response_raw = await agent_client.send_task(
-                self.critic_port, critic_task, timeout=self.timeouts["critic"]
+                self.critic_port,
+                critic_task,
+                timeout=self.timeouts["critic"],
+                metadata={
+                    "component": "orchestrator",
+                    "stage": "critic",
+                    "iteration": iteration,
+                },
             )
+            critic_latency = round(time.perf_counter() - critic_started, 3)
 
             try:
                 critic_verdict = CriticTaskResponse.model_validate_json(
                     critic_response_raw
                 )
-            except Exception as e:
+            except Exception as exc:
                 event_bus.publish(
-                    "error_message", f"Critic failed or returned invalid JSON: {e}"
+                    "error_message", f"Critic failed or returned invalid JSON: {exc}"
                 )
-                feedback = "Previous attempt could not be evaluated due to a system error. Please try again."
+                iteration_details.append(
+                    {
+                        "iteration": iteration,
+                        "summarizer_latency_seconds": summarizer_latency,
+                        "critic_latency_seconds": critic_latency,
+                        "critic_status": "invalid_json",
+                        "critic_word_count": 0,
+                        "critic_feedback": str(exc),
+                    }
+                )
+                event_bus.publish(
+                    "orchestrator_iteration_completed",
+                    iteration=iteration,
+                    converged=False,
+                    critic_status="invalid_json",
+                    word_count=0,
+                    summarizer_latency_seconds=summarizer_latency,
+                    critic_latency_seconds=critic_latency,
+                )
+                feedback = (
+                    "Previous attempt could not be evaluated due to a system error. "
+                    "Please try again."
+                )
                 continue
 
             status = critic_verdict.status
             word_count = critic_verdict.word_count
             critic_feedback = critic_verdict.feedback
+            iteration_details.append(
+                {
+                    "iteration": iteration,
+                    "summarizer_latency_seconds": summarizer_latency,
+                    "critic_latency_seconds": critic_latency,
+                    "critic_status": status,
+                    "critic_word_count": word_count,
+                    "critic_feedback": critic_feedback,
+                }
+            )
 
             if status == "pass":
                 event_bus.publish(
                     "status_message",
-                    message=f"✅ CONVERGENCE at iteration {iteration} (Word count: {word_count})",
+                    message=(
+                        "CONVERGENCE at iteration "
+                        f"{iteration} (Word count: {word_count})"
+                    ),
                 )
-                return draft
+                event_bus.publish(
+                    "orchestrator_iteration_completed",
+                    iteration=iteration,
+                    converged=True,
+                    critic_status=status,
+                    word_count=word_count,
+                    summarizer_latency_seconds=summarizer_latency,
+                    critic_latency_seconds=critic_latency,
+                )
+                return {
+                    "converged": True,
+                    "iterations_run": iteration,
+                    "max_iterations": max_iterations,
+                    "draft": draft,
+                    "final_status": status,
+                    "final_word_count": word_count,
+                    "final_feedback": critic_feedback,
+                    "iteration_details": iteration_details,
+                }
 
             feedback = critic_feedback
             event_bus.publish(
                 "system_message",
-                f"Iteration {iteration} — not converged ({word_count} words).",
+                f"Iteration {iteration} - not converged ({word_count} words).",
             )
             event_bus.publish("agent_message", "Critic Feedback", critic_feedback)
+            event_bus.publish(
+                "orchestrator_iteration_completed",
+                iteration=iteration,
+                converged=False,
+                critic_status=status,
+                word_count=word_count,
+                summarizer_latency_seconds=summarizer_latency,
+                critic_latency_seconds=critic_latency,
+            )
 
-        event_bus.publish(
-            "error_message", f"Max iterations ({max_iterations}) reached."
-        )
-        return None
+        event_bus.publish("error_message", f"Max iterations ({max_iterations}) reached.")
+        return {
+            "converged": False,
+            "iterations_run": max_iterations,
+            "max_iterations": max_iterations,
+            "draft": "",
+            "final_status": "max_iterations_reached",
+            "final_word_count": 0,
+            "final_feedback": feedback,
+            "iteration_details": iteration_details,
+        }

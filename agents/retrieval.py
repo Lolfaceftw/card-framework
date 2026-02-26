@@ -56,6 +56,15 @@ class InfoRetrievalExecutor(BaseA2AExecutor):
                 message=f"Retrieved {len(selected)} segments "
                 f"({total_words} words) for query: {req.query[:60]}...",
             )
+            event_bus.publish(
+                "retrieval_stats",
+                source="retrieval_agent",
+                query=req.query,
+                num_segments=len(selected),
+                total_words=total_words,
+                top_k=req.top_k,
+                lambda_param=req.lambda_param,
+            )
 
         else:
             result = json.dumps(

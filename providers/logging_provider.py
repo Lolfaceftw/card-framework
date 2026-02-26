@@ -5,9 +5,11 @@ Wraps an existing LLMProvider to capture its inputs and outputs.
 """
 
 import json
+import time
 
 from llm_provider import LLMProvider
 from logger_utils import logger
+from events import event_bus
 
 
 class LoggingLLMProvider(LLMProvider):
@@ -27,6 +29,7 @@ class LoggingLLMProvider(LLMProvider):
         user_prompt: str,
         max_tokens: int | None = None,
     ) -> str:
+        started = time.perf_counter()
         logger.info("-" * 40)
         logger.info(f"LLM REQUEST - {type(self.inner_provider).__name__}")
         logger.info(f"System Prompt:\n{system_prompt}")
@@ -40,7 +43,16 @@ class LoggingLLMProvider(LLMProvider):
                 user_prompt=user_prompt,
                 max_tokens=max_tokens,
             )
+            latency_ms = int((time.perf_counter() - started) * 1000)
             logger.info(f"LLM RESPONSE:\n{response}")
+            event_bus.publish(
+                "llm_call_completed",
+                operation="generate",
+                provider=type(self.inner_provider).__name__,
+                latency_ms=latency_ms,
+                input_messages=2,
+                tool_count=0,
+            )
             logger.info("-" * 40)
             return response
         except Exception as e:
@@ -55,6 +67,7 @@ class LoggingLLMProvider(LLMProvider):
         tool_choice: str | dict | None = None,
         max_tokens: int | None = None,
     ):
+        started = time.perf_counter()
         logger.info("-" * 40)
         logger.info(f"LLM CHAT REQUEST - {type(self.inner_provider).__name__}")
         try:
@@ -113,6 +126,15 @@ class LoggingLLMProvider(LLMProvider):
                             }
                         )
             logger.info(f"LLM CHAT RESPONSE:\n{json.dumps(res_log, indent=2)}")
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            event_bus.publish(
+                "llm_call_completed",
+                operation="chat",
+                provider=type(self.inner_provider).__name__,
+                latency_ms=latency_ms,
+                input_messages=len(messages),
+                tool_count=len(tools) if tools else 0,
+            )
             logger.info("-" * 40)
             return response_message
         except Exception as e:
