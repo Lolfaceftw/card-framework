@@ -5,6 +5,8 @@ Wraps any OpenAI-compatible endpoint (vLLM, ollama, LiteLLM, etc.)
 behind the LLMProvider strategy interface.
 """
 
+from typing import Any
+
 import requests
 from openai import OpenAI
 
@@ -20,11 +22,23 @@ class VLLMProvider(LLMProvider):
     Args:
         base_url: The base URL of the API server (e.g. ``http://host:8000/v1``).
         api_key:  API key (use ``"EMPTY"`` for keyless vLLM servers).
+        enable_thinking: Whether to request reasoning/thinking chunks from vLLM.
+        thinking_extra_body: Optional OpenAI `extra_body` payload for reasoning mode.
     """
 
-    def __init__(self, base_url: str, api_key: str = "EMPTY") -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "EMPTY",
+        enable_thinking: bool = True,
+        thinking_extra_body: dict[str, Any] | None = None,
+    ) -> None:
         self.base_url = base_url
         self.api_key = api_key
+        self.enable_thinking = enable_thinking
+        self.thinking_extra_body = thinking_extra_body or {
+            "chat_template_kwargs": {"enable_thinking": True}
+        }
         self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
         # Resolve model id from the server on startup
@@ -41,6 +55,15 @@ class VLLMProvider(LLMProvider):
         resp.raise_for_status()
         return resp.json()["data"][0]["id"]
 
+    def _maybe_enable_thinking(
+        self,
+        create_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attach reasoning-mode request params when enabled."""
+        if self.enable_thinking:
+            create_kwargs["extra_body"] = self.thinking_extra_body
+        return create_kwargs
+
     # ── LLMProvider interface ─────────────────────────────────────────────
 
     def generate(
@@ -54,7 +77,7 @@ class VLLMProvider(LLMProvider):
             {"role": "user", "content": user_prompt},
         ]
 
-        create_kwargs: dict = dict(
+        create_kwargs: dict[str, Any] = dict(
             model=self.model_id,
             messages=messages,
             stream=True,
@@ -62,6 +85,7 @@ class VLLMProvider(LLMProvider):
         )
         if max_tokens is not None:
             create_kwargs["max_tokens"] = max_tokens
+        create_kwargs = self._maybe_enable_thinking(create_kwargs)
 
         response = self._client.chat.completions.create(**create_kwargs)
 
@@ -96,7 +120,7 @@ class VLLMProvider(LLMProvider):
         """
         Chat completion with streaming support and tool call aggregation.
         """
-        create_kwargs: dict = dict(
+        create_kwargs: dict[str, Any] = dict(
             model=self.model_id,
             messages=messages,
             tools=tools,
@@ -105,6 +129,7 @@ class VLLMProvider(LLMProvider):
         )
         if max_tokens is not None:
             create_kwargs["max_tokens"] = max_tokens
+        create_kwargs = self._maybe_enable_thinking(create_kwargs)
 
         response_stream = self._client.chat.completions.create(**create_kwargs)
 
@@ -185,10 +210,12 @@ class VLLMProvider(LLMProvider):
                 }
 
         class AssistantMessage:
-            def __init__(self, content, tool_calls_info, reasoning=None):
+            def __init__(
+                self, content: str, tool_calls_info: list[dict], reasoning_content=None
+            ):
                 self.content = content
                 self.role = "assistant"
-                self.reasoning = reasoning
+                self.reasoning_content = reasoning_content
                 self.tool_calls = []
                 if tool_calls_info:
                     for tc in tool_calls_info:
@@ -206,8 +233,8 @@ class VLLMProvider(LLMProvider):
                 d = {"role": self.role, "content": self.content}
                 if self.tool_calls:
                     d["tool_calls"] = [tc.model_dump() for tc in self.tool_calls]
-                if self.reasoning:
-                    d["reasoning"] = self.reasoning
+                if self.reasoning_content:
+                    d["reasoning_content"] = self.reasoning_content
                 return d
 
         return AssistantMessage(full_content, tool_calls_data, full_thought)

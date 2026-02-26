@@ -1,5 +1,7 @@
+import hashlib
 import json
 import re
+from typing import Any
 
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
@@ -8,6 +10,7 @@ from agents.base import BaseA2AExecutor
 from agents.client import agent_client
 from agents.dtos import RetrieveTaskRequest
 from agents.message_registry import MessageRegistry
+from agents.tool_call_utils import build_tool_signature
 from agents.tool_handlers import build_revise_tools, build_summarizer_tools
 from events import event_bus
 from llm_provider import LLMProvider
@@ -17,13 +20,21 @@ from prompt_manager import PromptManager
 class SummarizerExecutor(BaseA2AExecutor):
     """
     A2A executor that produces an abstractive summary of a transcript.
-    Uses incremental tool-loop: the LLM adds one speaker message at a time,
-    gets automatic word-count feedback, and can edit/remove messages to
-    stay within budget.
 
-    On retry iterations (revise mode), the previous draft is pre-loaded
-    into the registry and the LLM can only edit/remove — not add new messages.
+    It uses an incremental tool loop where the LLM mutates a line registry
+    via add/edit/remove tools and explicitly calls finalize when done.
     """
+
+    _DEFAULT_LOOP_GUARDRAILS: dict[str, Any] = {
+        "enabled": False,
+        "enable_stall_guidance": False,
+        "enable_noop_edit_detection": False,
+        "enable_extended_text_tool_parser": False,
+        "stall_guidance_threshold_turns": 3,
+        "stall_guidance_cooldown_turns": 2,
+        "target_models": [],
+        "target_providers": [],
+    }
 
     def __init__(
         self,
@@ -31,12 +42,190 @@ class SummarizerExecutor(BaseA2AExecutor):
         retrieval_port: int,
         max_tool_turns: int,
         is_embedding_enabled: bool = True,
+        loop_guardrails: dict[str, Any] | None = None,
     ) -> None:
         super().__init__("Summarizer")
         self.llm = llm
         self.retrieval_port = retrieval_port
         self.max_tool_turns = max_tool_turns
         self.is_embedding_enabled = is_embedding_enabled
+        self.loop_guardrails = dict(loop_guardrails or {})
+
+    @staticmethod
+    def _unwrap_provider(provider: LLMProvider) -> LLMProvider:
+        """Unwrap logging/decorator wrappers and return the underlying provider."""
+        current = provider
+        seen: set[int] = set()
+        while hasattr(current, "inner_provider") and id(current) not in seen:
+            seen.add(id(current))
+            inner = getattr(current, "inner_provider")
+            if isinstance(inner, LLMProvider):
+                current = inner
+                continue
+            break
+        return current
+
+    @staticmethod
+    def _coerce_positive_int(raw_value: Any, *, default: int, minimum: int = 0) -> int:
+        """Parse an integer with clamping fallback for runtime config values."""
+        if isinstance(raw_value, bool):
+            return default
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed >= minimum else default
+
+    @staticmethod
+    def _normalise_matchers(raw_values: Any) -> list[str]:
+        """Normalize string matcher lists to lowercase non-empty entries."""
+        if not isinstance(raw_values, list):
+            return []
+        return [str(item).strip().lower() for item in raw_values if str(item).strip()]
+
+    def _resolve_provider_metadata(self) -> tuple[str, str]:
+        """Return provider class name and best-effort model identifier."""
+        provider = self._unwrap_provider(self.llm)
+        provider_name = type(provider).__name__
+
+        model_id = ""
+        for attr in ("model_id", "model_name", "model"):
+            value = getattr(provider, attr, None)
+            if isinstance(value, str) and value.strip():
+                model_id = value.strip()
+                break
+
+        if not model_id:
+            model_id = provider_name
+        return provider_name, model_id
+
+    def _resolve_loop_guardrails(self) -> dict[str, Any]:
+        """
+        Resolve model-gated loop guardrail policy for this summarizer execution.
+
+        Guardrails are considered active only when:
+        - `enabled` is true
+        - target provider/model matchers (if configured) match this provider
+        """
+        resolved = dict(self._DEFAULT_LOOP_GUARDRAILS)
+        resolved.update(self.loop_guardrails)
+
+        configured_enabled = bool(resolved.get("enabled", False))
+        provider_name, model_id = self._resolve_provider_metadata()
+        provider_name_lc = provider_name.lower()
+        model_id_lc = model_id.lower()
+
+        provider_matchers = self._normalise_matchers(resolved.get("target_providers"))
+        model_matchers = self._normalise_matchers(resolved.get("target_models"))
+
+        provider_match = (
+            True
+            if not provider_matchers
+            else any(matcher in provider_name_lc for matcher in provider_matchers)
+        )
+        model_match = (
+            True
+            if not model_matchers
+            else any(matcher in model_id_lc for matcher in model_matchers)
+        )
+        is_active = configured_enabled and provider_match and model_match
+
+        return {
+            "configured_enabled": configured_enabled,
+            "active": is_active,
+            "provider_name": provider_name,
+            "model_id": model_id,
+            "enable_stall_guidance": is_active
+            and bool(resolved.get("enable_stall_guidance", False)),
+            "enable_noop_edit_detection": is_active
+            and bool(resolved.get("enable_noop_edit_detection", False)),
+            "enable_extended_text_tool_parser": is_active
+            and bool(resolved.get("enable_extended_text_tool_parser", False)),
+            "stall_guidance_threshold_turns": self._coerce_positive_int(
+                resolved.get("stall_guidance_threshold_turns"),
+                default=3,
+                minimum=1,
+            ),
+            "stall_guidance_cooldown_turns": self._coerce_positive_int(
+                resolved.get("stall_guidance_cooldown_turns"),
+                default=2,
+                minimum=0,
+            ),
+            "provider_matchers": provider_matchers,
+            "model_matchers": model_matchers,
+            "provider_match": provider_match,
+            "model_match": model_match,
+        }
+
+    @staticmethod
+    def _build_mutation_fingerprint(name: str, arguments: dict[str, Any]) -> str:
+        """Build a lightweight fingerprint used for oscillation detection."""
+        if name == "edit_message":
+            line = arguments.get("line", "unknown")
+            content = str(arguments.get("new_content", ""))
+            digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
+            return f"edit:{line}:{digest}"
+        if name == "remove_message":
+            line = arguments.get("line", "unknown")
+            return f"remove:{line}"
+        if name == "add_speaker_message":
+            speaker_id = str(arguments.get("speaker_id", "UNKNOWN"))
+            content = str(arguments.get("content", ""))
+            digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
+            return f"add:{speaker_id}:{digest}"
+        return name
+
+    @staticmethod
+    def _is_oscillating(fingerprints: list[str]) -> bool:
+        """
+        Detect short ABAB mutation oscillation patterns.
+
+        Example: edit line 6 to A, edit line 5 to B, edit line 6 to A, edit line 5 to B.
+        """
+        if len(fingerprints) < 4:
+            return False
+        a, b, c, d = fingerprints[-4:]
+        return a == c and b == d and a != b
+
+    @staticmethod
+    def _build_stall_guidance(
+        *,
+        min_words: int,
+        max_words: int,
+        total_words: int | None,
+        stagnation_turns: int,
+    ) -> str:
+        """Build a targeted guidance message after repeated no-progress turns."""
+        base = (
+            "You are repeating edits without meaningful progress "
+            f"for {stagnation_turns} turns. "
+        )
+        if total_words is None:
+            return (
+                base
+                + "Make one materially different edit and wait for count_words before the next tool call."
+            )
+
+        if total_words > max_words:
+            return (
+                base
+                + f"Current total is {total_words}, above the {max_words} max. "
+                + "Remove a line with remove_message(line) or materially shorten one line with "
+                + "edit_message(line, shorter_content). Do not re-issue unchanged edits."
+            )
+        if total_words < min_words:
+            return (
+                base
+                + f"Current total is {total_words}, below the {min_words} min. "
+                + "Add a new line with add_speaker_message(...) or materially expand one line with "
+                + "edit_message(line, expanded_content). Do not re-issue unchanged edits."
+            )
+        return (
+            base
+            + f"Current total is {total_words}, within {min_words}-{max_words}. "
+            + "If no substantive improvements remain, call finalize_draft(). "
+            + "Otherwise make one materially different edit only."
+        )
 
     async def handle_task(
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
@@ -53,11 +242,29 @@ class SummarizerExecutor(BaseA2AExecutor):
 
         revise_mode = bool(previous_draft and feedback)
 
-        # ── Build per-task registry ──
+        loop_guardrails = self._resolve_loop_guardrails()
+        if loop_guardrails["active"]:
+            event_bus.publish(
+                "system_message",
+                (
+                    "Loop guardrails enabled for Summarizer "
+                    f"(provider={loop_guardrails['provider_name']}, "
+                    f"model={loop_guardrails['model_id']})."
+                ),
+            )
+        elif loop_guardrails["configured_enabled"]:
+            event_bus.publish(
+                "system_message",
+                (
+                    "Loop guardrails configured but inactive for this model "
+                    f"(provider={loop_guardrails['provider_name']}, "
+                    f"model={loop_guardrails['model_id']})."
+                ),
+            )
+
         registry = MessageRegistry()
 
         if revise_mode:
-            # Pre-load the registry from the previous draft XML
             self._load_draft_into_registry(registry, previous_draft)
             tool_registry = build_revise_tools(
                 registry,
@@ -68,7 +275,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             )
             event_bus.publish(
                 "system_message",
-                f"🔄 REVISE MODE — loaded {len(registry)} messages from previous draft",
+                f"REVISE MODE - loaded {len(registry)} messages from previous draft",
             )
         else:
             tool_registry = build_summarizer_tools(
@@ -84,10 +291,10 @@ class SummarizerExecutor(BaseA2AExecutor):
         num_segments = 0
 
         if self.is_embedding_enabled:
-            # ── Dynamically generate query for the Info Retrieval Agent ──
             query_sys_prompt = PromptManager.get_prompt("query_generation_system")
             query_user_prompt = (
-                f"Goal: Find main topics, key arguments, and important lessons for a {min_words}-{max_words} word summary.\n"
+                "Goal: Find main topics, key arguments, and important lessons for a "
+                f"{min_words}-{max_words} word summary.\n"
                 f"Feedback from previous attempt: {feedback if feedback else 'None'}"
             )
             event_bus.publish(
@@ -128,7 +335,6 @@ class SummarizerExecutor(BaseA2AExecutor):
                 total_words=total_words,
             )
 
-            # ── Format retrieved segments ──
             for seg in segments:
                 speaker = seg.get("speaker", "UNKNOWN")
                 text = seg.get("text", "")
@@ -139,8 +345,6 @@ class SummarizerExecutor(BaseA2AExecutor):
                 "system_message",
                 "Using full transcript directly (embeddings disabled).",
             )
-            # We don't have segment counts/word counts directly here easily without parsing again,
-            # but we can just say "all" or pass some defaults if needed.
             total_words = len(full_transcript.split())
             num_segments = full_transcript.count("\n")
             event_bus.publish(
@@ -150,7 +354,6 @@ class SummarizerExecutor(BaseA2AExecutor):
                 total_words=total_words,
             )
 
-        # ── Build system prompt ──
         if revise_mode:
             system_prompt = PromptManager.get_prompt(
                 "summarizer_revise",
@@ -190,7 +393,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             "system_message", f"Generating summary using {mode_label} tool loop..."
         )
 
-        context_data = {
+        context_data: dict[str, Any] = {
             "tool_registry": tool_registry,
             "min_words": min_words,
             "max_words": max_words,
@@ -202,6 +405,27 @@ class SummarizerExecutor(BaseA2AExecutor):
                 "remove_message",
                 "finalize_draft",
             },
+            "enable_extended_text_tool_parser": loop_guardrails[
+                "enable_extended_text_tool_parser"
+            ],
+            "enable_stall_guidance": loop_guardrails["enable_stall_guidance"],
+            "enable_noop_edit_detection": loop_guardrails[
+                "enable_noop_edit_detection"
+            ],
+            "stall_guidance_threshold_turns": loop_guardrails[
+                "stall_guidance_threshold_turns"
+            ],
+            "stall_guidance_cooldown_turns": loop_guardrails[
+                "stall_guidance_cooldown_turns"
+            ],
+            "stagnation_turns": 0,
+            "last_stall_guidance_turn": -10_000,
+            "loop_turn_index": 0,
+            "last_mutation_signature": None,
+            "last_total_word_count": None,
+            "recent_line_edit_fingerprints": [],
+            "loop_guardrail_provider": loop_guardrails["provider_name"],
+            "loop_guardrail_model": loop_guardrails["model_id"],
         }
         await self.run_agent_loop(
             messages,
@@ -210,7 +434,6 @@ class SummarizerExecutor(BaseA2AExecutor):
             context_data,
         )
 
-        # ── Assemble final XML output from registry ──
         result_xml = ""
         for speaker_id, content in registry.get_all():
             result_xml += f"<{speaker_id}>{content}</{speaker_id}>\n"
@@ -222,8 +445,6 @@ class SummarizerExecutor(BaseA2AExecutor):
             f"Tool-generated XML output:\n```xml\n{result_xml}\n```",
         )
         await self.send_response(result_xml, event_queue)
-
-    # ── Private helpers ───────────────────────────────────────────────────
 
     @staticmethod
     def _load_draft_into_registry(registry: MessageRegistry, draft_xml: str) -> None:
@@ -238,11 +459,38 @@ class SummarizerExecutor(BaseA2AExecutor):
         self, tool_calls: list[dict], messages: list, context_data: dict
     ) -> tuple[bool, dict | None]:
         tool_registry = context_data["tool_registry"]
-        min_words = context_data["min_words"]
-        max_words = context_data["max_words"]
+        min_words = int(context_data["min_words"])
+        max_words = int(context_data["max_words"])
         finalized = False
         mutating_tools = {"add_speaker_message", "edit_message", "remove_message"}
         mutating_executed_this_turn = False
+
+        context_data["loop_turn_index"] = int(context_data.get("loop_turn_index", 0)) + 1
+        loop_turn_index = int(context_data["loop_turn_index"])
+
+        enable_stall_guidance = bool(context_data.get("enable_stall_guidance", False))
+        enable_noop_edit_detection = bool(
+            context_data.get("enable_noop_edit_detection", False)
+        )
+        stall_threshold = self._coerce_positive_int(
+            context_data.get("stall_guidance_threshold_turns"), default=3, minimum=1
+        )
+        guidance_cooldown_turns = self._coerce_positive_int(
+            context_data.get("stall_guidance_cooldown_turns"), default=2, minimum=0
+        )
+
+        recent_fingerprints_raw = context_data.get("recent_line_edit_fingerprints", [])
+        recent_fingerprints = (
+            list(recent_fingerprints_raw)
+            if isinstance(recent_fingerprints_raw, list)
+            else []
+        )
+
+        turn_mutation_attempted = False
+        turn_progressed = False
+        stagnation_reason: str | None = None
+        turn_total_wc: int | None = None
+        turn_signature: str | None = None
 
         for tc in tool_calls:
             name = tc["name"]
@@ -274,11 +522,13 @@ class SummarizerExecutor(BaseA2AExecutor):
 
             if name in mutating_tools:
                 mutating_executed_this_turn = True
+                turn_mutation_attempted = True
+                turn_signature = build_tool_signature(name, args)
 
             result = await tool_registry.dispatch(name, args)
 
             if result is None:
-                result = {"error": f"Unknown tool: {name}"}
+                result = {"error": f"Unknown tool: {name}", "error_code": "unknown_tool"}
 
             messages.append(
                 {
@@ -292,13 +542,12 @@ class SummarizerExecutor(BaseA2AExecutor):
                 "tool_result", tool_name=name, result=json.dumps(result, indent=2)
             )
 
-            # ── Auto count_words after any registry-modifying tool ──
-            _registry_tools = {
+            registry_mutation_tools = {
                 "add_speaker_message",
                 "edit_message",
                 "remove_message",
             }
-            if name in _registry_tools and "error" not in result:
+            if name in registry_mutation_tools and "error" not in result:
                 count_result = await tool_registry.dispatch("count_words", {})
                 auto_id = f"auto_count_{tc.get('id', 'unknown')}"
                 messages.append(
@@ -309,23 +558,25 @@ class SummarizerExecutor(BaseA2AExecutor):
                         "content": json.dumps(count_result),
                     }
                 )
-                total_wc = count_result["total_word_count"]
+                total_wc = int(count_result["total_word_count"])
+                turn_total_wc = total_wc
+                context_data["last_total_word_count"] = total_wc
                 event_bus.publish(
                     "tool_result",
                     tool_name="count_words (auto)",
                     result=f"Total: {total_wc} words",
                 )
 
-                # ── Notify LLM when budget is met (but don't break) ──
                 if min_words <= total_wc <= max_words:
                     event_bus.publish(
                         "status_message",
-                        message=f"📋 Budget in range: {total_wc} words "
-                        f"(target {min_words}-{max_words}) — "
-                        f"waiting for LLM to call finalize_draft",
+                        message=(
+                            f"Budget in range: {total_wc} words "
+                            f"(target {min_words}-{max_words}) - "
+                            "waiting for LLM to call finalize_draft"
+                        ),
                     )
 
-                    # Auto save_draft so the LLM can review
                     save_result = await tool_registry.dispatch("save_draft", {})
                     save_id = f"auto_save_{tc.get('id', 'unknown')}"
                     messages.append(
@@ -342,7 +593,36 @@ class SummarizerExecutor(BaseA2AExecutor):
                         result=f"Saved {save_result.get('total_messages', 0)} messages",
                     )
 
-            # ── Break only when LLM explicitly finalizes ──
+            if name in registry_mutation_tools:
+                if "error" in result:
+                    stagnation_reason = str(
+                        result.get("error_code") or result.get("error") or "tool_error"
+                    )
+                else:
+                    turn_progressed = True
+
+                if (
+                    name == "edit_message"
+                    and enable_noop_edit_detection
+                    and result.get("changed") is False
+                ):
+                    turn_progressed = False
+                    stagnation_reason = "noop_edit"
+
+                if turn_signature:
+                    last_signature = context_data.get("last_mutation_signature")
+                    if isinstance(last_signature, str) and last_signature == turn_signature:
+                        if not turn_progressed:
+                            stagnation_reason = stagnation_reason or "repeated_signature"
+
+                fingerprint = self._build_mutation_fingerprint(name, args)
+                recent_fingerprints.append(fingerprint)
+                if len(recent_fingerprints) > 6:
+                    recent_fingerprints = recent_fingerprints[-6:]
+                if self._is_oscillating(recent_fingerprints):
+                    turn_progressed = False
+                    stagnation_reason = "oscillation"
+
             if name == "finalize_draft":
                 finalized = True
                 draft_xml = str(result.get("draft_xml", "")).strip()
@@ -354,53 +634,56 @@ class SummarizerExecutor(BaseA2AExecutor):
                     )
                 event_bus.publish(
                     "status_message",
-                    message="✅ LLM called finalize_draft — submitting to Critic",
+                    message="LLM called finalize_draft - submitting to Critic",
                 )
+
+        context_data["recent_line_edit_fingerprints"] = recent_fingerprints
+        if turn_signature:
+            context_data["last_mutation_signature"] = turn_signature
+
+        if turn_mutation_attempted:
+            stagnation_turns = int(context_data.get("stagnation_turns", 0))
+            if turn_progressed:
+                stagnation_turns = 0
+            else:
+                stagnation_turns += 1
+            context_data["stagnation_turns"] = stagnation_turns
+
+            if enable_stall_guidance and stagnation_turns >= stall_threshold:
+                last_guidance_turn = int(context_data.get("last_stall_guidance_turn", -10_000))
+                if (loop_turn_index - last_guidance_turn) >= (guidance_cooldown_turns + 1):
+                    if turn_total_wc is None:
+                        last_total = context_data.get("last_total_word_count")
+                        turn_total_wc = (
+                            int(last_total)
+                            if isinstance(last_total, int)
+                            else None
+                        )
+                    guidance = self._build_stall_guidance(
+                        min_words=min_words,
+                        max_words=max_words,
+                        total_words=turn_total_wc,
+                        stagnation_turns=stagnation_turns,
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"[STALL_GUIDANCE]\n{guidance}",
+                        }
+                    )
+                    context_data["last_stall_guidance_turn"] = loop_turn_index
+                    event_bus.publish(
+                        "status_message",
+                        message=(
+                            "Stall guardrail triggered: repetitive/no-op edits detected. "
+                            "Injected corrective guidance."
+                        ),
+                        model_id=context_data.get("loop_guardrail_model"),
+                        provider=context_data.get("loop_guardrail_provider"),
+                        stagnation_turns=stagnation_turns,
+                        stall_reason=stagnation_reason or "unknown",
+                    )
 
         if finalized:
             return True, None
         return False, None
-
-    @staticmethod
-    def _to_dict(response_message) -> dict:
-        """Normalise an LLM response object to a plain dict."""
-        if hasattr(response_message, "model_dump"):
-            d = response_message.model_dump()
-            return {
-                k: v for k, v in d.items() if k in ("role", "content", "tool_calls")
-            }
-        return {
-            "role": response_message.role,
-            "content": response_message.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in (response_message.tool_calls or [])
-            ]
-            if hasattr(response_message, "tool_calls") and response_message.tool_calls
-            else None,
-        }
-
-        return {
-            "role": response_message.role,
-            "content": response_message.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in (response_message.tool_calls or [])
-            ]
-            if hasattr(response_message, "tool_calls") and response_message.tool_calls
-            else None,
-        }

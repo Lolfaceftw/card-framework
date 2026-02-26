@@ -1,5 +1,4 @@
 from pathlib import Path
-import threading
 import time
 
 from audio_pipeline.contracts import DiarizationTurn, TimedTextSegment
@@ -94,21 +93,20 @@ def test_orchestrator_eta_reports_overrun_until_stage_stops(monkeypatch) -> None
         eta_update_interval_seconds=0.01,
     )
 
-    stop_event = threading.Event()
-    ticker_thread = threading.Thread(
-        target=orchestrator._publish_eta_updates,
-        kwargs={
-            "stage": "separation",
-            "estimated_total_seconds": 0.01,
-            "started_at": time.monotonic() - 0.2,
-            "stop_event": stop_event,
-        },
-        daemon=True,
+    class _DeterministicStopEvent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _timeout: float) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    orchestrator._publish_eta_updates(
+        stage="separation",
+        estimated_total_seconds=0.01,
+        started_at=time.monotonic() - 0.2,
+        stop_event=_DeterministicStopEvent(),
     )
-    ticker_thread.start()
-    time.sleep(0.04)
-    stop_event.set()
-    ticker_thread.join(timeout=0.2)
 
     assert any(
         "running longer than estimate by" in message for _, message in messages

@@ -1,6 +1,6 @@
-from typing import List
+from typing import List, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # Retrieval DTOs
@@ -53,10 +53,24 @@ class CriticTaskRequest(BaseModel):
     full_transcript: str = ""
 
 
+CriticStatus = Literal["pass", "fail"]
+
+
 class CriticTaskResponse(BaseModel):
-    status: str
+    status: CriticStatus
     word_count: int
     feedback: str
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, value: object) -> CriticStatus:
+        """Normalize critic status and reject unknown values."""
+        if not isinstance(value, str):
+            raise TypeError("status must be a string")
+        normalized = value.strip().lower()
+        if normalized not in {"pass", "fail"}:
+            raise ValueError("status must be 'pass' or 'fail'")
+        return cast(CriticStatus, normalized)
 
 
 # Common LLM DTOs

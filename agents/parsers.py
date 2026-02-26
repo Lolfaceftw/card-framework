@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 from abc import ABC, abstractmethod
@@ -71,25 +72,200 @@ class XMLFallbackParser(OutputParser):
 class TextFallbackParser(OutputParser):
     """Parses raw ad-hoc text functions like add_speaker_message(...) inline."""
 
+    def __init__(self, *, enable_extended_patterns: bool = True) -> None:
+        self._enable_extended_patterns = enable_extended_patterns
+
+    @staticmethod
+    def _decode_string_literal(raw_value: str) -> str | None:
+        """Decode a quoted Python/JSON style string literal."""
+        try:
+            decoded = ast.literal_eval(raw_value)
+        except (SyntaxError, ValueError):
+            return None
+        return decoded if isinstance(decoded, str) else None
+
+    @staticmethod
+    def _parse_json_object(raw_value: str) -> dict[str, Any] | None:
+        """
+        Parse a JSON object with light normalization for trailing commas.
+
+        The fallback parser accepts slightly malformed JSON that smaller models
+        often emit in text mode (for example trailing commas).
+        """
+        normalized = re.sub(r",(\s*[}\]])", r"\1", raw_value.strip())
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def parse(self, msg_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
-        calls = []
+        calls_with_positions: list[tuple[int, dict[str, Any]]] = []
         content = msg_dict.get("content") or ""
-        fn_matches = re.findall(
-            r"add_speaker_message\s*\(\s*(SPEAKER_\d+)\s*,\s*\"(.*?)\"\s*\)",
-            content,
+
+        add_pattern = re.compile(
+            r"add_speaker_message\s*\(\s*"
+            r"(?:speaker_id\s*=\s*)?[\"']?(SPEAKER_\d+)[\"']?\s*,\s*"
+            r"(?:content\s*=\s*)?(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')\s*\)",
             re.DOTALL,
         )
-        for idx, (speaker_id, msg_content) in enumerate(fn_matches):
-            calls.append(
-                {
-                    "id": f"text_fallback_{idx}",
-                    "name": "add_speaker_message",
-                    "arguments": {
-                        "speaker_id": speaker_id,
-                        "content": msg_content.replace('\\"', '"'),
+        for match in add_pattern.finditer(content):
+            decoded_content = self._decode_string_literal(match.group(2))
+            if decoded_content is None:
+                continue
+            calls_with_positions.append(
+                (
+                    match.start(),
+                    {
+                        "name": "add_speaker_message",
+                        "arguments": {
+                            "speaker_id": match.group(1),
+                            "content": decoded_content,
+                        },
                     },
-                }
+                )
             )
+
+        add_json_pattern = re.compile(
+            r"add_speaker_message\s*\(\s*(\{.*?\})\s*\)",
+            re.DOTALL,
+        )
+        for match in add_json_pattern.finditer(content):
+            parsed_object = self._parse_json_object(match.group(1))
+            if not parsed_object:
+                continue
+            speaker_id = parsed_object.get("speaker_id")
+            message_content = parsed_object.get("content")
+            if isinstance(speaker_id, str) and isinstance(message_content, str):
+                calls_with_positions.append(
+                    (
+                        match.start(),
+                        {
+                            "name": "add_speaker_message",
+                            "arguments": {
+                                "speaker_id": speaker_id,
+                                "content": message_content,
+                            },
+                        },
+                    )
+                )
+
+        if not self._enable_extended_patterns:
+            calls = []
+            for idx, (_position, parsed_call) in enumerate(
+                sorted(calls_with_positions, key=lambda item: item[0])
+            ):
+                calls.append(
+                    {
+                        "id": f"text_fallback_{idx}",
+                        "name": parsed_call["name"],
+                        "arguments": parsed_call["arguments"],
+                    }
+                )
+            return calls
+
+        edit_pattern = re.compile(
+            r"edit_message\s*\(\s*"
+            r"(?:line\s*=\s*)?[\"']?(\d+)[\"']?\s*,\s*"
+            r"(?:new_content\s*=\s*)?(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')\s*\)",
+            re.DOTALL,
+        )
+        for match in edit_pattern.finditer(content):
+            decoded_content = self._decode_string_literal(match.group(2))
+            if decoded_content is None:
+                continue
+            calls_with_positions.append(
+                (
+                    match.start(),
+                    {
+                        "name": "edit_message",
+                        "arguments": {
+                            "line": int(match.group(1)),
+                            "new_content": decoded_content,
+                        },
+                    },
+                )
+            )
+
+        edit_json_pattern = re.compile(
+            r"edit_message\s*\(\s*(\{.*?\})\s*\)",
+            re.DOTALL,
+        )
+        for match in edit_json_pattern.finditer(content):
+            parsed_object = self._parse_json_object(match.group(1))
+            if not parsed_object:
+                continue
+            line_value = parsed_object.get("line")
+            new_content = parsed_object.get("new_content")
+            if isinstance(new_content, str) and isinstance(line_value, (int, str)):
+                calls_with_positions.append(
+                    (
+                        match.start(),
+                        {
+                            "name": "edit_message",
+                            "arguments": {
+                                "line": line_value,
+                                "new_content": new_content,
+                            },
+                        },
+                    )
+                )
+
+        remove_pattern = re.compile(
+            r"remove_message\s*\(\s*(?:line\s*=\s*)?[\"']?(\d+)[\"']?\s*\)",
+            re.DOTALL,
+        )
+        for match in remove_pattern.finditer(content):
+            calls_with_positions.append(
+                (
+                    match.start(),
+                    {
+                        "name": "remove_message",
+                        "arguments": {"line": int(match.group(1))},
+                    },
+                )
+            )
+
+        remove_json_pattern = re.compile(
+            r"remove_message\s*\(\s*(\{.*?\})\s*\)",
+            re.DOTALL,
+        )
+        for match in remove_json_pattern.finditer(content):
+            parsed_object = self._parse_json_object(match.group(1))
+            if not parsed_object:
+                continue
+            line_value = parsed_object.get("line")
+            if isinstance(line_value, (int, str)):
+                calls_with_positions.append(
+                    (
+                        match.start(),
+                        {
+                            "name": "remove_message",
+                            "arguments": {"line": line_value},
+                        },
+                    )
+                )
+
+        finalize_pattern = re.compile(r"finalize_draft\s*\(\s*\)")
+        for match in finalize_pattern.finditer(content):
+            calls_with_positions.append(
+                (
+                    match.start(),
+                    {"name": "finalize_draft", "arguments": {}},
+                )
+            )
+
+        calls = []
+        for idx, (_position, parsed_call) in enumerate(
+            sorted(calls_with_positions, key=lambda item: item[0])
+        ):
+            call = {
+                "id": f"text_fallback_{idx}",
+                "name": parsed_call["name"],
+                "arguments": parsed_call["arguments"],
+            }
+            calls.append(call)
+
         return calls
 
 
@@ -108,6 +284,16 @@ class CompositeParser(OutputParser):
 
 
 def get_default_parser() -> OutputParser:
+    return get_default_parser_with_options(enable_extended_text_fallback=False)
+
+
+def get_default_parser_with_options(
+    *, enable_extended_text_fallback: bool
+) -> OutputParser:
     return CompositeParser(
-        [JSONToolCallParser(), XMLFallbackParser(), TextFallbackParser()]
+        [
+            JSONToolCallParser(),
+            XMLFallbackParser(),
+            TextFallbackParser(enable_extended_patterns=enable_extended_text_fallback),
+        ]
     )

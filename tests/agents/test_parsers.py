@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents.parsers import get_default_parser
+from agents.parsers import get_default_parser, get_default_parser_with_options
 
 
 def test_xml_fallback_assigns_unique_ids_for_distinct_calls() -> None:
@@ -61,3 +61,57 @@ def test_text_fallback_assigns_unique_ids() -> None:
     assert len(calls) == 2
     assert calls[0]["id"] == "text_fallback_0"
     assert calls[1]["id"] == "text_fallback_1"
+
+
+def test_text_fallback_parses_edit_remove_and_finalize_calls() -> None:
+    parser = get_default_parser_with_options(enable_extended_text_fallback=True)
+    message = {
+        "role": "assistant",
+        "content": (
+            'edit_message(line=6, new_content="trim this section")\n'
+            "remove_message(2)\n"
+            "finalize_draft()"
+        ),
+    }
+
+    calls = parser.parse(message)
+
+    assert len(calls) == 3
+    assert calls[0]["name"] == "edit_message"
+    assert calls[0]["arguments"]["line"] == 6
+    assert calls[1]["name"] == "remove_message"
+    assert calls[1]["arguments"]["line"] == 2
+    assert calls[2]["name"] == "finalize_draft"
+    assert calls[2]["arguments"] == {}
+
+
+def test_text_fallback_parses_json_style_call_with_trailing_comma() -> None:
+    parser = get_default_parser_with_options(enable_extended_text_fallback=True)
+    message = {
+        "role": "assistant",
+        "content": (
+            'edit_message({"line": "5", "new_content": "new body",})\n'
+            'remove_message({"line": "3",})'
+        ),
+    }
+
+    calls = parser.parse(message)
+
+    assert len(calls) == 2
+    assert calls[0]["name"] == "edit_message"
+    assert calls[0]["arguments"]["line"] == "5"
+    assert calls[0]["arguments"]["new_content"] == "new body"
+    assert calls[1]["name"] == "remove_message"
+    assert calls[1]["arguments"]["line"] == "3"
+
+
+def test_text_fallback_can_disable_extended_patterns() -> None:
+    parser = get_default_parser_with_options(enable_extended_text_fallback=False)
+    message = {
+        "role": "assistant",
+        "content": 'edit_message(line=4, new_content="x")\nfinalize_draft()',
+    }
+
+    calls = parser.parse(message)
+
+    assert calls == []
