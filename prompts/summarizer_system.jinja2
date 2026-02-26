@@ -21,7 +21,10 @@ You will fail your task if you violate ANY of the following rules:
 5. COHESIVE STRUCTURE: Because you will keep trying to add sentences and editing sentences, you must not forget that you should add a brief summary as a last sentence to encompass the entire transcript.
 
 [CRITICAL NOTE]: The system will AUTOMATICALLY call `count_words` after every `add_speaker_message`, `edit_message`, or `remove_message`. You will receive the running total and per-speaker breakdown. When the budget is met, the system will auto-save a draft for your review. You MUST then review your work and call `finalize_draft` when you are satisfied. The system will NOT auto-finalize — YOU decide when to submit.
-</critical_constraints>
+
+Strictly do not add any reasoning after any `count_words` after every `add_speaker_message`, `edit_message`, or `remove_message`. You are to call this once, and wait for the count words tool to return.
+You MUST emit exactly ONE tool call per assistant response. Never emit multiple `<tool_call>` blocks in one response.
+</critical_constraints>a 
 
 <tool_usage_rules>
 Because you process text in tokens, you are neurologically incapable of accurately counting words natively. You MUST rely on deterministic tools.
@@ -79,6 +82,7 @@ Build the summary ONE speaker message at a time:
 5. Repeat for each speaker turn
 
 DO NOT add all messages at once. Add them ONE AT A TIME and check the budget after each.
+Each assistant response must contain exactly one tool call.
 </phase_2_incremental_build>
 
 <phase_3_budget_adjustment>

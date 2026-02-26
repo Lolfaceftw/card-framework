@@ -136,11 +136,18 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
 
 def _build_eta_strategy(*, eta_cfg: Mapping[str, Any]) -> StageEtaStrategy:
     """Factory method for stage ETA strategy."""
-    stage_multipliers_cfg = _as_mapping(eta_cfg.get("stage_multipliers", {}))
-    if not stage_multipliers_cfg:
-        return default_stage_eta_strategy()
-
     defaults = default_stage_eta_strategy()
+    adaptive_cfg = _as_mapping(eta_cfg.get("adaptive", {}))
+    learning_rate = float(adaptive_cfg.get("learning_rate", defaults.learning_rate))
+    min_multiplier = float(adaptive_cfg.get("min_multiplier", defaults.min_multiplier))
+    max_multiplier = float(adaptive_cfg.get("max_multiplier", defaults.max_multiplier))
+    _validate_eta_adaptive_config(
+        learning_rate=learning_rate,
+        min_multiplier=min_multiplier,
+        max_multiplier=max_multiplier,
+    )
+
+    stage_multipliers_cfg = _as_mapping(eta_cfg.get("stage_multipliers", {}))
     separation_cfg = _as_mapping(stage_multipliers_cfg.get("separation", {}))
     transcription_cfg = _as_mapping(stage_multipliers_cfg.get("transcription", {}))
     diarization_cfg = _as_mapping(stage_multipliers_cfg.get("diarization", {}))
@@ -158,6 +165,9 @@ def _build_eta_strategy(*, eta_cfg: Mapping[str, Any]) -> StageEtaStrategy:
             stage_cfg=diarization_cfg,
             default_profile=defaults.diarization,
         ),
+        learning_rate=learning_rate,
+        min_multiplier=min_multiplier,
+        max_multiplier=max_multiplier,
     )
 
 
@@ -171,3 +181,20 @@ def _resolve_stage_profile(
         cpu=float(stage_cfg.get("cpu", default_profile.cpu)),
         cuda=float(stage_cfg.get("cuda", default_profile.cuda)),
     )
+
+
+def _validate_eta_adaptive_config(
+    *,
+    learning_rate: float,
+    min_multiplier: float,
+    max_multiplier: float,
+) -> None:
+    """Validate adaptive ETA config bounds."""
+    if not 0.0 <= learning_rate <= 1.0:
+        raise ValueError("audio.eta.adaptive.learning_rate must be within [0.0, 1.0].")
+    if min_multiplier <= 0:
+        raise ValueError("audio.eta.adaptive.min_multiplier must be > 0.")
+    if max_multiplier < min_multiplier:
+        raise ValueError(
+            "audio.eta.adaptive.max_multiplier must be >= min_multiplier."
+        )

@@ -366,6 +366,7 @@ class SaveDraftHandler(ToolHandler):
             "status": "draft_saved",
             "messages": snapshot,
             "total_messages": len(snapshot),
+            "draft_xml": _snapshot_to_xml(snapshot),
         }
 
 
@@ -403,7 +404,16 @@ class FinalizeDraftHandler(ToolHandler):
             "total_word_count": counts["total_word_count"],
             "total_messages": len(snapshot),
             "messages": snapshot,
+            "draft_xml": _snapshot_to_xml(snapshot),
         }
+
+
+def _snapshot_to_xml(snapshot: list[dict]) -> str:
+    """Serialize a registry snapshot into speaker-tagged XML."""
+    return "\n".join(
+        f"<{message['speaker_id']}>{message['content']}</{message['speaker_id']}>"
+        for message in snapshot
+    )
 
 
 def build_summarizer_tools(

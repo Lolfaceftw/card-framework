@@ -71,6 +71,8 @@ def _on_system_message(message: str, **kwargs):
 
 
 def _on_status_message(message: str, **kwargs):
+    if kwargs.get("inline", False):
+        return
     logger.info(_format_with_metadata(f"[Status] {message}", **kwargs))
 
 

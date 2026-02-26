@@ -1,9 +1,31 @@
+import re
+
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
+
+
+def _strip_tool_call_blocks(text: str) -> str:
+    """
+    Hide XML-style tool-call blocks from terminal display content.
+
+    This preserves normal assistant prose while suppressing raw tool markup
+    such as:
+    <tool_call>{...}</tool_call>
+    """
+    without_closed_blocks = re.sub(
+        r"<tool_call>\s*.*?\s*</tool_call>",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+    dangling_open_tag_idx = without_closed_blocks.find("<tool_call>")
+    if dangling_open_tag_idx >= 0:
+        return without_closed_blocks[:dangling_open_tag_idx]
+    return without_closed_blocks
 
 
 class ConsoleManager:
@@ -38,6 +60,8 @@ class ConsoleManager:
             }
         )
         self.console = Console(theme=custom_theme)
+        self._inline_status_active = False
+        self._last_inline_status_len = 0
 
         from events import event_bus
 
@@ -49,16 +73,48 @@ class ConsoleManager:
         event_bus.subscribe("tool_invocation", self.print_tool_invocation)
         event_bus.subscribe("tool_result", self.print_tool_result)
 
+    def _clear_inline_status(self):
+        """Clear any in-place status line before normal line-based output."""
+        if not self._inline_status_active:
+            return
+        stream = self.console.file
+        stream.write("\r" + (" " * self._last_inline_status_len) + "\r")
+        stream.flush()
+        self._inline_status_active = False
+        self._last_inline_status_len = 0
+
     def print_system(self, message: str):
         """Prints a dim/italic system-level message."""
+        self._clear_inline_status()
         self.console.print(f"[system]{message}[/system]")
 
-    def print_status(self, message: str):
-        """Prints an important status update."""
-        self.console.print(f"[status]Status: {message}[/status]")
+    def print_status(self, message: str, inline: bool = False, **kwargs):
+        """Prints a status update; supports in-place inline updates."""
+        del kwargs
+        rendered = f"Status: {message}"
+        if inline:
+            trailing_padding = ""
+            if len(rendered) < self._last_inline_status_len:
+                trailing_padding = " " * (self._last_inline_status_len - len(rendered))
+            self.console.print(
+                f"[status]{rendered}{trailing_padding}[/status]",
+                end="\r",
+                highlight=False,
+                soft_wrap=False,
+            )
+            self._inline_status_active = True
+            self._last_inline_status_len = max(
+                self._last_inline_status_len,
+                len(rendered),
+            )
+            return
+
+        self._clear_inline_status()
+        self.console.print(f"[status]{rendered}[/status]")
 
     def print_error(self, message: str):
         """Prints an error message."""
+        self._clear_inline_status()
         self.console.print(f"[error]Error: {message}[/error]")
 
     def _truncate_text(
@@ -83,6 +139,7 @@ class ConsoleManager:
         """
         Prints an agent's response in a stylised chat-like Panel.
         """
+        self._clear_inline_status()
         if not message or not message.strip():
             return
 
@@ -94,8 +151,9 @@ class ConsoleManager:
         )
 
         content = message
+        content = _strip_tool_call_blocks(content)
         if truncate:
-            content = self._truncate_text(message)
+            content = self._truncate_text(content)
 
         if markdown:
             content = Markdown(content)
@@ -114,6 +172,7 @@ class ConsoleManager:
         """
         Returns a context manager for live-updating an agent's message.
         """
+        self._clear_inline_status()
         border_style = (
             agent_name
             if agent_name in ["Retrieval", "Summarizer", "Critic"]
@@ -145,7 +204,8 @@ class ConsoleManager:
                     self.console.print()
 
             def _build_panel(self):
-                if not self.full_thought.strip() and not self.full_content.strip():
+                display_content = _strip_tool_call_blocks(self.full_content)
+                if not self.full_thought.strip() and not display_content.strip():
                     from rich.console import Group
 
                     return Group()
@@ -156,8 +216,8 @@ class ConsoleManager:
                     text.append(self.full_thought, style="thought")
                     text.append("\n" + "─" * 40 + "\n", style="dim")
 
-                if self.full_content:
-                    text.append(self.full_content)
+                if display_content:
+                    text.append(display_content)
 
                 return Panel(
                     text,
@@ -179,6 +239,7 @@ class ConsoleManager:
 
     def print_thought(self, agent_name: str, thought: str):
         """Prints the model's 'thinking' or scratchpad content."""
+        self._clear_inline_status()
         if not thought.strip():
             return
         content = self._truncate_text(thought, max_lines=10)
@@ -193,6 +254,7 @@ class ConsoleManager:
 
     def print_tool_invocation(self, tool_name: str, arguments: dict):
         """Prints a concise tool invocation message."""
+        self._clear_inline_status()
         import json
 
         arg_str = json.dumps(arguments)
@@ -204,6 +266,7 @@ class ConsoleManager:
 
     def print_tool_result(self, tool_name: str, result: str):
         """Prints a concise result of a tool execution."""
+        self._clear_inline_status()
         summary = result
         if len(result) > 150:
             summary = result[:150].replace("\n", " ") + "..."

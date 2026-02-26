@@ -34,6 +34,11 @@ def test_factory_builds_eta_strategy_from_config() -> None:
             "diarization": {"provider": "nemo"},
             "eta": {
                 "update_interval_seconds": 5,
+                "adaptive": {
+                    "learning_rate": 0.5,
+                    "min_multiplier": 0.1,
+                    "max_multiplier": 10.0,
+                },
                 "stage_multipliers": {
                     "separation": {"cpu": 6.0, "cuda": 1.0},
                     "transcription": {"cpu": 3.0, "cuda": 0.5},
@@ -45,6 +50,9 @@ def test_factory_builds_eta_strategy_from_config() -> None:
 
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
     assert orchestrator.eta_update_interval_seconds == 5.0
+    assert orchestrator.eta_strategy.learning_rate == 0.5
+    assert orchestrator.eta_strategy.min_multiplier == 0.1
+    assert orchestrator.eta_strategy.max_multiplier == 10.0
     estimated = orchestrator.eta_strategy.estimate_total_seconds(
         stage="transcription",
         audio_duration_ms=2000,
@@ -73,5 +81,23 @@ def test_factory_raises_for_unknown_provider() -> None:
                 "separation": {"provider": "unknown_provider"},
                 "asr": {"provider": "faster_whisper"},
                 "diarization": {"provider": "nemo"},
+            }
+        )
+
+
+def test_factory_validates_eta_adaptive_bounds() -> None:
+    with pytest.raises(ValueError, match="learning_rate"):
+        build_audio_to_script_orchestrator(
+            {
+                "separation": {"provider": "demucs"},
+                "asr": {"provider": "faster_whisper"},
+                "diarization": {"provider": "nemo"},
+                "eta": {
+                    "adaptive": {
+                        "learning_rate": -0.1,
+                        "min_multiplier": 0.1,
+                        "max_multiplier": 5.0,
+                    }
+                },
             }
         )

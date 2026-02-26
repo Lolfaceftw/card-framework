@@ -194,6 +194,14 @@ class SummarizerExecutor(BaseA2AExecutor):
             "tool_registry": tool_registry,
             "min_words": min_words,
             "max_words": max_words,
+            "max_tool_calls_per_turn": 1,
+            "signature_dedupe_window_turns": 1,
+            "replay_dedupe_tools": {
+                "add_speaker_message",
+                "edit_message",
+                "remove_message",
+                "finalize_draft",
+            },
         }
         await self.run_agent_loop(
             messages,
@@ -233,10 +241,40 @@ class SummarizerExecutor(BaseA2AExecutor):
         min_words = context_data["min_words"]
         max_words = context_data["max_words"]
         finalized = False
+        mutating_tools = {"add_speaker_message", "edit_message", "remove_message"}
+        mutating_executed_this_turn = False
 
         for tc in tool_calls:
             name = tc["name"]
             args = tc["arguments"]
+
+            if name in mutating_tools and mutating_executed_this_turn:
+                skip_result = {
+                    "status": "skipped",
+                    "reason": "single_mutating_call_per_turn",
+                    "message": (
+                        "Only one mutating tool call is executed per assistant turn. "
+                        "Issue the next mutation in a new turn after reading count_words."
+                    ),
+                }
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", "unknown"),
+                        "name": name,
+                        "content": json.dumps(skip_result),
+                    }
+                )
+                event_bus.publish(
+                    "tool_result",
+                    tool_name=f"{name} (skipped)",
+                    result=json.dumps(skip_result, indent=2),
+                )
+                continue
+
+            if name in mutating_tools:
+                mutating_executed_this_turn = True
+
             result = await tool_registry.dispatch(name, args)
 
             if result is None:
@@ -307,6 +345,13 @@ class SummarizerExecutor(BaseA2AExecutor):
             # ── Break only when LLM explicitly finalizes ──
             if name == "finalize_draft":
                 finalized = True
+                draft_xml = str(result.get("draft_xml", "")).strip()
+                if draft_xml:
+                    event_bus.publish(
+                        "agent_message",
+                        self.name,
+                        f"Finalized Draft:\n```xml\n{draft_xml}\n```",
+                    )
                 event_bus.publish(
                     "status_message",
                     message="✅ LLM called finalize_draft — submitting to Critic",

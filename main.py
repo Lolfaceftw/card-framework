@@ -16,19 +16,19 @@ from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 from omegaconf import DictConfig, OmegaConf
 
 from agents.critic import CriticExecutor
+from agents.health import AgentHealthChecker
 from agents.retrieval import InfoRetrievalExecutor
 from agents.summarizer import SummarizerExecutor
-from agents.health import AgentHealthChecker
 from agents.utils import load_transcript
 from audio_pipeline import build_audio_to_script_orchestrator
-from audio_pipeline.config import should_use_audio_stage
 from audio_pipeline.runtime import resolve_device, resolve_path
 from embeddings import TranscriptIndex
+from events import event_bus
 from llm_provider import EmbeddingProvider, LLMProvider
 from logger_utils import configure_logger
 from orchestrator import Orchestrator
+from pipeline_plan import build_pipeline_stage_plan
 from providers.logging_provider import LoggingLLMProvider
-from events import event_bus
 
 
 def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecutor):
@@ -56,7 +56,8 @@ def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecut
         queue_manager=InMemoryQueueManager(),
     )
     a2a_app = A2AStarletteApplication(
-        agent_card=agent_card, http_handler=request_handler
+        agent_card=agent_card,
+        http_handler=request_handler,
     )
     return a2a_app.build()
 
@@ -64,48 +65,74 @@ def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecut
 def _run_server_in_thread(name: str, app, port: int) -> threading.Thread:
     """Run a uvicorn server in a daemon thread."""
     config = uvicorn.Config(
-        app, host="127.0.0.1", port=port, log_level="warning", access_log=False
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        access_log=False,
     )
     server = uvicorn.Server(config)
 
-    def _serve():
+    def _serve() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(server.serve())
 
-    t = threading.Thread(target=_serve, name=name, daemon=True)
-    t.start()
-    return t
+    thread = threading.Thread(target=_serve, name=name, daemon=True)
+    thread.start()
+    return thread
+
+
+def _to_plain_dict(value: DictConfig | dict | None) -> dict:
+    """Convert Hydra config nodes into plain dictionaries."""
+    if isinstance(value, DictConfig):
+        resolved = OmegaConf.to_container(value, resolve=True)
+        if isinstance(resolved, dict):
+            return resolved
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _build_full_transcript_text(transcript: dict) -> str:
+    """Build fallback transcript text for non-RAG mode."""
+    segments = transcript.get("segments", [])
+    return "".join(
+        f"[{segment.get('speaker', 'UNKNOWN')}]: {segment.get('text', '')}\n"
+        for segment in segments
+    )
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
-    # ── 1. Configure Logging ──
+    """Run the configured summarization pipeline."""
     configure_logger(cfg.logging)
 
-    # Silence third-party loggers if terminal output is disabled
     if not cfg.logging.get("print_to_terminal", False):
         for logger_name in ["google", "google_genai", "httpx", "a2a", "uvicorn"]:
             logging.getLogger(logger_name).propagate = False
 
-    # ── 2. Load transcript ──
     project_root = Path(hydra.utils.get_original_cwd())
-    audio_cfg = cfg.get("audio", {})
-    audio_cfg_dict = (
-        OmegaConf.to_container(audio_cfg, resolve=True)
-        if isinstance(audio_cfg, DictConfig)
-        else dict(audio_cfg)
-        if isinstance(audio_cfg, dict)
-        else {}
+    audio_cfg_dict = _to_plain_dict(cfg.get("audio", {}))
+    pipeline_cfg_dict = _to_plain_dict(cfg.get("pipeline", {}))
+    stage_plan = build_pipeline_stage_plan(pipeline_cfg_dict, project_root=project_root)
+
+    event_bus.publish(
+        "system_message",
+        (
+            "Pipeline plan: "
+            f"start_stage={stage_plan.start_stage}, stop_stage={stage_plan.stop_stage}"
+        ),
     )
 
     transcript_path = str(cfg.transcript_path)
-    if should_use_audio_stage(audio_cfg_dict):
+    if stage_plan.run_audio_stage:
         audio_path_value = str(audio_cfg_dict.get("audio_path", "")).strip()
         if not audio_path_value:
             raise ValueError(
-                "audio.audio_path is required when audio.input_mode=audio_first. "
-                "To skip stage 1, set audio.input_mode=auto_detect and leave audio.audio_path empty."
+                "audio.audio_path is required when pipeline.start_stage=audio. "
+                "To skip stage 1, set pipeline.start_stage=transcript."
             )
 
         input_audio_path = resolve_path(audio_path_value, base_dir=project_root)
@@ -142,12 +169,19 @@ def main(cfg: DictConfig) -> None:
             },
         )
         transcript_path = str(audio_stage_output.transcript_path)
+    else:
+        event_bus.publish(
+            "system_message",
+            f"Skipping audio stage (start_stage={stage_plan.start_stage}).",
+        )
 
     event_bus.publish("system_message", f"Loading transcript from {transcript_path}...")
     transcript = load_transcript(transcript_path)
-    event_bus.publish("system_message", f"Loaded {len(transcript.get('segments', []))} segments")
+    event_bus.publish(
+        "system_message",
+        f"Loaded {len(transcript.get('segments', []))} segments",
+    )
 
-    # ── 3. Instantiate providers ──
     event_bus.publish("system_message", "Instantiating LLM provider...")
     llm: LLMProvider = hydra.utils.instantiate(cfg.llm)
 
@@ -156,7 +190,6 @@ def main(cfg: DictConfig) -> None:
 
     event_bus.publish("system_message", f"LLM provider: {type(llm).__name__}")
 
-    # Check CUDA and embedding config
     is_embedding_enabled = "NoOpEmbeddingProvider" not in cfg.embedding.get(
         "_target_", ""
     )
@@ -193,20 +226,22 @@ def main(cfg: DictConfig) -> None:
                     is_embedding_enabled = False
                     event_bus.publish("system_message", "Embeddings disabled by user.")
         except ImportError:
-            pass  # If torch isn't installed, evaluating the provider will fail later anyway.
+            pass
 
     transcript_index = None
-    if is_embedding_enabled:
+    if is_embedding_enabled and stage_plan.requires_retrieval_tools:
         event_bus.publish("system_message", "Instantiating Embedding provider...")
         embedding: EmbeddingProvider = hydra.utils.instantiate(cfg.embedding)
         event_bus.publish(
             "system_message", f"Embedding provider: {type(embedding).__name__}"
         )
-
-        # ── 3. Build the transcript index ──
         transcript_index = TranscriptIndex(embedding_provider=embedding)
+    else:
+        event_bus.publish(
+            "system_message",
+            "Embedding provider disabled or not required for selected pipeline plan.",
+        )
 
-    # ── 4. Start A2A servers ──
     retrieval_port = cfg.ports.retrieval
     summarizer_port = cfg.ports.summarizer
     critic_port = cfg.ports.critic
@@ -226,62 +261,70 @@ def main(cfg: DictConfig) -> None:
     else:
         event_bus.publish("system_message", "Info Retrieval Agent disabled.")
 
-    event_bus.publish(
-        "system_message", f"Starting Summarizer A2A server on port {summarizer_port}..."
-    )
-    summarizer_app = _build_a2a_app(
-        name="Summarizer",
-        description="Produces abstractive summaries.",
-        port=summarizer_port,
-        executor=SummarizerExecutor(
-            llm=llm,
-            retrieval_port=retrieval_port,
-            max_tool_turns=cfg.get("agents", {})
-            .get("summarizer", {})
-            .get("max_tool_turns", 3),
-            is_embedding_enabled=is_embedding_enabled,
-        ),
-    )
-    _run_server_in_thread("summarizer-a2a", summarizer_app, summarizer_port)
+    if stage_plan.run_summarizer_stage:
+        event_bus.publish(
+            "system_message",
+            f"Starting Summarizer A2A server on port {summarizer_port}...",
+        )
+        summarizer_app = _build_a2a_app(
+            name="Summarizer",
+            description="Produces abstractive summaries.",
+            port=summarizer_port,
+            executor=SummarizerExecutor(
+                llm=llm,
+                retrieval_port=retrieval_port,
+                max_tool_turns=cfg.get("agents", {})
+                .get("summarizer", {})
+                .get("max_tool_turns", 3),
+                is_embedding_enabled=is_embedding_enabled,
+            ),
+        )
+        _run_server_in_thread("summarizer-a2a", summarizer_app, summarizer_port)
+    else:
+        event_bus.publish("system_message", "Summarizer stage disabled by pipeline plan.")
 
-    event_bus.publish(
-        "system_message", f"Starting Critic A2A server on port {critic_port}..."
-    )
-    critic_app = _build_a2a_app(
-        name="Critic",
-        description="Evaluates summaries.",
-        port=critic_port,
-        executor=CriticExecutor(
-            llm=llm,
-            max_tool_turns=cfg.get("agents", {})
-            .get("critic", {})
-            .get("max_tool_turns", 5),
-            retrieval_port=retrieval_port,
-            is_embedding_enabled=is_embedding_enabled,
-        ),
-    )
-    _run_server_in_thread("critic-a2a", critic_app, critic_port)
+    if stage_plan.run_critic_stage:
+        event_bus.publish(
+            "system_message",
+            f"Starting Critic A2A server on port {critic_port}...",
+        )
+        critic_app = _build_a2a_app(
+            name="Critic",
+            description="Evaluates summaries.",
+            port=critic_port,
+            executor=CriticExecutor(
+                llm=llm,
+                max_tool_turns=cfg.get("agents", {})
+                .get("critic", {})
+                .get("max_tool_turns", 5),
+                retrieval_port=retrieval_port,
+                is_embedding_enabled=is_embedding_enabled,
+            ),
+        )
+        _run_server_in_thread("critic-a2a", critic_app, critic_port)
+    else:
+        event_bus.publish("system_message", "Critic stage disabled by pipeline plan.")
 
     event_bus.publish("system_message", "Waiting for A2A servers to start...")
     time.sleep(2)
 
-    # ── 5. Verify servers are up ──
-    servers_to_check = [("Summarizer", summarizer_port), ("Critic", critic_port)]
+    servers_to_check: list[tuple[str, int]] = []
     if transcript_index is not None:
-        servers_to_check.insert(0, ("InfoRetrieval", retrieval_port))
+        servers_to_check.append(("InfoRetrieval", retrieval_port))
+    if stage_plan.run_summarizer_stage:
+        servers_to_check.append(("Summarizer", summarizer_port))
+    if stage_plan.run_critic_stage:
+        servers_to_check.append(("Critic", critic_port))
 
     checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
-
     for name, port in servers_to_check:
-        is_up = checker.check(name, port)
-        if not is_up:
+        if not checker.check(name, port):
             event_bus.publish(
                 "error_message",
                 f"[ERR] {name} server failed to start after multiple attempts.",
             )
             sys.exit(1)
 
-    # ── 6. Run the orchestrator ──
     event_bus.publish("system_message", "Starting orchestration loop...")
     orchestrator = Orchestrator(
         retrieval_port=retrieval_port,
@@ -290,16 +333,51 @@ def main(cfg: DictConfig) -> None:
         timeouts=dict(cfg.orchestrator.get("timeouts", {})),
     )
 
-    async def run():
+    async def run() -> None:
         full_text = ""
-        if is_embedding_enabled:
+        if transcript_index is not None:
             await orchestrator.index_transcript(transcript)
-        else:
-            segments = transcript.get("segments", [])
-            full_text = "".join(
-                f"[{s.get('speaker', 'UNKNOWN')}]: {s.get('text', '')}\n"
-                for s in segments
+        elif stage_plan.requires_retrieval_tools:
+            full_text = _build_full_transcript_text(transcript)
+
+        if stage_plan.start_stage == "draft":
+            if stage_plan.draft_path is None:
+                raise ValueError("pipeline.draft_path must be set when start_stage=draft.")
+            if not stage_plan.draft_path.exists():
+                raise ValueError(f"Draft file not found: {stage_plan.draft_path}")
+
+            draft = stage_plan.draft_path.read_text(encoding="utf-8").strip()
+            if not draft:
+                raise ValueError(f"Draft file is empty: {stage_plan.draft_path}")
+
+            verdict = await orchestrator.run_critic_once(
+                draft=draft,
+                min_words=cfg.orchestrator.min_words,
+                max_words=cfg.orchestrator.max_words,
+                full_transcript_text=full_text,
             )
+            event_bus.publish(
+                "status_message",
+                (
+                    "Critic verdict: "
+                    f"status={verdict.status}, word_count={verdict.word_count}"
+                ),
+            )
+            event_bus.publish("agent_message", "Critic Feedback", verdict.feedback)
+            return
+
+        if stage_plan.stop_stage == "summarizer":
+            summary = await orchestrator.run_summarizer_once(
+                min_words=cfg.orchestrator.min_words,
+                max_words=cfg.orchestrator.max_words,
+                full_transcript_text=full_text,
+            )
+            event_bus.publish(
+                "agent_message",
+                "Summarizer",
+                f"Single-pass Summary:\n```xml\n{summary}\n```",
+            )
+            return
 
         result = await orchestrator.run_loop(
             min_words=cfg.orchestrator.min_words,
@@ -309,7 +387,9 @@ def main(cfg: DictConfig) -> None:
         )
         if result:
             event_bus.publish(
-                "agent_message", "Orchestrator", f"Final Summary:\n\n{result}"
+                "agent_message",
+                "Orchestrator",
+                f"Final Summary:\n```xml\n{result}\n```",
             )
 
     asyncio.run(run())
