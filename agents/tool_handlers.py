@@ -235,7 +235,25 @@ class EditMessageHandler(ToolHandler):
         }
 
     async def execute(self, arguments: dict) -> dict:
-        result = self._registry.edit(arguments["line"], arguments["new_content"])
+        raw_line = arguments.get("line")
+        try:
+            line = int(raw_line)
+        except (TypeError, ValueError):
+            return {
+                "error": "Argument 'line' must be an integer line number.",
+                "error_code": "invalid_line_argument",
+                "line": raw_line,
+            }
+
+        new_content = arguments.get("new_content")
+        if not isinstance(new_content, str):
+            return {
+                "error": "Argument 'new_content' must be a string.",
+                "error_code": "invalid_new_content_argument",
+                "line": line,
+            }
+
+        result = self._registry.edit(line, new_content)
         if "error" not in result:
             result.update(self._budget.compute_stats())
         return result
@@ -273,7 +291,17 @@ class RemoveMessageHandler(ToolHandler):
         }
 
     async def execute(self, arguments: dict) -> dict:
-        result = self._registry.remove(arguments["line"])
+        raw_line = arguments.get("line")
+        try:
+            line = int(raw_line)
+        except (TypeError, ValueError):
+            return {
+                "error": "Argument 'line' must be an integer line number.",
+                "error_code": "invalid_line_argument",
+                "line": raw_line,
+            }
+
+        result = self._registry.remove(line)
         if "error" not in result:
             result.update(self._budget.compute_stats())
         return result

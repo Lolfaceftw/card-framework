@@ -95,6 +95,41 @@ def _to_plain_dict(value: DictConfig | dict | None) -> dict:
     return {}
 
 
+def _has_target_config(value: dict | None) -> bool:
+    """Return whether a config mapping includes a non-empty Hydra target."""
+    if not isinstance(value, dict):
+        return False
+    target = value.get("_target_")
+    return isinstance(target, str) and bool(target.strip())
+
+
+def _instantiate_llm_provider(
+    llm_cfg: DictConfig | dict,
+    *,
+    enable_logging: bool,
+) -> LLMProvider:
+    """Instantiate an LLM provider and apply logging wrapper when enabled."""
+    llm: LLMProvider = hydra.utils.instantiate(llm_cfg)
+    if enable_logging:
+        return LoggingLLMProvider(inner_provider=llm)
+    return llm
+
+
+def _resolve_stage_llm(
+    override_cfg: dict | None,
+    *,
+    shared_llm: LLMProvider,
+    enable_logging: bool,
+) -> tuple[LLMProvider, str]:
+    """Resolve stage LLM provider, falling back to shared provider when unset."""
+    if _has_target_config(override_cfg):
+        return (
+            _instantiate_llm_provider(override_cfg, enable_logging=enable_logging),
+            "override",
+        )
+    return shared_llm, "shared"
+
+
 def _build_full_transcript_text(transcript: dict) -> str:
     """Build fallback transcript text for non-RAG mode."""
     segments = transcript.get("segments", [])
@@ -182,13 +217,36 @@ def main(cfg: DictConfig) -> None:
         f"Loaded {len(transcript.get('segments', []))} segments",
     )
 
-    event_bus.publish("system_message", "Instantiating LLM provider...")
-    llm: LLMProvider = hydra.utils.instantiate(cfg.llm)
+    event_bus.publish("system_message", "Instantiating LLM providers...")
+    logging_enabled = bool(cfg.get("logging", {}).get("enabled", False))
+    shared_llm = _instantiate_llm_provider(cfg.llm, enable_logging=logging_enabled)
 
-    if cfg.get("logging", {}).get("enabled", False):
-        llm = LoggingLLMProvider(inner_provider=llm)
+    stage_llm_cfg = _to_plain_dict(cfg.get("stage_llm", {}))
+    summarizer_llm, summarizer_llm_source = _resolve_stage_llm(
+        stage_llm_cfg.get("summarizer"),
+        shared_llm=shared_llm,
+        enable_logging=logging_enabled,
+    )
+    critic_llm, critic_llm_source = _resolve_stage_llm(
+        stage_llm_cfg.get("critic"),
+        shared_llm=shared_llm,
+        enable_logging=logging_enabled,
+    )
 
-    event_bus.publish("system_message", f"LLM provider: {type(llm).__name__}")
+    event_bus.publish(
+        "system_message", f"Default LLM provider: {type(shared_llm).__name__}"
+    )
+    event_bus.publish(
+        "system_message",
+        (
+            "Summarizer LLM provider: "
+            f"{type(summarizer_llm).__name__} (source={summarizer_llm_source})"
+        ),
+    )
+    event_bus.publish(
+        "system_message",
+        f"Critic LLM provider: {type(critic_llm).__name__} (source={critic_llm_source})",
+    )
 
     is_embedding_enabled = "NoOpEmbeddingProvider" not in cfg.embedding.get(
         "_target_", ""
@@ -245,6 +303,9 @@ def main(cfg: DictConfig) -> None:
     retrieval_port = cfg.ports.retrieval
     summarizer_port = cfg.ports.summarizer
     critic_port = cfg.ports.critic
+    agents_cfg = _to_plain_dict(cfg.get("agents", {}))
+    summarizer_cfg = _to_plain_dict(agents_cfg.get("summarizer", {}))
+    critic_cfg = _to_plain_dict(agents_cfg.get("critic", {}))
 
     if transcript_index is not None:
         event_bus.publish(
@@ -271,12 +332,11 @@ def main(cfg: DictConfig) -> None:
             description="Produces abstractive summaries.",
             port=summarizer_port,
             executor=SummarizerExecutor(
-                llm=llm,
+                llm=summarizer_llm,
                 retrieval_port=retrieval_port,
-                max_tool_turns=cfg.get("agents", {})
-                .get("summarizer", {})
-                .get("max_tool_turns", 3),
+                max_tool_turns=int(summarizer_cfg.get("max_tool_turns", 3)),
                 is_embedding_enabled=is_embedding_enabled,
+                loop_guardrails=_to_plain_dict(summarizer_cfg.get("loop_guardrails")),
             ),
         )
         _run_server_in_thread("summarizer-a2a", summarizer_app, summarizer_port)
@@ -293,10 +353,8 @@ def main(cfg: DictConfig) -> None:
             description="Evaluates summaries.",
             port=critic_port,
             executor=CriticExecutor(
-                llm=llm,
-                max_tool_turns=cfg.get("agents", {})
-                .get("critic", {})
-                .get("max_tool_turns", 5),
+                llm=critic_llm,
+                max_tool_turns=int(critic_cfg.get("max_tool_turns", 5)),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=is_embedding_enabled,
             ),

@@ -173,6 +173,36 @@ class FakeToolRegistry:
         return {"status": "ok"}
 
 
+class FakeEditToolRegistry:
+    """Tool registry stub that supports deterministic edit/count responses."""
+
+    def __init__(
+        self,
+        *,
+        edit_results: list[dict[str, Any]],
+        count_totals: list[int],
+    ) -> None:
+        self._edit_results = edit_results
+        self._count_totals = count_totals
+        self._edit_index = 0
+        self._count_index = 0
+
+    async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        if name == "edit_message":
+            idx = min(self._edit_index, len(self._edit_results) - 1)
+            self._edit_index += 1
+            return dict(self._edit_results[idx])
+        if name == "count_words":
+            idx = min(self._count_index, len(self._count_totals) - 1)
+            self._count_index += 1
+            return {"total_word_count": self._count_totals[idx]}
+        if name == "save_draft":
+            return {"total_messages": 1}
+        if name == "finalize_draft":
+            return {"status": "finalized"}
+        return {"status": "ok"}
+
+
 def _tool_call(tool_id: str, speaker_id: str, content: str) -> dict[str, Any]:
     return {
         "id": tool_id,
@@ -438,3 +468,138 @@ def test_summarizer_executes_only_first_mutating_call_per_turn() -> None:
     skipped_payload = json.loads(skipped[0]["content"])
     assert skipped_payload["status"] == "skipped"
     assert skipped_payload["reason"] == "single_mutating_call_per_turn"
+
+
+def test_summarizer_injects_stall_guidance_after_repeated_noop_edits() -> None:
+    executor = SummarizerExecutor(
+        llm=FakeLLM([]),
+        retrieval_port=12345,
+        max_tool_turns=5,
+        is_embedding_enabled=False,
+    )
+    tool_registry = FakeEditToolRegistry(
+        edit_results=[
+            {
+                "line": 6,
+                "old_word_count": 101,
+                "new_word_count": 101,
+                "delta_words": 0,
+                "changed": False,
+            },
+            {
+                "line": 6,
+                "old_word_count": 101,
+                "new_word_count": 101,
+                "delta_words": 0,
+                "changed": False,
+            },
+            {
+                "line": 6,
+                "old_word_count": 101,
+                "new_word_count": 101,
+                "delta_words": 0,
+                "changed": False,
+            },
+        ],
+        count_totals=[556, 556, 556],
+    )
+    context_data: dict[str, Any] = {
+        "tool_registry": tool_registry,
+        "min_words": 500,
+        "max_words": 550,
+        "enable_stall_guidance": True,
+        "enable_noop_edit_detection": True,
+        "stall_guidance_threshold_turns": 3,
+        "stall_guidance_cooldown_turns": 2,
+        "stagnation_turns": 0,
+        "last_stall_guidance_turn": -10_000,
+        "loop_turn_index": 0,
+        "last_mutation_signature": None,
+        "last_total_word_count": None,
+        "recent_line_edit_fingerprints": [],
+    }
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]
+    tool_call = {"id": "call_1", "name": "edit_message", "arguments": {"line": 6, "new_content": "same"}}
+
+    for _ in range(3):
+        asyncio.run(executor.process_tool_calls([tool_call], messages, context_data))
+
+    assert context_data["stagnation_turns"] == 3
+    guidance_messages = [
+        message
+        for message in messages
+        if message.get("role") == "user"
+        and str(message.get("content", "")).startswith("[STALL_GUIDANCE]")
+        and "repeating edits without meaningful progress"
+        in str(message.get("content", ""))
+    ]
+    assert len(guidance_messages) == 1
+    assert "remove a line" in str(guidance_messages[0]["content"]).lower()
+    assert not any(
+        message.get("role") == "system"
+        and "repeating edits without meaningful progress"
+        in str(message.get("content", ""))
+        for message in messages
+    )
+
+
+def test_summarizer_resets_stagnation_after_meaningful_edit() -> None:
+    executor = SummarizerExecutor(
+        llm=FakeLLM([]),
+        retrieval_port=12345,
+        max_tool_turns=5,
+        is_embedding_enabled=False,
+    )
+    tool_registry = FakeEditToolRegistry(
+        edit_results=[
+            {
+                "line": 3,
+                "old_word_count": 64,
+                "new_word_count": 64,
+                "delta_words": 0,
+                "changed": False,
+            },
+            {
+                "line": 3,
+                "old_word_count": 64,
+                "new_word_count": 70,
+                "delta_words": 6,
+                "changed": True,
+            },
+        ],
+        count_totals=[552, 546],
+    )
+    context_data: dict[str, Any] = {
+        "tool_registry": tool_registry,
+        "min_words": 500,
+        "max_words": 550,
+        "enable_stall_guidance": True,
+        "enable_noop_edit_detection": True,
+        "stall_guidance_threshold_turns": 3,
+        "stall_guidance_cooldown_turns": 2,
+        "stagnation_turns": 0,
+        "last_stall_guidance_turn": -10_000,
+        "loop_turn_index": 0,
+        "last_mutation_signature": None,
+        "last_total_word_count": None,
+        "recent_line_edit_fingerprints": [],
+    }
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]
+
+    asyncio.run(
+        executor.process_tool_calls(
+            [{"id": "call_1", "name": "edit_message", "arguments": {"line": 3, "new_content": "same"}}],
+            messages,
+            context_data,
+        )
+    )
+    assert context_data["stagnation_turns"] == 1
+
+    asyncio.run(
+        executor.process_tool_calls(
+            [{"id": "call_2", "name": "edit_message", "arguments": {"line": 3, "new_content": "expanded"}}],
+            messages,
+            context_data,
+        )
+    )
+    assert context_data["stagnation_turns"] == 0

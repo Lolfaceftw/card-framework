@@ -24,7 +24,9 @@ You will fail your task if you violate ANY of the following rules:
 
 Strictly do not add any reasoning after any `count_words` after every `add_speaker_message`, `edit_message`, or `remove_message`. You are to call this once, and wait for the count words tool to return.
 You MUST emit exactly ONE tool call per assistant response. Never emit multiple `<tool_call>` blocks in one response.
-</critical_constraints>a 
+Do not repeat unchanged edits. Every `edit_message` must materially change content.
+If you receive a stall/repetition warning: OVER budget -> remove or shorten a line; UNDER budget -> add or expand a line; IN budget -> finalize unless you are making a substantive change.
+</critical_constraints>
 
 <tool_usage_rules>
 Because you process text in tokens, you are neurologically incapable of accurately counting words natively. You MUST rely on deterministic tools.

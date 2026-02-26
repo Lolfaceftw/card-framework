@@ -40,3 +40,24 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu126" }
 torchaudio = { index = "pytorch-cu126" }
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+xfail_strict = true
+junit_family = "xunit2"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--durations=10",
+    "--durations-min=1.0",
+]
+markers = [
+    "unit: deterministic fast unit tests",
+    "integration: component integration tests using local dependencies",
+    "contract: shared interface/adapter behavior tests",
+    "slow: intentionally slow tests",
+    "gpu: tests that require GPU acceleration",
+    "network: tests that require external network access",
+]

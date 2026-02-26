@@ -82,7 +82,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         max_turns: int,
         context_data: dict[str, Any] | None = None,
     ) -> dict | None:
-        from agents.parsers import get_default_parser
+        from agents.parsers import get_default_parser_with_options
         from events import event_bus
 
         runtime_context = context_data if context_data is not None else {}
@@ -105,12 +105,17 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         runtime_context["seen_tool_call_ids"] = seen_tool_call_ids
         runtime_context["seen_tool_signature_turns"] = seen_tool_signature_turns
         runtime_context.setdefault("tool_replay_window", "run")
+        enable_extended_text_tool_parser = bool(
+            runtime_context.get("enable_extended_text_tool_parser", False)
+        )
 
         total_parsed_calls = 0
         total_executed_calls = 0
         total_skipped_calls = 0
 
-        parser = get_default_parser()
+        parser = get_default_parser_with_options(
+            enable_extended_text_fallback=enable_extended_text_tool_parser
+        )
 
         for turn in range(max_turns):
             response_message = self.llm.chat(messages=messages, tools=tools)

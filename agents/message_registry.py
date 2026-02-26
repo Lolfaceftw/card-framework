@@ -50,9 +50,25 @@ class MessageRegistry:
         """Replace content at *line* (1-indexed). Returns old/new counts."""
         idx = line - 1
         if idx < 0 or idx >= len(self._messages):
-            return {"error": f"Line {line} does not exist."}
+            return {
+                "error": f"Line {line} does not exist.",
+                "error_code": "line_not_found",
+                "line": line,
+            }
 
-        old_wc = count_words(self._messages[idx]["content"])
+        old_content = self._messages[idx]["content"]
+        old_wc = count_words(old_content)
+        if old_content == new_content:
+            return {
+                "line": line,
+                "old_word_count": old_wc,
+                "new_word_count": old_wc,
+                "delta_words": 0,
+                "changed": False,
+                "stagnation_hint": "no_change",
+                "total_word_count": self.get_counts()["total_word_count"],
+            }
+
         self._messages[idx]["content"] = new_content
         new_wc = count_words(new_content)
 
@@ -60,6 +76,8 @@ class MessageRegistry:
             "line": line,
             "old_word_count": old_wc,
             "new_word_count": new_wc,
+            "delta_words": new_wc - old_wc,
+            "changed": True,
             "total_word_count": self.get_counts()["total_word_count"],
         }
 
