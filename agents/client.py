@@ -65,6 +65,9 @@ class AgentClient:
         """
         Sends a task to the agent.
         """
+        if max_retries < 1:
+            raise ValueError("max_retries must be >= 1.")
+
         call_id = str(uuid.uuid4())
         metadata = metadata or {}
 
@@ -100,7 +103,7 @@ class AgentClient:
             **metadata,
         )
 
-        last_exception = None
+        last_exception: Exception | None = None
         for attempt in range(1, max_retries + 1):
             attempt_start = time.perf_counter()
             try:
@@ -168,9 +171,12 @@ class AgentClient:
                     **metadata,
                 )
                 return str(result)
-            except (httpx.RequestError, httpx.HTTPStatusError) as e:
-                last_exception = e
-                if attempt < max_retries:
+            except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                last_exception = exc
+                is_unsafe_retry_timeout = isinstance(
+                    exc, (httpx.ReadTimeout, httpx.WriteTimeout)
+                )
+                if attempt < max_retries and not is_unsafe_retry_timeout:
                     delay_seconds = float(2**attempt)
                     event_bus.publish(
                         "a2a_call_retry",
@@ -178,12 +184,24 @@ class AgentClient:
                         port=port,
                         attempt=attempt,
                         delay_seconds=delay_seconds,
-                        error=str(e),
+                        error=self._format_exception_detail(exc),
                         **metadata,
                     )
                     await asyncio.sleep(delay_seconds)  # Exponential backoff (2s, 4s, 8s)
+                    continue
+                break
 
-        error_message = f"Failed after {max_retries} attempts. Last error: {last_exception}"
+        last_error = self._format_exception_detail(last_exception)
+        if isinstance(last_exception, (httpx.ReadTimeout, httpx.WriteTimeout)):
+            error_message = (
+                f"Failed after {max_retries} attempts. Request timed out after {timeout}s; "
+                "the request may still be running on the agent. Increase timeout instead of "
+                f"relying on retries. Last error: {last_error}"
+            )
+        else:
+            error_message = (
+                f"Failed after {max_retries} attempts. Last error: {last_error}"
+            )
         event_bus.publish(
             "a2a_call_failed",
             call_id=call_id,
@@ -191,7 +209,17 @@ class AgentClient:
             error=error_message,
             **metadata,
         )
+        if last_exception is not None:
+            raise RuntimeError(error_message) from last_exception
         raise RuntimeError(error_message)
+
+    @staticmethod
+    def _format_exception_detail(exc: Exception | None) -> str:
+        """Return a stable error summary that always includes exception type."""
+        if exc is None:
+            return "none"
+        error_text = str(exc).strip() or repr(exc)
+        return f"{type(exc).__name__}: {error_text}"
 
 
 # Global connection pool instance

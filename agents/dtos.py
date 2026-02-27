@@ -38,6 +38,7 @@ class SummarizerTaskRequest(BaseModel):
     retrieval_port: int
     feedback: str = ""
     previous_draft: str = ""
+    loop_context: str = ""
     full_transcript: str = ""
 
 
