@@ -29,6 +29,7 @@ from logger_utils import configure_logger
 from orchestrator import Orchestrator
 from pipeline_plan import build_pipeline_stage_plan
 from providers.logging_provider import LoggingLLMProvider
+from summary_output import write_summary_xml_to_workspace
 
 
 def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecutor):
@@ -422,6 +423,12 @@ def main(cfg: DictConfig) -> None:
                 ),
             )
             event_bus.publish("agent_message", "Critic Feedback", verdict.feedback)
+            if verdict.status == "pass":
+                summary_path = write_summary_xml_to_workspace(draft, project_root)
+                event_bus.publish(
+                    "status_message",
+                    f"Saved critic-approved draft to {summary_path}",
+                )
             return
 
         if stage_plan.stop_stage == "summarizer":
@@ -448,6 +455,11 @@ def main(cfg: DictConfig) -> None:
                 "agent_message",
                 "Orchestrator",
                 f"Final Summary:\n```xml\n{result}\n```",
+            )
+            summary_path = write_summary_xml_to_workspace(result, project_root)
+            event_bus.publish(
+                "status_message",
+                f"Saved final summary to {summary_path}",
             )
 
     asyncio.run(run())
