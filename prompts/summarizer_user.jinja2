@@ -1,5 +1,10 @@
 Transcript excerpt ({{ num_segments }} segments, {{ total_words }} words):
 
 {{ transcript_excerpt }}
+{% if loop_context_block %}
+
+--- LOOP CONTEXT ---
+{{ loop_context_block }}
+{% endif %}
 
 {{ feedback_block }}

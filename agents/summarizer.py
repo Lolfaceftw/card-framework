@@ -9,6 +9,7 @@ from a2a.server.events import EventQueue
 from agents.base import BaseA2AExecutor
 from agents.client import agent_client
 from agents.dtos import RetrieveTaskRequest
+from agents.loop_context import build_loop_context_prompt_block
 from agents.message_registry import MessageRegistry
 from agents.tool_call_utils import build_tool_signature
 from agents.tool_handlers import build_revise_tools, build_summarizer_tools
@@ -39,7 +40,6 @@ class SummarizerExecutor(BaseA2AExecutor):
         "target_models": [],
         "target_providers": [],
     }
-
     def __init__(
         self,
         llm: LLMProvider,
@@ -93,6 +93,11 @@ class SummarizerExecutor(BaseA2AExecutor):
         if raw_query is None:
             return ""
         return " ".join(str(raw_query).strip().lower().split())
+
+    @staticmethod
+    def _build_loop_context_prompt_block(raw_loop_context: Any) -> str:
+        """Build a bounded loop-context payload for prompt injection."""
+        return build_loop_context_prompt_block(raw_loop_context, char_cap=1024)
 
     def _resolve_provider_metadata(self) -> tuple[str, str]:
         """Return provider class name and best-effort model identifier."""
@@ -271,6 +276,8 @@ class SummarizerExecutor(BaseA2AExecutor):
         retrieval_port = req.retrieval_port
         previous_draft = req.previous_draft
         full_transcript = req.full_transcript
+        loop_context = getattr(req, "loop_context", task_data.get("loop_context", ""))
+        loop_context_block = self._build_loop_context_prompt_block(loop_context)
 
         revise_mode = bool(previous_draft and feedback)
 
@@ -394,6 +401,7 @@ class SummarizerExecutor(BaseA2AExecutor):
                 previous_draft=previous_draft,
                 draft_line_map=json.dumps(registry.snapshot(), indent=2),
                 feedback=feedback,
+                loop_context_block=loop_context_block,
                 is_embedding_enabled=self.is_embedding_enabled,
                 staged_discovery_enabled=self.is_embedding_enabled
                 and loop_guardrails["enable_staged_discovery"],
@@ -427,6 +435,7 @@ class SummarizerExecutor(BaseA2AExecutor):
                     num_segments=num_segments,
                     total_words=total_words,
                     transcript_excerpt=transcript_excerpt,
+                    loop_context_block=loop_context_block,
                     feedback_block=f"\n\n--- CRITIC FEEDBACK ---\n{feedback}"
                     if feedback
                     else "",

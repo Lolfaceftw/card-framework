@@ -16,6 +16,12 @@ You will go through the critic feedback and fix the issues one by one. You will 
 <critic_feedback>
 {{ feedback }}
 </critic_feedback>
+{% if loop_context_block %}
+
+<loop_context>
+{{ loop_context_block }}
+</loop_context>
+{% endif %}
 
 <previous_draft>
 {{ previous_draft }}
@@ -64,14 +70,15 @@ You do NOT have `add_speaker_message` — you can only edit or remove existing l
 
 <execution_workflow>
 1. Review the Critic's feedback carefully
-2. Identify which specific lines need changes (consult the draft_line_map above)
-3. Use `edit_message` to fix each flagged line, one at a time, with exactly one tool call per assistant response
-4. After each edit, check the auto-returned `count_words` to stay within budget
+2. Prioritize unresolved issues in <loop_context> when present, then address remaining Critic feedback
+3. Identify which specific lines need changes (consult the draft_line_map above)
+4. Use `edit_message` to fix each flagged line, one at a time, with exactly one tool call per assistant response
+5. After each edit, check the auto-returned `count_words` to stay within budget
 {% if is_embedding_enabled %}
-5. If the Critic flagged factual issues, use `query_transcript` to verify before editing
+6. If the Critic flagged factual issues, use `query_transcript` to verify before editing
 {% else %}
-5. Address factual issues raised by the Critic by carefully reading the full transcript
+6. Address factual issues raised by the Critic by carefully reading the full transcript
 {% endif %}
-6. Once all issues are addressed and budget is met, review the draft one more time
-7. Call `finalize_draft()` when you are satisfied with the revised draft
+7. Once all issues are addressed and budget is met, review the draft one more time
+8. Call `finalize_draft()` when you are satisfied with the revised draft
 </execution_workflow>
