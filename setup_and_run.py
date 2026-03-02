@@ -134,6 +134,7 @@ def run_cmd(
     command: Sequence[str],
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    stream_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """
     Execute a shell command and raise ``BootstrapError`` on non-zero exit code.
@@ -143,6 +144,7 @@ def run_cmd(
         command: Argument list for subprocess execution.
         cwd: Optional working directory.
         env: Optional environment mapping.
+        stream_output: Stream child process stdout/stderr to terminal in real time.
 
     Returns:
         Completed process object.
@@ -150,16 +152,28 @@ def run_cmd(
     Raises:
         BootstrapError: If command execution fails.
     """
-    completed = subprocess.run(
-        list(command),
-        cwd=str(cwd) if cwd is not None else None,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=dict(env) if env is not None else None,
-    )
+    if stream_output:
+        completed = subprocess.run(
+            list(command),
+            cwd=str(cwd) if cwd is not None else None,
+            check=False,
+            text=True,
+            env=dict(env) if env is not None else None,
+        )
+    else:
+        completed = subprocess.run(
+            list(command),
+            cwd=str(cwd) if cwd is not None else None,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=dict(env) if env is not None else None,
+        )
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
+        if stream_output:
+            detail = "See streamed command output above for details."
+        else:
+            detail = (completed.stderr or completed.stdout or "").strip()
         raise BootstrapError(
             step=step,
             message=f"Command failed with exit code {completed.returncode}.",
@@ -592,6 +606,7 @@ def build_run_overrides(*, audio_path: Path, run_id: str) -> list[str]:
         "audio.voice_clone.enabled=true",
         "audio.voice_clone.provider=indextts",
         "audio.voice_clone.execution_backend=subprocess",
+        "logging.print_to_terminal=true",
         f"audio.voice_clone.runner_project_dir={_path_for_override(INDEX_TTS_DIR)}",
         (
             "audio.voice_clone.cfg_path="
@@ -618,7 +633,12 @@ def run_pipeline(*, uv_executable: str, overrides: Sequence[str]) -> None:
         BootstrapError: If pipeline command exits non-zero.
     """
     command = [uv_executable, "run", "main.py", *overrides]
-    run_cmd(step="pipeline_run", command=command, cwd=REPO_ROOT)
+    run_cmd(
+        step="pipeline_run",
+        command=command,
+        cwd=REPO_ROOT,
+        stream_output=True,
+    )
 
 
 def print_summary(

@@ -332,6 +332,9 @@ def _build_voice_clone_provider(
             execution_backend=execution_backend,
             runner_project_dir=runner_project_dir,
             uv_executable=str(voice_clone_cfg.get("uv_executable", "uv")),
+            stream_subprocess_output=bool(
+                voice_clone_cfg.get("stream_subprocess_output", True)
+            ),
         )
     if provider in {"passthrough", "none"}:
         return PassthroughVoiceCloneGateway()

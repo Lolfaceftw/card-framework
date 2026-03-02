@@ -181,6 +181,7 @@ def test_factory_builds_indextts_subprocess_provider_defaults(tmp_path: Path) ->
     provider = orchestrator.provider
     assert isinstance(provider, IndexTTSVoiceCloneGateway)
     assert provider.execution_backend == "subprocess"
+    assert provider.stream_subprocess_output is True
     assert provider.runner_project_dir == (tmp_path / "third_party" / "index_tts").resolve()
     assert provider.cfg_path == (
         tmp_path / "third_party" / "index_tts" / "checkpoints" / "config.yaml"
@@ -188,3 +189,21 @@ def test_factory_builds_indextts_subprocess_provider_defaults(tmp_path: Path) ->
     assert provider.model_dir == (
         tmp_path / "third_party" / "index_tts" / "checkpoints"
     ).resolve()
+
+
+def test_factory_respects_indextts_stream_subprocess_override(tmp_path: Path) -> None:
+    orchestrator = build_voice_clone_orchestrator(
+        {
+            "voice_clone": {
+                "enabled": True,
+                "provider": "indextts",
+                "stream_subprocess_output": False,
+            }
+        },
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    provider = orchestrator.provider
+    assert isinstance(provider, IndexTTSVoiceCloneGateway)
+    assert provider.stream_subprocess_output is False

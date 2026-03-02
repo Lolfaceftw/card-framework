@@ -203,6 +203,7 @@ def test_build_run_overrides_include_required_voice_clone_settings(
     assert override_map["pipeline.stop_stage"] == "critic"
     assert override_map["audio.voice_clone.enabled"] == "true"
     assert override_map["audio.voice_clone.execution_backend"] == "subprocess"
+    assert override_map["logging.print_to_terminal"] == "true"
     assert override_map["audio.speaker_samples.source_audio"] == "vocals"
     assert override_map["audio.speaker_samples.target_duration_seconds"] == "30"
     assert "\\" not in override_map["audio.audio_path"]
@@ -223,3 +224,29 @@ def test_resolve_audio_input_supports_relative_path(
     resolved = bootstrap.resolve_audio_input("audio.wav")
     assert resolved == input_audio.resolve()
 
+
+def test_run_pipeline_streams_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def _fake_run_cmd(**kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(dict(kwargs))
+        command = kwargs["command"]
+        assert isinstance(command, list)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bootstrap, "run_cmd", _fake_run_cmd)
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", Path("C:/repo"))
+
+    bootstrap.run_pipeline(
+        uv_executable="uv",
+        overrides=["pipeline.start_stage=audio"],
+    )
+
+    assert len(captured) == 1
+    call = captured[0]
+    assert call["step"] == "pipeline_run"
+    assert call["cwd"] == Path("C:/repo")
+    assert call["stream_output"] is True
+    assert call["command"] == ["uv", "run", "main.py", "pipeline.start_stage=audio"]

@@ -218,16 +218,11 @@ def test_indextts_gateway_subprocess_backend_executes_runner_command(
     runner_project_dir.mkdir(parents=True, exist_ok=True)
     (runner_project_dir / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
     captured_commands: list[list[str]] = []
+    captured_run_kwargs: list[dict[str, object]] = []
 
-    def _fake_run(
-        command: list[str],
-        *,
-        check: bool,
-        capture_output: bool,
-        text: bool,
-    ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text
+    def _fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         captured_commands.append(command)
+        captured_run_kwargs.append(dict(kwargs))
         output_audio.write_bytes(b"wav")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
@@ -258,6 +253,7 @@ def test_indextts_gateway_subprocess_backend_executes_runner_command(
     assert rendered_path == output_audio
     assert len(captured_commands) == 1
     command = captured_commands[0]
+    run_kwargs = captured_run_kwargs[0]
     assert command[0] == "uv"
     assert "--project" in command
     assert str(runner_project_dir.resolve()) in command
@@ -277,3 +273,93 @@ def test_indextts_gateway_subprocess_backend_executes_runner_command(
     assert "--use-accel" in command
     assert "--use-torch-compile" in command
     assert "--verbose" in command
+    assert run_kwargs["check"] is False
+    assert run_kwargs["text"] is True
+    assert "capture_output" not in run_kwargs
+
+
+def test_indextts_gateway_subprocess_backend_can_capture_output_when_streaming_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = tmp_path / "checkpoints" / "config.yaml"
+    model_dir = tmp_path / "checkpoints"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("version: test", encoding="utf-8")
+    reference_audio = tmp_path / "speaker.wav"
+    reference_audio.write_bytes(b"ref")
+    output_audio = tmp_path / "output.wav"
+    runner_project_dir = tmp_path / "third_party" / "index_tts"
+    runner_project_dir.mkdir(parents=True, exist_ok=True)
+    (runner_project_dir / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    captured_run_kwargs: list[dict[str, object]] = []
+
+    def _fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del command
+        captured_run_kwargs.append(dict(kwargs))
+        output_audio.write_bytes(b"wav")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    gateway = IndexTTSVoiceCloneGateway(
+        cfg_path=cfg_path,
+        model_dir=model_dir,
+        execution_backend="subprocess",
+        runner_project_dir=runner_project_dir,
+        uv_executable="uv",
+        stream_subprocess_output=False,
+    )
+
+    gateway.synthesize(
+        reference_audio_path=reference_audio,
+        text="Text",
+        output_audio_path=output_audio,
+    )
+
+    assert len(captured_run_kwargs) == 1
+    run_kwargs = captured_run_kwargs[0]
+    assert run_kwargs["check"] is False
+    assert run_kwargs["text"] is True
+    assert run_kwargs["capture_output"] is True
+
+
+def test_indextts_gateway_subprocess_backend_streaming_failure_reports_stream_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = tmp_path / "checkpoints" / "config.yaml"
+    model_dir = tmp_path / "checkpoints"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("version: test", encoding="utf-8")
+    reference_audio = tmp_path / "speaker.wav"
+    reference_audio.write_bytes(b"ref")
+    output_audio = tmp_path / "output.wav"
+    runner_project_dir = tmp_path / "third_party" / "index_tts"
+    runner_project_dir.mkdir(parents=True, exist_ok=True)
+    (runner_project_dir / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+
+    def _fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        return subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    gateway = IndexTTSVoiceCloneGateway(
+        cfg_path=cfg_path,
+        model_dir=model_dir,
+        execution_backend="subprocess",
+        runner_project_dir=runner_project_dir,
+        uv_executable="uv",
+        stream_subprocess_output=True,
+    )
+
+    with pytest.raises(
+        NonRetryableAudioStageError,
+        match="See streamed subprocess output above.",
+    ):
+        gateway.synthesize(
+            reference_audio_path=reference_audio,
+            text="Text",
+            output_audio_path=output_audio,
+        )
