@@ -30,6 +30,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         execution_backend: ``inprocess`` or ``subprocess`` execution mode.
         runner_project_dir: ``uv`` project dir containing IndexTTS dependencies.
         uv_executable: Name/path of the ``uv`` executable.
+        stream_subprocess_output: Stream nested subprocess logs to terminal.
     """
 
     cfg_path: Path
@@ -45,6 +46,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
     execution_backend: str = "subprocess"
     runner_project_dir: Path | None = None
     uv_executable: str = "uv"
+    stream_subprocess_output: bool = True
     _tts_model: object | None = field(default=None, init=False, repr=False)
 
     def synthesize(
@@ -188,16 +190,26 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         if self.verbose:
             command.append("--verbose")
 
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        if self.stream_subprocess_output:
+            result = subprocess.run(
+                command,
+                check=False,
+                text=True,
+            )
+        else:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
         if result.returncode != 0:
-            stderr_tail = (result.stderr or "").strip()
-            stdout_tail = (result.stdout or "").strip()
-            detail = stderr_tail or stdout_tail or "No subprocess output captured."
+            if self.stream_subprocess_output:
+                detail = "See streamed subprocess output above."
+            else:
+                stderr_tail = (result.stderr or "").strip()
+                stdout_tail = (result.stdout or "").strip()
+                detail = stderr_tail or stdout_tail or "No subprocess output captured."
             raise NonRetryableAudioStageError(
                 "IndexTTS subprocess synthesis failed with "
                 f"exit_code={result.returncode}: {detail}"
