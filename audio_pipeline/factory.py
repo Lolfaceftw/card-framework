@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from audio_pipeline.contracts import SourceSeparator, SpeakerDiarizer, SpeechTranscriber
@@ -20,8 +21,17 @@ from audio_pipeline.gateways.fallback_gateways import (
 from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
 from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
 from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
+from audio_pipeline.gateways.fallback_voice_clone_gateway import (
+    PassthroughVoiceCloneGateway,
+)
+from audio_pipeline.gateways.indextts_voice_clone_gateway import (
+    IndexTTSVoiceCloneGateway,
+)
 from audio_pipeline.orchestrator import AudioToScriptOrchestrator
+from audio_pipeline.runtime import resolve_device, resolve_path
 from audio_pipeline.speaker_samples import SpeakerSampleGenerator
+from audio_pipeline.voice_clone_contracts import VoiceCloneProvider
+from audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
 
 
 def build_audio_to_script_orchestrator(
@@ -96,6 +106,45 @@ def build_speaker_sample_generator(audio_cfg: Mapping[str, Any]) -> SpeakerSampl
             short_policy,
         ),
         manifest_filename=str(speaker_samples_cfg.get("manifest_filename", "manifest.json")),
+    )
+
+
+def build_voice_clone_orchestrator(
+    audio_cfg: Mapping[str, Any],
+    *,
+    project_root: Path,
+) -> VoiceCloneOrchestrator | None:
+    """
+    Build post-summary voice-cloning orchestrator from config mapping.
+
+    Args:
+        audio_cfg: ``audio`` config section.
+        project_root: Repository root used for path resolution.
+
+    Returns:
+        Wired ``VoiceCloneOrchestrator`` when enabled, otherwise ``None``.
+    """
+    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
+    if not bool(voice_clone_cfg.get("enabled", False)):
+        return None
+
+    work_dir = resolve_path(
+        str(audio_cfg.get("work_dir", "artifacts/audio_stage")),
+        base_dir=project_root,
+    )
+    output_dir = resolve_path(
+        str(voice_clone_cfg.get("output_dir_name", "voice_clone")),
+        base_dir=work_dir,
+    )
+    provider = _build_voice_clone_provider(
+        voice_clone_cfg=voice_clone_cfg,
+        project_root=project_root,
+    )
+    return VoiceCloneOrchestrator(
+        provider=provider,
+        output_dir=output_dir,
+        fail_on_error=bool(voice_clone_cfg.get("fail_on_error", True)),
+        manifest_filename=str(voice_clone_cfg.get("manifest_filename", "manifest.json")),
     )
 
 
@@ -237,3 +286,53 @@ def _validate_eta_adaptive_config(
         raise ValueError(
             "audio.eta.adaptive.max_multiplier must be >= min_multiplier."
         )
+
+
+def _build_voice_clone_provider(
+    *,
+    voice_clone_cfg: Mapping[str, Any],
+    project_root: Path,
+) -> VoiceCloneProvider:
+    """Factory method for voice-cloning strategy providers."""
+    provider = str(voice_clone_cfg.get("provider", "indextts")).strip().lower()
+    if provider == "indextts":
+        execution_backend = str(
+            voice_clone_cfg.get("execution_backend", "subprocess")
+        )
+        runner_project_dir = resolve_path(
+            str(voice_clone_cfg.get("runner_project_dir", "third_party/index_tts")),
+            base_dir=project_root,
+        )
+        cfg_default = "checkpoints/config.yaml"
+        model_default = "checkpoints"
+        if execution_backend.strip().lower() == "subprocess":
+            cfg_default = "third_party/index_tts/checkpoints/config.yaml"
+            model_default = "third_party/index_tts/checkpoints"
+        cfg_path = resolve_path(
+            str(voice_clone_cfg.get("cfg_path", cfg_default)),
+            base_dir=project_root,
+        )
+        model_dir = resolve_path(
+            str(voice_clone_cfg.get("model_dir", model_default)),
+            base_dir=project_root,
+        )
+        return IndexTTSVoiceCloneGateway(
+            cfg_path=cfg_path,
+            model_dir=model_dir,
+            device=resolve_device(str(voice_clone_cfg.get("device", "auto"))),
+            use_fp16=bool(voice_clone_cfg.get("use_fp16", False)),
+            use_cuda_kernel=bool(voice_clone_cfg.get("use_cuda_kernel", False)),
+            use_deepspeed=bool(voice_clone_cfg.get("use_deepspeed", False)),
+            use_accel=bool(voice_clone_cfg.get("use_accel", False)),
+            use_torch_compile=bool(voice_clone_cfg.get("use_torch_compile", False)),
+            verbose=bool(voice_clone_cfg.get("verbose", False)),
+            max_text_tokens_per_segment=int(
+                voice_clone_cfg.get("max_text_tokens_per_segment", 120)
+            ),
+            execution_backend=execution_backend,
+            runner_project_dir=runner_project_dir,
+            uv_executable=str(voice_clone_cfg.get("uv_executable", "uv")),
+        )
+    if provider in {"passthrough", "none"}:
+        return PassthroughVoiceCloneGateway()
+    raise ValueError(f"Unsupported voice clone provider: {provider}")

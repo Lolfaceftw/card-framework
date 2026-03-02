@@ -33,13 +33,20 @@ dependencies = [
 ]
 
 [[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
+# Optional fallback index kept for environments that need CUDA 12.6 wheels.
+# To switch, temporarily point `tool.uv.sources` torch/torchaudio to `pytorch-cu126`.
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchaudio = { index = "pytorch-cu126" }
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
 
 [tool.pytest.ini_options]
 minversion = "8.0"

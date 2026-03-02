@@ -25,3 +25,4 @@ eval_report.json
 .ruff_cache/
 
 audio.wav
+third_party/index_tts/

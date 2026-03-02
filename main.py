@@ -25,6 +25,7 @@ from agents.utils import load_transcript
 from audio_pipeline import (
     build_audio_to_script_orchestrator,
     build_speaker_sample_generator,
+    build_voice_clone_orchestrator,
 )
 from audio_pipeline.contracts import TranscriptPayload
 from audio_pipeline.io import write_transcript_atomic
@@ -166,7 +167,7 @@ def _run_post_transcript_speaker_sample_step(
     project_root: Path,
     transcript_path: str,
     transcript: Transcript,
-) -> None:
+) -> Transcript:
     """
     Generate per-speaker voice samples after transcript availability.
 
@@ -176,13 +177,17 @@ def _run_post_transcript_speaker_sample_step(
         project_root: Repository root for relative path resolution.
         transcript_path: Path to transcript JSON to update.
         transcript: Loaded transcript domain DTO.
+
+    Returns:
+        Transcript with updated speaker-sample metadata when generation runs;
+        otherwise the original transcript.
     """
     if stage_start not in {"audio", "transcript"}:
-        return
+        return transcript
 
     speaker_samples_cfg = _to_plain_dict(audio_cfg_dict.get("speaker_samples", {}))
     if not bool(speaker_samples_cfg.get("enabled", True)):
-        return
+        return transcript
 
     work_dir = resolve_path(
         str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
@@ -192,8 +197,10 @@ def _run_post_transcript_speaker_sample_step(
     if not output_dir_name.strip():
         raise ValueError("audio.speaker_samples.output_dir_name must be non-empty.")
     samples_output_dir = resolve_path(output_dir_name, base_dir=work_dir)
+    # Voice sample extraction is constrained to the vocals stem to maximize
+    # speaker separation quality and avoid background bleed from full-mix audio.
     source_audio_path = resolve_sample_source_audio_path(
-        source_mode=str(speaker_samples_cfg.get("source_audio", "vocals")),
+        source_mode="vocals",
         transcript_metadata=transcript.metadata,
         configured_audio_path=str(audio_cfg_dict.get("audio_path", "")),
         base_dir=project_root,
@@ -239,6 +246,7 @@ def _run_post_transcript_speaker_sample_step(
         "status_message",
         f"Speaker sample manifest written to {sample_result.manifest_path}",
     )
+    return updated_transcript
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -319,13 +327,27 @@ def main(cfg: DictConfig) -> None:
         "system_message",
         f"Loaded {len(transcript.segments)} segments",
     )
-    _run_post_transcript_speaker_sample_step(
+    transcript = _run_post_transcript_speaker_sample_step(
         stage_start=stage_plan.start_stage,
         audio_cfg_dict=audio_cfg_dict,
         project_root=project_root,
         transcript_path=transcript_path,
         transcript=transcript,
     )
+    voice_clone_orchestrator = build_voice_clone_orchestrator(
+        audio_cfg_dict,
+        project_root=project_root,
+    )
+    if voice_clone_orchestrator is None:
+        event_bus.publish("system_message", "Voice clone stage disabled.")
+    else:
+        event_bus.publish(
+            "system_message",
+            (
+                "Voice clone stage enabled with output dir "
+                f"{voice_clone_orchestrator.output_dir}"
+            ),
+        )
 
     event_bus.publish("system_message", "Instantiating LLM providers...")
     shared_agent_client = AgentClient(event_bus=event_bus)
@@ -514,6 +536,7 @@ def main(cfg: DictConfig) -> None:
         min_words=int(cfg.orchestrator.min_words),
         max_words=int(cfg.orchestrator.max_words),
         max_iterations=int(cfg.orchestrator.max_iterations),
+        voice_clone_orchestrator=voice_clone_orchestrator,
     )
     asyncio.run(
         stage_orchestrator.run(

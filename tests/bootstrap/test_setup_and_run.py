@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+
+import pytest
+
+import setup_and_run as bootstrap
+
+
+def _write_project_files(project_dir: Path) -> None:
+    """Create minimal lock and project files used by smart-sync tests."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    (project_dir / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+
+def test_check_prerequisites_raises_when_required_command_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_which(command_name: str) -> str | None:
+        if command_name == "ffmpeg":
+            return None
+        return f"C:/tools/{command_name}"
+
+    monkeypatch.setattr(bootstrap.shutil, "which", _fake_which)
+    monkeypatch.setattr(
+        bootstrap,
+        "run_cmd",
+        lambda **kwargs: subprocess.CompletedProcess(
+            args=kwargs["command"], returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    with pytest.raises(bootstrap.BootstrapError, match="ffmpeg"):
+        bootstrap.check_prerequisites(git_executable="git")
+
+
+def test_checkpoints_ready_requires_weight_file(tmp_path: Path) -> None:
+    checkpoints_dir = tmp_path / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoints_dir / "config.yaml").write_text("version: test\n", encoding="utf-8")
+    (checkpoints_dir / "pinyin.vocab").write_text("a\n", encoding="utf-8")
+
+    ready, reason = bootstrap.checkpoints_ready(checkpoints_dir)
+    assert ready is False
+    assert "No model weight files" in reason
+
+    (checkpoints_dir / "model.safetensors").write_bytes(b"x" * bootstrap.MIN_WEIGHT_BYTES)
+    ready_after, _reason_after = bootstrap.checkpoints_ready(checkpoints_dir)
+    assert ready_after is True
+
+
+def test_smart_sync_projects_skips_when_fingerprints_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    _write_project_files(repo_root)
+    _write_project_files(index_tts_dir)
+    (repo_root / ".venv").mkdir(parents=True, exist_ok=True)
+    (index_tts_dir / ".venv").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+    monkeypatch.setattr(
+        bootstrap,
+        "SETUP_STATE_PATH",
+        repo_root / "artifacts" / "bootstrap" / "setup_state.json",
+    )
+
+    captured: list[list[str]] = []
+
+    def _fake_run_cmd(
+        *,
+        step: str,
+        command: list[str],
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del step, cwd, env
+        captured.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bootstrap, "run_cmd", _fake_run_cmd)
+
+    first_synced = bootstrap.smart_sync_projects(uv_executable="uv", force_sync=False)
+    assert first_synced == ("root", "index_tts")
+    assert len(captured) == 2
+
+    captured.clear()
+    second_synced = bootstrap.smart_sync_projects(uv_executable="uv", force_sync=False)
+    assert second_synced == ()
+    assert captured == []
+
+
+def test_ensure_indextts_repo_skips_pull_when_git_tree_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    index_tts_dir.mkdir(parents=True, exist_ok=True)
+    (index_tts_dir / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+
+    commands: list[list[str]] = []
+
+    def _fake_run_cmd(
+        *,
+        step: str,
+        command: list[str],
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del step, cwd, env
+        commands.append(command)
+        if command[1:] == ["status", "--porcelain"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=" M changed.py\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bootstrap, "run_cmd", _fake_run_cmd)
+
+    result = bootstrap.ensure_indextts_repo(git_executable="git", skip_update=False)
+    assert result.pull_skipped_dirty is True
+    assert not any(command[:3] == ["git", "pull", "--ff-only"] for command in commands)
+    assert any(command[:3] == ["git", "lfs", "pull"] for command in commands)
+
+
+def test_ensure_indextts_model_falls_back_to_modelscope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    checkpoints_dir = index_tts_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoints_dir / "config.yaml").write_text("version: test\n", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+
+    commands: list[list[str]] = []
+
+    def _fake_run_cmd(
+        *,
+        step: str,
+        command: list[str],
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        commands.append(command)
+        if "hf" in command:
+            raise bootstrap.BootstrapError(
+                step=step,
+                message="hf failed",
+                command=tuple(command),
+                stderr_tail="simulated",
+            )
+        if "modelscope" in command:
+            (checkpoints_dir / "model.safetensors").write_bytes(
+                b"x" * bootstrap.MIN_WEIGHT_BYTES
+            )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bootstrap, "run_cmd", _fake_run_cmd)
+
+    result = bootstrap.ensure_indextts_model(uv_executable="uv", force_download=False)
+    assert result.downloaded is True
+    assert result.source == "modelscope"
+    assert any("hf" in command for command in commands)
+    assert any("modelscope" in command for command in commands)
+
+
+def test_build_run_overrides_include_required_voice_clone_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    index_tts_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+
+    audio_path = repo_root / "input audio.wav"
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_path.write_bytes(b"wav")
+
+    overrides = bootstrap.build_run_overrides(audio_path=audio_path, run_id="20260302_120000")
+    override_map = dict(entry.split("=", 1) for entry in overrides)
+
+    assert override_map["pipeline.start_stage"] == "audio"
+    assert override_map["pipeline.stop_stage"] == "critic"
+    assert override_map["audio.voice_clone.enabled"] == "true"
+    assert override_map["audio.voice_clone.execution_backend"] == "subprocess"
+    assert override_map["audio.speaker_samples.source_audio"] == "vocals"
+    assert override_map["audio.speaker_samples.target_duration_seconds"] == "30"
+    assert "\\" not in override_map["audio.audio_path"]
+    assert override_map["audio.audio_path"].endswith("input audio.wav")
+
+
+def test_resolve_audio_input_supports_relative_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    input_audio = repo_root / "audio.wav"
+    input_audio.write_bytes(b"wav")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    resolved = bootstrap.resolve_audio_input("audio.wav")
+    assert resolved == input_audio.resolve()
+

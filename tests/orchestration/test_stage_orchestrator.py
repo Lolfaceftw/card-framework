@@ -47,11 +47,37 @@ class _FakeOrchestrator:
         return _FakeVerdict(status="pass", word_count=42, feedback="ok")
 
 
+@dataclass(slots=True)
+class _FakeVoiceCloneResult:
+    output_dir: Path
+    artifacts: tuple[str, ...]
+
+
+class _FakeVoiceCloneOrchestrator:
+    """Capture voice-clone stage invocation without external dependencies."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = output_dir
+        self.summary_xml: str | None = None
+        self.manifest_path: Path | None = None
+
+    def run(
+        self,
+        *,
+        summary_xml: str,
+        speaker_samples_manifest_path: Path,
+    ) -> _FakeVoiceCloneResult:
+        self.summary_xml = summary_xml
+        self.manifest_path = speaker_samples_manifest_path
+        return _FakeVoiceCloneResult(output_dir=self.output_dir, artifacts=("turn.wav",))
+
+
 def _build_stage_orchestrator(
     *,
     stage_plan: PipelineStagePlan,
     fake_orchestrator: _FakeOrchestrator,
     project_root: Path,
+    fake_voice_clone_orchestrator: _FakeVoiceCloneOrchestrator | None = None,
 ) -> StageOrchestrator:
     """Create a stage-orchestrator with stable defaults for tests."""
     return StageOrchestrator(
@@ -61,6 +87,7 @@ def _build_stage_orchestrator(
         min_words=10,
         max_words=30,
         max_iterations=3,
+        voice_clone_orchestrator=fake_voice_clone_orchestrator,  # type: ignore[arg-type]
     )
 
 
@@ -150,3 +177,26 @@ def test_run_accepts_legacy_raw_transcript_dict(tmp_path: Path) -> None:
     assert fake_orchestrator.indexed_transcript is not None
     assert len(fake_orchestrator.indexed_transcript.segments) == 1
     assert fake_orchestrator.indexed_transcript.segments[0].text == "legacy"
+
+
+def test_run_summarizer_stage_triggers_voice_clone(tmp_path: Path) -> None:
+    """Run voice clone stage after summarizer when voice-clone orchestrator is configured."""
+    fake_orchestrator = _FakeOrchestrator()
+    fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
+    stage_orchestrator = _build_stage_orchestrator(
+        stage_plan=PipelineStagePlan(start_stage="transcript", stop_stage="summarizer"),
+        fake_orchestrator=fake_orchestrator,
+        project_root=tmp_path,
+        fake_voice_clone_orchestrator=fake_voice_clone,
+    )
+    transcript = {
+        "segments": [{"speaker": "SPEAKER_00", "text": "hello world"}],
+        "metadata": {"speaker_samples_manifest_path": "speaker_samples/manifest.json"},
+    }
+
+    asyncio.run(stage_orchestrator.run(transcript=transcript, retrieval_enabled=False))
+
+    assert fake_voice_clone.summary_xml == "<SPEAKER_00>summary</SPEAKER_00>"
+    assert fake_voice_clone.manifest_path == (
+        tmp_path / "speaker_samples" / "manifest.json"
+    ).resolve()
