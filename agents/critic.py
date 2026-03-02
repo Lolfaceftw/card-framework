@@ -5,10 +5,10 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 
 from agents.base import BaseA2AExecutor
-from agents.client import agent_client
+from agents.client import AgentTaskClient, get_default_agent_client
 from agents.dtos import RetrieveTaskRequest
 from agents.utils import count_words
-from events import event_bus
+from events import EventBus, get_event_bus
 from llm_provider import LLMProvider
 from prompt_manager import PromptManager
 
@@ -25,12 +25,19 @@ class CriticExecutor(BaseA2AExecutor):
         max_tool_turns: int = 5,
         retrieval_port: int = 9012,
         is_embedding_enabled: bool = True,
-    ):
+        agent_client: AgentTaskClient | None = None,
+        event_bus: EventBus | None = None,
+    ) -> None:
+        """Initialize critic executor and injected collaborators."""
         super().__init__("Critic")
         self.llm = llm
         self.max_tool_turns = max_tool_turns
         self.retrieval_port = retrieval_port
         self.is_embedding_enabled = is_embedding_enabled
+        self.agent_client = (
+            agent_client if agent_client is not None else get_default_agent_client()
+        )
+        self.event_bus = event_bus if event_bus is not None else get_event_bus()
 
     def _run_deterministic_checks(
         self, draft: str, min_words: int, max_words: int
@@ -80,7 +87,7 @@ class CriticExecutor(BaseA2AExecutor):
         max_words = req.max_words
         full_transcript = req.full_transcript
 
-        event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
+        self.event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
 
         system_prompt = PromptManager.get_prompt(
             "critic_system",
@@ -179,9 +186,9 @@ class CriticExecutor(BaseA2AExecutor):
 
         result_json = json.dumps(final_verdict)
         if final_verdict.get("status") == "pass":
-            event_bus.publish("status_message", message=f"Final Verdict: {result_json}")
+            self.event_bus.publish("status_message", message=f"Final Verdict: {result_json}")
         else:
-            event_bus.publish(
+            self.event_bus.publish(
                 "agent_message",
                 agent_name=self.name,
                 message=f"Final Verdict: {result_json}",
@@ -204,7 +211,7 @@ class CriticExecutor(BaseA2AExecutor):
             if name == "run_deterministic_checks":
                 llm_draft_text = str(args.get("draft_text", ""))
                 if llm_draft_text.strip() and llm_draft_text.strip() != draft.strip():
-                    event_bus.publish(
+                    self.event_bus.publish(
                         "system_message",
                         "Ignoring LLM-supplied draft_text and using finalized draft from task payload.",
                     )
@@ -217,7 +224,7 @@ class CriticExecutor(BaseA2AExecutor):
                         "content": json.dumps(results),
                     }
                 )
-                event_bus.publish(
+                self.event_bus.publish(
                     "tool_result",
                     tool_name="run_deterministic_checks",
                     result=f"Status: {results.get('status')} ({len(results.get('failures', []))} failures)",
@@ -227,7 +234,7 @@ class CriticExecutor(BaseA2AExecutor):
                 retrieve_task = RetrieveTaskRequest(
                     action="retrieve", query=query_text, top_k=10
                 )
-                raw_resp = await agent_client.send_task(
+                raw_resp = await self.agent_client.send_task(
                     self.retrieval_port, retrieve_task
                 )
                 messages.append(
@@ -238,7 +245,7 @@ class CriticExecutor(BaseA2AExecutor):
                         "content": raw_resp,
                     }
                 )
-                event_bus.publish(
+                self.event_bus.publish(
                     "tool_result",
                     tool_name="verify_against_transcript",
                     result="Retrieved segments for verification.",
@@ -254,3 +261,4 @@ class CriticExecutor(BaseA2AExecutor):
         if final_verdict:
             return True, final_verdict
         return False, None
+

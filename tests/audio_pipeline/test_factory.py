@@ -1,6 +1,9 @@
 import pytest
 
-from audio_pipeline.factory import build_audio_to_script_orchestrator
+from audio_pipeline.factory import (
+    build_audio_to_script_orchestrator,
+    build_speaker_sample_generator,
+)
 from audio_pipeline.eta import LinearStageEtaStrategy
 from audio_pipeline.gateways.demucs_gateway import DemucsSourceSeparator
 from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
@@ -9,6 +12,7 @@ from audio_pipeline.gateways.fallback_gateways import (
     SingleSpeakerDiarizer,
 )
 from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
+from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
 
 
 def test_factory_builds_default_strategies() -> None:
@@ -101,3 +105,14 @@ def test_factory_validates_eta_adaptive_bounds() -> None:
                 },
             }
         )
+
+
+def test_factory_builds_speaker_sample_generator_defaults() -> None:
+    generator = build_speaker_sample_generator({})
+
+    assert isinstance(generator.exporter, FfmpegSpeakerSampleExporter)
+    assert generator.target_duration_seconds == 30
+    assert generator.sample_rate_hz == 16000
+    assert generator.channels == 1
+    assert generator.clip_method == "concat_turns"
+    assert generator.short_speaker_policy == "export_shorter"

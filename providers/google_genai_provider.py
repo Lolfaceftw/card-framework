@@ -5,11 +5,12 @@ Uses the official google-genai SDK.
 """
 
 import sys
+from collections.abc import Sequence
 
 from google import genai
 from google.genai import types
 
-from llm_provider import LLMProvider
+from llm_provider import LLMProvider, MessageInput, ToolChoice, ToolInput, normalize_messages
 from events import event_bus
 
 
@@ -85,18 +86,20 @@ class GoogleGenAIProvider(LLMProvider):
 
     def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
     ):
         """
         Chat completion mapping OpenAI-compatible message lists to Google Gen AI.
         """
+        del tools, tool_choice
+        normalized_messages = normalize_messages(messages)
         contents = []
         system_instructions = []
 
-        for msg in messages:
+        for msg in normalized_messages:
             role = msg.get("role", "user")
             content = msg.get("content") or " "
 

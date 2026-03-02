@@ -10,6 +10,7 @@ from a2a.utils import new_agent_text_message
 
 from agents.tool_call_utils import build_tool_signature
 from logger_utils import logger
+from llm_provider import Message, ToolDefinition
 
 
 class BaseA2AExecutor(AgentExecutor, ABC):
@@ -204,7 +205,12 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         )
 
         for turn in range(max_turns):
-            response_message = self.llm.chat(messages=messages, tools=tools)
+            typed_messages = [Message.from_mapping(message) for message in messages]
+            typed_tools = [ToolDefinition.from_mapping(tool) for tool in tools]
+            response_message = self.llm.chat(
+                messages=typed_messages,
+                tools=typed_tools,
+            )
             if hasattr(response_message, "model_dump"):
                 msg_dict = response_message.model_dump()
                 msg_dict = {

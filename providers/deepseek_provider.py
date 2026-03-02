@@ -6,13 +6,22 @@ Uses the official OpenAI Python client pointing to DeepSeek API.
 
 import json
 import sys
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any
 
 from openai import OpenAI
 
 from events import event_bus
-from llm_provider import LLMProvider
+from llm_provider import (
+    LLMProvider,
+    MessageInput,
+    ToolChoice,
+    ToolInput,
+    infer_agent_name,
+    normalize_messages,
+    normalize_tools,
+)
 from ui import ui
 
 
@@ -299,23 +308,24 @@ class DeepSeekProvider(LLMProvider):
 
     def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
     ) -> AssistantMessage:
         """
         Clean, scalable implementation of chat completion with support for tools.
         """
-        normalized_messages = self._normalize_messages(messages)
+        normalized_messages = self._normalize_messages(normalize_messages(messages))
+        normalized_tools = normalize_tools(tools)
 
         create_kwargs: dict = dict(
             model=self.model,
             messages=normalized_messages,
             stream=True,
         )
-        if tools:
-            create_kwargs["tools"] = tools
+        if normalized_tools:
+            create_kwargs["tools"] = normalized_tools
             if tool_choice:
                 create_kwargs["tool_choice"] = tool_choice
 
@@ -323,15 +333,7 @@ class DeepSeekProvider(LLMProvider):
             create_kwargs["max_tokens"] = max_tokens
 
         # Identify agent name for UI
-        agent_name = "Agent"
-        for msg in reversed(messages):
-            if msg.get("role") == "system":
-                content = str(msg.get("content", ""))
-                if "Summarizer" in content:
-                    agent_name = "Summarizer"
-                elif "Critic" in content:
-                    agent_name = "Critic"
-                break
+        agent_name = infer_agent_name(messages)
 
         response_stream = self._client.chat.completions.create(**create_kwargs)
         return self._process_stream_and_ui(response_stream, agent_name)

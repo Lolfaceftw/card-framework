@@ -5,11 +5,20 @@ Uses the official zai-sdk.
 """
 
 import sys
+from collections.abc import Sequence
 
 from zai import ZaiClient
 
 from events import event_bus
-from llm_provider import LLMProvider
+from llm_provider import (
+    LLMProvider,
+    MessageInput,
+    ToolChoice,
+    ToolInput,
+    infer_agent_name,
+    normalize_messages,
+    normalize_tools,
+)
 from ui import ui
 
 
@@ -86,25 +95,27 @@ class GLMProvider(LLMProvider):
 
     def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
     ):
         """
         Chat completion mapping OpenAI-compatible message lists to GLM.
         Now supports streaming for real-time UI updates.
         """
+        normalized_messages = normalize_messages(messages)
+        normalized_tools = normalize_tools(tools)
         create_kwargs = {
             "model": self.model,
-            "messages": messages,
+            "messages": normalized_messages,
             "stream": True,  # Enable streaming
             "thinking": {"type": "enabled"},
         }
-        if tools:
+        if normalized_tools:
             # Note: GLM-4.6 might have specific ways to handle tools with thinking.
             # We'll pass them through and see.
-            create_kwargs["tools"] = tools
+            create_kwargs["tools"] = normalized_tools
         if tool_choice:
             create_kwargs["tool_choice"] = tool_choice
         if max_tokens is not None:
@@ -117,14 +128,7 @@ class GLMProvider(LLMProvider):
         tool_calls = []
 
         # Find agent name from messages or context
-        agent_name = "Agent"
-        for msg in reversed(messages):
-            if msg["role"] == "system":
-                if "Summarizer" in msg["content"]:
-                    agent_name = "Summarizer"
-                elif "Critic" in msg["content"]:
-                    agent_name = "Critic"
-                break
+        agent_name = infer_agent_name(messages)
 
         with ui.live_agent_message(agent_name) as live_msg:
             for chunk in response_stream:

@@ -6,8 +6,16 @@ Wraps an existing LLMProvider to capture its inputs and outputs.
 
 import json
 import time
+from collections.abc import Sequence
 
-from llm_provider import LLMProvider
+from llm_provider import (
+    LLMProvider,
+    MessageInput,
+    ToolChoice,
+    ToolInput,
+    normalize_messages,
+    normalize_tools,
+)
 from logger_utils import logger
 from events import event_bus
 
@@ -62,9 +70,9 @@ class LoggingLLMProvider(LLMProvider):
 
     def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
     ):
         started = time.perf_counter()
@@ -77,14 +85,17 @@ class LoggingLLMProvider(LLMProvider):
                     return obj.model_dump()
                 return str(obj)
 
+            normalized_messages = normalize_messages(messages)
             logger.info(
-                f"Messages: {json.dumps(messages, indent=2, default=json_default)}"
+                "Messages: "
+                f"{json.dumps(normalized_messages, indent=2, default=json_default)}"
             )
         except Exception as e:
             logger.warning(f"Failed to log messages: {e}")
 
         if tools:
-            logger.info(f"Tools: {json.dumps(tools, indent=2)}")
+            normalized_tools = normalize_tools(tools)
+            logger.info(f"Tools: {json.dumps(normalized_tools, indent=2)}")
         if tool_choice:
             logger.info(f"Tool Choice: {tool_choice}")
 

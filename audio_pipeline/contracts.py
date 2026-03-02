@@ -27,6 +27,10 @@ class TranscriptMetadataPayload(TypedDict, total=False):
     device: str
     generated_at_utc: str
     warnings: list[str]
+    speaker_samples_manifest_path: str
+    speaker_samples_dir: str
+    speaker_sample_count: int
+    speaker_samples_generated_at_utc: str
 
 
 class TranscriptPayload(TypedDict, total=False):

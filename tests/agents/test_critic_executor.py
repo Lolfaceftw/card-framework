@@ -18,8 +18,13 @@ if "numpy" not in sys.modules:
     numpy_module.ndarray = _NDArray
     sys.modules["numpy"] = numpy_module
 
-# Provide minimal `jinja2` module stub for prompt_manager imports.
-if "jinja2" not in sys.modules:
+# Provide minimal `jinja2` module stub for prompt_manager imports only when unavailable.
+try:
+    import jinja2 as _jinja2
+except Exception:
+    _jinja2 = None
+
+if _jinja2 is None or getattr(_jinja2, "__spec__", None) is None:
     jinja2_module = types.ModuleType("jinja2")
 
     class _FileSystemLoader:
@@ -76,6 +81,13 @@ if "a2a.server.agent_execution" not in sys.modules:
 
 from agents.critic import CriticExecutor
 from agents.utils import count_words
+from prompt_manager import PromptManager
+
+
+def setup_function(function: object) -> None:
+    """Reset global prompt template environment for test isolation."""
+    del function
+    PromptManager._env = None
 
 
 class _FakeLLM:
@@ -92,6 +104,25 @@ class _FakeLLM:
     ) -> str:
         del system_prompt, user_prompt, max_tokens
         raise NotImplementedError
+
+
+class _FakeAgentClient:
+    """Fake transport used to verify dependency injection paths."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def send_task(
+        self,
+        port: int,
+        task_data: object,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        del task_data, max_retries, metadata
+        self.calls.append({"port": port, "timeout": timeout})
+        return json.dumps({"segments": [], "total_words": 0})
 
 
 def test_run_deterministic_checks_uses_canonical_task_draft() -> None:
@@ -168,3 +199,36 @@ def test_submit_verdict_returns_final_result() -> None:
 
     assert should_break is True
     assert final_verdict == {"status": "pass", "word_count": 5, "feedback": "ok"}
+
+
+def test_verify_against_transcript_uses_injected_agent_client() -> None:
+    """Route transcript verification through the executor-injected client."""
+    fake_client = _FakeAgentClient()
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        is_embedding_enabled=True,
+        retrieval_port=9123,
+        agent_client=fake_client,
+    )
+
+    should_break, final_verdict = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_3",
+                    "name": "verify_against_transcript",
+                    "arguments": {"query": "architecture"},
+                }
+            ],
+            messages=[],
+            context_data={
+                "draft": "<SPEAKER_00>Text.</SPEAKER_00>",
+                "min_words": 1,
+                "max_words": 10,
+            },
+        )
+    )
+
+    assert should_break is False
+    assert final_verdict is None
+    assert fake_client.calls == [{"port": 9123, "timeout": 120.0}]

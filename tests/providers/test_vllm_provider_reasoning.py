@@ -79,25 +79,6 @@ class _FakeOpenAI:
         self.chat = types.SimpleNamespace(completions=self.completions)
 
 
-class _FakeLiveMessage:
-    def __enter__(self) -> "_FakeLiveMessage":
-        return self
-
-    def __exit__(self, *_exc_info: Any) -> None:
-        return None
-
-    def update_thought(self, _chunk: str) -> None:
-        return None
-
-    def update_content(self, _chunk: str) -> None:
-        return None
-
-
-class _FakeUI:
-    def live_agent_message(self, _agent_name: str) -> _FakeLiveMessage:
-        return _FakeLiveMessage()
-
-
 def _build_provider(
     monkeypatch,
     *,
@@ -110,7 +91,6 @@ def _build_provider(
         "_fetch_model_id",
         lambda _self: "fake-model",
     )
-    monkeypatch.setattr(vllm_provider_module, "ui", _FakeUI())
 
     provider = vllm_provider_module.VLLMProvider(
         base_url="http://localhost:8000/v1",

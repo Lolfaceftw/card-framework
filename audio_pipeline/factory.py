@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal, cast
 
 from audio_pipeline.contracts import SourceSeparator, SpeakerDiarizer, SpeechTranscriber
 from audio_pipeline.eta import (
@@ -19,7 +19,9 @@ from audio_pipeline.gateways.fallback_gateways import (
 )
 from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
 from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
+from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
 from audio_pipeline.orchestrator import AudioToScriptOrchestrator
+from audio_pipeline.speaker_samples import SpeakerSampleGenerator
 
 
 def build_audio_to_script_orchestrator(
@@ -57,6 +59,43 @@ def build_audio_to_script_orchestrator(
         eta_update_interval_seconds=float(
             eta_cfg.get("update_interval_seconds", 10.0)
         ),
+    )
+
+
+def build_speaker_sample_generator(audio_cfg: Mapping[str, Any]) -> SpeakerSampleGenerator:
+    """
+    Build post-transcript speaker-sample generator from audio config mapping.
+
+    Args:
+        audio_cfg: ``audio`` config section.
+
+    Returns:
+        Wired ``SpeakerSampleGenerator`` instance.
+    """
+    speaker_samples_cfg = _as_mapping(audio_cfg.get("speaker_samples", {}))
+    clip_method = str(speaker_samples_cfg.get("clip_method", "concat_turns"))
+    short_policy = str(
+        speaker_samples_cfg.get("short_speaker_policy", "export_shorter")
+    )
+    if clip_method != "concat_turns":
+        raise ValueError("audio.speaker_samples.clip_method must be 'concat_turns'.")
+    if short_policy != "export_shorter":
+        raise ValueError(
+            "audio.speaker_samples.short_speaker_policy must be 'export_shorter'."
+        )
+    return SpeakerSampleGenerator(
+        exporter=FfmpegSpeakerSampleExporter(),
+        target_duration_seconds=int(
+            speaker_samples_cfg.get("target_duration_seconds", 30)
+        ),
+        sample_rate_hz=int(speaker_samples_cfg.get("sample_rate_hz", 16000)),
+        channels=int(speaker_samples_cfg.get("channels", 1)),
+        clip_method=cast(Literal["concat_turns"], clip_method),
+        short_speaker_policy=cast(
+            Literal["export_shorter"],
+            short_policy,
+        ),
+        manifest_filename=str(speaker_samples_cfg.get("manifest_filename", "manifest.json")),
     )
 
 
