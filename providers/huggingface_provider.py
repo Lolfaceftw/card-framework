@@ -5,10 +5,18 @@ Uses the official OpenAI Python client pointing to the Hugging Face Serverless I
 """
 
 import sys
+from collections.abc import Sequence
 
 from openai import OpenAI
 
-from llm_provider import LLMProvider
+from llm_provider import (
+    LLMProvider,
+    MessageInput,
+    ToolChoice,
+    ToolInput,
+    normalize_messages,
+    normalize_tools,
+)
 from events import event_bus
 
 
@@ -78,21 +86,23 @@ class HuggingfaceProvider(LLMProvider):
 
     def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
     ):
         """
         Chat completion with support for tools via Hugging Face Inference API.
         """
+        normalized_messages = normalize_messages(messages)
+        normalized_tools = normalize_tools(tools)
         create_kwargs: dict = dict(
             model=self.model,
-            messages=messages,
+            messages=normalized_messages,
             stream=False,
         )
-        if tools is not None:
-            create_kwargs["tools"] = tools
+        if normalized_tools is not None:
+            create_kwargs["tools"] = normalized_tools
             create_kwargs["tool_choice"] = tool_choice
 
         if max_tokens is not None:

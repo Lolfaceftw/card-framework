@@ -21,5 +21,7 @@ eval_report.json
 
 # Cache
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 audio.wav

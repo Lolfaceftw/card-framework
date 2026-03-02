@@ -5,14 +5,27 @@ Wraps any OpenAI-compatible endpoint (vLLM, ollama, LiteLLM, etc.)
 behind the LLMProvider strategy interface.
 """
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 from typing import Any
 
 import requests
 from openai import OpenAI
 
-from llm_provider import LLMProvider
+from agents.dtos import AssistantMessage, Function, ToolCall
 from events import event_bus
-from ui import ui
+from llm_provider import (
+    LLMProvider,
+    LLMResponseCallback,
+    MessageInput,
+    NullLLMResponseCallback,
+    ToolChoice,
+    ToolInput,
+    infer_agent_name,
+    normalize_messages,
+    normalize_tools,
+)
 
 
 class VLLMProvider(LLMProvider):
@@ -20,10 +33,11 @@ class VLLMProvider(LLMProvider):
     Concrete LLM strategy for OpenAI-compatible APIs (vLLM, etc.).
 
     Args:
-        base_url: The base URL of the API server (e.g. ``http://host:8000/v1``).
-        api_key:  API key (use ``"EMPTY"`` for keyless vLLM servers).
+        base_url: The base URL of the API server (for example ``http://host:8000/v1``).
+        api_key: API key (use ``"EMPTY"`` for keyless vLLM servers).
         enable_thinking: Whether to request reasoning/thinking chunks from vLLM.
-        thinking_extra_body: Optional OpenAI `extra_body` payload for reasoning mode.
+        thinking_extra_body: Optional OpenAI ``extra_body`` payload for reasoning mode.
+        response_callback: Optional callback sink for streamed token updates.
     """
 
     def __init__(
@@ -32,6 +46,7 @@ class VLLMProvider(LLMProvider):
         api_key: str = "EMPTY",
         enable_thinking: bool = True,
         thinking_extra_body: dict[str, Any] | None = None,
+        response_callback: LLMResponseCallback | None = None,
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
@@ -40,31 +55,32 @@ class VLLMProvider(LLMProvider):
             "chat_template_kwargs": {"enable_thinking": True}
         }
         self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        self._response_callback: LLMResponseCallback = (
+            response_callback or NullLLMResponseCallback()
+        )
 
-        # Resolve model id from the server on startup
+        # Resolve model id from the server on startup.
         self.model_id = self._fetch_model_id()
         event_bus.publish(
             "system_message",
-            f"Connected to VLLM → model={self.model_id}, url={self.base_url}",
+            f"Connected to VLLM -> model={self.model_id}, url={self.base_url}",
         )
 
-    # ── internal helpers ──────────────────────────────────────────────────
+    def set_response_callback(self, response_callback: LLMResponseCallback) -> None:
+        """Replace the streaming callback sink at runtime."""
+        self._response_callback = response_callback
 
     def _fetch_model_id(self) -> str:
-        resp = requests.get(f"{self.base_url}/models")
+        """Return the first available model id from the configured endpoint."""
+        resp = requests.get(f"{self.base_url}/models", timeout=10)
         resp.raise_for_status()
-        return resp.json()["data"][0]["id"]
+        return str(resp.json()["data"][0]["id"])
 
-    def _maybe_enable_thinking(
-        self,
-        create_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
+    def _maybe_enable_thinking(self, create_kwargs: dict[str, Any]) -> dict[str, Any]:
         """Attach reasoning-mode request params when enabled."""
         if self.enable_thinking:
             create_kwargs["extra_body"] = self.thinking_extra_body
         return create_kwargs
-
-    # ── LLMProvider interface ─────────────────────────────────────────────
 
     def generate(
         self,
@@ -77,12 +93,12 @@ class VLLMProvider(LLMProvider):
             {"role": "user", "content": user_prompt},
         ]
 
-        create_kwargs: dict[str, Any] = dict(
-            model=self.model_id,
-            messages=messages,
-            stream=True,
-            stream_options={"include_usage": True},
-        )
+        create_kwargs: dict[str, Any] = {
+            "model": self.model_id,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         if max_tokens is not None:
             create_kwargs["max_tokens"] = max_tokens
         create_kwargs = self._maybe_enable_thinking(create_kwargs)
@@ -90,43 +106,44 @@ class VLLMProvider(LLMProvider):
         response = self._client.chat.completions.create(**create_kwargs)
 
         full_content = ""
-        full_thought = ""
-
-        with ui.live_agent_message("Agent") as live_msg:
+        self._response_callback.on_start("Agent")
+        try:
             for chunk in response:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
 
-                # Handle Reasoning/Thinking
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    live_msg.update_thought(delta.reasoning_content)
-                    full_thought += delta.reasoning_content
+                    self._response_callback.on_thought_token(delta.reasoning_content)
 
-                # Handle Content
                 if hasattr(delta, "content") and delta.content:
-                    live_msg.update_content(delta.content)
+                    self._response_callback.on_content_token(delta.content)
                     full_content += delta.content
+        finally:
+            self._response_callback.on_complete()
 
         return full_content.strip()
 
     def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
-    ):
-        """
-        Chat completion with streaming support and tool call aggregation.
-        """
-        create_kwargs: dict[str, Any] = dict(
-            model=self.model_id,
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            stream=True,
-        )
+    ) -> AssistantMessage:
+        """Stream chat completion with tool-call aggregation support."""
+        normalized_messages = normalize_messages(messages)
+        normalized_tools = normalize_tools(tools)
+
+        create_kwargs: dict[str, Any] = {
+            "model": self.model_id,
+            "messages": normalized_messages,
+            "stream": True,
+        }
+        if normalized_tools is not None:
+            create_kwargs["tools"] = normalized_tools
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
         if max_tokens is not None:
             create_kwargs["max_tokens"] = max_tokens
         create_kwargs = self._maybe_enable_thinking(create_kwargs)
@@ -135,38 +152,26 @@ class VLLMProvider(LLMProvider):
 
         full_content = ""
         full_thought = ""
-        tool_calls_data = []
+        tool_calls_data: list[dict[str, Any]] = []
 
-        # Identify agent name for UI
-        agent_name = "Agent"
-        for msg in reversed(messages):
-            if msg["role"] == "system":
-                if "Summarizer" in msg["content"]:
-                    agent_name = "Summarizer"
-                elif "Critic" in msg["content"]:
-                    agent_name = "Critic"
-                break
-
-        with ui.live_agent_message(agent_name) as live_msg:
+        agent_name = infer_agent_name(messages)
+        self._response_callback.on_start(agent_name)
+        try:
             for chunk in response_stream:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
 
-                # Handle Reasoning/Thinking (Qwen3 specific field)
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    live_msg.update_thought(delta.reasoning_content)
+                    self._response_callback.on_thought_token(delta.reasoning_content)
                     full_thought += delta.reasoning_content
 
-                # Handle Content
                 if hasattr(delta, "content") and delta.content:
-                    live_msg.update_content(delta.content)
+                    self._response_callback.on_content_token(delta.content)
                     full_content += delta.content
 
-                # Handle Tool Calls
                 if hasattr(delta, "tool_calls") and delta.tool_calls:
                     for tc_delta in delta.tool_calls:
-                        # Ensure we have a placeholder for this tool call index
                         while len(tool_calls_data) <= tc_delta.index:
                             tool_calls_data.append(
                                 {
@@ -176,65 +181,32 @@ class VLLMProvider(LLMProvider):
                                 }
                             )
 
-                        tc = tool_calls_data[tc_delta.index]
+                        tool_call = tool_calls_data[tc_delta.index]
                         if tc_delta.id:
-                            tc["id"] = tc_delta.id
+                            tool_call["id"] = tc_delta.id
                         if tc_delta.function:
                             if tc_delta.function.name:
-                                tc["function"]["name"] += tc_delta.function.name
+                                tool_call["function"]["name"] += tc_delta.function.name
                             if tc_delta.function.arguments:
-                                tc["function"]["arguments"] += (
+                                tool_call["function"]["arguments"] += (
                                     tc_delta.function.arguments
                                 )
+        finally:
+            self._response_callback.on_complete()
 
-        # Reconstruct OpenAI-like response object for downstream logic
-        class Function:
-            def __init__(self, name, arguments):
-                self.name = name
-                self.arguments = arguments
+        final_tool_calls = [
+            ToolCall(
+                id=str(tc.get("id") or f"call_{index}"),
+                function=Function(
+                    name=str(tc["function"]["name"]),
+                    arguments=str(tc["function"]["arguments"]),
+                ),
+            )
+            for index, tc in enumerate(tool_calls_data)
+        ]
 
-        class ToolCall:
-            def __init__(self, id, name, arguments):
-                self.id = id
-                self.type = "function"
-                self.function = Function(name, arguments)
-
-            def model_dump(self):
-                return {
-                    "id": self.id,
-                    "type": self.type,
-                    "function": {
-                        "name": self.function.name,
-                        "arguments": self.function.arguments,
-                    },
-                }
-
-        class AssistantMessage:
-            def __init__(
-                self, content: str, tool_calls_info: list[dict], reasoning_content=None
-            ):
-                self.content = content
-                self.role = "assistant"
-                self.reasoning_content = reasoning_content
-                self.tool_calls = []
-                if tool_calls_info:
-                    for tc in tool_calls_info:
-                        self.tool_calls.append(
-                            ToolCall(
-                                tc["id"],
-                                tc["function"]["name"],
-                                tc["function"]["arguments"],
-                            )
-                        )
-                else:
-                    self.tool_calls = None
-
-            def model_dump(self):
-                d = {"role": self.role, "content": self.content}
-                if self.tool_calls:
-                    d["tool_calls"] = [tc.model_dump() for tc in self.tool_calls]
-                if self.reasoning_content:
-                    d["reasoning_content"] = self.reasoning_content
-                return d
-
-        return AssistantMessage(full_content, tool_calls_data, full_thought)
+        return AssistantMessage(
+            content=full_content,
+            tool_calls=final_tool_calls if final_tool_calls else None,
+            reasoning_content=full_thought if full_thought else None,
+        )

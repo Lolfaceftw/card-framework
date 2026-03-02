@@ -1,11 +1,22 @@
 import asyncio
+from typing import Awaitable, Callable
 
 import pytest
 
 from orchestrator import Orchestrator
 
 
-def test_run_summarizer_once_returns_agent_output(monkeypatch) -> None:
+class _FakeAgentClient:
+    """Injectable fake client exposing the production ``send_task`` API."""
+
+    def __init__(
+        self,
+        send_task: Callable[..., Awaitable[str]],
+    ) -> None:
+        self.send_task = send_task
+
+
+def test_run_summarizer_once_returns_agent_output() -> None:
     async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
         del task_data, timeout, max_retries
         assert port == 9010
@@ -13,8 +24,12 @@ def test_run_summarizer_once_returns_agent_output(monkeypatch) -> None:
         assert metadata.get("stage") == "summarizer_single_pass"
         return "<summary>ok</summary>"
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
-    orchestrator = Orchestrator(retrieval_port=9012, summarizer_port=9010, critic_port=9011)
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
 
     result = asyncio.run(
         orchestrator.run_summarizer_once(
@@ -26,7 +41,7 @@ def test_run_summarizer_once_returns_agent_output(monkeypatch) -> None:
     assert result == "<summary>ok</summary>"
 
 
-def test_run_critic_once_parses_valid_json(monkeypatch) -> None:
+def test_run_critic_once_parses_valid_json() -> None:
     async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
         del task_data, timeout, max_retries
         assert port == 9011
@@ -34,8 +49,12 @@ def test_run_critic_once_parses_valid_json(monkeypatch) -> None:
         assert metadata.get("stage") == "critic_single_pass"
         return '{"status":"pass","word_count":72,"feedback":"ok"}'
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
-    orchestrator = Orchestrator(retrieval_port=9012, summarizer_port=9010, critic_port=9011)
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
 
     verdict = asyncio.run(
         orchestrator.run_critic_once(
@@ -49,7 +68,7 @@ def test_run_critic_once_parses_valid_json(monkeypatch) -> None:
     assert verdict.word_count == 72
 
 
-def test_run_critic_once_normalizes_status(monkeypatch) -> None:
+def test_run_critic_once_normalizes_status() -> None:
     async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
         del task_data, timeout, max_retries
         assert port == 9011
@@ -57,8 +76,12 @@ def test_run_critic_once_normalizes_status(monkeypatch) -> None:
         assert metadata.get("stage") == "critic_single_pass"
         return '{"status":" PASS ","word_count":72,"feedback":"ok"}'
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
-    orchestrator = Orchestrator(retrieval_port=9012, summarizer_port=9010, critic_port=9011)
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
 
     verdict = asyncio.run(
         orchestrator.run_critic_once(
@@ -72,13 +95,17 @@ def test_run_critic_once_normalizes_status(monkeypatch) -> None:
     assert verdict.word_count == 72
 
 
-def test_run_critic_once_raises_for_invalid_json(monkeypatch) -> None:
+def test_run_critic_once_raises_for_invalid_json() -> None:
     async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
         del port, task_data, timeout, max_retries, metadata
         return "not-json"
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
-    orchestrator = Orchestrator(retrieval_port=9012, summarizer_port=9010, critic_port=9011)
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
 
     with pytest.raises(RuntimeError):
         asyncio.run(
@@ -91,7 +118,7 @@ def test_run_critic_once_raises_for_invalid_json(monkeypatch) -> None:
         )
 
 
-def test_run_loop_sends_empty_loop_context_on_first_pass(monkeypatch) -> None:
+def test_run_loop_sends_empty_loop_context_on_first_pass() -> None:
     summarizer_loop_contexts: list[str] = []
 
     async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
@@ -103,8 +130,12 @@ def test_run_loop_sends_empty_loop_context_on_first_pass(monkeypatch) -> None:
             return '{"status":"pass","word_count":72,"feedback":"ok"}'
         raise AssertionError(f"Unexpected port: {port}")
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
-    orchestrator = Orchestrator(retrieval_port=9012, summarizer_port=9010, critic_port=9011)
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
 
     result = asyncio.run(
         orchestrator.run_loop(
@@ -119,7 +150,7 @@ def test_run_loop_sends_empty_loop_context_on_first_pass(monkeypatch) -> None:
     assert summarizer_loop_contexts[0].strip() == ""
 
 
-def test_run_loop_sends_non_empty_loop_context_on_retry_after_fail(monkeypatch) -> None:
+def test_run_loop_sends_non_empty_loop_context_on_retry_after_fail() -> None:
     summarizer_loop_contexts: list[str] = []
     critic_calls = 0
 
@@ -139,8 +170,12 @@ def test_run_loop_sends_non_empty_loop_context_on_retry_after_fail(monkeypatch) 
             return '{"status":"pass","word_count":74,"feedback":"ok"}'
         raise AssertionError(f"Unexpected port: {port}")
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
-    orchestrator = Orchestrator(retrieval_port=9012, summarizer_port=9010, critic_port=9011)
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
 
     result = asyncio.run(
         orchestrator.run_loop(
@@ -156,7 +191,7 @@ def test_run_loop_sends_non_empty_loop_context_on_retry_after_fail(monkeypatch) 
     assert summarizer_loop_contexts[1].strip() != ""
 
 
-def test_run_summarizer_once_uses_full_transcript_timeout_floor(monkeypatch) -> None:
+def test_run_summarizer_once_uses_full_transcript_timeout_floor() -> None:
     observed_timeout: dict[str, float] = {}
 
     async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
@@ -165,12 +200,12 @@ def test_run_summarizer_once_uses_full_transcript_timeout_floor(monkeypatch) -> 
         observed_timeout["value"] = float(timeout)
         return "<summary>ok</summary>"
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
     orchestrator = Orchestrator(
         retrieval_port=9012,
         summarizer_port=9010,
         critic_port=9011,
         timeouts={"summarizer": 180},
+        agent_client=_FakeAgentClient(_fake_send_task),
     )
 
     asyncio.run(
@@ -183,7 +218,7 @@ def test_run_summarizer_once_uses_full_transcript_timeout_floor(monkeypatch) -> 
     assert observed_timeout["value"] == 900.0
 
 
-def test_run_critic_once_uses_full_transcript_timeout_floor(monkeypatch) -> None:
+def test_run_critic_once_uses_full_transcript_timeout_floor() -> None:
     observed_timeout: dict[str, float] = {}
 
     async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
@@ -192,12 +227,12 @@ def test_run_critic_once_uses_full_transcript_timeout_floor(monkeypatch) -> None
         observed_timeout["value"] = float(timeout)
         return '{"status":"pass","word_count":72,"feedback":"ok"}'
 
-    monkeypatch.setattr("orchestrator.agent_client.send_task", _fake_send_task)
     orchestrator = Orchestrator(
         retrieval_port=9012,
         summarizer_port=9010,
         critic_port=9011,
         timeouts={"critic": 120},
+        agent_client=_FakeAgentClient(_fake_send_task),
     )
 
     verdict = asyncio.run(

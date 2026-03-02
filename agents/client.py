@@ -1,12 +1,27 @@
 import asyncio
 import json
-import uuid
-import threading
 import time
+import threading
+import uuid
+from typing import Any, Protocol
 
 import httpx
 
-from events import event_bus
+from events import EventBus, get_event_bus
+
+
+class AgentTaskClient(Protocol):
+    """Protocol for components that can send tasks to A2A services."""
+
+    async def send_task(
+        self,
+        port: int,
+        task_data: dict | str | object,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Send one task request and return serialized response payload."""
 
 
 class AgentClient:
@@ -15,10 +30,12 @@ class AgentClient:
     Features connection pooling and exponential backoff for transient errors.
     """
 
-    def __init__(self):
+    def __init__(self, event_bus: EventBus | None = None) -> None:
+        """Initialize pooled transport and event bus dependency."""
         self.limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
-        self._clients = {}
+        self._clients: dict[asyncio.AbstractEventLoop | None, httpx.AsyncClient] = {}
         self._lock = threading.Lock()
+        self._event_bus = event_bus if event_bus is not None else get_event_bus()
 
     def _get_client(self) -> httpx.AsyncClient:
         try:
@@ -94,7 +111,7 @@ class AgentClient:
         }
         url = f"http://127.0.0.1:{port}"
 
-        event_bus.publish(
+        self._event_bus.publish(
             "a2a_call_started",
             call_id=call_id,
             port=port,
@@ -133,7 +150,7 @@ class AgentClient:
                         )
                         if texts:
                             latency_ms = int((time.perf_counter() - attempt_start) * 1000)
-                            event_bus.publish(
+                            self._event_bus.publish(
                                 "a2a_call_succeeded",
                                 call_id=call_id,
                                 port=port,
@@ -151,7 +168,7 @@ class AgentClient:
                     ]
                     if texts:
                         latency_ms = int((time.perf_counter() - attempt_start) * 1000)
-                        event_bus.publish(
+                        self._event_bus.publish(
                             "a2a_call_succeeded",
                             call_id=call_id,
                             port=port,
@@ -162,7 +179,7 @@ class AgentClient:
                         return "\n".join(texts)
 
                 latency_ms = int((time.perf_counter() - attempt_start) * 1000)
-                event_bus.publish(
+                self._event_bus.publish(
                     "a2a_call_succeeded",
                     call_id=call_id,
                     port=port,
@@ -178,7 +195,7 @@ class AgentClient:
                 )
                 if attempt < max_retries and not is_unsafe_retry_timeout:
                     delay_seconds = float(2**attempt)
-                    event_bus.publish(
+                    self._event_bus.publish(
                         "a2a_call_retry",
                         call_id=call_id,
                         port=port,
@@ -202,7 +219,7 @@ class AgentClient:
             error_message = (
                 f"Failed after {max_retries} attempts. Last error: {last_error}"
             )
-        event_bus.publish(
+        self._event_bus.publish(
             "a2a_call_failed",
             call_id=call_id,
             port=port,
@@ -222,5 +239,21 @@ class AgentClient:
         return f"{type(exc).__name__}: {error_text}"
 
 
-# Global connection pool instance
-agent_client = AgentClient()
+_default_agent_client: AgentClient | None = None
+
+
+def create_agent_client(*, event_bus: EventBus | None = None) -> AgentClient:
+    """Create a new ``AgentClient`` instance."""
+    return AgentClient(event_bus=event_bus)
+
+
+def get_default_agent_client() -> AgentClient:
+    """Return process default ``AgentClient`` initialized lazily."""
+    global _default_agent_client
+    if _default_agent_client is None:
+        _default_agent_client = create_agent_client()
+    return _default_agent_client
+
+
+# Backward-compatible default client for existing imports.
+agent_client = get_default_agent_client()

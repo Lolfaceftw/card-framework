@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
+try:
+    import jinja2 as _jinja2
+except Exception:
+    _jinja2 = None
+
+if _jinja2 is None or getattr(_jinja2, "__spec__", None) is None:
+    pytest.skip("jinja2 is required for prompt template rendering tests.", allow_module_level=True)
+
 from agents.loop_context import build_loop_context_prompt_block
 from prompt_manager import PromptManager
 

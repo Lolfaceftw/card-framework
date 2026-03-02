@@ -12,7 +12,7 @@ the retrieval agent) work seamlessly alongside synchronous ones.
 import json
 from abc import ABC, abstractmethod
 
-from agents.client import agent_client
+from agents.client import AgentTaskClient, get_default_agent_client
 from agents.message_registry import MessageRegistry
 
 
@@ -310,8 +310,15 @@ class RemoveMessageHandler(ToolHandler):
 class QueryTranscriptHandler(ToolHandler):
     """Queries the Info Retrieval agent for transcript segments matching a semantic query."""
 
-    def __init__(self, retrieval_port: int) -> None:
+    def __init__(
+        self,
+        retrieval_port: int,
+        agent_client: AgentTaskClient | None = None,
+    ) -> None:
         self._retrieval_port = retrieval_port
+        self._agent_client = (
+            agent_client if agent_client is not None else get_default_agent_client()
+        )
 
     @property
     def name(self) -> str:
@@ -351,7 +358,7 @@ class QueryTranscriptHandler(ToolHandler):
         query = arguments["query"]
         top_k = arguments.get("top_k", 5)
         retrieve_task = RetrieveTaskRequest(action="retrieve", query=query, top_k=top_k)
-        raw_response = await agent_client.send_task(
+        raw_response = await self._agent_client.send_task(
             self._retrieval_port, retrieve_task, timeout=30.0
         )
         try:
@@ -450,6 +457,7 @@ def build_summarizer_tools(
     min_words: int,
     max_words: int,
     is_embedding_enabled: bool = True,
+    agent_client: AgentTaskClient | None = None,
 ) -> ToolRegistry:
     """Factory: wires up all summariser tool handlers against *registry*."""
     budget = BudgetContext(registry, min_words, max_words)
@@ -459,7 +467,9 @@ def build_summarizer_tools(
     tool_registry.register(EditMessageHandler(registry, budget))
     tool_registry.register(RemoveMessageHandler(registry, budget))
     if is_embedding_enabled:
-        tool_registry.register(QueryTranscriptHandler(retrieval_port))
+        tool_registry.register(
+            QueryTranscriptHandler(retrieval_port, agent_client=agent_client)
+        )
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))
     return tool_registry
@@ -471,6 +481,7 @@ def build_revise_tools(
     min_words: int,
     max_words: int,
     is_embedding_enabled: bool = True,
+    agent_client: AgentTaskClient | None = None,
 ) -> ToolRegistry:
     """Factory: revise-mode tools — edit/remove only, no add_speaker_message."""
     budget = BudgetContext(registry, min_words, max_words)
@@ -479,7 +490,10 @@ def build_revise_tools(
     tool_registry.register(EditMessageHandler(registry, budget))
     tool_registry.register(RemoveMessageHandler(registry, budget))
     if is_embedding_enabled:
-        tool_registry.register(QueryTranscriptHandler(retrieval_port))
+        tool_registry.register(
+            QueryTranscriptHandler(retrieval_port, agent_client=agent_client)
+        )
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))
     return tool_registry
+

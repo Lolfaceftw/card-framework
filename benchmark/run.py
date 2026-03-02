@@ -19,7 +19,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import uvicorn
 
-from agents.client import agent_client
+from agents.client import AgentClient
 from agents.critic import CriticExecutor
 from agents.health import AgentHealthChecker
 from agents.retrieval import InfoRetrievalExecutor
@@ -334,6 +334,8 @@ async def _run_cell(
         ]
     )
     event_capture.start()
+    shared_event_bus = event_bus
+    shared_agent_client = AgentClient(event_bus=shared_event_bus)
 
     try:
         llm_cfg = OmegaConf.create(cell.llm_config)
@@ -400,6 +402,8 @@ async def _run_cell(
                 .get("summarizer", {})
                 .get("max_tool_turns", 3),
                 is_embedding_enabled=is_embedding_enabled,
+                agent_client=shared_agent_client,
+                event_bus=shared_event_bus,
             ),
         )
         servers.append(
@@ -417,6 +421,8 @@ async def _run_cell(
                 .get("max_tool_turns", 5),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=is_embedding_enabled,
+                agent_client=shared_agent_client,
+                event_bus=shared_event_bus,
             ),
         )
         servers.append(_run_server_in_thread("benchmark-critic-a2a", critic_app, critic_port))
@@ -435,6 +441,8 @@ async def _run_cell(
             summarizer_port=summarizer_port,
             critic_port=critic_port,
             timeouts=dict(base_cfg.orchestrator.get("timeouts", {})),
+            agent_client=shared_agent_client,
+            event_bus=shared_event_bus,
         )
 
         min_words = int(base_cfg.orchestrator.min_words)
@@ -491,7 +499,7 @@ async def _run_cell(
 
                 reference_free_result = None
                 try:
-                    event_bus.publish(
+                    shared_event_bus.publish(
                         "reference_free_started",
                         **event_capture_metadata,
                     )
@@ -499,13 +507,13 @@ async def _run_cell(
                         source_text=source_text,
                         summary_text=candidate_summary,
                     )
-                    event_bus.publish(
+                    shared_event_bus.publish(
                         "reference_free_completed",
                         status=reference_free_result.status,
                         **event_capture_metadata,
                     )
                 except Exception as reference_free_exc:
-                    event_bus.publish(
+                    shared_event_bus.publish(
                         "reference_free_failed",
                         error=str(reference_free_exc),
                         **event_capture_metadata,
@@ -608,7 +616,7 @@ async def _run_cell(
         event_capture.stop()
         for server in reversed(servers):
             _stop_server(server)
-        await agent_client.close()
+        await shared_agent_client.close()
 
 
 def _commands_executed() -> list[str]:

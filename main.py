@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+from typing import Any, cast
 
 import hydra
 import uvicorn
@@ -15,21 +16,30 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 from omegaconf import DictConfig, OmegaConf
 
+from agents.client import AgentClient
 from agents.critic import CriticExecutor
 from agents.health import AgentHealthChecker
 from agents.retrieval import InfoRetrievalExecutor
 from agents.summarizer import SummarizerExecutor
 from agents.utils import load_transcript
-from audio_pipeline import build_audio_to_script_orchestrator
+from audio_pipeline import (
+    build_audio_to_script_orchestrator,
+    build_speaker_sample_generator,
+)
+from audio_pipeline.contracts import TranscriptPayload
+from audio_pipeline.io import write_transcript_atomic
 from audio_pipeline.runtime import resolve_device, resolve_path
+from audio_pipeline.speaker_samples import resolve_sample_source_audio_path
 from embeddings import TranscriptIndex
 from events import event_bus
 from llm_provider import EmbeddingProvider, LLMProvider
 from logger_utils import configure_logger
+from orchestration import StageOrchestrator
 from orchestrator import Orchestrator
 from pipeline_plan import build_pipeline_stage_plan
 from providers.logging_provider import LoggingLLMProvider
-from summary_output import write_summary_xml_to_workspace
+from providers.response_callbacks import RichConsoleResponseCallback
+from orchestration.transcript import Transcript
 
 
 def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecutor):
@@ -111,9 +121,27 @@ def _instantiate_llm_provider(
 ) -> LLMProvider:
     """Instantiate an LLM provider and apply logging wrapper when enabled."""
     llm: LLMProvider = hydra.utils.instantiate(llm_cfg)
+    _attach_stream_callback(llm)
     if enable_logging:
         return LoggingLLMProvider(inner_provider=llm)
     return llm
+
+
+def _attach_stream_callback(llm: LLMProvider) -> None:
+    """
+    Attach a UI stream callback when a provider supports callback injection.
+
+    This keeps UI dependencies in the composition root rather than provider
+    implementation modules.
+    """
+    callback_setter = getattr(llm, "set_response_callback", None)
+    if callable(callback_setter):
+        callback_setter(RichConsoleResponseCallback())
+        return
+
+    inner_provider = getattr(llm, "inner_provider", None)
+    if isinstance(inner_provider, LLMProvider):
+        _attach_stream_callback(inner_provider)
 
 
 def _resolve_stage_llm(
@@ -131,12 +159,85 @@ def _resolve_stage_llm(
     return shared_llm, "shared"
 
 
-def _build_full_transcript_text(transcript: dict) -> str:
-    """Build fallback transcript text for non-RAG mode."""
-    segments = transcript.get("segments", [])
-    return "".join(
-        f"[{segment.get('speaker', 'UNKNOWN')}]: {segment.get('text', '')}\n"
-        for segment in segments
+def _run_post_transcript_speaker_sample_step(
+    *,
+    stage_start: str,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    transcript_path: str,
+    transcript: Transcript,
+) -> None:
+    """
+    Generate per-speaker voice samples after transcript availability.
+
+    Args:
+        stage_start: Active start stage from pipeline plan.
+        audio_cfg_dict: Resolved audio config mapping.
+        project_root: Repository root for relative path resolution.
+        transcript_path: Path to transcript JSON to update.
+        transcript: Loaded transcript domain DTO.
+    """
+    if stage_start not in {"audio", "transcript"}:
+        return
+
+    speaker_samples_cfg = _to_plain_dict(audio_cfg_dict.get("speaker_samples", {}))
+    if not bool(speaker_samples_cfg.get("enabled", True)):
+        return
+
+    work_dir = resolve_path(
+        str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
+        base_dir=project_root,
+    )
+    output_dir_name = str(speaker_samples_cfg.get("output_dir_name", "speaker_samples"))
+    if not output_dir_name.strip():
+        raise ValueError("audio.speaker_samples.output_dir_name must be non-empty.")
+    samples_output_dir = resolve_path(output_dir_name, base_dir=work_dir)
+    source_audio_path = resolve_sample_source_audio_path(
+        source_mode=str(speaker_samples_cfg.get("source_audio", "vocals")),
+        transcript_metadata=transcript.metadata,
+        configured_audio_path=str(audio_cfg_dict.get("audio_path", "")),
+        base_dir=project_root,
+    )
+    sample_generator = build_speaker_sample_generator(audio_cfg_dict)
+    event_bus.publish(
+        "system_message",
+        (
+            "Generating speaker voice samples from "
+            f"{source_audio_path} into {samples_output_dir}"
+        ),
+    )
+    sample_result = sample_generator.generate(
+        transcript_payload=transcript.to_payload(),
+        source_audio_path=source_audio_path,
+        output_dir=samples_output_dir,
+    )
+    event_bus.publish(
+        "status_message",
+        (
+            f"Generated {len(sample_result.artifacts)} speaker samples "
+            f"at {sample_result.output_dir}"
+        ),
+    )
+
+    metadata = dict(transcript.metadata)
+    metadata.update(
+        {
+            "speaker_samples_manifest_path": str(sample_result.manifest_path),
+            "speaker_samples_dir": str(sample_result.output_dir),
+            "speaker_sample_count": len(sample_result.artifacts),
+            "speaker_samples_generated_at_utc": sample_result.generated_at_utc,
+        }
+    )
+    updated_transcript = transcript.with_metadata(metadata)
+
+    resolved_transcript_path = resolve_path(transcript_path, base_dir=project_root)
+    write_transcript_atomic(
+        cast(TranscriptPayload, updated_transcript.to_payload()),
+        resolved_transcript_path,
+    )
+    event_bus.publish(
+        "status_message",
+        f"Speaker sample manifest written to {sample_result.manifest_path}",
     )
 
 
@@ -212,13 +313,22 @@ def main(cfg: DictConfig) -> None:
         )
 
     event_bus.publish("system_message", f"Loading transcript from {transcript_path}...")
-    transcript = load_transcript(transcript_path)
+    transcript_payload = load_transcript(transcript_path)
+    transcript = Transcript.from_mapping(transcript_payload)
     event_bus.publish(
         "system_message",
-        f"Loaded {len(transcript.get('segments', []))} segments",
+        f"Loaded {len(transcript.segments)} segments",
+    )
+    _run_post_transcript_speaker_sample_step(
+        stage_start=stage_plan.start_stage,
+        audio_cfg_dict=audio_cfg_dict,
+        project_root=project_root,
+        transcript_path=transcript_path,
+        transcript=transcript,
     )
 
     event_bus.publish("system_message", "Instantiating LLM providers...")
+    shared_agent_client = AgentClient(event_bus=event_bus)
     logging_enabled = bool(cfg.get("logging", {}).get("enabled", False))
     shared_llm = _instantiate_llm_provider(cfg.llm, enable_logging=logging_enabled)
 
@@ -338,6 +448,8 @@ def main(cfg: DictConfig) -> None:
                 max_tool_turns=int(summarizer_cfg.get("max_tool_turns", 3)),
                 is_embedding_enabled=is_embedding_enabled,
                 loop_guardrails=_to_plain_dict(summarizer_cfg.get("loop_guardrails")),
+                agent_client=shared_agent_client,
+                event_bus=event_bus,
             ),
         )
         _run_server_in_thread("summarizer-a2a", summarizer_app, summarizer_port)
@@ -358,6 +470,8 @@ def main(cfg: DictConfig) -> None:
                 max_tool_turns=int(critic_cfg.get("max_tool_turns", 5)),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=is_embedding_enabled,
+                agent_client=shared_agent_client,
+                event_bus=event_bus,
             ),
         )
         _run_server_in_thread("critic-a2a", critic_app, critic_port)
@@ -390,79 +504,23 @@ def main(cfg: DictConfig) -> None:
         summarizer_port=summarizer_port,
         critic_port=critic_port,
         timeouts=dict(cfg.orchestrator.get("timeouts", {})),
+        agent_client=shared_agent_client,
+        event_bus=event_bus,
     )
-
-    async def run() -> None:
-        full_text = ""
-        if transcript_index is not None:
-            await orchestrator.index_transcript(transcript)
-        elif stage_plan.requires_retrieval_tools:
-            full_text = _build_full_transcript_text(transcript)
-
-        if stage_plan.start_stage == "draft":
-            if stage_plan.draft_path is None:
-                raise ValueError("pipeline.draft_path must be set when start_stage=draft.")
-            if not stage_plan.draft_path.exists():
-                raise ValueError(f"Draft file not found: {stage_plan.draft_path}")
-
-            draft = stage_plan.draft_path.read_text(encoding="utf-8").strip()
-            if not draft:
-                raise ValueError(f"Draft file is empty: {stage_plan.draft_path}")
-
-            verdict = await orchestrator.run_critic_once(
-                draft=draft,
-                min_words=cfg.orchestrator.min_words,
-                max_words=cfg.orchestrator.max_words,
-                full_transcript_text=full_text,
-            )
-            event_bus.publish(
-                "status_message",
-                (
-                    "Critic verdict: "
-                    f"status={verdict.status}, word_count={verdict.word_count}"
-                ),
-            )
-            event_bus.publish("agent_message", "Critic Feedback", verdict.feedback)
-            if verdict.status == "pass":
-                summary_path = write_summary_xml_to_workspace(draft, project_root)
-                event_bus.publish(
-                    "status_message",
-                    f"Saved critic-approved draft to {summary_path}",
-                )
-            return
-
-        if stage_plan.stop_stage == "summarizer":
-            summary = await orchestrator.run_summarizer_once(
-                min_words=cfg.orchestrator.min_words,
-                max_words=cfg.orchestrator.max_words,
-                full_transcript_text=full_text,
-            )
-            event_bus.publish(
-                "agent_message",
-                "Summarizer",
-                f"Single-pass Summary:\n```xml\n{summary}\n```",
-            )
-            return
-
-        result = await orchestrator.run_loop(
-            min_words=cfg.orchestrator.min_words,
-            max_words=cfg.orchestrator.max_words,
-            max_iterations=cfg.orchestrator.max_iterations,
-            full_transcript_text=full_text,
+    stage_orchestrator = StageOrchestrator(
+        orchestrator=orchestrator,
+        stage_plan=stage_plan,
+        project_root=project_root,
+        min_words=int(cfg.orchestrator.min_words),
+        max_words=int(cfg.orchestrator.max_words),
+        max_iterations=int(cfg.orchestrator.max_iterations),
+    )
+    asyncio.run(
+        stage_orchestrator.run(
+            transcript=transcript,
+            retrieval_enabled=transcript_index is not None,
         )
-        if result:
-            event_bus.publish(
-                "agent_message",
-                "Orchestrator",
-                f"Final Summary:\n```xml\n{result}\n```",
-            )
-            summary_path = write_summary_xml_to_workspace(result, project_root)
-            event_bus.publish(
-                "status_message",
-                f"Saved final summary to {summary_path}",
-            )
-
-    asyncio.run(run())
+    )
 
 
 if __name__ == "__main__":

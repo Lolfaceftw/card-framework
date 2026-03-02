@@ -6,12 +6,20 @@ Allows running models locally via the HuggingFace transformers library.
 
 import json
 import sys
+from collections.abc import Sequence
 from types import SimpleNamespace
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from llm_provider import LLMProvider
+from llm_provider import (
+    LLMProvider,
+    MessageInput,
+    ToolChoice,
+    ToolInput,
+    normalize_messages,
+    normalize_tools,
+)
 from events import event_bus
 
 
@@ -90,37 +98,26 @@ class TransformersProvider(LLMProvider):
 
     def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
     ):
         """
         Chat completion mimicking the OpenAI response format to integrate smoothly
         with the existing application, utilizing transformers chat templates.
         """
-
+        del tool_choice
+        normalized_messages = normalize_messages(messages)
+        normalized_tools = normalize_tools(tools)
         apply_kwargs = dict(
-            conversation=messages,
+            conversation=normalized_messages,
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
         )
-        if tools:
-            # We map function parameters from our tool_registry to expected format
-            apply_kwargs["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.get("function", t).get("name"),
-                        "description": t.get("function", t).get("description", ""),
-                        "parameters": t.get("function", t).get("parameters", {}),
-                    },
-                }
-                if "function" not in t
-                else t
-                for t in tools
-            ]
+        if normalized_tools:
+            apply_kwargs["tools"] = normalized_tools
 
         inputs = self.tokenizer.apply_chat_template(**apply_kwargs)
         input_ids_len = inputs["input_ids"].shape[-1]
