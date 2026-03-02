@@ -1,10 +1,19 @@
+from pathlib import Path
+
 import pytest
 
 from audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
     build_speaker_sample_generator,
+    build_voice_clone_orchestrator,
 )
 from audio_pipeline.eta import LinearStageEtaStrategy
+from audio_pipeline.gateways.fallback_voice_clone_gateway import (
+    PassthroughVoiceCloneGateway,
+)
+from audio_pipeline.gateways.indextts_voice_clone_gateway import (
+    IndexTTSVoiceCloneGateway,
+)
 from audio_pipeline.gateways.demucs_gateway import DemucsSourceSeparator
 from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
 from audio_pipeline.gateways.fallback_gateways import (
@@ -116,3 +125,66 @@ def test_factory_builds_speaker_sample_generator_defaults() -> None:
     assert generator.channels == 1
     assert generator.clip_method == "concat_turns"
     assert generator.short_speaker_policy == "export_shorter"
+
+
+def test_factory_builds_voice_clone_orchestrator_when_enabled(tmp_path: Path) -> None:
+    orchestrator = build_voice_clone_orchestrator(
+        {
+            "work_dir": "artifacts/audio_stage",
+            "voice_clone": {
+                "enabled": True,
+                "provider": "passthrough",
+                "output_dir_name": "voice_clone",
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    assert isinstance(orchestrator.provider, PassthroughVoiceCloneGateway)
+    assert orchestrator.output_dir == (
+        tmp_path / "artifacts" / "audio_stage" / "voice_clone"
+    ).resolve()
+
+
+def test_factory_disables_voice_clone_orchestrator_by_default(tmp_path: Path) -> None:
+    orchestrator = build_voice_clone_orchestrator({}, project_root=tmp_path)
+
+    assert orchestrator is None
+
+
+def test_factory_raises_for_unknown_voice_clone_provider(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unsupported voice clone provider"):
+        build_voice_clone_orchestrator(
+            {
+                "voice_clone": {
+                    "enabled": True,
+                    "provider": "unknown",
+                }
+            },
+            project_root=tmp_path,
+        )
+
+
+def test_factory_builds_indextts_subprocess_provider_defaults(tmp_path: Path) -> None:
+    orchestrator = build_voice_clone_orchestrator(
+        {
+            "voice_clone": {
+                "enabled": True,
+                "provider": "indextts",
+            }
+        },
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    provider = orchestrator.provider
+    assert isinstance(provider, IndexTTSVoiceCloneGateway)
+    assert provider.execution_backend == "subprocess"
+    assert provider.runner_project_dir == (tmp_path / "third_party" / "index_tts").resolve()
+    assert provider.cfg_path == (
+        tmp_path / "third_party" / "index_tts" / "checkpoints" / "config.yaml"
+    ).resolve()
+    assert provider.model_dir == (
+        tmp_path / "third_party" / "index_tts" / "checkpoints"
+    ).resolve()
