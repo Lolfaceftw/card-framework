@@ -7,13 +7,18 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, Callable, TypeVar
+from typing import cast
 
 from audio_pipeline.alignment import align_segments_with_speakers
 from audio_pipeline.contracts import (
+    DiarizationTurn,
     SourceSeparator,
     SpeakerDiarizer,
     SpeechTranscriber,
+    TranscriptionResult,
+    TranscriptMetadataPayload,
     TranscriptPayload,
+    TranscriptSegment,
 )
 from audio_pipeline.eta import (
     AudioStageName,
@@ -28,6 +33,7 @@ from audio_pipeline.eta import (
 )
 from audio_pipeline.io import build_transcript_payload, write_transcript_atomic
 from audio_pipeline.runtime import probe_audio_duration_ms, utc_now_iso
+from audio_pipeline.word_speaker_alignment import build_word_speaker_segments
 from events import event_bus
 
 T = TypeVar("T")
@@ -114,7 +120,7 @@ class AudioToScriptOrchestrator:
             )
 
             vocals_duration_ms = probe_audio_duration_ms(vocals_path) or source_duration_ms
-            asr_segments = self._run_stage_with_eta(
+            asr_result = self._run_stage_with_eta(
                 stage="transcription",
                 description=f"transcribing vocals {vocals_path}",
                 audio_duration_ms=vocals_duration_ms,
@@ -143,26 +149,32 @@ class AudioToScriptOrchestrator:
                     "Diarization produced a single speaker timeline; verify NeMo setup for multi-speaker audio."
                 )
 
-            aligned_segments = align_segments_with_speakers(
-                asr_segments=asr_segments,
+            aligned_segments, forced_alignment_satisfied = self._align_transcript_segments(
+                asr_result=asr_result,
                 diarization_turns=diarization_turns,
-                default_speaker=self.default_speaker,
-                merge_gap_ms=self.merge_gap_ms,
+                warnings=warnings,
             )
 
-            metadata = {
+            metadata: TranscriptMetadataPayload = {
                 "source_audio_path": str(input_audio_path),
                 "vocals_audio_path": str(vocals_path),
                 "device": device,
                 "generated_at_utc": utc_now_iso(),
                 "warnings": warnings,
+                "alignment_backend": "ctc_forced_aligner",
+                "forced_alignment_enabled": True,
+                "forced_alignment_satisfied": forced_alignment_satisfied,
+                "transcription_language": asr_result.language,
             }
             if metadata_overrides:
-                metadata.update(metadata_overrides)
+                metadata = cast(
+                    TranscriptMetadataPayload,
+                    {**metadata, **metadata_overrides},
+                )
 
             payload = build_transcript_payload(
                 segments=aligned_segments,
-                metadata=metadata,
+                metadata=cast(TranscriptMetadataPayload, metadata),
             )
             write_transcript_atomic(payload, output_transcript_path)
 
@@ -181,6 +193,37 @@ class AudioToScriptOrchestrator:
                 profile_path=eta_profile_path,
                 context=eta_profile_context,
             )
+
+    def _align_transcript_segments(
+        self,
+        *,
+        asr_result: TranscriptionResult,
+        diarization_turns: list[DiarizationTurn],
+        warnings: list[str],
+    ) -> tuple[list[TranscriptSegment], bool]:
+        """Align transcription to speaker turns with word-level priority."""
+        if asr_result.word_timestamps:
+            aligned = build_word_speaker_segments(
+                word_timestamps=asr_result.word_timestamps,
+                diarization_turns=diarization_turns,
+                default_speaker=self.default_speaker,
+                language=asr_result.language,
+                merge_gap_ms=self.merge_gap_ms,
+                restore_punctuation_model=True,
+            )
+            if aligned:
+                return aligned, True
+            warnings.append(
+                "Word-level speaker alignment returned no segments; using segment-level fallback."
+            )
+
+        fallback = align_segments_with_speakers(
+            asr_segments=asr_result.segments,
+            diarization_turns=diarization_turns,
+            default_speaker=self.default_speaker,
+            merge_gap_ms=self.merge_gap_ms,
+        )
+        return fallback, False
 
     def _run_stage_with_eta(
         self,

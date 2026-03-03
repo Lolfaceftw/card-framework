@@ -36,6 +36,7 @@ def test_factory_builds_default_strategies() -> None:
     assert isinstance(orchestrator.separator, DemucsSourceSeparator)
     assert isinstance(orchestrator.transcriber, FasterWhisperTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
+    assert orchestrator.diarizer.allow_single_speaker_fallback is False
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
 
 
@@ -101,6 +102,22 @@ def test_factory_supports_fallback_strategies() -> None:
     assert isinstance(orchestrator.diarizer, SingleSpeakerDiarizer)
 
 
+def test_factory_allows_explicit_single_speaker_fallback_opt_in() -> None:
+    orchestrator = build_audio_to_script_orchestrator(
+        {
+            "separation": {"provider": "demucs", "model": "htdemucs"},
+            "asr": {"provider": "faster_whisper", "model": "large-v3"},
+            "diarization": {
+                "provider": "nemo",
+                "allow_single_speaker_fallback": True,
+            },
+        }
+    )
+
+    assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
+    assert orchestrator.diarizer.allow_single_speaker_fallback is True
+
+
 def test_factory_raises_for_unknown_provider() -> None:
     with pytest.raises(ValueError):
         build_audio_to_script_orchestrator(
@@ -153,8 +170,14 @@ def test_factory_builds_speaker_sample_generator_defaults() -> None:
 
     assert isinstance(generator.exporter, FfmpegSpeakerSampleExporter)
     assert generator.target_duration_seconds == 30
-    assert generator.sample_rate_hz == 16000
+    assert generator.sample_rate_hz == 44100
     assert generator.channels == 1
+    assert generator.edge_fade_ms == 20
+    assert generator.min_slice_duration_ms == 1200
+    assert generator.max_slices == 6
+    assert generator.selection_order == "chronological"
+    assert generator.low_data_policy == "quality_first_shorter"
+    assert generator.audio_codec == "pcm_s24le"
     assert generator.clip_method == "concat_turns"
     assert generator.short_speaker_policy == "export_shorter"
 
@@ -177,6 +200,8 @@ def test_factory_builds_voice_clone_orchestrator_when_enabled(tmp_path: Path) ->
     assert orchestrator.output_dir == (
         tmp_path / "artifacts" / "audio_stage" / "voice_clone"
     ).resolve()
+    assert orchestrator.merge_segments is True
+    assert orchestrator.merged_output_filename == "voice_cloned.wav"
 
 
 def test_factory_disables_voice_clone_orchestrator_by_default(tmp_path: Path) -> None:
@@ -239,3 +264,21 @@ def test_factory_respects_indextts_stream_subprocess_override(tmp_path: Path) ->
     provider = orchestrator.provider
     assert isinstance(provider, IndexTTSVoiceCloneGateway)
     assert provider.stream_subprocess_output is False
+
+
+def test_factory_respects_voice_clone_merged_output_override(tmp_path: Path) -> None:
+    orchestrator = build_voice_clone_orchestrator(
+        {
+            "voice_clone": {
+                "enabled": True,
+                "provider": "passthrough",
+                "merge_segments": True,
+                "merged_output_filename": "custom_voice_mix.wav",
+            }
+        },
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    assert orchestrator.merge_segments is True
+    assert orchestrator.merged_output_filename == "custom_voice_mix.wav"

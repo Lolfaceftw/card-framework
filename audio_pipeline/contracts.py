@@ -33,6 +33,10 @@ class TranscriptMetadataPayload(TypedDict, total=False):
     speaker_samples_dir: str
     speaker_sample_count: int
     speaker_samples_generated_at_utc: str
+    alignment_backend: str
+    forced_alignment_enabled: bool
+    forced_alignment_satisfied: bool
+    transcription_language: str
 
 
 class TranscriptPayload(TypedDict, total=False):
@@ -57,6 +61,56 @@ class TimedTextSegment:
             raise ValueError("end_time_ms must be >= start_time_ms")
         if not self.text.strip():
             raise ValueError("text must be non-empty")
+
+
+@dataclass(slots=True, frozen=True)
+class WordTimestamp:
+    """Word-level span in milliseconds."""
+
+    word: str
+    start_time_ms: int
+    end_time_ms: int
+
+    def __post_init__(self) -> None:
+        if self.start_time_ms < 0:
+            raise ValueError("start_time_ms must be >= 0")
+        if self.end_time_ms < self.start_time_ms:
+            raise ValueError("end_time_ms must be >= start_time_ms")
+        if not self.word.strip():
+            raise ValueError("word must be non-empty")
+
+
+@dataclass(slots=True, frozen=True)
+class TranscriptionResult:
+    """ASR output with optional aligned word timestamps."""
+
+    segments: list[TimedTextSegment]
+    word_timestamps: list[WordTimestamp]
+    language: str = "en"
+
+    def __post_init__(self) -> None:
+        if not self.segments:
+            raise ValueError("segments must be non-empty")
+
+
+@dataclass(slots=True, frozen=True)
+class WordSpeakerToken:
+    """Word span with resolved speaker attribution."""
+
+    word: str
+    speaker: str
+    start_time_ms: int
+    end_time_ms: int
+
+    def __post_init__(self) -> None:
+        if self.start_time_ms < 0:
+            raise ValueError("start_time_ms must be >= 0")
+        if self.end_time_ms < self.start_time_ms:
+            raise ValueError("end_time_ms must be >= start_time_ms")
+        if not self.word.strip():
+            raise ValueError("word must be non-empty")
+        if not self.speaker.strip():
+            raise ValueError("speaker must be non-empty")
 
 
 @dataclass(slots=True, frozen=True)
@@ -121,8 +175,8 @@ class SpeechTranscriber(Protocol):
         *,
         device: str,
         progress_callback: StageProgressCallback | None = None,
-    ) -> list[TimedTextSegment]:
-        """Return timed text segments."""
+    ) -> TranscriptionResult:
+        """Return timed text and optional word-level timestamps."""
 
 
 @runtime_checkable

@@ -1,7 +1,13 @@
 from pathlib import Path
 import time
+from typing import cast
 
-from audio_pipeline.contracts import DiarizationTurn, TimedTextSegment
+from audio_pipeline.contracts import (
+    DiarizationTurn,
+    TimedTextSegment,
+    TranscriptionResult,
+    WordTimestamp,
+)
 import threading
 
 from audio_pipeline.eta import DynamicEtaTracker, LinearStageEtaStrategy, StageSpeedProfile
@@ -22,9 +28,22 @@ class _StubSeparator:
 
 
 class _StubTranscriber:
-    def transcribe(self, audio_path: Path, *, device: str, progress_callback=None) -> list[TimedTextSegment]:
+    def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        device: str,
+        progress_callback=None,
+    ) -> TranscriptionResult:
         del audio_path, device, progress_callback
-        return [TimedTextSegment(start_time_ms=0, end_time_ms=800, text="hello world")]
+        return TranscriptionResult(
+            segments=[TimedTextSegment(start_time_ms=0, end_time_ms=800, text="hello world")],
+            word_timestamps=[
+                WordTimestamp(word="hello", start_time_ms=0, end_time_ms=400),
+                WordTimestamp(word="world", start_time_ms=400, end_time_ms=800),
+            ],
+            language="en",
+        )
 
 
 class _StubDiarizer:
@@ -116,7 +135,7 @@ def test_orchestrator_eta_reports_overrun_until_stage_stops(monkeypatch) -> None
         eta_tracker=DynamicEtaTracker(initial_total_seconds=0.01),
         tracker_lock=threading.Lock(),
         started_at=time.monotonic() - 0.2,
-        stop_event=_DeterministicStopEvent(),
+        stop_event=cast(threading.Event, _DeterministicStopEvent()),
     )
 
     assert any(

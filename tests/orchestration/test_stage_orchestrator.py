@@ -12,39 +12,20 @@ from orchestration.transcript import Transcript
 from pipeline_plan import PipelineStagePlan
 
 
-@dataclass(slots=True)
-class _FakeVerdict:
-    """Minimal critic verdict used by stage-orchestrator tests."""
-
-    status: str
-    word_count: int
-    feedback: str
-
-
 class _FakeOrchestrator:
     """Capture stage-orchestrator calls without external dependencies."""
 
     def __init__(self) -> None:
         self.indexed_transcript: Transcript | None = None
-        self.summarizer_kwargs: dict[str, Any] | None = None
         self.loop_kwargs: dict[str, Any] | None = None
-        self.critic_kwargs: dict[str, Any] | None = None
 
     async def index_transcript(self, transcript: Transcript) -> int:
         self.indexed_transcript = transcript
         return 1
 
-    async def run_summarizer_once(self, **kwargs: Any) -> str:
-        self.summarizer_kwargs = kwargs
-        return "<SPEAKER_00>summary</SPEAKER_00>"
-
     async def run_loop(self, **kwargs: Any) -> str:
         self.loop_kwargs = kwargs
         return "<SPEAKER_00>loop</SPEAKER_00>"
-
-    async def run_critic_once(self, **kwargs: Any) -> _FakeVerdict:
-        self.critic_kwargs = kwargs
-        return _FakeVerdict(status="pass", word_count=42, feedback="ok")
 
 
 @dataclass(slots=True)
@@ -74,12 +55,27 @@ class _FakeVoiceCloneOrchestrator:
         return _FakeVoiceCloneResult(output_dir=self.output_dir, artifacts=("turn.wav",))
 
 
+class _FakeGpuHeartbeat:
+    """Capture heartbeat lifecycle interactions during voice-clone stage."""
+
+    def __init__(self) -> None:
+        self.started_with_pid: int | None = None
+        self.stop_calls = 0
+
+    def start(self, *, pipeline_root_pid: int) -> None:
+        self.started_with_pid = pipeline_root_pid
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
 def _build_stage_orchestrator(
     *,
     stage_plan: PipelineStagePlan,
     fake_orchestrator: _FakeOrchestrator,
     project_root: Path,
     fake_voice_clone_orchestrator: _FakeVoiceCloneOrchestrator | None = None,
+    fake_gpu_heartbeat: _FakeGpuHeartbeat | None = None,
 ) -> StageOrchestrator:
     """Create a stage-orchestrator with stable defaults for tests."""
     return StageOrchestrator(
@@ -90,16 +86,17 @@ def _build_stage_orchestrator(
         max_words=30,
         max_iterations=3,
         voice_clone_orchestrator=fake_voice_clone_orchestrator,  # type: ignore[arg-type]
+        voice_clone_gpu_heartbeat=fake_gpu_heartbeat,  # type: ignore[arg-type]
     )
 
 
-def test_run_summarizer_stage_uses_full_transcript_when_retrieval_disabled(
+def test_run_stage_two_uses_full_transcript_when_retrieval_disabled(
     tmp_path: Path,
 ) -> None:
-    """Build full transcript text for summarizer stage when retrieval is disabled."""
+    """Build full transcript text for stage-2 when retrieval is disabled."""
     fake_orchestrator = _FakeOrchestrator()
     stage_orchestrator = _build_stage_orchestrator(
-        stage_plan=PipelineStagePlan(start_stage="transcript", stop_stage="summarizer"),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
         fake_orchestrator=fake_orchestrator,
         project_root=tmp_path,
     )
@@ -108,21 +105,21 @@ def test_run_summarizer_stage_uses_full_transcript_when_retrieval_disabled(
     asyncio.run(stage_orchestrator.run(transcript=transcript, retrieval_enabled=False))
 
     assert fake_orchestrator.indexed_transcript is None
-    assert fake_orchestrator.summarizer_kwargs is not None
+    assert fake_orchestrator.loop_kwargs is not None
     assert (
-        fake_orchestrator.summarizer_kwargs["full_transcript_text"]
+        fake_orchestrator.loop_kwargs["full_transcript_text"]
         == "[SPEAKER_00]: hello world\n"
     )
     assert (tmp_path / "summary.xml").read_text(encoding="utf-8") == (
-        "<SPEAKER_00>summary</SPEAKER_00>\n"
+        "<SPEAKER_00>loop</SPEAKER_00>\n"
     )
 
 
-def test_run_full_loop_indexes_when_retrieval_enabled(tmp_path: Path) -> None:
+def test_run_stage_two_indexes_when_retrieval_enabled(tmp_path: Path) -> None:
     """Index transcript before loop when retrieval tools are available."""
     fake_orchestrator = _FakeOrchestrator()
     stage_orchestrator = _build_stage_orchestrator(
-        stage_plan=PipelineStagePlan(start_stage="transcript", stop_stage="critic"),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
         fake_orchestrator=fake_orchestrator,
         project_root=tmp_path,
     )
@@ -137,43 +134,18 @@ def test_run_full_loop_indexes_when_retrieval_enabled(tmp_path: Path) -> None:
     assert fake_orchestrator.loop_kwargs["full_transcript_text"] == ""
 
 
-def test_run_draft_stage_reads_existing_draft(tmp_path: Path) -> None:
-    """Forward draft content to critic-only stage in draft start mode."""
-    fake_orchestrator = _FakeOrchestrator()
-    draft_path = tmp_path / "draft.xml"
-    draft_path.write_text("<SPEAKER_00>draft</SPEAKER_00>", encoding="utf-8")
-    stage_orchestrator = _build_stage_orchestrator(
-        stage_plan=PipelineStagePlan(
-            start_stage="draft",
-            stop_stage="critic",
-            draft_path=draft_path,
-        ),
-        fake_orchestrator=fake_orchestrator,
-        project_root=tmp_path,
-    )
-
-    asyncio.run(
-        stage_orchestrator.run(
-            transcript={"segments": []},
-            retrieval_enabled=False,
-        )
-    )
-
-    assert fake_orchestrator.critic_kwargs is not None
-    assert fake_orchestrator.critic_kwargs["draft"] == "<SPEAKER_00>draft</SPEAKER_00>"
-
-
-def test_run_draft_stage_with_summarizer_stop_triggers_voice_clone(tmp_path: Path) -> None:
-    """Use draft XML directly as voice-clone input when stop_stage=summarizer."""
+def test_run_stage_three_reads_existing_summary_and_triggers_voice_clone(
+    tmp_path: Path,
+) -> None:
+    """Use provided summary XML directly as stage-3 voice-clone input."""
     fake_orchestrator = _FakeOrchestrator()
     fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
-    draft_path = tmp_path / "summary.xml"
-    draft_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
+    final_summary_path = tmp_path / "summary.xml"
+    final_summary_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
     stage_orchestrator = _build_stage_orchestrator(
         stage_plan=PipelineStagePlan(
-            start_stage="draft",
-            stop_stage="summarizer",
-            draft_path=draft_path,
+            start_stage="stage-3",
+            final_summary_path=final_summary_path,
         ),
         fake_orchestrator=fake_orchestrator,
         project_root=tmp_path,
@@ -192,7 +164,7 @@ def test_run_draft_stage_with_summarizer_stop_triggers_voice_clone(tmp_path: Pat
         )
     )
 
-    assert fake_orchestrator.critic_kwargs is None
+    assert fake_orchestrator.loop_kwargs is None
     assert (tmp_path / "summary.xml").read_text(encoding="utf-8") == (
         "<SPEAKER_00>hello</SPEAKER_00>\n"
     )
@@ -206,7 +178,7 @@ def test_run_accepts_legacy_raw_transcript_dict(tmp_path: Path) -> None:
     """Accept raw transcript dictionaries at run ingress for compatibility."""
     fake_orchestrator = _FakeOrchestrator()
     stage_orchestrator = _build_stage_orchestrator(
-        stage_plan=PipelineStagePlan(start_stage="transcript", stop_stage="critic"),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
         fake_orchestrator=fake_orchestrator,
         project_root=tmp_path,
     )
@@ -223,12 +195,12 @@ def test_run_accepts_legacy_raw_transcript_dict(tmp_path: Path) -> None:
     assert fake_orchestrator.indexed_transcript.segments[0].text == "legacy"
 
 
-def test_run_summarizer_stage_triggers_voice_clone(tmp_path: Path) -> None:
-    """Run voice clone stage after summarizer when voice-clone orchestrator is configured."""
+def test_run_stage_two_triggers_voice_clone(tmp_path: Path) -> None:
+    """Run stage-3 voice clone after stage-2 when orchestrator is configured."""
     fake_orchestrator = _FakeOrchestrator()
     fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
     stage_orchestrator = _build_stage_orchestrator(
-        stage_plan=PipelineStagePlan(start_stage="transcript", stop_stage="summarizer"),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
         fake_orchestrator=fake_orchestrator,
         project_root=tmp_path,
         fake_voice_clone_orchestrator=fake_voice_clone,
@@ -240,7 +212,30 @@ def test_run_summarizer_stage_triggers_voice_clone(tmp_path: Path) -> None:
 
     asyncio.run(stage_orchestrator.run(transcript=transcript, retrieval_enabled=False))
 
-    assert fake_voice_clone.summary_xml == "<SPEAKER_00>summary</SPEAKER_00>"
+    assert fake_voice_clone.summary_xml == "<SPEAKER_00>loop</SPEAKER_00>"
     assert fake_voice_clone.manifest_path == (
         tmp_path / "speaker_samples" / "manifest.json"
     ).resolve()
+
+
+def test_run_stage_two_starts_and_stops_gpu_heartbeat(tmp_path: Path) -> None:
+    """Start and stop GPU heartbeat around stage-3 voice-clone execution."""
+    fake_orchestrator = _FakeOrchestrator()
+    fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
+    fake_gpu_heartbeat = _FakeGpuHeartbeat()
+    stage_orchestrator = _build_stage_orchestrator(
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        fake_orchestrator=fake_orchestrator,
+        project_root=tmp_path,
+        fake_voice_clone_orchestrator=fake_voice_clone,
+        fake_gpu_heartbeat=fake_gpu_heartbeat,
+    )
+    transcript = {
+        "segments": [{"speaker": "SPEAKER_00", "text": "hello world"}],
+        "metadata": {"speaker_samples_manifest_path": "speaker_samples/manifest.json"},
+    }
+
+    asyncio.run(stage_orchestrator.run(transcript=transcript, retrieval_enabled=False))
+
+    assert fake_gpu_heartbeat.started_with_pid is not None
+    assert fake_gpu_heartbeat.stop_calls == 1

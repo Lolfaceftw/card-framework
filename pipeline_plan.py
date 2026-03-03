@@ -6,8 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, TypeAlias, cast
 
-PipelineStartStage: TypeAlias = Literal["audio", "transcript", "draft"]
-PipelineStopStage: TypeAlias = Literal["summarizer", "critic"]
+PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -17,37 +16,31 @@ class PipelineStagePlan:
 
     Attributes:
         start_stage: Stage where the pipeline starts.
-        stop_stage: Stage where the pipeline stops.
-        draft_path: Optional draft path used by ``start_stage='draft'``.
+        final_summary_path: Optional summary XML path used by ``start_stage='stage-3'``.
     """
 
     start_stage: PipelineStartStage
-    stop_stage: PipelineStopStage
-    draft_path: Path | None = None
+    final_summary_path: Path | None = None
 
     @property
     def run_audio_stage(self) -> bool:
-        """Return whether stage 1 (audio-to-script) should execute."""
-        return self.start_stage == "audio"
+        """Return whether stage-1 (audio separation/transcription/diarization) should run."""
+        return self.start_stage == "stage-1"
 
     @property
     def run_summarizer_stage(self) -> bool:
-        """Return whether summarizer service is required."""
-        return self.start_stage in {"audio", "transcript"}
+        """Return whether stage-2 summarizer stage should run."""
+        return self.start_stage in {"stage-1", "stage-2"}
 
     @property
     def run_critic_stage(self) -> bool:
-        """Return whether critic service is required."""
-        return self.stop_stage == "critic"
+        """Return whether stage-2 critic stage should run."""
+        return self.start_stage in {"stage-1", "stage-2"}
 
     @property
     def requires_retrieval_tools(self) -> bool:
-        """
-        Return whether retrieval/indexing tools may be used.
-
-        Retrieval is relevant for summarizer and critic stages.
-        """
-        return self.run_summarizer_stage or self.run_critic_stage
+        """Return whether retrieval/indexing tools may be used."""
+        return self.start_stage in {"stage-1", "stage-2"}
 
 
 def build_pipeline_stage_plan(
@@ -68,48 +61,33 @@ def build_pipeline_stage_plan(
     Raises:
         ValueError: If configuration combination is invalid.
     """
-    start_stage = _parse_start_stage(pipeline_cfg.get("start_stage", "audio"))
-    stop_stage = _parse_stop_stage(pipeline_cfg.get("stop_stage", "critic"))
-    draft_path_value = str(pipeline_cfg.get("draft_path", "")).strip()
+    start_stage = _parse_start_stage(pipeline_cfg.get("start_stage", "stage-1"))
+    final_summary_path_value = str(pipeline_cfg.get("final_summary_path", "")).strip()
 
-    if start_stage == "draft":
-        if stop_stage not in {"summarizer", "critic"}:
+    if start_stage == "stage-3":
+        if not final_summary_path_value:
             raise ValueError(
-                "pipeline.start_stage=draft requires pipeline.stop_stage in {summarizer, critic}."
-            )
-        if not draft_path_value:
-            raise ValueError(
-                "pipeline.draft_path is required when pipeline.start_stage=draft."
+                "pipeline.final_summary_path is required when pipeline.start_stage=stage-3."
             )
         return PipelineStagePlan(
             start_stage=start_stage,
-            stop_stage=stop_stage,
-            draft_path=_resolve_path(draft_path_value, base_dir=project_root),
+            final_summary_path=_resolve_path(
+                final_summary_path_value,
+                base_dir=project_root,
+            ),
         )
 
-    return PipelineStagePlan(
-        start_stage=start_stage,
-        stop_stage=stop_stage,
-        draft_path=None,
-    )
+    return PipelineStagePlan(start_stage=start_stage, final_summary_path=None)
 
 
 def _parse_start_stage(value: Any) -> PipelineStartStage:
     """Parse pipeline start stage with explicit error message."""
     normalized = str(value).strip().lower()
-    if normalized not in {"audio", "transcript", "draft"}:
+    if normalized not in {"stage-1", "stage-2", "stage-3"}:
         raise ValueError(
-            "pipeline.start_stage must be one of: audio, transcript, draft"
+            "pipeline.start_stage must be one of: stage-1, stage-2, stage-3"
         )
     return cast(PipelineStartStage, normalized)
-
-
-def _parse_stop_stage(value: Any) -> PipelineStopStage:
-    """Parse pipeline stop stage with explicit error message."""
-    normalized = str(value).strip().lower()
-    if normalized not in {"summarizer", "critic"}:
-        raise ValueError("pipeline.stop_stage must be one of: summarizer, critic")
-    return cast(PipelineStopStage, normalized)
 
 
 def _resolve_path(path_value: str, *, base_dir: Path) -> Path:

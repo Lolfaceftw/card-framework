@@ -71,3 +71,44 @@ def test_prepare_diarization_audio_surfaces_ffmpeg_errors(
             audio_path=input_audio,
             output_dir=tmp_path,
         )
+
+
+def test_diarize_raises_when_single_speaker_fallback_disabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    diarizer = NemoSpeakerDiarizer(allow_single_speaker_fallback=False)
+
+    def _raise(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("nemo failed")
+
+    monkeypatch.setattr(diarizer, "_run_nemo_msdd", _raise)
+    input_audio = tmp_path / "input.wav"
+    input_audio.write_bytes(b"input")
+
+    with pytest.raises(NonRetryableAudioStageError, match="NeMo diarization failed"):
+        diarizer.diarize(audio_path=input_audio, output_dir=tmp_path / "out", device="cpu")
+
+
+def test_diarize_can_fallback_to_single_speaker_when_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    diarizer = NemoSpeakerDiarizer(allow_single_speaker_fallback=True)
+
+    def _raise(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("nemo failed")
+
+    monkeypatch.setattr(diarizer, "_run_nemo_msdd", _raise)
+    monkeypatch.setattr(diarizer, "_probe_duration_ms", lambda _: 3210)
+    input_audio = tmp_path / "input.wav"
+    input_audio.write_bytes(b"input")
+
+    turns = diarizer.diarize(audio_path=input_audio, output_dir=tmp_path / "out", device="cpu")
+
+    assert len(turns) == 1
+    assert turns[0].speaker == "SPEAKER_00"
+    assert turns[0].start_time_ms == 0
+    assert turns[0].end_time_ms == 3210

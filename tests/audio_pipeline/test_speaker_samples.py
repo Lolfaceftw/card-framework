@@ -43,6 +43,128 @@ def test_build_speaker_sample_plans_truncates_to_target_and_marks_shorter() -> N
     assert plans[1].slices == (AudioSlice(start_time_ms=5_000, end_time_ms=15_000),)
 
 
+def test_build_speaker_sample_plans_prefers_longest_slices_and_caps_count() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 1_300, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 5_000, "end_time": 7_000, "text": "b"},
+            {"speaker": "SPEAKER_00", "start_time": 9_000, "end_time": 11_500, "text": "c"},
+            {"speaker": "SPEAKER_00", "start_time": 15_000, "end_time": 17_000, "text": "d"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=3_000,
+        min_slice_duration_ms=1_200,
+        max_slices=2,
+        selection_order="longest_first",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=9_000, end_time_ms=11_500),
+        AudioSlice(start_time_ms=5_000, end_time_ms=5_500),
+    )
+    assert plans[0].actual_duration_ms == 3_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_chronological_appends_from_start() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 1_300, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 5_000, "end_time": 7_000, "text": "b"},
+            {"speaker": "SPEAKER_00", "start_time": 9_000, "end_time": 11_500, "text": "c"},
+            {"speaker": "SPEAKER_00", "start_time": 15_000, "end_time": 17_000, "text": "d"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=3_000,
+        min_slice_duration_ms=1_200,
+        max_slices=2,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=1_300),
+        AudioSlice(start_time_ms=5_000, end_time_ms=6_700),
+    )
+    assert plans[0].actual_duration_ms == 3_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_uses_quality_first_fallback_for_short_slices() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 500, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 1_000, "end_time": 1_700, "text": "b"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=3_000,
+        min_slice_duration_ms=1_200,
+        max_slices=3,
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (AudioSlice(start_time_ms=1_000, end_time_ms=1_700),)
+    assert plans[0].actual_duration_ms == 700
+    assert plans[0].status == "shorter_than_requested"
+
+
+def test_build_speaker_sample_plans_fail_speaker_policy_raises() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 500, "text": "a"},
+        ]
+    }
+
+    with pytest.raises(NonRetryableAudioStageError, match="no slices >= 1200"):
+        build_speaker_sample_plans(
+            transcript_payload=transcript_payload,
+            target_duration_ms=3_000,
+            min_slice_duration_ms=1_200,
+            max_slices=3,
+            low_data_policy="fail_speaker",
+        )
+
+
+def test_build_speaker_sample_plans_backfills_when_policy_enabled() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 1_000, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 2_000, "end_time": 3_000, "text": "b"},
+            {"speaker": "SPEAKER_00", "start_time": 4_000, "end_time": 5_000, "text": "c"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=2_500,
+        min_slice_duration_ms=1_200,
+        max_slices=3,
+        low_data_policy="backfill_to_target",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=1_000),
+        AudioSlice(start_time_ms=2_000, end_time_ms=3_000),
+        AudioSlice(start_time_ms=4_000, end_time_ms=4_500),
+    )
+    assert plans[0].actual_duration_ms == 2_500
+    assert plans[0].status == "ok"
+
+
 def test_speaker_sample_generator_writes_manifest_and_audio_files(tmp_path: Path) -> None:
     class _StubExporter:
         def export(
@@ -53,8 +175,17 @@ def test_speaker_sample_generator_writes_manifest_and_audio_files(tmp_path: Path
             output_path: Path,
             sample_rate_hz: int,
             channels: int,
+            edge_fade_ms: int = 0,
+            audio_codec: str = "pcm_s24le",
         ) -> None:
-            del source_audio_path, slices, sample_rate_hz, channels
+            del (
+                source_audio_path,
+                slices,
+                sample_rate_hz,
+                channels,
+                edge_fade_ms,
+                audio_codec,
+            )
             output_path.write_bytes(b"wav")
 
     source_audio_path = tmp_path / "vocals.wav"
@@ -95,7 +226,17 @@ def test_speaker_sample_generator_writes_manifest_and_audio_files(tmp_path: Path
     assert manifest["target_duration_ms"] == 30_000
     assert manifest["clip_method"] == "concat_turns"
     assert manifest["short_speaker_policy"] == "export_shorter"
+    assert manifest["sample_rate_hz"] == 44_100
+    assert manifest["channels"] == 1
+    assert manifest["codec"] == "pcm_s24le"
+    assert manifest["edge_fade_ms"] == 20
+    assert manifest["min_slice_duration_ms"] == 1200
+    assert manifest["max_slices"] == 6
+    assert manifest["selection_order"] == "chronological"
+    assert manifest["low_data_policy"] == "quality_first_shorter"
     assert len(manifest["samples"]) == 2
+    assert all("selected_slice_count" in sample for sample in manifest["samples"])
+    assert all("dropped_slice_count" in sample for sample in manifest["samples"])
 
 
 def test_resolve_sample_source_audio_path_supports_modes_and_fallback(
@@ -156,8 +297,18 @@ def test_speaker_sample_generator_propagates_export_failure_without_manifest(
             output_path: Path,
             sample_rate_hz: int,
             channels: int,
+            edge_fade_ms: int = 0,
+            audio_codec: str = "pcm_s24le",
         ) -> None:
-            del source_audio_path, slices, output_path, sample_rate_hz, channels
+            del (
+                source_audio_path,
+                slices,
+                output_path,
+                sample_rate_hz,
+                channels,
+                edge_fade_ms,
+                audio_codec,
+            )
             raise NonRetryableAudioStageError("Failed to export speaker sample with ffmpeg")
 
     source_audio_path = tmp_path / "vocals.wav"
@@ -200,8 +351,17 @@ def test_speaker_sample_generator_emits_progress_updates(tmp_path: Path) -> None
             output_path: Path,
             sample_rate_hz: int,
             channels: int,
+            edge_fade_ms: int = 0,
+            audio_codec: str = "pcm_s24le",
         ) -> None:
-            del source_audio_path, slices, sample_rate_hz, channels
+            del (
+                source_audio_path,
+                slices,
+                sample_rate_hz,
+                channels,
+                edge_fade_ms,
+                audio_codec,
+            )
             output_path.write_bytes(b"wav")
 
     source_audio_path = tmp_path / "vocals.wav"
