@@ -8,6 +8,7 @@ from typing import Any, Literal, cast
 
 from audio_pipeline.contracts import SourceSeparator, SpeakerDiarizer, SpeechTranscriber
 from audio_pipeline.eta import (
+    EtaUnitStageName,
     LinearStageEtaStrategy,
     StageEtaStrategy,
     StageSpeedProfile,
@@ -51,6 +52,15 @@ def build_audio_to_script_orchestrator(
     diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
     retry_cfg = _as_mapping(audio_cfg.get("retry", {}))
     eta_cfg = _as_mapping(audio_cfg.get("eta", {}))
+    dynamic_eta_cfg = _as_mapping(eta_cfg.get("dynamic", {}))
+    eta_progress_smoothing = float(dynamic_eta_cfg.get("progress_smoothing", 0.25))
+    eta_overrun_factor = float(dynamic_eta_cfg.get("overrun_factor", 1.15))
+    eta_headroom_seconds = float(dynamic_eta_cfg.get("headroom_seconds", 1.0))
+    _validate_eta_dynamic_config(
+        progress_smoothing=eta_progress_smoothing,
+        overrun_factor=eta_overrun_factor,
+        headroom_seconds=eta_headroom_seconds,
+    )
 
     separator = _build_separator(
         separation_cfg=separation_cfg,
@@ -69,6 +79,9 @@ def build_audio_to_script_orchestrator(
         eta_update_interval_seconds=float(
             eta_cfg.get("update_interval_seconds", 10.0)
         ),
+        eta_progress_smoothing=eta_progress_smoothing,
+        eta_overrun_factor=eta_overrun_factor,
+        eta_headroom_seconds=eta_headroom_seconds,
     )
 
 
@@ -236,9 +249,14 @@ def _build_eta_strategy(*, eta_cfg: Mapping[str, Any]) -> StageEtaStrategy:
     )
 
     stage_multipliers_cfg = _as_mapping(eta_cfg.get("stage_multipliers", {}))
+    unit_defaults_cfg = _as_mapping(eta_cfg.get("unit_bootstrap_seconds_per_unit", {}))
     separation_cfg = _as_mapping(stage_multipliers_cfg.get("separation", {}))
     transcription_cfg = _as_mapping(stage_multipliers_cfg.get("transcription", {}))
     diarization_cfg = _as_mapping(stage_multipliers_cfg.get("diarization", {}))
+    unit_defaults = _resolve_unit_stage_defaults(
+        configured=unit_defaults_cfg,
+        defaults=defaults.unit_stage_defaults,
+    )
 
     return LinearStageEtaStrategy(
         separation=_resolve_stage_profile(
@@ -256,6 +274,7 @@ def _build_eta_strategy(*, eta_cfg: Mapping[str, Any]) -> StageEtaStrategy:
         learning_rate=learning_rate,
         min_multiplier=min_multiplier,
         max_multiplier=max_multiplier,
+        unit_stage_defaults=unit_defaults,
     )
 
 
@@ -286,6 +305,38 @@ def _validate_eta_adaptive_config(
         raise ValueError(
             "audio.eta.adaptive.max_multiplier must be >= min_multiplier."
         )
+
+
+def _resolve_unit_stage_defaults(
+    *,
+    configured: Mapping[str, Any],
+    defaults: Mapping[EtaUnitStageName, float],
+) -> dict[EtaUnitStageName, float]:
+    """Resolve baseline seconds-per-unit defaults for unit stages."""
+    resolved: dict[EtaUnitStageName, float] = {}
+    for stage_name in ("speaker_samples", "voice_clone"):
+        fallback = float(defaults[stage_name])
+        resolved[stage_name] = float(configured.get(stage_name, fallback))
+        if resolved[stage_name] <= 0:
+            raise ValueError(
+                f"audio.eta.unit_bootstrap_seconds_per_unit.{stage_name} must be > 0."
+            )
+    return resolved
+
+
+def _validate_eta_dynamic_config(
+    *,
+    progress_smoothing: float,
+    overrun_factor: float,
+    headroom_seconds: float,
+) -> None:
+    """Validate runtime dynamic ETA tuning parameters."""
+    if not 0.0 < progress_smoothing <= 1.0:
+        raise ValueError("audio.eta.dynamic.progress_smoothing must be within (0.0, 1.0].")
+    if overrun_factor <= 1.0:
+        raise ValueError("audio.eta.dynamic.overrun_factor must be > 1.0.")
+    if headroom_seconds < 0:
+        raise ValueError("audio.eta.dynamic.headroom_seconds must be >= 0.")
 
 
 def _build_voice_clone_provider(

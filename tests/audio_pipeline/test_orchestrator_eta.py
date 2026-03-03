@@ -2,19 +2,28 @@ from pathlib import Path
 import time
 
 from audio_pipeline.contracts import DiarizationTurn, TimedTextSegment
-from audio_pipeline.eta import LinearStageEtaStrategy, StageSpeedProfile
+import threading
+
+from audio_pipeline.eta import DynamicEtaTracker, LinearStageEtaStrategy, StageSpeedProfile
 from audio_pipeline.orchestrator import AudioToScriptOrchestrator
 
 
 class _StubSeparator:
-    def separate_vocals(self, input_audio_path: Path, output_dir: Path, *, device: str) -> Path:
-        del output_dir, device
+    def separate_vocals(
+        self,
+        input_audio_path: Path,
+        output_dir: Path,
+        *,
+        device: str,
+        progress_callback=None,
+    ) -> Path:
+        del output_dir, device, progress_callback
         return input_audio_path
 
 
 class _StubTranscriber:
-    def transcribe(self, audio_path: Path, *, device: str) -> list[TimedTextSegment]:
-        del audio_path, device
+    def transcribe(self, audio_path: Path, *, device: str, progress_callback=None) -> list[TimedTextSegment]:
+        del audio_path, device, progress_callback
         return [TimedTextSegment(start_time_ms=0, end_time_ms=800, text="hello world")]
 
 
@@ -25,8 +34,9 @@ class _StubDiarizer:
         output_dir: Path,
         *,
         device: str,
+        progress_callback=None,
     ) -> list[DiarizationTurn]:
-        del audio_path, output_dir, device
+        del audio_path, output_dir, device, progress_callback
         return [DiarizationTurn(speaker="SPEAKER_00", start_time_ms=0, end_time_ms=1000)]
 
 
@@ -103,7 +113,8 @@ def test_orchestrator_eta_reports_overrun_until_stage_stops(monkeypatch) -> None
 
     orchestrator._publish_eta_updates(
         stage="separation",
-        estimated_total_seconds=0.01,
+        eta_tracker=DynamicEtaTracker(initial_total_seconds=0.01),
+        tracker_lock=threading.Lock(),
         started_at=time.monotonic() - 0.2,
         stop_event=_DeterministicStopEvent(),
     )

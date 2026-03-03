@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from audio_pipeline.contracts import SpeechTranscriber, TimedTextSegment
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
 from audio_pipeline.runtime import ensure_command_available
 
@@ -28,13 +29,20 @@ class FasterWhisperTranscriber(SpeechTranscriber):
         self.vad_filter = vad_filter
         self._model_cache: dict[tuple[str, str], object] = {}
 
-    def transcribe(self, audio_path: Path, *, device: str) -> list[TimedTextSegment]:
+    def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        device: str,
+        progress_callback: StageProgressCallback | None = None,
+    ) -> list[TimedTextSegment]:
         """
         Transcribe audio and return normalized timed segments.
 
         Args:
             audio_path: Input audio path.
             device: Runtime device (``cpu`` or ``cuda``).
+            progress_callback: Optional callback for progress updates.
 
         Returns:
             List of timed text segments.
@@ -49,12 +57,14 @@ class FasterWhisperTranscriber(SpeechTranscriber):
         )
 
         normalized: list[TimedTextSegment] = []
+        max_processed_audio_ms = 0
         for segment in segments:
             text = str(segment.text or "").strip()
             if not text:
                 continue
             start_time_ms = max(0, int(round(float(segment.start) * 1000)))
             end_time_ms = max(start_time_ms, int(round(float(segment.end) * 1000)))
+            max_processed_audio_ms = max(max_processed_audio_ms, end_time_ms)
             normalized.append(
                 TimedTextSegment(
                     start_time_ms=start_time_ms,
@@ -62,11 +72,25 @@ class FasterWhisperTranscriber(SpeechTranscriber):
                     text=text,
                 )
             )
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        StageProgressUpdate(processed_audio_ms=end_time_ms)
+                    )
+                except Exception:
+                    pass
 
         if not normalized:
             raise NonRetryableAudioStageError(
                 "Faster-Whisper returned no transcript segments."
             )
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(processed_audio_ms=max_processed_audio_ms)
+                )
+            except Exception:
+                pass
         return normalized
 
     def _get_model(self, *, device: str):

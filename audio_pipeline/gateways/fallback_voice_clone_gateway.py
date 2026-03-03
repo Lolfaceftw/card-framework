@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import NonRetryableAudioStageError
 from audio_pipeline.voice_clone_contracts import VoiceCloneProvider
 
@@ -18,6 +19,7 @@ class PassthroughVoiceCloneGateway(VoiceCloneProvider):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
         Copy reference WAV to output path.
@@ -26,6 +28,7 @@ class PassthroughVoiceCloneGateway(VoiceCloneProvider):
             reference_audio_path: Source WAV path.
             text: Ignored synthesis text argument for interface compatibility.
             output_audio_path: Destination WAV path.
+            progress_callback: Optional callback for progress updates.
 
         Returns:
             Output WAV path.
@@ -37,4 +40,13 @@ class PassthroughVoiceCloneGateway(VoiceCloneProvider):
             )
         output_audio_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(reference_audio_path, output_audio_path)
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        note="passthrough voice clone completed",
+                    )
+                )
+            except Exception:
+                pass
         return output_audio_path

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
 from audio_pipeline.voice_clone_contracts import VoiceCloneProvider
 
@@ -55,6 +56,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
         Synthesize one WAV artifact from text and speaker reference audio.
@@ -63,6 +65,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             reference_audio_path: Speaker reference sample WAV path.
             text: Text payload to synthesize.
             output_audio_path: Target WAV path.
+            progress_callback: Optional callback for progress updates.
 
         Returns:
             Path to generated WAV artifact.
@@ -79,21 +82,32 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             )
         backend = self.execution_backend.strip().lower()
         if backend == "inprocess":
-            return self._synthesize_inprocess(
+            rendered_path = self._synthesize_inprocess(
                 reference_audio_path=reference_audio_path,
                 text=text.strip(),
                 output_audio_path=output_audio_path,
             )
-        if backend == "subprocess":
-            return self._synthesize_subprocess(
+        elif backend == "subprocess":
+            rendered_path = self._synthesize_subprocess(
                 reference_audio_path=reference_audio_path,
                 text=text.strip(),
                 output_audio_path=output_audio_path,
             )
-        raise NonRetryableAudioStageError(
-            "Unsupported IndexTTS execution backend: "
-            f"{self.execution_backend!r}. Expected 'inprocess' or 'subprocess'."
-        )
+        else:
+            raise NonRetryableAudioStageError(
+                "Unsupported IndexTTS execution backend: "
+                f"{self.execution_backend!r}. Expected 'inprocess' or 'subprocess'."
+            )
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        note="indextts synthesis completed",
+                    )
+                )
+            except Exception:
+                pass
+        return rendered_path
 
     def _synthesize_inprocess(
         self,

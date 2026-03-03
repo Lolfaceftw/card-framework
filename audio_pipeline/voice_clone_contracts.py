@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from audio_pipeline.eta import StageProgressCallback
+
 
 @dataclass(slots=True, frozen=True)
 class VoiceCloneTurn:
@@ -65,6 +67,7 @@ class VoiceCloneProvider(Protocol):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
         Synthesize speech for one turn.
@@ -73,8 +76,8 @@ class VoiceCloneProvider(Protocol):
             reference_audio_path: Speaker reference audio artifact.
             text: Text to synthesize.
             output_audio_path: Target output WAV path.
+            progress_callback: Optional callback for synthesis progress updates.
 
         Returns:
             Path to synthesized audio output.
         """
-

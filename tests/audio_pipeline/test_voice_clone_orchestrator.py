@@ -19,8 +19,9 @@ class _StubVoiceCloneProvider:
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        progress_callback=None,
     ) -> Path:
-        del text
+        del text, progress_callback
         self.reference_calls.append(reference_audio_path)
         output_audio_path.parent.mkdir(parents=True, exist_ok=True)
         output_audio_path.write_bytes(b"wav")
@@ -52,6 +53,7 @@ def test_voice_clone_orchestrator_generates_turn_artifacts(tmp_path: Path) -> No
         output_dir=tmp_path / "voice_clone",
         fail_on_error=True,
     )
+    updates: list[tuple[int | None, int | None]] = []
 
     result = orchestrator.run(
         summary_xml=(
@@ -59,11 +61,16 @@ def test_voice_clone_orchestrator_generates_turn_artifacts(tmp_path: Path) -> No
             "<SPEAKER_01>General Kenobi</SPEAKER_01>"
         ),
         speaker_samples_manifest_path=manifest_path,
+        progress_callback=lambda update: updates.append(
+            (update.completed_units, update.total_units)
+        ),
     )
 
     assert len(result.artifacts) == 2
     assert all(artifact.output_audio_path.exists() for artifact in result.artifacts)
     assert result.manifest_path.exists()
+    assert updates[0] == (0, 2)
+    assert updates[-1] == (2, 2)
     payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert payload["artifact_count"] == 2
 

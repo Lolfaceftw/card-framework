@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from audio_pipeline.contracts import DiarizationTurn, SourceSeparator, SpeakerDiarizer
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 
 
 class PassthroughSourceSeparator(SourceSeparator):
@@ -16,8 +17,20 @@ class PassthroughSourceSeparator(SourceSeparator):
         output_dir: Path,
         *,
         device: str,
+        progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         del output_dir, device
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        completed_units=1,
+                        total_units=1,
+                        note="passthrough separation completed",
+                    )
+                )
+            except Exception:
+                pass
         return input_audio_path
 
 
@@ -34,8 +47,20 @@ class SingleSpeakerDiarizer(SpeakerDiarizer):
         output_dir: Path,
         *,
         device: str,
+        progress_callback: StageProgressCallback | None = None,
     ) -> list[DiarizationTurn]:
         del audio_path, output_dir, device
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        completed_units=1,
+                        total_units=1,
+                        note="single-speaker diarization completed",
+                    )
+                )
+            except Exception:
+                pass
         return [
             DiarizationTurn(
                 speaker=self.speaker_label,

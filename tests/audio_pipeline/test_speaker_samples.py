@@ -188,3 +188,42 @@ def test_speaker_sample_generator_propagates_export_failure_without_manifest(
 
     assert not (output_dir / "samples.manifest.json").exists()
     assert list(output_dir.glob("*.wav")) == []
+
+
+def test_speaker_sample_generator_emits_progress_updates(tmp_path: Path) -> None:
+    class _StubExporter:
+        def export(
+            self,
+            *,
+            source_audio_path: Path,
+            slices: list[AudioSlice] | tuple[AudioSlice, ...],
+            output_path: Path,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> None:
+            del source_audio_path, slices, sample_rate_hz, channels
+            output_path.write_bytes(b"wav")
+
+    source_audio_path = tmp_path / "vocals.wav"
+    source_audio_path.write_bytes(b"source")
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 10_000, "text": "hello"},
+            {"speaker": "SPEAKER_01", "start_time": 10_000, "end_time": 20_000, "text": "world"},
+        ]
+    }
+    updates: list[tuple[int | None, int | None]] = []
+    generator = SpeakerSampleGenerator(exporter=_StubExporter(), target_duration_seconds=10)
+
+    result = generator.generate(
+        transcript_payload=transcript_payload,
+        source_audio_path=source_audio_path,
+        output_dir=tmp_path / "speaker_samples",
+        progress_callback=lambda update: updates.append(
+            (update.completed_units, update.total_units)
+        ),
+    )
+
+    assert len(result.artifacts) == 2
+    assert updates[0] == (0, 2)
+    assert updates[-1] == (2, 2)

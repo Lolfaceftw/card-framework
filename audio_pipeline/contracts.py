@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypedDict, runtime_checkable
 
+from audio_pipeline.eta import StageProgressCallback
+
 
 class TranscriptSegmentPayload(TypedDict):
     """Serialized segment payload consumed by downstream retrieval/LLM stages."""
@@ -104,6 +106,7 @@ class SourceSeparator(Protocol):
         output_dir: Path,
         *,
         device: str,
+        progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """Return path to separated vocals audio."""
 
@@ -112,7 +115,13 @@ class SourceSeparator(Protocol):
 class SpeechTranscriber(Protocol):
     """Port for speech-to-text adapters."""
 
-    def transcribe(self, audio_path: Path, *, device: str) -> list[TimedTextSegment]:
+    def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        device: str,
+        progress_callback: StageProgressCallback | None = None,
+    ) -> list[TimedTextSegment]:
         """Return timed text segments."""
 
 
@@ -126,5 +135,6 @@ class SpeakerDiarizer(Protocol):
         output_dir: Path,
         *,
         device: str,
+        progress_callback: StageProgressCallback | None = None,
     ) -> list[DiarizationTurn]:
         """Return diarization turns."""

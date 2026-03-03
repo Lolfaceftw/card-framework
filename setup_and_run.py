@@ -76,6 +76,15 @@ class ModelProvisionResult:
     source: str
 
 
+@dataclass(slots=True, frozen=True)
+class EffectivePipelineMode:
+    """Resolved stage behavior derived from final Hydra overrides."""
+
+    start_stage: str
+    stop_stage: str
+    voice_clone_enabled: bool
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse bootstrap CLI arguments."""
     parser = argparse.ArgumentParser(
@@ -85,6 +94,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument("--audio-path", help="Source audio path for pipeline.start_stage=audio.")
+    parser.add_argument(
+        "--voiceclone-from-summary",
+        dest="voiceclone_from_summary",
+        help=(
+            "Shortcut mode. Skip audio/summarizer/critic and run voice clone directly "
+            "from an existing summary XML file."
+        ),
+    )
+    parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Pass through one extra Hydra override. Repeat this flag for multiple "
+            "values, for example: --override pipeline.start_stage=transcript"
+        ),
+    )
     parser.add_argument(
         "--setup-only",
         action="store_true",
@@ -579,13 +606,299 @@ def prompt_or_validate_audio_path(cli_audio_path: str | None) -> Path:
             print(exc.render())
 
 
-def build_run_overrides(*, audio_path: Path, run_id: str) -> list[str]:
+def resolve_path_input(path_value: str, *, field_name: str) -> Path:
+    """
+    Resolve and validate one generic user-provided file path.
+
+    Args:
+        path_value: Raw user input path string.
+        field_name: Human-readable field label for validation errors.
+
+    Returns:
+        Absolute resolved path to an existing file.
+
+    Raises:
+        BootstrapError: If value is empty or invalid.
+    """
+    normalized = path_value.strip().strip('"').strip("'")
+    if not normalized:
+        raise BootstrapError(step="input", message=f"{field_name} must not be empty.")
+    candidate = Path(normalized).expanduser()
+    if not candidate.is_absolute():
+        candidate = (REPO_ROOT / candidate).resolve()
+    if not candidate.exists():
+        raise BootstrapError(step="input", message=f"{field_name} does not exist: {candidate}")
+    if not candidate.is_file():
+        raise BootstrapError(step="input", message=f"{field_name} is not a file: {candidate}")
+    return candidate
+
+
+def normalize_cli_overrides(raw_overrides: Sequence[str]) -> tuple[str, ...]:
+    """
+    Validate and normalize pass-through Hydra CLI overrides.
+
+    Args:
+        raw_overrides: Raw override strings from repeated ``--override`` flags.
+
+    Returns:
+        Tuple of validated ``KEY=VALUE`` override strings.
+
+    Raises:
+        BootstrapError: If any override is empty or malformed.
+    """
+    normalized: list[str] = []
+    for raw_override in raw_overrides:
+        candidate = str(raw_override).strip()
+        if not candidate:
+            raise BootstrapError(
+                step="input",
+                message="Empty --override value is not allowed. Use KEY=VALUE format.",
+            )
+        if "=" not in candidate:
+            raise BootstrapError(
+                step="input",
+                message=(
+                    f"Invalid --override '{candidate}'. Expected KEY=VALUE "
+                    "(example: pipeline.start_stage=transcript)."
+                ),
+            )
+        key, _value = candidate.split("=", 1)
+        if not key.strip():
+            raise BootstrapError(
+                step="input",
+                message=(
+                    f"Invalid --override '{candidate}'. Override key must be non-empty."
+                ),
+            )
+        normalized.append(candidate)
+    return tuple(normalized)
+
+
+def build_shortcut_overrides(
+    *,
+    voiceclone_from_summary: str | None,
+    run_id: str,
+) -> tuple[str, ...]:
+    """
+    Build opinionated override bundle shortcuts for common tasks.
+
+    Args:
+        voiceclone_from_summary: Optional summary XML path for voice-clone shortcut.
+        run_id: UTC run identifier used for generated shortcut artifacts.
+
+    Returns:
+        Tuple of Hydra overrides contributed by enabled shortcuts.
+
+    Raises:
+        BootstrapError: If shortcut input path is invalid.
+    """
+    if voiceclone_from_summary is None:
+        return ()
+
+    summary_path = resolve_path_input(
+        voiceclone_from_summary,
+        field_name="Summary XML path",
+    )
+    speaker_manifest_path = _find_latest_speaker_samples_manifest()
+    synthetic_transcript_path = _write_voiceclone_shortcut_transcript(
+        run_id=run_id,
+        speaker_samples_manifest_path=speaker_manifest_path,
+    )
+    return (
+        "pipeline.start_stage=draft",
+        "pipeline.stop_stage=summarizer",
+        f"pipeline.draft_path={_path_for_override(summary_path)}",
+        f"transcript_path={_path_for_override(synthetic_transcript_path)}",
+        "audio.speaker_samples.enabled=false",
+        "audio.voice_clone.enabled=true",
+    )
+
+
+def _find_latest_speaker_samples_manifest() -> Path:
+    """
+    Return the most recent speaker-sample manifest generated by prior runs.
+
+    Raises:
+        BootstrapError: If no manifest can be discovered.
+    """
+    manifests = sorted(
+        (REPO_ROOT / "artifacts" / "audio_stage" / "runs").glob(
+            "*/speaker_samples/manifest.json"
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not manifests:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "No speaker-sample manifest was found under "
+                "artifacts/audio_stage/runs/*/speaker_samples/manifest.json. "
+                "Run an audio stage first or pass --override transcript_path=<transcript.json> "
+                "that contains metadata.speaker_samples_manifest_path."
+            ),
+        )
+    return manifests[0].resolve()
+
+
+def _write_voiceclone_shortcut_transcript(
+    *,
+    run_id: str,
+    speaker_samples_manifest_path: Path,
+) -> Path:
+    """
+    Write a minimal transcript JSON carrying speaker-manifest metadata.
+
+    Args:
+        run_id: UTC run identifier for deterministic output path.
+        speaker_samples_manifest_path: Resolved speaker sample manifest path.
+
+    Returns:
+        Path to generated transcript JSON.
+
+    Raises:
+        BootstrapError: If output cannot be written.
+    """
+    output_path = (
+        REPO_ROOT
+        / "artifacts"
+        / "bootstrap"
+        / "voiceclone_shortcuts"
+        / f"{run_id}.transcript.json"
+    ).resolve()
+    payload = {
+        "segments": [],
+        "metadata": {
+            "speaker_samples_manifest_path": _path_for_override(
+                speaker_samples_manifest_path
+            )
+        },
+    }
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise BootstrapError(
+            step="input",
+            message=f"Failed to write shortcut transcript metadata file: {output_path}",
+        ) from exc
+    return output_path
+
+
+def _resolve_last_override_value(
+    *,
+    overrides: Sequence[str],
+    key: str,
+    default: str,
+) -> str:
+    """Resolve effective override value for one key using last-wins ordering."""
+    prefix = f"{key}="
+    resolved = default
+    for override in overrides:
+        if override.startswith(prefix):
+            resolved = override[len(prefix) :]
+    return resolved
+
+
+def _parse_override_bool(value: str) -> bool:
+    """Parse Hydra boolean-like override values using conservative defaults."""
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "y", "on"}
+
+
+def resolve_effective_pipeline_mode(overrides: Sequence[str]) -> EffectivePipelineMode:
+    """
+    Resolve effective pipeline stages and voice-clone toggle from CLI overrides.
+
+    Args:
+        overrides: Ordered Hydra overrides with last-wins semantics.
+
+    Returns:
+        Effective mode values consumed by runtime guardrails.
+    """
+    start_stage = _resolve_last_override_value(
+        overrides=overrides,
+        key="pipeline.start_stage",
+        default="audio",
+    ).strip().lower()
+    stop_stage = _resolve_last_override_value(
+        overrides=overrides,
+        key="pipeline.stop_stage",
+        default="critic",
+    ).strip().lower()
+    voice_clone_enabled = _parse_override_bool(
+        _resolve_last_override_value(
+            overrides=overrides,
+            key="audio.voice_clone.enabled",
+            default="false",
+        )
+    )
+    return EffectivePipelineMode(
+        start_stage=start_stage,
+        stop_stage=stop_stage,
+        voice_clone_enabled=voice_clone_enabled,
+    )
+
+
+def build_critic_skip_warning_messages(overrides: Sequence[str]) -> tuple[str, ...]:
+    """
+    Build warning messages when effective overrides skip the critic stage.
+
+    Args:
+        overrides: Ordered Hydra overrides with last-wins semantics.
+
+    Returns:
+        Warning lines to print before pipeline execution.
+    """
+    mode = resolve_effective_pipeline_mode(overrides)
+    if mode.stop_stage != "summarizer":
+        return ()
+    if mode.start_stage not in {"audio", "transcript"}:
+        return ()
+
+    warnings = [
+        (
+            "Effective pipeline mode sets pipeline.stop_stage=summarizer. "
+            "Critic will be skipped for this run."
+        ),
+        "Set --override pipeline.stop_stage=critic to run Summarizer -> Critic.",
+    ]
+    if mode.voice_clone_enabled:
+        warnings.append(
+            "audio.voice_clone.enabled=true, so the summarizer output will "
+            "continue directly to voice clone."
+        )
+    return tuple(warnings)
+
+
+def requires_audio_path_input(overrides: Sequence[str]) -> bool:
+    """
+    Return whether runtime audio path input is required for the effective stage plan.
+
+    Args:
+        overrides: Ordered Hydra overrides with last-wins semantics.
+
+    Returns:
+        ``True`` when effective ``pipeline.start_stage`` is ``audio``.
+    """
+    start_stage = _resolve_last_override_value(
+        overrides=overrides,
+        key="pipeline.start_stage",
+        default="audio",
+    ).strip().lower()
+    return start_stage == "audio"
+
+
+def build_run_overrides(*, run_id: str, audio_path: Path | None = None) -> list[str]:
     """
     Build deterministic Hydra overrides for full pipeline + voice cloning run.
 
     Args:
-        audio_path: Resolved source audio path.
         run_id: UTC run identifier.
+        audio_path: Optional resolved source audio path.
 
     Returns:
         Ordered list of Hydra override key-value strings.
@@ -593,10 +906,9 @@ def build_run_overrides(*, audio_path: Path, run_id: str) -> list[str]:
     run_work_dir = (REPO_ROOT / "artifacts" / "audio_stage" / "runs" / run_id).resolve()
     transcript_path = (REPO_ROOT / "artifacts" / "transcripts" / f"{run_id}.transcript.json")
     transcript_path = transcript_path.resolve()
-    return [
+    overrides = [
         "pipeline.start_stage=audio",
         "pipeline.stop_stage=critic",
-        f"audio.audio_path={_path_for_override(audio_path)}",
         f"audio.work_dir={_path_for_override(run_work_dir)}",
         f"audio.output_transcript_path={_path_for_override(transcript_path)}",
         f"transcript_path={_path_for_override(transcript_path)}",
@@ -607,6 +919,7 @@ def build_run_overrides(*, audio_path: Path, run_id: str) -> list[str]:
         "audio.voice_clone.provider=indextts",
         "audio.voice_clone.execution_backend=subprocess",
         "logging.print_to_terminal=true",
+        "logging.summarizer_critic_print_to_terminal=false",
         f"audio.voice_clone.runner_project_dir={_path_for_override(INDEX_TTS_DIR)}",
         (
             "audio.voice_clone.cfg_path="
@@ -614,6 +927,9 @@ def build_run_overrides(*, audio_path: Path, run_id: str) -> list[str]:
         ),
         f"audio.voice_clone.model_dir={_path_for_override(INDEX_TTS_DIR / 'checkpoints')}",
     ]
+    if audio_path is not None:
+        overrides.append(f"audio.audio_path={_path_for_override(audio_path)}")
+    return overrides
 
 
 def _path_for_override(path: Path) -> str:
@@ -726,14 +1042,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         print("[5/6] Resolve runtime input")
-        audio_path = prompt_or_validate_audio_path(args.audio_path)
-        records.append(
-            StepRecord(name="input", status="ok", detail=f"audio_path={audio_path}")
+        run_id = utc_now_compact()
+        base_overrides = build_run_overrides(run_id=run_id)
+        shortcut_overrides = build_shortcut_overrides(
+            voiceclone_from_summary=args.voiceclone_from_summary,
+            run_id=run_id,
         )
+        pass_through_overrides = normalize_cli_overrides(args.override)
+        overrides = [*base_overrides, *shortcut_overrides, *pass_through_overrides]
+        if requires_audio_path_input(overrides):
+            audio_path = prompt_or_validate_audio_path(args.audio_path)
+            overrides.append(f"audio.audio_path={_path_for_override(audio_path)}")
+            records.append(
+                StepRecord(name="input", status="ok", detail=f"audio_path={audio_path}")
+            )
+        elif args.audio_path is not None:
+            audio_path = resolve_audio_input(args.audio_path)
+            overrides.append(f"audio.audio_path={_path_for_override(audio_path)}")
+            records.append(
+                StepRecord(
+                    name="input",
+                    status="ok",
+                    detail=f"audio_path={audio_path} (optional)",
+                )
+            )
+        else:
+            records.append(
+                StepRecord(
+                    name="input",
+                    status="ok",
+                    detail="audio_path=not_required_for_selected_stage",
+                )
+            )
+
+        warning_messages = build_critic_skip_warning_messages(overrides)
+        for message in warning_messages:
+            print(f"[warning] {message}")
 
         print("[6/6] Running pipeline")
-        run_id = utc_now_compact()
-        overrides = build_run_overrides(audio_path=audio_path, run_id=run_id)
         run_pipeline(uv_executable=args.uv_executable, overrides=overrides)
         records.append(
             StepRecord(

@@ -8,6 +8,7 @@ import sys
 import time
 
 from audio_pipeline.contracts import SourceSeparator
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import NonRetryableAudioStageError, RetryableAudioStageError
 from audio_pipeline.runtime import ensure_command_available, ensure_module_available
 
@@ -39,6 +40,7 @@ class DemucsSourceSeparator(SourceSeparator):
         output_dir: Path,
         *,
         device: str,
+        progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
         Separate input audio and return vocals file path.
@@ -47,6 +49,7 @@ class DemucsSourceSeparator(SourceSeparator):
             input_audio_path: Path to source audio file.
             output_dir: Directory where demucs outputs stems.
             device: Runtime device (``cpu`` or ``cuda``).
+            progress_callback: Optional callback for progress updates.
 
         Returns:
             Path to generated ``vocals.wav`` file.
@@ -58,6 +61,17 @@ class DemucsSourceSeparator(SourceSeparator):
 
         ensure_module_available("demucs")
         ensure_command_available("ffmpeg")
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        completed_units=0,
+                        total_units=1,
+                        note="demucs separation started",
+                    )
+                )
+            except Exception:
+                pass
 
         output_dir.mkdir(parents=True, exist_ok=True)
         command = [
@@ -103,10 +117,32 @@ class DemucsSourceSeparator(SourceSeparator):
 
         vocals_path = output_dir / self.model_name / input_audio_path.stem / "vocals.wav"
         if vocals_path.exists():
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        StageProgressUpdate(
+                            completed_units=1,
+                            total_units=1,
+                            note="demucs separation finished",
+                        )
+                    )
+                except Exception:
+                    pass
             return vocals_path
 
         fallback = next(output_dir.rglob("vocals.wav"), None)
         if fallback is not None and fallback.exists():
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        StageProgressUpdate(
+                            completed_units=1,
+                            total_units=1,
+                            note="demucs separation finished",
+                        )
+                    )
+                except Exception:
+                    pass
             return fallback
 
         raise NonRetryableAudioStageError(
