@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
 from audio_pipeline.runtime import utc_now_iso
 
@@ -152,6 +153,7 @@ class SpeakerSampleGenerator:
         transcript_payload: Mapping[str, Any],
         source_audio_path: Path,
         output_dir: Path,
+        progress_callback: StageProgressCallback | None = None,
     ) -> SpeakerSampleGenerationResult:
         """
         Generate per-speaker sample files and a machine-readable manifest.
@@ -160,6 +162,7 @@ class SpeakerSampleGenerator:
             transcript_payload: Normalized transcript payload containing segments.
             source_audio_path: Source audio used for clipping.
             output_dir: Target directory for generated artifacts.
+            progress_callback: Optional callback invoked after progress updates.
 
         Returns:
             Structured generation result containing artifact and manifest paths.
@@ -183,6 +186,18 @@ class SpeakerSampleGenerator:
         output_dir.mkdir(parents=True, exist_ok=True)
         used_filenames: set[str] = set()
         artifacts: list[SpeakerSampleArtifact] = []
+        total_plan_count = len(plans)
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        completed_units=0,
+                        total_units=total_plan_count,
+                        note="speaker sample generation started",
+                    )
+                )
+            except Exception:
+                pass
         for plan in plans:
             output_path = output_dir / _build_unique_filename(
                 speaker=plan.speaker,
@@ -205,6 +220,17 @@ class SpeakerSampleGenerator:
                     ranges_ms=plan.slices,
                 )
             )
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        StageProgressUpdate(
+                            completed_units=len(artifacts),
+                            total_units=total_plan_count,
+                            note=f"speaker sample exported for {plan.speaker}",
+                        )
+                    )
+                except Exception:
+                    pass
 
         generated_at_utc = utc_now_iso()
         manifest: SpeakerSampleManifest = {

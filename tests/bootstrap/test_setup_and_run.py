@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 
@@ -204,10 +205,145 @@ def test_build_run_overrides_include_required_voice_clone_settings(
     assert override_map["audio.voice_clone.enabled"] == "true"
     assert override_map["audio.voice_clone.execution_backend"] == "subprocess"
     assert override_map["logging.print_to_terminal"] == "true"
+    assert override_map["logging.summarizer_critic_print_to_terminal"] == "false"
     assert override_map["audio.speaker_samples.source_audio"] == "vocals"
     assert override_map["audio.speaker_samples.target_duration_seconds"] == "30"
     assert "\\" not in override_map["audio.audio_path"]
     assert override_map["audio.audio_path"].endswith("input audio.wav")
+
+
+def test_build_run_overrides_can_omit_audio_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    index_tts_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+
+    overrides = bootstrap.build_run_overrides(run_id="20260302_120000")
+    override_map = dict(entry.split("=", 1) for entry in overrides)
+
+    assert "audio.audio_path" not in override_map
+    assert override_map["pipeline.start_stage"] == "audio"
+
+
+def test_normalize_cli_overrides_rejects_malformed_values() -> None:
+    with pytest.raises(bootstrap.BootstrapError, match="Expected KEY=VALUE"):
+        bootstrap.normalize_cli_overrides(["pipeline.start_stage"])
+
+
+def test_build_shortcut_overrides_for_voiceclone_from_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    summary_path = repo_root / "outputs" / "summary.xml"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
+    manifest_path = (
+        repo_root
+        / "artifacts"
+        / "audio_stage"
+        / "runs"
+        / "20260302_120000"
+        / "speaker_samples"
+        / "manifest.json"
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text('{"samples": []}', encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    overrides = bootstrap.build_shortcut_overrides(
+        voiceclone_from_summary="outputs/summary.xml",
+        run_id="20260302_130000",
+    )
+    override_map = dict(entry.split("=", 1) for entry in overrides)
+
+    assert override_map["pipeline.start_stage"] == "draft"
+    assert override_map["pipeline.stop_stage"] == "summarizer"
+    assert override_map["pipeline.draft_path"].endswith("/outputs/summary.xml")
+    assert override_map["audio.speaker_samples.enabled"] == "false"
+    assert override_map["audio.voice_clone.enabled"] == "true"
+    shortcut_transcript = Path(override_map["transcript_path"])
+    assert shortcut_transcript.exists()
+    payload = json.loads(shortcut_transcript.read_text(encoding="utf-8"))
+    assert payload["metadata"]["speaker_samples_manifest_path"] == manifest_path.as_posix()
+
+
+def test_build_shortcut_overrides_requires_existing_speaker_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    summary_path = repo_root / "outputs" / "summary.xml"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    with pytest.raises(bootstrap.BootstrapError, match="No speaker-sample manifest"):
+        bootstrap.build_shortcut_overrides(
+            voiceclone_from_summary="outputs/summary.xml",
+            run_id="20260302_130001",
+        )
+
+
+def test_requires_audio_path_input_uses_last_override_wins() -> None:
+    assert (
+        bootstrap.requires_audio_path_input(
+            [
+                "pipeline.start_stage=audio",
+                "pipeline.start_stage=transcript",
+            ]
+        )
+        is False
+    )
+    assert bootstrap.requires_audio_path_input(["pipeline.start_stage=audio"]) is True
+
+
+def test_build_critic_skip_warning_messages_warns_for_summarizer_stop() -> None:
+    warnings = bootstrap.build_critic_skip_warning_messages(
+        [
+            "pipeline.start_stage=transcript",
+            "pipeline.stop_stage=summarizer",
+            "audio.voice_clone.enabled=true",
+        ]
+    )
+
+    assert len(warnings) == 3
+    assert "Critic will be skipped" in warnings[0]
+    assert "pipeline.stop_stage=critic" in warnings[1]
+    assert "directly to voice clone" in warnings[2]
+
+
+def test_build_critic_skip_warning_messages_no_warning_for_critic_stop() -> None:
+    warnings = bootstrap.build_critic_skip_warning_messages(
+        [
+            "pipeline.start_stage=transcript",
+            "pipeline.stop_stage=critic",
+            "audio.voice_clone.enabled=true",
+        ]
+    )
+
+    assert warnings == ()
+
+
+def test_build_critic_skip_warning_messages_no_warning_for_draft_shortcut() -> None:
+    warnings = bootstrap.build_critic_skip_warning_messages(
+        [
+            "pipeline.start_stage=draft",
+            "pipeline.stop_stage=summarizer",
+            "audio.voice_clone.enabled=true",
+        ]
+    )
+
+    assert warnings == ()
 
 
 def test_resolve_audio_input_supports_relative_path(

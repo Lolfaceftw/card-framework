@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
 from audio_pipeline.voice_clone_contracts import (
     VoiceCloneArtifact,
@@ -50,6 +51,7 @@ class VoiceCloneOrchestrator:
         *,
         summary_xml: str,
         speaker_samples_manifest_path: Path,
+        progress_callback: StageProgressCallback | None = None,
     ) -> VoiceCloneRunResult:
         """
         Run voice cloning for each speaker turn in summary XML.
@@ -57,6 +59,7 @@ class VoiceCloneOrchestrator:
         Args:
             summary_xml: Final summary XML containing speaker-tagged turns.
             speaker_samples_manifest_path: Path to speaker-sample manifest JSON.
+            progress_callback: Optional callback invoked after progress updates.
 
         Returns:
             Structured run result including synthesized artifacts and manifest path.
@@ -67,9 +70,21 @@ class VoiceCloneOrchestrator:
         """
         turns = _parse_summary_turns(summary_xml)
         sample_refs = _load_speaker_sample_references(speaker_samples_manifest_path)
+        total_turns = len(turns)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         artifacts: list[VoiceCloneArtifact] = []
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        completed_units=0,
+                        total_units=total_turns,
+                        note="voice clone stage started",
+                    )
+                )
+            except Exception:
+                pass
         for index, turn in enumerate(turns, start=1):
             reference = sample_refs.get(turn.speaker)
             if reference is None:
@@ -90,6 +105,7 @@ class VoiceCloneOrchestrator:
                     reference_audio_path=reference.path,
                     text=turn.text,
                     output_audio_path=output_audio_path,
+                    progress_callback=progress_callback,
                 )
             except Exception as exc:
                 if self.fail_on_error:
@@ -108,6 +124,17 @@ class VoiceCloneOrchestrator:
                     output_audio_path=rendered_path,
                 )
             )
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        StageProgressUpdate(
+                            completed_units=len(artifacts),
+                            total_units=total_turns,
+                            note=f"voice clone artifact generated for turn {index}",
+                        )
+                    )
+                except Exception:
+                    pass
 
         if not artifacts:
             raise NonRetryableAudioStageError(

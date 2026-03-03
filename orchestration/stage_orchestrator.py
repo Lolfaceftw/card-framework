@@ -4,8 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
+import threading
+import time
 
 from audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
+from audio_pipeline.eta import (
+    DynamicEtaTracker,
+    StageEtaStrategy,
+    StageProgressCallback,
+    StageProgressUpdate,
+    UnitStageEtaLearner,
+    UnitStageEtaStrategy,
+    format_eta_seconds,
+)
 from events import event_bus
 from orchestrator import Orchestrator
 from pipeline_plan import PipelineStagePlan
@@ -24,6 +36,11 @@ class StageOrchestrator:
     max_words: int
     max_iterations: int
     voice_clone_orchestrator: VoiceCloneOrchestrator | None = None
+    eta_strategy: StageEtaStrategy | None = None
+    eta_update_interval_seconds: float = 10.0
+    eta_progress_smoothing: float = 0.25
+    eta_overrun_factor: float = 1.15
+    eta_headroom_seconds: float = 1.0
 
     async def run(
         self,
@@ -50,8 +67,7 @@ class StageOrchestrator:
         await self._run_full_loop(full_text=full_text, transcript=transcript_dto)
 
     async def _run_draft_stage(self, *, full_text: str, transcript: Transcript) -> None:
-        """Run critic-only evaluation for a pre-existing draft file."""
-        del transcript
+        """Run draft-based stage flow for a pre-existing summary XML file."""
         if self.stage_plan.draft_path is None:
             raise ValueError("pipeline.draft_path must be set when start_stage=draft.")
         if not self.stage_plan.draft_path.exists():
@@ -60,6 +76,22 @@ class StageOrchestrator:
         draft = self.stage_plan.draft_path.read_text(encoding="utf-8").strip()
         if not draft:
             raise ValueError(f"Draft file is empty: {self.stage_plan.draft_path}")
+
+        if self.stage_plan.stop_stage == "summarizer":
+            summary_path = write_summary_xml_to_workspace(draft, self.project_root)
+            event_bus.publish(
+                "status_message",
+                f"Saved summary to {summary_path}",
+            )
+            event_bus.publish(
+                "status_message",
+                (
+                    "Using existing draft summary XML for voice cloning from "
+                    f"{self.stage_plan.draft_path}"
+                ),
+            )
+            self._run_voice_clone_stage(summary_xml=draft, transcript=transcript)
+            return
 
         verdict = await self.orchestrator.run_critic_once(
             draft=draft,
@@ -95,6 +127,11 @@ class StageOrchestrator:
             "agent_message",
             "Summarizer",
             f"Single-pass Summary:\n```xml\n{summary}\n```",
+        )
+        summary_path = write_summary_xml_to_workspace(summary, self.project_root)
+        event_bus.publish(
+            "status_message",
+            f"Saved summary to {summary_path}",
         )
         self._run_voice_clone_stage(summary_xml=summary, transcript=transcript)
 
@@ -141,21 +178,130 @@ class StageOrchestrator:
         manifest_path = Path(manifest_path_value)
         if not manifest_path.is_absolute():
             manifest_path = (self.project_root / manifest_path).resolve()
-        event_bus.publish(
-            "system_message",
-            (
-                "Running voice cloning from speaker samples using manifest "
-                f"{manifest_path}"
-            ),
-        )
-        result = self.voice_clone_orchestrator.run(
-            summary_xml=summary_xml,
-            speaker_samples_manifest_path=manifest_path,
-        )
+        expected_turn_count = _count_summary_turns(summary_xml)
+        eta_tracker: DynamicEtaTracker | None = None
+        if (
+            expected_turn_count > 0
+            and isinstance(self.eta_strategy, UnitStageEtaStrategy)
+        ):
+            estimated_total_seconds = self.eta_strategy.estimate_unit_stage_total_seconds(
+                stage="voice_clone",
+                total_units=expected_turn_count,
+            )
+            if estimated_total_seconds is not None:
+                eta_tracker = DynamicEtaTracker(
+                    initial_total_seconds=estimated_total_seconds,
+                    progress_smoothing=self.eta_progress_smoothing,
+                    overrun_factor=self.eta_overrun_factor,
+                    headroom_seconds=self.eta_headroom_seconds,
+                )
+        if eta_tracker is None:
+            event_bus.publish(
+                "system_message",
+                (
+                    "Running voice cloning from speaker samples using manifest "
+                    f"{manifest_path}"
+                ),
+            )
+        else:
+            event_bus.publish(
+                "system_message",
+                (
+                    "Running voice cloning from speaker samples using manifest "
+                    f"{manifest_path} (estimated time left "
+                    f"{format_eta_seconds(eta_tracker.initial_total_seconds)})"
+                ),
+            )
+
+        started_at = time.monotonic()
+        tracker_lock = threading.Lock()
+        stop_event = threading.Event()
+        ticker_thread: threading.Thread | None = None
+
+        progress_callback: StageProgressCallback | None = None
+        if eta_tracker is not None:
+            def _on_progress(update: StageProgressUpdate) -> None:
+                elapsed_seconds = max(0.0, time.monotonic() - started_at)
+                with tracker_lock:
+                    eta_tracker.observe_progress(
+                        elapsed_seconds=elapsed_seconds,
+                        update=update,
+                    )
+
+            progress_callback = _on_progress
+
+            if self.eta_update_interval_seconds > 0:
+                def _ticker() -> None:
+                    while not stop_event.wait(self.eta_update_interval_seconds):
+                        elapsed_seconds = max(0.0, time.monotonic() - started_at)
+                        with tracker_lock:
+                            remaining_seconds = eta_tracker.estimate_signed_remaining_seconds(
+                                elapsed_seconds=elapsed_seconds
+                            )
+                        if remaining_seconds >= 0:
+                            event_bus.publish(
+                                "status_message",
+                                (
+                                    "Voice clone stage: estimated time left "
+                                    f"{format_eta_seconds(remaining_seconds)}"
+                                ),
+                                inline=True,
+                            )
+                            continue
+                        event_bus.publish(
+                            "status_message",
+                            (
+                                "Voice clone stage: running longer than estimate by "
+                                f"{format_eta_seconds(abs(remaining_seconds))}"
+                            ),
+                            inline=True,
+                        )
+
+                ticker_thread = threading.Thread(target=_ticker, daemon=True)
+                ticker_thread.start()
+
+        try:
+            result = self.voice_clone_orchestrator.run(
+                summary_xml=summary_xml,
+                speaker_samples_manifest_path=manifest_path,
+                progress_callback=progress_callback,
+            )
+        finally:
+            stop_event.set()
+            if ticker_thread is not None:
+                ticker_thread.join(timeout=0.2)
+
+        elapsed_seconds = max(0.0, time.monotonic() - started_at)
+        if (
+            isinstance(self.eta_strategy, UnitStageEtaLearner)
+            and len(result.artifacts) > 0
+        ):
+            try:
+                self.eta_strategy.observe_unit_stage_duration(
+                    stage="voice_clone",
+                    total_units=len(result.artifacts),
+                    elapsed_seconds=elapsed_seconds,
+                )
+            except Exception:
+                event_bus.publish(
+                    "system_message",
+                    "Voice clone stage: ETA learning update skipped.",
+                )
         event_bus.publish(
             "status_message",
             (
                 f"Voice cloning complete: {len(result.artifacts)} artifacts "
-                f"written to {result.output_dir}"
+                f"written to {result.output_dir} in {format_eta_seconds(elapsed_seconds)}"
             ),
         )
+
+
+def _count_summary_turns(summary_xml: str) -> int:
+    """Return number of speaker-tagged turns in summary XML."""
+    return len(
+        re.findall(
+            r"<([A-Za-z0-9_.-]+)>.*?</\1>",
+            summary_xml,
+            flags=re.DOTALL,
+        )
+    )

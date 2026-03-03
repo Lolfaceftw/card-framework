@@ -73,9 +73,9 @@ def build_pipeline_stage_plan(
     draft_path_value = str(pipeline_cfg.get("draft_path", "")).strip()
 
     if start_stage == "draft":
-        if stop_stage != "critic":
+        if stop_stage not in {"summarizer", "critic"}:
             raise ValueError(
-                "pipeline.start_stage=draft requires pipeline.stop_stage=critic."
+                "pipeline.start_stage=draft requires pipeline.stop_stage in {summarizer, critic}."
             )
         if not draft_path_value:
             raise ValueError(

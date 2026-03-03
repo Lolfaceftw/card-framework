@@ -42,12 +42,21 @@ def test_build_pipeline_stage_plan_resolves_draft_path(tmp_path: Path) -> None:
 def test_build_pipeline_stage_plan_validates_draft_requirements(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         build_pipeline_stage_plan(
-            {"start_stage": "draft", "stop_stage": "summarizer", "draft_path": "x"},
-            project_root=tmp_path,
-        )
-
-    with pytest.raises(ValueError):
-        build_pipeline_stage_plan(
             {"start_stage": "draft", "stop_stage": "critic", "draft_path": ""},
             project_root=tmp_path,
         )
+
+
+def test_build_pipeline_stage_plan_supports_draft_to_voiceclone_mode(
+    tmp_path: Path,
+) -> None:
+    plan = build_pipeline_stage_plan(
+        {"start_stage": "draft", "stop_stage": "summarizer", "draft_path": "summary.xml"},
+        project_root=tmp_path,
+    )
+
+    assert plan.start_stage == "draft"
+    assert plan.stop_stage == "summarizer"
+    assert plan.draft_path == (tmp_path / "summary.xml").resolve()
+    assert plan.run_summarizer_stage is False
+    assert plan.run_critic_stage is False

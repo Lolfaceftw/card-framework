@@ -66,7 +66,9 @@ class _FakeVoiceCloneOrchestrator:
         *,
         summary_xml: str,
         speaker_samples_manifest_path: Path,
+        progress_callback=None,
     ) -> _FakeVoiceCloneResult:
+        del progress_callback
         self.summary_xml = summary_xml
         self.manifest_path = speaker_samples_manifest_path
         return _FakeVoiceCloneResult(output_dir=self.output_dir, artifacts=("turn.wav",))
@@ -110,6 +112,9 @@ def test_run_summarizer_stage_uses_full_transcript_when_retrieval_disabled(
     assert (
         fake_orchestrator.summarizer_kwargs["full_transcript_text"]
         == "[SPEAKER_00]: hello world\n"
+    )
+    assert (tmp_path / "summary.xml").read_text(encoding="utf-8") == (
+        "<SPEAKER_00>summary</SPEAKER_00>\n"
     )
 
 
@@ -156,6 +161,45 @@ def test_run_draft_stage_reads_existing_draft(tmp_path: Path) -> None:
 
     assert fake_orchestrator.critic_kwargs is not None
     assert fake_orchestrator.critic_kwargs["draft"] == "<SPEAKER_00>draft</SPEAKER_00>"
+
+
+def test_run_draft_stage_with_summarizer_stop_triggers_voice_clone(tmp_path: Path) -> None:
+    """Use draft XML directly as voice-clone input when stop_stage=summarizer."""
+    fake_orchestrator = _FakeOrchestrator()
+    fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
+    draft_path = tmp_path / "summary.xml"
+    draft_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
+    stage_orchestrator = _build_stage_orchestrator(
+        stage_plan=PipelineStagePlan(
+            start_stage="draft",
+            stop_stage="summarizer",
+            draft_path=draft_path,
+        ),
+        fake_orchestrator=fake_orchestrator,
+        project_root=tmp_path,
+        fake_voice_clone_orchestrator=fake_voice_clone,
+    )
+
+    asyncio.run(
+        stage_orchestrator.run(
+            transcript={
+                "segments": [],
+                "metadata": {
+                    "speaker_samples_manifest_path": "speaker_samples/manifest.json"
+                },
+            },
+            retrieval_enabled=False,
+        )
+    )
+
+    assert fake_orchestrator.critic_kwargs is None
+    assert (tmp_path / "summary.xml").read_text(encoding="utf-8") == (
+        "<SPEAKER_00>hello</SPEAKER_00>\n"
+    )
+    assert fake_voice_clone.summary_xml == "<SPEAKER_00>hello</SPEAKER_00>"
+    assert fake_voice_clone.manifest_path == (
+        tmp_path / "speaker_samples" / "manifest.json"
+    ).resolve()
 
 
 def test_run_accepts_legacy_raw_transcript_dict(tmp_path: Path) -> None:

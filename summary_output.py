@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def write_summary_xml_to_workspace(summary_xml: str, workspace_root: Path) -> Path:
-    """Persist a critic-approved XML summary at workspace root as ``summary.xml``."""
+    """Persist an XML summary at workspace root as ``summary.xml``."""
     output_path = workspace_root / "summary.xml"
     normalized_summary = summary_xml.strip()
     output_path.write_text(

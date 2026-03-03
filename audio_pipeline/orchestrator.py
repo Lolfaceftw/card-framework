@@ -17,7 +17,10 @@ from audio_pipeline.contracts import (
 )
 from audio_pipeline.eta import (
     AudioStageName,
+    DynamicEtaTracker,
     EtaProfilePersistence,
+    StageProgressCallback,
+    StageProgressUpdate,
     StageEtaLearner,
     StageEtaStrategy,
     default_stage_eta_strategy,
@@ -56,6 +59,9 @@ class AudioToScriptOrchestrator:
     default_speaker: str = "SPEAKER_00"
     eta_strategy: StageEtaStrategy = field(default_factory=default_stage_eta_strategy)
     eta_update_interval_seconds: float = 10.0
+    eta_progress_smoothing: float = 0.25
+    eta_overrun_factor: float = 1.15
+    eta_headroom_seconds: float = 1.0
     eta_profile_filename: str = "eta_profile.json"
 
     def run(
@@ -99,10 +105,11 @@ class AudioToScriptOrchestrator:
                 description=f"separating sources from {input_audio_path}",
                 audio_duration_ms=source_duration_ms,
                 device=device,
-                operation=lambda: self.separator.separate_vocals(
+                operation=lambda progress_callback: self.separator.separate_vocals(
                     input_audio_path=input_audio_path,
                     output_dir=work_dir / "separation",
                     device=device,
+                    progress_callback=progress_callback,
                 ),
             )
 
@@ -112,7 +119,11 @@ class AudioToScriptOrchestrator:
                 description=f"transcribing vocals {vocals_path}",
                 audio_duration_ms=vocals_duration_ms,
                 device=device,
-                operation=lambda: self.transcriber.transcribe(vocals_path, device=device),
+                operation=lambda progress_callback: self.transcriber.transcribe(
+                    vocals_path,
+                    device=device,
+                    progress_callback=progress_callback,
+                ),
             )
 
             diarization_turns = self._run_stage_with_eta(
@@ -120,10 +131,11 @@ class AudioToScriptOrchestrator:
                 description="running NeMo diarization",
                 audio_duration_ms=vocals_duration_ms,
                 device=device,
-                operation=lambda: self.diarizer.diarize(
+                operation=lambda progress_callback: self.diarizer.diarize(
                     audio_path=vocals_path,
                     output_dir=work_dir / "diarization",
                     device=device,
+                    progress_callback=progress_callback,
                 ),
             )
             if len(diarization_turns) <= 1:
@@ -177,7 +189,7 @@ class AudioToScriptOrchestrator:
         description: str,
         audio_duration_ms: int | None,
         device: str,
-        operation: Callable[[], T],
+        operation: Callable[[StageProgressCallback | None], T],
     ) -> T:
         """
         Execute one stage while publishing periodic ETA updates.
@@ -201,29 +213,49 @@ class AudioToScriptOrchestrator:
             device=device,
         )
         started_at = time.monotonic()
+        eta_tracker = self._build_stage_eta_tracker(
+            estimated_total_seconds=estimated_total_seconds,
+            audio_duration_ms=audio_duration_ms,
+        )
+        tracker_lock = threading.Lock()
 
-        if estimated_total_seconds is None:
+        def _progress_callback(update: StageProgressUpdate) -> None:
+            if eta_tracker is None:
+                return
+            elapsed_seconds = max(0.0, time.monotonic() - started_at)
+            with tracker_lock:
+                try:
+                    eta_tracker.observe_progress(
+                        elapsed_seconds=elapsed_seconds,
+                        update=update,
+                    )
+                except Exception:
+                    return
+
+        if eta_tracker is None:
             event_bus.publish("system_message", f"Audio stage: {description}")
         else:
+            initial_remaining_seconds = eta_tracker.initial_total_seconds
             event_bus.publish(
                 "system_message",
                 (
                     f"Audio stage: {description} "
-                    f"(estimated time left {format_eta_seconds(estimated_total_seconds)})"
+                    f"(estimated time left {format_eta_seconds(initial_remaining_seconds)})"
                 ),
             )
 
         stop_event = threading.Event()
         ticker_thread: threading.Thread | None = None
         if (
-            estimated_total_seconds is not None
+            eta_tracker is not None
             and self.eta_update_interval_seconds > 0
         ):
             ticker_thread = threading.Thread(
                 target=self._publish_eta_updates,
                 kwargs={
                     "stage": stage,
-                    "estimated_total_seconds": estimated_total_seconds,
+                    "eta_tracker": eta_tracker,
+                    "tracker_lock": tracker_lock,
                     "started_at": started_at,
                     "stop_event": stop_event,
                 },
@@ -232,7 +264,7 @@ class AudioToScriptOrchestrator:
             ticker_thread.start()
 
         try:
-            result = operation()
+            result = operation(_progress_callback if eta_tracker is not None else None)
         except Exception:
             self._stop_eta_updates(stop_event=stop_event, ticker_thread=ticker_thread)
             elapsed_seconds = time.monotonic() - started_at
@@ -276,14 +308,18 @@ class AudioToScriptOrchestrator:
         self,
         *,
         stage: AudioStageName,
-        estimated_total_seconds: float,
+        eta_tracker: DynamicEtaTracker,
+        tracker_lock: threading.Lock,
         started_at: float,
         stop_event: threading.Event,
     ) -> None:
         """Emit periodic ETA updates until stage completion."""
         while not stop_event.wait(self.eta_update_interval_seconds):
             elapsed_seconds = max(0.0, time.monotonic() - started_at)
-            remaining_seconds = estimated_total_seconds - elapsed_seconds
+            with tracker_lock:
+                remaining_seconds = eta_tracker.estimate_signed_remaining_seconds(
+                    elapsed_seconds=elapsed_seconds
+                )
             if remaining_seconds >= 0:
                 event_bus.publish(
                     "status_message",
@@ -302,6 +338,24 @@ class AudioToScriptOrchestrator:
                 ),
                 inline=True,
             )
+
+    def _build_stage_eta_tracker(
+        self,
+        *,
+        estimated_total_seconds: float | None,
+        audio_duration_ms: int | None,
+    ) -> DynamicEtaTracker | None:
+        """Build dynamic ETA tracker for one stage run when baseline estimate exists."""
+        if estimated_total_seconds is None:
+            return None
+        total_audio_ms = audio_duration_ms if audio_duration_ms and audio_duration_ms > 0 else None
+        return DynamicEtaTracker(
+            initial_total_seconds=estimated_total_seconds,
+            progress_smoothing=self.eta_progress_smoothing,
+            overrun_factor=self.eta_overrun_factor,
+            headroom_seconds=self.eta_headroom_seconds,
+            total_audio_ms=total_audio_ms,
+        )
 
     def _stop_eta_updates(
         self,

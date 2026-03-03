@@ -4,8 +4,10 @@ import json
 import pytest
 
 from audio_pipeline.eta import (
+    DynamicEtaTracker,
     LinearStageEtaStrategy,
     StageSpeedProfile,
+    StageProgressUpdate,
     format_eta_seconds,
 )
 
@@ -68,6 +70,44 @@ def test_linear_eta_strategy_refits_from_observed_throughput() -> None:
     assert adapted == 20.0
 
 
+def test_linear_eta_strategy_estimates_unit_stage_from_defaults() -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+
+    estimated = strategy.estimate_unit_stage_total_seconds(
+        stage="speaker_samples",
+        total_units=3,
+    )
+    assert estimated == 24.0
+
+
+def test_linear_eta_strategy_refits_unit_stage_throughput() -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+    baseline = strategy.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    )
+    assert baseline == 40.0
+
+    strategy.observe_unit_stage_duration(
+        stage="voice_clone",
+        total_units=2,
+        elapsed_seconds=60.0,
+    )
+    adapted = strategy.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    )
+    assert adapted == 60.0
+
+
 def test_linear_eta_strategy_profile_round_trip(tmp_path: Path) -> None:
     strategy = LinearStageEtaStrategy(
         separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
@@ -79,6 +119,11 @@ def test_linear_eta_strategy_profile_round_trip(tmp_path: Path) -> None:
         audio_duration_ms=5_000,
         elapsed_seconds=15.0,
         device="cpu",
+    )
+    strategy.observe_unit_stage_duration(
+        stage="speaker_samples",
+        total_units=3,
+        elapsed_seconds=21.0,
     )
 
     profile_path = tmp_path / "eta_profile.json"
@@ -96,7 +141,12 @@ def test_linear_eta_strategy_profile_round_trip(tmp_path: Path) -> None:
         audio_duration_ms=5_000,
         device="cpu",
     )
+    unit_estimate = reloaded.estimate_unit_stage_total_seconds(
+        stage="speaker_samples",
+        total_units=3,
+    )
     assert estimate == 15.0
+    assert unit_estimate == 21.0
 
 
 def test_linear_eta_strategy_ignores_context_mismatch(tmp_path: Path) -> None:
@@ -142,3 +192,26 @@ def test_linear_eta_strategy_validates_learning_bounds() -> None:
             diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
             learning_rate=1.5,
         )
+
+
+def test_dynamic_eta_tracker_reestimates_total_from_progress() -> None:
+    tracker = DynamicEtaTracker(
+        initial_total_seconds=100.0,
+        progress_smoothing=1.0,
+    )
+    tracker.observe_progress(
+        elapsed_seconds=10.0,
+        update=StageProgressUpdate(completed_units=2, total_units=10),
+    )
+    remaining = tracker.estimate_signed_remaining_seconds(elapsed_seconds=10.0)
+    assert remaining == 40.0
+
+
+def test_dynamic_eta_tracker_inflates_after_overrun() -> None:
+    tracker = DynamicEtaTracker(
+        initial_total_seconds=5.0,
+        overrun_factor=1.2,
+    )
+    remaining = tracker.estimate_signed_remaining_seconds(elapsed_seconds=10.0)
+    assert remaining < 0
+    assert tracker.estimate_total_seconds(elapsed_seconds=10.0) == 12.0

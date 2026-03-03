@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 
 from audio_pipeline.contracts import DiarizationTurn, SpeakerDiarizer
+from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import (
     DependencyMissingError,
     NonRetryableAudioStageError,
@@ -50,6 +51,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         output_dir: Path,
         *,
         device: str,
+        progress_callback: StageProgressCallback | None = None,
     ) -> list[DiarizationTurn]:
         """
         Run diarization and return speaker turns.
@@ -58,16 +60,30 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             audio_path: Input audio path.
             output_dir: Workspace directory for NeMo artifacts.
             device: Runtime device (``cpu`` or ``cuda``).
+            progress_callback: Optional callback for progress updates.
 
         Returns:
             Ordered speaker turns.
         """
         if not audio_path.exists():
             raise NonRetryableAudioStageError(f"Audio file does not exist: {audio_path}")
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    StageProgressUpdate(
+                        completed_units=0,
+                        total_units=1,
+                        note="nemo diarization started",
+                    )
+                )
+            except Exception:
+                pass
 
+        completed = False
         try:
             turns = self._run_nemo(audio_path=audio_path, output_dir=output_dir, device=device)
             if turns:
+                completed = True
                 return turns
             raise NonRetryableAudioStageError("NeMo diarization returned zero RTTM turns.")
         except Exception as exc:
@@ -76,6 +92,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
                     raise
                 raise NonRetryableAudioStageError("NeMo diarization failed.") from exc
             fallback_end = max(1, self._probe_duration_ms(audio_path))
+            completed = True
             return [
                 DiarizationTurn(
                     speaker="SPEAKER_00",
@@ -83,6 +100,18 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
                     end_time_ms=fallback_end,
                 )
             ]
+        finally:
+            if completed and progress_callback is not None:
+                try:
+                    progress_callback(
+                        StageProgressUpdate(
+                            completed_units=1,
+                            total_units=1,
+                            note="nemo diarization completed",
+                        )
+                    )
+                except Exception:
+                    pass
 
     def _run_nemo(
         self,

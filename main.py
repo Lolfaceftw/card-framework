@@ -28,6 +28,15 @@ from audio_pipeline import (
     build_voice_clone_orchestrator,
 )
 from audio_pipeline.contracts import TranscriptPayload
+from audio_pipeline.eta import (
+    DynamicEtaTracker,
+    StageEtaStrategy,
+    StageProgressCallback,
+    StageProgressUpdate,
+    UnitStageEtaLearner,
+    UnitStageEtaStrategy,
+    format_eta_seconds,
+)
 from audio_pipeline.io import write_transcript_atomic
 from audio_pipeline.runtime import resolve_device, resolve_path
 from audio_pipeline.speaker_samples import resolve_sample_source_audio_path
@@ -37,10 +46,16 @@ from llm_provider import EmbeddingProvider, LLMProvider
 from logger_utils import configure_logger
 from orchestration import StageOrchestrator
 from orchestrator import Orchestrator
-from pipeline_plan import build_pipeline_stage_plan
+from pipeline_plan import PipelineStagePlan, build_pipeline_stage_plan
 from providers.logging_provider import LoggingLLMProvider
 from providers.response_callbacks import RichConsoleResponseCallback
 from orchestration.transcript import Transcript
+
+
+def _suppress_chatty_logger_propagation() -> None:
+    """Prevent noisy third-party logs from leaking to terminal handlers."""
+    for logger_name in ["google", "google_genai", "httpx", "a2a", "uvicorn"]:
+        logging.getLogger(logger_name).propagate = False
 
 
 def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecutor):
@@ -160,6 +175,41 @@ def _resolve_stage_llm(
     return shared_llm, "shared"
 
 
+def _build_critic_skip_warning_messages(
+    *,
+    stage_plan: PipelineStagePlan,
+    voice_clone_enabled: bool,
+) -> tuple[str, ...]:
+    """
+    Build runtime warnings when the selected stage plan bypasses Critic.
+
+    Args:
+        stage_plan: Effective pipeline stage plan.
+        voice_clone_enabled: Whether voice cloning is enabled for this run.
+
+    Returns:
+        Warning lines to emit through the event bus.
+    """
+    if stage_plan.stop_stage != "summarizer":
+        return ()
+    if stage_plan.start_stage not in {"audio", "transcript"}:
+        return ()
+
+    warnings = [
+        (
+            "WARNING: pipeline.stop_stage=summarizer disables Critic for this run. "
+            "The summary will not be critic-reviewed."
+        ),
+        "Set pipeline.stop_stage=critic to run Summarizer -> Critic.",
+    ]
+    if voice_clone_enabled:
+        warnings.append(
+            "audio.voice_clone.enabled=true, so summarizer output will proceed "
+            "directly to voice clone."
+        )
+    return tuple(warnings)
+
+
 def _run_post_transcript_speaker_sample_step(
     *,
     stage_start: str,
@@ -167,6 +217,11 @@ def _run_post_transcript_speaker_sample_step(
     project_root: Path,
     transcript_path: str,
     transcript: Transcript,
+    eta_strategy: StageEtaStrategy | None = None,
+    eta_update_interval_seconds: float = 10.0,
+    eta_progress_smoothing: float = 0.25,
+    eta_overrun_factor: float = 1.15,
+    eta_headroom_seconds: float = 1.0,
 ) -> Transcript:
     """
     Generate per-speaker voice samples after transcript availability.
@@ -206,23 +261,129 @@ def _run_post_transcript_speaker_sample_step(
         base_dir=project_root,
     )
     sample_generator = build_speaker_sample_generator(audio_cfg_dict)
-    event_bus.publish(
-        "system_message",
-        (
-            "Generating speaker voice samples from "
-            f"{source_audio_path} into {samples_output_dir}"
-        ),
+    expected_sample_count = len(
+        {
+            segment.speaker
+            for segment in transcript.segments
+            if isinstance(segment.speaker, str) and segment.speaker.strip()
+        }
     )
-    sample_result = sample_generator.generate(
-        transcript_payload=transcript.to_payload(),
-        source_audio_path=source_audio_path,
-        output_dir=samples_output_dir,
-    )
+    eta_tracker: DynamicEtaTracker | None = None
+    if (
+        expected_sample_count > 0
+        and isinstance(eta_strategy, UnitStageEtaStrategy)
+    ):
+        estimated_total_seconds = eta_strategy.estimate_unit_stage_total_seconds(
+            stage="speaker_samples",
+            total_units=expected_sample_count,
+        )
+        if estimated_total_seconds is not None:
+            eta_tracker = DynamicEtaTracker(
+                initial_total_seconds=estimated_total_seconds,
+                progress_smoothing=eta_progress_smoothing,
+                overrun_factor=eta_overrun_factor,
+                headroom_seconds=eta_headroom_seconds,
+            )
+
+    if eta_tracker is None:
+        event_bus.publish(
+            "system_message",
+            (
+                "Generating speaker voice samples from "
+                f"{source_audio_path} into {samples_output_dir}"
+            ),
+        )
+    else:
+        event_bus.publish(
+            "system_message",
+            (
+                "Generating speaker voice samples from "
+                f"{source_audio_path} into {samples_output_dir} "
+                f"(estimated time left {format_eta_seconds(eta_tracker.initial_total_seconds)})"
+            ),
+        )
+
+    started_at = time.monotonic()
+    tracker_lock = threading.Lock()
+    stop_event = threading.Event()
+    ticker_thread: threading.Thread | None = None
+
+    progress_callback: StageProgressCallback | None = None
+    if eta_tracker is not None:
+        def _on_progress(update: StageProgressUpdate) -> None:
+            elapsed_seconds = max(0.0, time.monotonic() - started_at)
+            with tracker_lock:
+                eta_tracker.observe_progress(
+                    elapsed_seconds=elapsed_seconds,
+                    update=update,
+                )
+
+        progress_callback = _on_progress
+
+        if eta_update_interval_seconds > 0:
+            def _ticker() -> None:
+                while not stop_event.wait(eta_update_interval_seconds):
+                    elapsed_seconds = max(0.0, time.monotonic() - started_at)
+                    with tracker_lock:
+                        remaining_seconds = eta_tracker.estimate_signed_remaining_seconds(
+                            elapsed_seconds=elapsed_seconds
+                        )
+                    if remaining_seconds >= 0:
+                        event_bus.publish(
+                            "status_message",
+                            (
+                                "Speaker sample stage: estimated time left "
+                                f"{format_eta_seconds(remaining_seconds)}"
+                            ),
+                            inline=True,
+                        )
+                        continue
+                    event_bus.publish(
+                        "status_message",
+                        (
+                            "Speaker sample stage: running longer than estimate by "
+                            f"{format_eta_seconds(abs(remaining_seconds))}"
+                        ),
+                        inline=True,
+                    )
+
+            ticker_thread = threading.Thread(target=_ticker, daemon=True)
+            ticker_thread.start()
+
+    try:
+        sample_result = sample_generator.generate(
+            transcript_payload=transcript.to_payload(),
+            source_audio_path=source_audio_path,
+            output_dir=samples_output_dir,
+            progress_callback=progress_callback,
+        )
+    finally:
+        stop_event.set()
+        if ticker_thread is not None:
+            ticker_thread.join(timeout=0.2)
+
+    elapsed_seconds = max(0.0, time.monotonic() - started_at)
+    if (
+        isinstance(eta_strategy, UnitStageEtaLearner)
+        and len(sample_result.artifacts) > 0
+    ):
+        try:
+            eta_strategy.observe_unit_stage_duration(
+                stage="speaker_samples",
+                total_units=len(sample_result.artifacts),
+                elapsed_seconds=elapsed_seconds,
+            )
+        except Exception:
+            event_bus.publish(
+                "system_message",
+                "Speaker sample stage: ETA learning update skipped.",
+            )
+
     event_bus.publish(
         "status_message",
         (
             f"Generated {len(sample_result.artifacts)} speaker samples "
-            f"at {sample_result.output_dir}"
+            f"at {sample_result.output_dir} in {format_eta_seconds(elapsed_seconds)}"
         ),
     )
 
@@ -252,16 +413,29 @@ def _run_post_transcript_speaker_sample_step(
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Run the configured summarization pipeline."""
-    configure_logger(cfg.logging)
+    logging_cfg = _to_plain_dict(cfg.get("logging", {}))
+    configure_logger(logging_cfg)
 
-    if not cfg.logging.get("print_to_terminal", False):
-        for logger_name in ["google", "google_genai", "httpx", "a2a", "uvicorn"]:
-            logging.getLogger(logger_name).propagate = False
+    if not bool(logging_cfg.get("print_to_terminal", False)):
+        _suppress_chatty_logger_propagation()
 
     project_root = Path(hydra.utils.get_original_cwd())
     audio_cfg_dict = _to_plain_dict(cfg.get("audio", {}))
     pipeline_cfg_dict = _to_plain_dict(cfg.get("pipeline", {}))
     stage_plan = build_pipeline_stage_plan(pipeline_cfg_dict, project_root=project_root)
+    runtime_device = resolve_device(str(audio_cfg_dict.get("device", "auto")))
+    work_dir = resolve_path(
+        str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
+        base_dir=project_root,
+    )
+    audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg_dict)
+    eta_profile_path = work_dir / audio_orchestrator.eta_profile_filename
+    eta_profile_context = audio_orchestrator._build_eta_profile_context(device=runtime_device)
+    if not stage_plan.run_audio_stage:
+        audio_orchestrator._load_eta_profile(
+            profile_path=eta_profile_path,
+            context=eta_profile_context,
+        )
 
     event_bus.publish(
         "system_message",
@@ -290,12 +464,6 @@ def main(cfg: DictConfig) -> None:
             ),
             base_dir=project_root,
         )
-        work_dir = resolve_path(
-            str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
-            base_dir=project_root,
-        )
-        runtime_device = resolve_device(str(audio_cfg_dict.get("device", "auto")))
-        audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg_dict)
         audio_stage_output = audio_orchestrator.run(
             input_audio_path=input_audio_path,
             output_transcript_path=output_transcript_path,
@@ -333,7 +501,26 @@ def main(cfg: DictConfig) -> None:
         project_root=project_root,
         transcript_path=transcript_path,
         transcript=transcript,
+        eta_strategy=audio_orchestrator.eta_strategy,
+        eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
+        eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
+        eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
+        eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
     )
+    if stage_plan.run_summarizer_stage or stage_plan.run_critic_stage:
+        stage_terminal_logging = bool(
+            logging_cfg.get(
+                "summarizer_critic_print_to_terminal",
+                logging_cfg.get("print_to_terminal", False),
+            )
+        )
+        current_terminal_logging = bool(logging_cfg.get("print_to_terminal", False))
+        if stage_terminal_logging != current_terminal_logging:
+            logging_cfg["print_to_terminal"] = stage_terminal_logging
+            configure_logger(logging_cfg)
+            if not stage_terminal_logging:
+                _suppress_chatty_logger_propagation()
+
     voice_clone_orchestrator = build_voice_clone_orchestrator(
         audio_cfg_dict,
         project_root=project_root,
@@ -348,6 +535,11 @@ def main(cfg: DictConfig) -> None:
                 f"{voice_clone_orchestrator.output_dir}"
             ),
         )
+    for warning in _build_critic_skip_warning_messages(
+        stage_plan=stage_plan,
+        voice_clone_enabled=voice_clone_orchestrator is not None,
+    ):
+        event_bus.publish("status_message", warning)
 
     event_bus.publish("system_message", "Instantiating LLM providers...")
     shared_agent_client = AgentClient(event_bus=event_bus)
@@ -537,13 +729,24 @@ def main(cfg: DictConfig) -> None:
         max_words=int(cfg.orchestrator.max_words),
         max_iterations=int(cfg.orchestrator.max_iterations),
         voice_clone_orchestrator=voice_clone_orchestrator,
+        eta_strategy=audio_orchestrator.eta_strategy,
+        eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
+        eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
+        eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
+        eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
     )
-    asyncio.run(
-        stage_orchestrator.run(
-            transcript=transcript,
-            retrieval_enabled=transcript_index is not None,
+    try:
+        asyncio.run(
+            stage_orchestrator.run(
+                transcript=transcript,
+                retrieval_enabled=transcript_index is not None,
+            )
         )
-    )
+    finally:
+        audio_orchestrator._save_eta_profile(
+            profile_path=eta_profile_path,
+            context=eta_profile_context,
+        )
 
 
 if __name__ == "__main__":
