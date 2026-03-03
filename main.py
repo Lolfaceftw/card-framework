@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from pathlib import Path
 import sys
 import threading
@@ -37,6 +38,11 @@ from audio_pipeline.eta import (
     UnitStageEtaStrategy,
     format_eta_seconds,
 )
+from audio_pipeline.gpu_heartbeat import (
+    VoiceCloneGpuHeartbeatService,
+    WindowsNvidiaDedicatedGpuProbe,
+    parse_voice_clone_gpu_heartbeat_config,
+)
 from audio_pipeline.io import write_transcript_atomic
 from audio_pipeline.runtime import resolve_device, resolve_path
 from audio_pipeline.speaker_samples import resolve_sample_source_audio_path
@@ -46,7 +52,7 @@ from llm_provider import EmbeddingProvider, LLMProvider
 from logger_utils import configure_logger
 from orchestration import StageOrchestrator
 from orchestrator import Orchestrator
-from pipeline_plan import PipelineStagePlan, build_pipeline_stage_plan
+from pipeline_plan import build_pipeline_stage_plan
 from providers.logging_provider import LoggingLLMProvider
 from providers.response_callbacks import RichConsoleResponseCallback
 from orchestration.transcript import Transcript
@@ -175,41 +181,6 @@ def _resolve_stage_llm(
     return shared_llm, "shared"
 
 
-def _build_critic_skip_warning_messages(
-    *,
-    stage_plan: PipelineStagePlan,
-    voice_clone_enabled: bool,
-) -> tuple[str, ...]:
-    """
-    Build runtime warnings when the selected stage plan bypasses Critic.
-
-    Args:
-        stage_plan: Effective pipeline stage plan.
-        voice_clone_enabled: Whether voice cloning is enabled for this run.
-
-    Returns:
-        Warning lines to emit through the event bus.
-    """
-    if stage_plan.stop_stage != "summarizer":
-        return ()
-    if stage_plan.start_stage not in {"audio", "transcript"}:
-        return ()
-
-    warnings = [
-        (
-            "WARNING: pipeline.stop_stage=summarizer disables Critic for this run. "
-            "The summary will not be critic-reviewed."
-        ),
-        "Set pipeline.stop_stage=critic to run Summarizer -> Critic.",
-    ]
-    if voice_clone_enabled:
-        warnings.append(
-            "audio.voice_clone.enabled=true, so summarizer output will proceed "
-            "directly to voice clone."
-        )
-    return tuple(warnings)
-
-
 def _run_post_transcript_speaker_sample_step(
     *,
     stage_start: str,
@@ -237,7 +208,7 @@ def _run_post_transcript_speaker_sample_step(
         Transcript with updated speaker-sample metadata when generation runs;
         otherwise the original transcript.
     """
-    if stage_start not in {"audio", "transcript"}:
+    if stage_start not in {"stage-1", "stage-2"}:
         return transcript
 
     speaker_samples_cfg = _to_plain_dict(audio_cfg_dict.get("speaker_samples", {}))
@@ -441,7 +412,7 @@ def main(cfg: DictConfig) -> None:
         "system_message",
         (
             "Pipeline plan: "
-            f"start_stage={stage_plan.start_stage}, stop_stage={stage_plan.stop_stage}"
+            f"start_stage={stage_plan.start_stage}"
         ),
     )
 
@@ -450,8 +421,8 @@ def main(cfg: DictConfig) -> None:
         audio_path_value = str(audio_cfg_dict.get("audio_path", "")).strip()
         if not audio_path_value:
             raise ValueError(
-                "audio.audio_path is required when pipeline.start_stage=audio. "
-                "To skip stage 1, set pipeline.start_stage=transcript."
+                "audio.audio_path is required when pipeline.start_stage=stage-1. "
+                "To skip stage-1, set pipeline.start_stage=stage-2."
             )
 
         input_audio_path = resolve_path(audio_path_value, base_dir=project_root)
@@ -488,6 +459,17 @@ def main(cfg: DictConfig) -> None:
             f"Skipping audio stage (start_stage={stage_plan.start_stage}).",
         )
 
+    resolved_transcript_path = resolve_path(transcript_path, base_dir=project_root)
+    if not resolved_transcript_path.exists():
+        if stage_plan.start_stage == "stage-3":
+            raise ValueError(
+                "transcript_path must point to an existing transcript JSON with "
+                "metadata.speaker_samples_manifest_path when "
+                "pipeline.start_stage=stage-3."
+            )
+        raise FileNotFoundError(f"Transcript file not found: {resolved_transcript_path}")
+
+    transcript_path = str(resolved_transcript_path)
     event_bus.publish("system_message", f"Loading transcript from {transcript_path}...")
     transcript_payload = load_transcript(transcript_path)
     transcript = Transcript.from_mapping(transcript_payload)
@@ -525,6 +507,7 @@ def main(cfg: DictConfig) -> None:
         audio_cfg_dict,
         project_root=project_root,
     )
+    voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
     if voice_clone_orchestrator is None:
         event_bus.publish("system_message", "Voice clone stage disabled.")
     else:
@@ -535,12 +518,50 @@ def main(cfg: DictConfig) -> None:
                 f"{voice_clone_orchestrator.output_dir}"
             ),
         )
-    for warning in _build_critic_skip_warning_messages(
-        stage_plan=stage_plan,
-        voice_clone_enabled=voice_clone_orchestrator is not None,
-    ):
-        event_bus.publish("status_message", warning)
-
+        voice_clone_cfg = _to_plain_dict(audio_cfg_dict.get("voice_clone", {}))
+        heartbeat_cfg = parse_voice_clone_gpu_heartbeat_config(
+            _to_plain_dict(voice_clone_cfg.get("gpu_heartbeat", {}))
+        )
+        provider_device = str(
+            getattr(voice_clone_orchestrator.provider, "device", "")
+        ).strip().lower()
+        if not heartbeat_cfg.enabled:
+            event_bus.publish(
+                "system_message",
+                "Voice clone stage: dedicated GPU heartbeat disabled by config.",
+            )
+        elif os.name != "nt":
+            event_bus.publish(
+                "system_message",
+                "Voice clone stage: dedicated GPU heartbeat is Windows-only; skipping.",
+            )
+        elif provider_device != "cuda":
+            event_bus.publish(
+                "system_message",
+                (
+                    "Voice clone stage: dedicated GPU heartbeat skipped because "
+                    f"voice clone provider device is '{provider_device or 'unknown'}'."
+                ),
+            )
+        else:
+            voice_clone_gpu_heartbeat = VoiceCloneGpuHeartbeatService(
+                probe=WindowsNvidiaDedicatedGpuProbe(
+                    command_timeout_seconds=heartbeat_cfg.command_timeout_seconds,
+                ),
+                emit_status=lambda message: event_bus.publish("status_message", message),
+                emit_system=lambda message: event_bus.publish("system_message", message),
+                interval_seconds=heartbeat_cfg.interval_seconds,
+                threshold_ratio=heartbeat_cfg.dedicated_usage_threshold_ratio,
+                top_other_processes=heartbeat_cfg.top_other_processes,
+            )
+            event_bus.publish(
+                "system_message",
+                (
+                    "Voice clone stage: dedicated GPU heartbeat configured "
+                    f"(interval={heartbeat_cfg.interval_seconds}s, "
+                    f"threshold={heartbeat_cfg.dedicated_usage_threshold_ratio:.0%})."
+                ),
+            )
     event_bus.publish("system_message", "Instantiating LLM providers...")
     shared_agent_client = AgentClient(event_bus=event_bus)
     logging_enabled = bool(cfg.get("logging", {}).get("enabled", False))
@@ -734,6 +755,7 @@ def main(cfg: DictConfig) -> None:
         eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
         eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
         eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
+        voice_clone_gpu_heartbeat=voice_clone_gpu_heartbeat,
     )
     try:
         asyncio.run(

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
 from typing import Any
 
 from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
+from audio_pipeline.runtime import ensure_command_available
 from audio_pipeline.voice_clone_contracts import (
     VoiceCloneArtifact,
     VoiceCloneProvider,
@@ -27,6 +31,7 @@ class VoiceCloneRunResult:
     manifest_path: Path
     generated_at_utc: str
     artifacts: tuple[VoiceCloneArtifact, ...]
+    merged_output_audio_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -39,12 +44,34 @@ class VoiceCloneOrchestrator:
         output_dir: Destination directory for synthesized WAV artifacts.
         fail_on_error: Whether synthesis errors should abort the run.
         manifest_filename: Output manifest filename.
+        merge_segments: Whether to merge all turn-level outputs into one WAV.
+        merged_output_filename: Filename for merged output audio.
+        merge_audio_codec: FFmpeg audio codec for merged WAV output.
+        merge_timeout_seconds: Timeout applied to FFmpeg merge command.
     """
 
     provider: VoiceCloneProvider
     output_dir: Path
     fail_on_error: bool = True
     manifest_filename: str = "manifest.json"
+    merge_segments: bool = True
+    merged_output_filename: str = "voice_cloned.wav"
+    merge_audio_codec: str = "pcm_s24le"
+    merge_timeout_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        """Validate orchestrator configuration."""
+        if not self.manifest_filename.strip():
+            raise ValueError("manifest_filename must be non-empty.")
+        if self.merge_segments:
+            if not self.merged_output_filename.strip():
+                raise ValueError("merged_output_filename must be non-empty.")
+            if Path(self.merged_output_filename).suffix.lower() != ".wav":
+                raise ValueError("merged_output_filename must end with '.wav'.")
+        if not self.merge_audio_codec.strip():
+            raise ValueError("merge_audio_codec must be non-empty.")
+        if self.merge_timeout_seconds <= 0:
+            raise ValueError("merge_timeout_seconds must be > 0.")
 
     def run(
         self,
@@ -141,11 +168,34 @@ class VoiceCloneOrchestrator:
                 "Voice cloning produced no artifacts from summary turns."
             )
 
+        merged_output_audio_path: Path | None = None
+        if self.merge_segments:
+            merged_output_audio_path = self.output_dir / self.merged_output_filename
+            try:
+                _merge_artifacts_to_wav(
+                    artifact_paths=[artifact.output_audio_path for artifact in artifacts],
+                    output_path=merged_output_audio_path,
+                    audio_codec=self.merge_audio_codec,
+                    timeout_seconds=self.merge_timeout_seconds,
+                )
+            except Exception as exc:
+                if self.fail_on_error:
+                    raise NonRetryableAudioStageError(
+                        "Failed to merge voice clone artifacts into one WAV output."
+                    ) from exc
+                merged_output_audio_path = None
+
         generated_at_utc = _utc_now_iso()
         manifest_payload = {
             "generated_at_utc": generated_at_utc,
             "speaker_samples_manifest_path": str(speaker_samples_manifest_path),
             "artifact_count": len(artifacts),
+            "merge_segments": self.merge_segments,
+            "merged_output_audio_path": (
+                str(merged_output_audio_path)
+                if merged_output_audio_path is not None
+                else None
+            ),
             "artifacts": [
                 {
                     "turn_index": artifact.turn_index,
@@ -164,6 +214,7 @@ class VoiceCloneOrchestrator:
             manifest_path=manifest_path,
             generated_at_utc=generated_at_utc,
             artifacts=tuple(artifacts),
+            merged_output_audio_path=merged_output_audio_path,
         )
 
 
@@ -264,6 +315,105 @@ def _build_output_filename(*, turn_index: int, speaker: str) -> str:
     if not sanitized:
         sanitized = "speaker"
     return f"{turn_index:03d}_{sanitized}.wav"
+
+
+def _merge_artifacts_to_wav(
+    *,
+    artifact_paths: Sequence[Path],
+    output_path: Path,
+    audio_codec: str,
+    timeout_seconds: int,
+) -> None:
+    """Merge turn-level voice-clone WAV artifacts into one WAV output."""
+    if not artifact_paths:
+        raise NonRetryableAudioStageError("Voice clone merge requires at least one artifact.")
+    for artifact_path in artifact_paths:
+        if not artifact_path.exists():
+            raise NonRetryableAudioStageError(
+                f"Voice clone artifact missing for merge: {artifact_path}"
+            )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_output_path = _build_temp_output_path(output_path)
+
+    if len(artifact_paths) == 1:
+        source = artifact_paths[0]
+        if source.resolve() == output_path.resolve():
+            return
+        try:
+            shutil.copyfile(source, temp_output_path)
+            temp_output_path.replace(output_path)
+            return
+        except Exception as exc:
+            _remove_temp_output(temp_output_path)
+            raise NonRetryableAudioStageError(
+                f"Failed to persist merged voice clone artifact: {output_path}"
+            ) from exc
+
+    ensure_command_available("ffmpeg")
+    filter_inputs = "".join(f"[{index}:a]" for index in range(len(artifact_paths)))
+    filter_complex = f"{filter_inputs}concat=n={len(artifact_paths)}:v=0:a=1[outa]"
+    command: list[str] = ["ffmpeg", "-y"]
+    for artifact_path in artifact_paths:
+        command.extend(["-i", str(artifact_path)])
+    command.extend(
+        [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[outa]",
+            "-c:a",
+            audio_codec,
+            "-vn",
+            "-f",
+            "wav",
+            str(temp_output_path),
+        ]
+    )
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        temp_output_path.replace(output_path)
+    except subprocess.TimeoutExpired as exc:
+        _remove_temp_output(temp_output_path)
+        raise NonRetryableAudioStageError(
+            "Failed to merge voice clone artifacts due to timeout. "
+            f"Command: {' '.join(command)}."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        _remove_temp_output(temp_output_path)
+        raise NonRetryableAudioStageError(
+            "Failed to merge voice clone artifacts with ffmpeg. "
+            f"Command: {' '.join(command)}. "
+            f"Stderr: {(exc.stderr or '').strip()[:500]}"
+        ) from exc
+    except Exception as exc:
+        _remove_temp_output(temp_output_path)
+        raise NonRetryableAudioStageError(
+            f"Failed to persist merged voice clone artifact: {output_path}"
+        ) from exc
+
+
+def _build_temp_output_path(output_path: Path) -> Path:
+    """Build temp output path preserving the final file extension."""
+    if output_path.suffix:
+        return output_path.with_name(f"{output_path.stem}.tmp{output_path.suffix}")
+    return output_path.with_name(f"{output_path.name}.tmp")
+
+
+def _remove_temp_output(temp_path: Path) -> None:
+    """Remove stale temporary output on best-effort basis."""
+    try:
+        if temp_path.exists():
+            temp_path.unlink()
+    except OSError:
+        pass
 
 
 def _utc_now_iso() -> str:

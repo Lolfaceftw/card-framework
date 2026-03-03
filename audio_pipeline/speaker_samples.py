@@ -15,6 +15,12 @@ from audio_pipeline.runtime import utc_now_iso
 
 SpeakerSampleStatus = Literal["ok", "shorter_than_requested"]
 SpeakerSampleSourceMode = Literal["vocals", "source", "auto"]
+SpeakerSampleSelectionOrder = Literal["chronological", "longest_first"]
+SpeakerSampleLowDataPolicy = Literal[
+    "quality_first_shorter",
+    "backfill_to_target",
+    "fail_speaker",
+]
 
 
 @dataclass(slots=True, frozen=True)
@@ -44,6 +50,7 @@ class SpeakerSamplePlan:
     requested_duration_ms: int
     actual_duration_ms: int
     status: SpeakerSampleStatus
+    dropped_slice_count: int
     slices: tuple[AudioSlice, ...]
 
     def __post_init__(self) -> None:
@@ -53,6 +60,8 @@ class SpeakerSamplePlan:
             raise ValueError("requested_duration_ms must be > 0")
         if self.actual_duration_ms <= 0:
             raise ValueError("actual_duration_ms must be > 0")
+        if self.dropped_slice_count < 0:
+            raise ValueError("dropped_slice_count must be >= 0")
         if not self.slices:
             raise ValueError("slices must be non-empty")
 
@@ -66,6 +75,7 @@ class SpeakerSampleArtifact:
     requested_duration_ms: int
     actual_duration_ms: int
     status: SpeakerSampleStatus
+    dropped_slice_count: int
     ranges_ms: tuple[AudioSlice, ...]
 
 
@@ -94,6 +104,8 @@ class SpeakerSampleManifestEntry(TypedDict):
     requested_duration_ms: int
     duration_ms: int
     status: SpeakerSampleStatus
+    selected_slice_count: int
+    dropped_slice_count: int
     ranges_ms: list[ManifestRangePayload]
 
 
@@ -105,6 +117,14 @@ class SpeakerSampleManifest(TypedDict):
     target_duration_ms: int
     clip_method: Literal["concat_turns"]
     short_speaker_policy: Literal["export_shorter"]
+    sample_rate_hz: int
+    channels: int
+    codec: Literal["pcm_s24le"]
+    edge_fade_ms: int
+    min_slice_duration_ms: int
+    max_slices: int
+    selection_order: SpeakerSampleSelectionOrder
+    low_data_policy: SpeakerSampleLowDataPolicy
     samples: list[SpeakerSampleManifestEntry]
 
 
@@ -120,6 +140,8 @@ class SpeakerSampleExporter(Protocol):
         output_path: Path,
         sample_rate_hz: int,
         channels: int,
+        edge_fade_ms: int = 0,
+        audio_codec: str = "pcm_s24le",
     ) -> None:
         """Render one speaker sample from ordered source slices."""
 
@@ -141,8 +163,14 @@ class SpeakerSampleGenerator:
 
     exporter: SpeakerSampleExporter
     target_duration_seconds: int = 30
-    sample_rate_hz: int = 16000
+    sample_rate_hz: int = 44100
     channels: int = 1
+    edge_fade_ms: int = 20
+    audio_codec: Literal["pcm_s24le"] = "pcm_s24le"
+    min_slice_duration_ms: int = 1200
+    max_slices: int = 6
+    selection_order: SpeakerSampleSelectionOrder = "chronological"
+    low_data_policy: SpeakerSampleLowDataPolicy = "quality_first_shorter"
     clip_method: Literal["concat_turns"] = "concat_turns"
     short_speaker_policy: Literal["export_shorter"] = "export_shorter"
     manifest_filename: str = "manifest.json"
@@ -181,6 +209,10 @@ class SpeakerSampleGenerator:
         plans = build_speaker_sample_plans(
             transcript_payload=transcript_payload,
             target_duration_ms=target_duration_ms,
+            min_slice_duration_ms=self.min_slice_duration_ms,
+            max_slices=self.max_slices,
+            selection_order=self.selection_order,
+            low_data_policy=self.low_data_policy,
         )
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -209,6 +241,8 @@ class SpeakerSampleGenerator:
                 output_path=output_path,
                 sample_rate_hz=self.sample_rate_hz,
                 channels=self.channels,
+                edge_fade_ms=self.edge_fade_ms,
+                audio_codec=self.audio_codec,
             )
             artifacts.append(
                 SpeakerSampleArtifact(
@@ -217,6 +251,7 @@ class SpeakerSampleGenerator:
                     requested_duration_ms=plan.requested_duration_ms,
                     actual_duration_ms=plan.actual_duration_ms,
                     status=plan.status,
+                    dropped_slice_count=plan.dropped_slice_count,
                     ranges_ms=plan.slices,
                 )
             )
@@ -239,6 +274,14 @@ class SpeakerSampleGenerator:
             "target_duration_ms": target_duration_ms,
             "clip_method": self.clip_method,
             "short_speaker_policy": self.short_speaker_policy,
+            "sample_rate_hz": self.sample_rate_hz,
+            "channels": self.channels,
+            "codec": self.audio_codec,
+            "edge_fade_ms": self.edge_fade_ms,
+            "min_slice_duration_ms": self.min_slice_duration_ms,
+            "max_slices": self.max_slices,
+            "selection_order": self.selection_order,
+            "low_data_policy": self.low_data_policy,
             "samples": [
                 {
                     "speaker": artifact.speaker,
@@ -246,6 +289,8 @@ class SpeakerSampleGenerator:
                     "requested_duration_ms": artifact.requested_duration_ms,
                     "duration_ms": artifact.actual_duration_ms,
                     "status": artifact.status,
+                    "selected_slice_count": len(artifact.ranges_ms),
+                    "dropped_slice_count": artifact.dropped_slice_count,
                     "ranges_ms": [
                         {
                             "start_time_ms": time_range.start_time_ms,
@@ -274,10 +319,31 @@ class SpeakerSampleGenerator:
             raise ValueError("sample_rate_hz must be > 0")
         if self.channels <= 0:
             raise ValueError("channels must be > 0")
+        if self.edge_fade_ms < 0:
+            raise ValueError("edge_fade_ms must be >= 0")
+        if self.min_slice_duration_ms <= 0:
+            raise ValueError("min_slice_duration_ms must be > 0")
+        if self.max_slices <= 0:
+            raise ValueError("max_slices must be > 0")
+        if self.selection_order not in {"chronological", "longest_first"}:
+            raise ValueError(
+                "selection_order must be one of: chronological, longest_first."
+            )
+        if self.low_data_policy not in {
+            "quality_first_shorter",
+            "backfill_to_target",
+            "fail_speaker",
+        }:
+            raise ValueError(
+                "low_data_policy must be one of: "
+                "quality_first_shorter, backfill_to_target, fail_speaker."
+            )
         if self.clip_method != "concat_turns":
             raise ValueError("clip_method must be 'concat_turns'.")
         if self.short_speaker_policy != "export_shorter":
             raise ValueError("short_speaker_policy must be 'export_shorter'.")
+        if self.audio_codec != "pcm_s24le":
+            raise ValueError("audio_codec must be 'pcm_s24le'.")
         if not self.manifest_filename.strip():
             raise ValueError("manifest_filename must be non-empty")
 
@@ -286,6 +352,10 @@ def build_speaker_sample_plans(
     *,
     transcript_payload: Mapping[str, Any],
     target_duration_ms: int,
+    min_slice_duration_ms: int = 1200,
+    max_slices: int = 6,
+    selection_order: SpeakerSampleSelectionOrder = "chronological",
+    low_data_policy: SpeakerSampleLowDataPolicy = "quality_first_shorter",
 ) -> list[SpeakerSamplePlan]:
     """
     Build per-speaker concatenation plans from transcript segment timings.
@@ -293,6 +363,10 @@ def build_speaker_sample_plans(
     Args:
         transcript_payload: Transcript payload with `segments`.
         target_duration_ms: Requested duration per speaker sample.
+        min_slice_duration_ms: Minimum allowed slice length before filtering.
+        max_slices: Maximum number of slices allowed per speaker sample.
+        selection_order: Slice ranking strategy.
+        low_data_policy: Behavior when no slices pass strict minimum duration.
 
     Returns:
         Ordered speaker plans based on first appearance in transcript.
@@ -302,6 +376,23 @@ def build_speaker_sample_plans(
     """
     if target_duration_ms <= 0:
         raise ValueError("target_duration_ms must be > 0")
+    if min_slice_duration_ms <= 0:
+        raise ValueError("min_slice_duration_ms must be > 0")
+    if max_slices <= 0:
+        raise ValueError("max_slices must be > 0")
+    if selection_order not in {"chronological", "longest_first"}:
+        raise ValueError(
+            "selection_order must be one of: chronological, longest_first."
+        )
+    if low_data_policy not in {
+        "quality_first_shorter",
+        "backfill_to_target",
+        "fail_speaker",
+    }:
+        raise ValueError(
+            "low_data_policy must be one of: quality_first_shorter, "
+            "backfill_to_target, fail_speaker."
+        )
 
     segments = transcript_payload.get("segments", [])
     if not isinstance(segments, list):
@@ -333,24 +424,36 @@ def build_speaker_sample_plans(
 
     plans: list[SpeakerSamplePlan] = []
     for speaker, slices in speaker_slices.items():
-        remaining_ms = target_duration_ms
-        selected_slices: list[AudioSlice] = []
-        for time_slice in slices:
-            if remaining_ms <= 0:
-                break
-            if time_slice.duration_ms <= remaining_ms:
-                selected_slices.append(time_slice)
-                remaining_ms -= time_slice.duration_ms
-                continue
-            selected_slices.append(
-                AudioSlice(
-                    start_time_ms=time_slice.start_time_ms,
-                    end_time_ms=time_slice.start_time_ms + remaining_ms,
-                )
+        compacted = _compact_slices(slices)
+        pool = _resolve_speaker_slice_pool(
+            speaker=speaker,
+            slices=compacted,
+            min_slice_duration_ms=min_slice_duration_ms,
+            low_data_policy=low_data_policy,
+        )
+        ranked_pool = _rank_slices(pool, selection_order=selection_order)
+        selected_slices = _select_slices_for_target(
+            ranked_pool,
+            target_duration_ms=target_duration_ms,
+            max_slices=max_slices,
+        )
+        if (
+            low_data_policy == "backfill_to_target"
+            and _sum_slice_durations(selected_slices) < target_duration_ms
+            and len(selected_slices) < max_slices
+        ):
+            extra_candidates = [
+                candidate
+                for candidate in _rank_slices(compacted, selection_order=selection_order)
+                if candidate not in set(pool)
+            ]
+            selected_slices = _select_slices_for_target(
+                (*selected_slices, *extra_candidates),
+                target_duration_ms=target_duration_ms,
+                max_slices=max_slices,
             )
-            remaining_ms = 0
 
-        actual_duration_ms = target_duration_ms - remaining_ms
+        actual_duration_ms = _sum_slice_durations(selected_slices)
         if actual_duration_ms <= 0:
             raise NonRetryableAudioStageError(
                 f"Speaker '{speaker}' does not contain positive-duration segments."
@@ -364,10 +467,123 @@ def build_speaker_sample_plans(
                 requested_duration_ms=target_duration_ms,
                 actual_duration_ms=actual_duration_ms,
                 status=status,
+                dropped_slice_count=max(0, len(compacted) - len(selected_slices)),
                 slices=tuple(selected_slices),
             )
         )
     return plans
+
+
+def _resolve_speaker_slice_pool(
+    *,
+    speaker: str,
+    slices: Sequence[AudioSlice],
+    min_slice_duration_ms: int,
+    low_data_policy: SpeakerSampleLowDataPolicy,
+) -> tuple[AudioSlice, ...]:
+    """Choose candidate slices according to low-data policy."""
+    if not slices:
+        raise NonRetryableAudioStageError(
+            f"Speaker '{speaker}' does not contain any usable audio slices."
+        )
+    filtered = tuple(
+        time_slice
+        for time_slice in slices
+        if time_slice.duration_ms >= min_slice_duration_ms
+    )
+    if filtered:
+        return filtered
+    if low_data_policy == "backfill_to_target":
+        return tuple(slices)
+    if low_data_policy == "quality_first_shorter":
+        return (max(slices, key=lambda time_slice: time_slice.duration_ms),)
+    raise NonRetryableAudioStageError(
+        f"Speaker '{speaker}' has no slices >= {min_slice_duration_ms} ms."
+    )
+
+
+def _rank_slices(
+    slices: Sequence[AudioSlice],
+    *,
+    selection_order: SpeakerSampleSelectionOrder,
+) -> tuple[AudioSlice, ...]:
+    """Rank slices according to configured selection policy."""
+    if selection_order == "chronological":
+        return tuple(
+            sorted(
+                slices,
+                key=lambda time_slice: (
+                    time_slice.start_time_ms,
+                    time_slice.end_time_ms,
+                ),
+            )
+        )
+    if selection_order != "longest_first":
+        raise ValueError(
+            "selection_order must be one of: chronological, longest_first."
+        )
+    return tuple(
+        sorted(
+            slices,
+            key=lambda time_slice: (
+                -time_slice.duration_ms,
+                time_slice.start_time_ms,
+                time_slice.end_time_ms,
+            ),
+        )
+    )
+
+
+def _select_slices_for_target(
+    ranked_slices: Sequence[AudioSlice],
+    *,
+    target_duration_ms: int,
+    max_slices: int,
+) -> tuple[AudioSlice, ...]:
+    """Select up to max slices and trim final slice to fit requested duration."""
+    remaining_ms = target_duration_ms
+    selected: list[AudioSlice] = []
+    for time_slice in ranked_slices:
+        if remaining_ms <= 0 or len(selected) >= max_slices:
+            break
+        if time_slice.duration_ms <= remaining_ms:
+            selected.append(time_slice)
+            remaining_ms -= time_slice.duration_ms
+            continue
+        selected.append(
+            AudioSlice(
+                start_time_ms=time_slice.start_time_ms,
+                end_time_ms=time_slice.start_time_ms + remaining_ms,
+            )
+        )
+        remaining_ms = 0
+    return tuple(selected)
+
+
+def _sum_slice_durations(slices: Sequence[AudioSlice]) -> int:
+    """Return total duration in milliseconds across selected slices."""
+    return sum(time_slice.duration_ms for time_slice in slices)
+
+
+def _compact_slices(slices: Sequence[AudioSlice]) -> tuple[AudioSlice, ...]:
+    """Merge overlapping slices so one interval is not duplicated in exports."""
+    if not slices:
+        return ()
+    ordered = sorted(
+        slices,
+        key=lambda time_slice: (time_slice.start_time_ms, time_slice.end_time_ms),
+    )
+    compacted: list[AudioSlice] = [ordered[0]]
+    for current in ordered[1:]:
+        previous = compacted[-1]
+        if current.start_time_ms <= previous.end_time_ms:
+            compacted[-1] = AudioSlice(
+                start_time_ms=previous.start_time_ms,
+                end_time_ms=max(previous.end_time_ms, current.end_time_ms),
+            )
+            continue
+        compacted.append(current)
+    return tuple(compacted)
 
 
 def resolve_sample_source_audio_path(

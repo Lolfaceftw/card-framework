@@ -1,13 +1,15 @@
-"""Use-case orchestration for transcript indexing, drafting, and critique stages."""
+"""Use-case orchestration for stage-2 summary loop and stage-3 voice cloning."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import threading
 import time
 
+from audio_pipeline.gpu_heartbeat import VoiceCloneGpuHeartbeatService
 from audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
 from audio_pipeline.eta import (
     DynamicEtaTracker,
@@ -27,7 +29,7 @@ from orchestration.transcript import Transcript, TranscriptLike, coerce_transcri
 
 @dataclass(slots=True, frozen=True)
 class StageOrchestrator:
-    """Coordinate start/stop stage behavior for the summarization workflow."""
+    """Coordinate stage-1/stage-2/stage-3 execution for the summarization workflow."""
 
     orchestrator: Orchestrator
     stage_plan: PipelineStagePlan
@@ -41,6 +43,7 @@ class StageOrchestrator:
     eta_progress_smoothing: float = 0.25
     eta_overrun_factor: float = 1.15
     eta_headroom_seconds: float = 1.0
+    voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
 
     async def run(
         self,
@@ -51,89 +54,49 @@ class StageOrchestrator:
         """Execute the configured pipeline stages."""
         transcript_dto = coerce_transcript(transcript)
         full_text = ""
-        if retrieval_enabled:
+        if self.stage_plan.requires_retrieval_tools and retrieval_enabled:
             await self.orchestrator.index_transcript(transcript_dto)
         elif self.stage_plan.requires_retrieval_tools:
             full_text = transcript_dto.to_full_text()
 
-        if self.stage_plan.start_stage == "draft":
-            await self._run_draft_stage(full_text=full_text, transcript=transcript_dto)
-            return
-
-        if self.stage_plan.stop_stage == "summarizer":
-            await self._run_summarizer_stage(full_text=full_text, transcript=transcript_dto)
+        if self.stage_plan.start_stage == "stage-3":
+            self._run_stage_three_only(transcript=transcript_dto)
             return
 
         await self._run_full_loop(full_text=full_text, transcript=transcript_dto)
 
-    async def _run_draft_stage(self, *, full_text: str, transcript: Transcript) -> None:
-        """Run draft-based stage flow for a pre-existing summary XML file."""
-        if self.stage_plan.draft_path is None:
-            raise ValueError("pipeline.draft_path must be set when start_stage=draft.")
-        if not self.stage_plan.draft_path.exists():
-            raise ValueError(f"Draft file not found: {self.stage_plan.draft_path}")
-
-        draft = self.stage_plan.draft_path.read_text(encoding="utf-8").strip()
-        if not draft:
-            raise ValueError(f"Draft file is empty: {self.stage_plan.draft_path}")
-
-        if self.stage_plan.stop_stage == "summarizer":
-            summary_path = write_summary_xml_to_workspace(draft, self.project_root)
-            event_bus.publish(
-                "status_message",
-                f"Saved summary to {summary_path}",
+    def _run_stage_three_only(self, *, transcript: Transcript) -> None:
+        """Run stage-3 voice cloning using a pre-existing summary XML file."""
+        if self.stage_plan.final_summary_path is None:
+            raise ValueError(
+                "pipeline.final_summary_path must be set when pipeline.start_stage=stage-3."
             )
-            event_bus.publish(
-                "status_message",
-                (
-                    "Using existing draft summary XML for voice cloning from "
-                    f"{self.stage_plan.draft_path}"
-                ),
-            )
-            self._run_voice_clone_stage(summary_xml=draft, transcript=transcript)
-            return
-
-        verdict = await self.orchestrator.run_critic_once(
-            draft=draft,
-            min_words=self.min_words,
-            max_words=self.max_words,
-            full_transcript_text=full_text,
-        )
-        event_bus.publish(
-            "status_message",
-            f"Critic verdict: status={verdict.status}, word_count={verdict.word_count}",
-        )
-        event_bus.publish("agent_message", "Critic Feedback", verdict.feedback)
-        if verdict.status == "pass":
-            summary_path = write_summary_xml_to_workspace(draft, self.project_root)
-            event_bus.publish(
-                "status_message",
-                f"Saved critic-approved draft to {summary_path}",
+        if not self.stage_plan.final_summary_path.exists():
+            raise ValueError(
+                f"Final summary file not found: {self.stage_plan.final_summary_path}"
             )
 
-    async def _run_summarizer_stage(
-        self,
-        *,
-        full_text: str,
-        transcript: Transcript,
-    ) -> None:
-        """Run one summarizer pass and emit the draft result."""
-        summary = await self.orchestrator.run_summarizer_once(
-            min_words=self.min_words,
-            max_words=self.max_words,
-            full_transcript_text=full_text,
-        )
-        event_bus.publish(
-            "agent_message",
-            "Summarizer",
-            f"Single-pass Summary:\n```xml\n{summary}\n```",
-        )
-        summary_path = write_summary_xml_to_workspace(summary, self.project_root)
+        final_summary = self.stage_plan.final_summary_path.read_text(
+            encoding="utf-8"
+        ).strip()
+        if not final_summary:
+            raise ValueError(
+                f"Final summary file is empty: {self.stage_plan.final_summary_path}"
+            )
+
+        summary_path = write_summary_xml_to_workspace(final_summary, self.project_root)
         event_bus.publish(
             "status_message",
             f"Saved summary to {summary_path}",
         )
-        self._run_voice_clone_stage(summary_xml=summary, transcript=transcript)
+        event_bus.publish(
+            "status_message",
+            (
+                "Using existing summary XML for stage-3 voice cloning from "
+                f"{self.stage_plan.final_summary_path}"
+            ),
+        )
+        self._run_voice_clone_stage(summary_xml=final_summary, transcript=transcript)
 
     async def _run_full_loop(self, *, full_text: str, transcript: Transcript) -> None:
         """Run the full summarizer-critic loop until convergence or max iterations."""
@@ -261,6 +224,8 @@ class StageOrchestrator:
                 ticker_thread.start()
 
         try:
+            if self.voice_clone_gpu_heartbeat is not None:
+                self.voice_clone_gpu_heartbeat.start(pipeline_root_pid=os.getpid())
             result = self.voice_clone_orchestrator.run(
                 summary_xml=summary_xml,
                 speaker_samples_manifest_path=manifest_path,
@@ -270,6 +235,8 @@ class StageOrchestrator:
             stop_event.set()
             if ticker_thread is not None:
                 ticker_thread.join(timeout=0.2)
+            if self.voice_clone_gpu_heartbeat is not None:
+                self.voice_clone_gpu_heartbeat.stop()
 
         elapsed_seconds = max(0.0, time.monotonic() - started_at)
         if (

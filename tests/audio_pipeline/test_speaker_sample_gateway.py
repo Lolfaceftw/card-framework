@@ -42,6 +42,8 @@ def test_gateway_builds_concat_command_and_writes_output(
         output_path=output_path,
         sample_rate_hz=16_000,
         channels=1,
+        edge_fade_ms=20,
+        audio_codec="pcm_s24le",
     )
 
     assert output_path.exists()
@@ -53,7 +55,9 @@ def test_gateway_builds_concat_command_and_writes_output(
     assert "concat=n=2" in filter_graph
     assert "atrim=start=1.000:end=2.000" in filter_graph
     assert "atrim=start=5.000:end=6.000" in filter_graph
+    assert "afade=t=in:st=0:d=0.020" in filter_graph
     assert command[command.index("-f") + 1] == "wav"
+    assert command[command.index("-c:a") + 1] == "pcm_s24le"
     assert Path(command[-1]).name == "speaker.tmp.wav"
 
 
@@ -81,6 +85,36 @@ def test_gateway_surfaces_ffmpeg_errors(
     source_audio.write_bytes(b"source")
 
     with pytest.raises(NonRetryableAudioStageError, match="Failed to export speaker sample"):
+        exporter.export(
+            source_audio_path=source_audio,
+            slices=(AudioSlice(start_time_ms=0, end_time_ms=1_000),),
+            output_path=tmp_path / "speaker.wav",
+            sample_rate_hz=16_000,
+            channels=1,
+        )
+
+
+def test_gateway_surfaces_ffmpeg_timeout_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    exporter = FfmpegSpeakerSampleExporter(timeout_seconds=1)
+
+    def _raise(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        command = args[0]
+        del kwargs
+        raise subprocess.TimeoutExpired(cmd=command, timeout=1)
+
+    monkeypatch.setattr(
+        "audio_pipeline.gateways.speaker_sample_gateway.ensure_command_available",
+        lambda _: None,
+    )
+    monkeypatch.setattr(subprocess, "run", _raise)
+
+    source_audio = tmp_path / "source.wav"
+    source_audio.write_bytes(b"source")
+
+    with pytest.raises(NonRetryableAudioStageError, match="due to timeout"):
         exporter.export(
             source_audio_path=source_audio,
             slices=(AudioSlice(start_time_ms=0, end_time_ms=1_000),),

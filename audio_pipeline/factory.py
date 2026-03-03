@@ -100,19 +100,61 @@ def build_speaker_sample_generator(audio_cfg: Mapping[str, Any]) -> SpeakerSampl
     short_policy = str(
         speaker_samples_cfg.get("short_speaker_policy", "export_shorter")
     )
+    selection_order = str(speaker_samples_cfg.get("selection_order", "chronological"))
+    low_data_policy = str(
+        speaker_samples_cfg.get("low_data_policy", "quality_first_shorter")
+    )
+    audio_codec = str(speaker_samples_cfg.get("audio_codec", "pcm_s24le"))
     if clip_method != "concat_turns":
         raise ValueError("audio.speaker_samples.clip_method must be 'concat_turns'.")
     if short_policy != "export_shorter":
         raise ValueError(
             "audio.speaker_samples.short_speaker_policy must be 'export_shorter'."
         )
+    if selection_order not in {"chronological", "longest_first"}:
+        raise ValueError(
+            "audio.speaker_samples.selection_order must be one of: "
+            "chronological, longest_first."
+        )
+    if low_data_policy not in {
+        "quality_first_shorter",
+        "backfill_to_target",
+        "fail_speaker",
+    }:
+        raise ValueError(
+            "audio.speaker_samples.low_data_policy must be one of: "
+            "quality_first_shorter, backfill_to_target, fail_speaker."
+        )
+    if audio_codec != "pcm_s24le":
+        raise ValueError("audio.speaker_samples.audio_codec must be 'pcm_s24le'.")
+    min_slice_duration_ms = int(speaker_samples_cfg.get("min_slice_duration_ms", 1200))
+    max_slices = int(speaker_samples_cfg.get("max_slices", 6))
+    edge_fade_ms = int(speaker_samples_cfg.get("edge_fade_ms", 20))
+    if min_slice_duration_ms <= 0:
+        raise ValueError("audio.speaker_samples.min_slice_duration_ms must be > 0.")
+    if max_slices <= 0:
+        raise ValueError("audio.speaker_samples.max_slices must be > 0.")
+    if edge_fade_ms < 0:
+        raise ValueError("audio.speaker_samples.edge_fade_ms must be >= 0.")
     return SpeakerSampleGenerator(
         exporter=FfmpegSpeakerSampleExporter(),
         target_duration_seconds=int(
             speaker_samples_cfg.get("target_duration_seconds", 30)
         ),
-        sample_rate_hz=int(speaker_samples_cfg.get("sample_rate_hz", 16000)),
+        sample_rate_hz=int(speaker_samples_cfg.get("sample_rate_hz", 44100)),
         channels=int(speaker_samples_cfg.get("channels", 1)),
+        edge_fade_ms=edge_fade_ms,
+        audio_codec=cast(Literal["pcm_s24le"], audio_codec),
+        min_slice_duration_ms=min_slice_duration_ms,
+        max_slices=max_slices,
+        selection_order=cast(
+            Literal["chronological", "longest_first"],
+            selection_order,
+        ),
+        low_data_policy=cast(
+            Literal["quality_first_shorter", "backfill_to_target", "fail_speaker"],
+            low_data_policy,
+        ),
         clip_method=cast(Literal["concat_turns"], clip_method),
         short_speaker_policy=cast(
             Literal["export_shorter"],
@@ -158,6 +200,11 @@ def build_voice_clone_orchestrator(
         output_dir=output_dir,
         fail_on_error=bool(voice_clone_cfg.get("fail_on_error", True)),
         manifest_filename=str(voice_clone_cfg.get("manifest_filename", "manifest.json")),
+        merge_segments=bool(voice_clone_cfg.get("merge_segments", True)),
+        merged_output_filename=str(
+            voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav")
+        ),
+        merge_timeout_seconds=int(voice_clone_cfg.get("merge_timeout_seconds", 300)),
     )
 
 
@@ -200,12 +247,27 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
     """Factory method for ASR strategy."""
     provider = str(asr_cfg.get("provider", "faster_whisper")).strip().lower()
     if provider == "faster_whisper":
+        forced_alignment_cfg = _as_mapping(asr_cfg.get("forced_alignment", {}))
         return FasterWhisperTranscriber(
             model_name=str(asr_cfg.get("model", "large-v3")),
             compute_type_cuda=str(asr_cfg.get("compute_type_cuda", "int8_float16")),
             compute_type_cpu=str(asr_cfg.get("compute_type_cpu", "int8")),
             beam_size=int(asr_cfg.get("beam_size", 5)),
             vad_filter=bool(asr_cfg.get("vad_filter", True)),
+            batch_size=int(asr_cfg.get("batch_size", 8)),
+            language=(
+                str(asr_cfg.get("language", "")).strip() or None
+            ),
+            suppress_numerals=bool(asr_cfg.get("suppress_numerals", False)),
+            enable_forced_alignment=bool(
+                forced_alignment_cfg.get("enabled", True)
+            ),
+            require_forced_alignment=bool(
+                forced_alignment_cfg.get("required", True)
+            ),
+            forced_alignment_batch_size=int(
+                forced_alignment_cfg.get("batch_size", 8)
+            ),
         )
     raise ValueError(f"Unsupported ASR provider: {provider}")
 
@@ -225,7 +287,7 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
             min_speakers=_optional_int(diarization_cfg.get("min_speakers")),
             max_speakers=_optional_int(diarization_cfg.get("max_speakers")),
             allow_single_speaker_fallback=bool(
-                diarization_cfg.get("allow_single_speaker_fallback", True)
+                diarization_cfg.get("allow_single_speaker_fallback", False)
             ),
         )
     if provider in {"single_speaker", "none"}:
