@@ -37,6 +37,7 @@ class VLLMProvider(LLMProvider):
         api_key: API key (use ``"EMPTY"`` for keyless vLLM servers).
         enable_thinking: Whether to request reasoning/thinking chunks from vLLM.
         thinking_extra_body: Optional OpenAI ``extra_body`` payload for reasoning mode.
+        request_timeout_seconds: Request timeout applied to model discovery and chat calls.
         response_callback: Optional callback sink for streamed token updates.
     """
 
@@ -46,15 +47,21 @@ class VLLMProvider(LLMProvider):
         api_key: str = "EMPTY",
         enable_thinking: bool = True,
         thinking_extra_body: dict[str, Any] | None = None,
+        request_timeout_seconds: float = 30.0,
         response_callback: LLMResponseCallback | None = None,
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.enable_thinking = enable_thinking
+        self.request_timeout_seconds = max(1.0, float(request_timeout_seconds))
         self.thinking_extra_body = thinking_extra_body or {
             "chat_template_kwargs": {"enable_thinking": True}
         }
-        self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        self._client = OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=self.request_timeout_seconds,
+        )
         self._response_callback: LLMResponseCallback = (
             response_callback or NullLLMResponseCallback()
         )
@@ -72,7 +79,10 @@ class VLLMProvider(LLMProvider):
 
     def _fetch_model_id(self) -> str:
         """Return the first available model id from the configured endpoint."""
-        resp = requests.get(f"{self.base_url}/models", timeout=10)
+        resp = requests.get(
+            f"{self.base_url}/models",
+            timeout=self.request_timeout_seconds,
+        )
         resp.raise_for_status()
         return str(resp.json()["data"][0]["id"])
 

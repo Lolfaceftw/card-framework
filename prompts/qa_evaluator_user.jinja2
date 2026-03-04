@@ -1,0 +1,25 @@
+<Objective>
+Evaluate the candidate summary against the source using turn-by-turn questions from runtime.
+</Objective>
+<Context>
+Each question expects a binary yes/no answer.
+Answer strictly in runtime order.
+</Context>
+<Inputs>
+Candidate Summary XML:
+{{ summary_xml }}
+
+Source Transcript:
+{{ source_text }}
+
+Total Questions:
+{{ total_questions }}
+</Inputs>
+<Output contract>
+Call tool `submit_answer` once per turn until all questions are answered.
+The current question_id is always in the latest `Turn instruction` message.
+Never answer a previous or future question_id.
+Return no plain text outside tool calls.
+Each tool call must include `summary_evidence_quote` copied exactly from candidate summary XML.
+The quote must overlap key non-generic terms from current `question_text`.
+</Output contract>

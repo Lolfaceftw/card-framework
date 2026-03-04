@@ -231,9 +231,9 @@ class ConsoleManager:
 
                 text = Text()
                 if self.full_thought.strip():
-                    text.append("💭 Thinking...\n", style="bold yellow")
+                    text.append("[THINKING]\n", style="bold yellow")
                     text.append(self.full_thought, style="thought")
-                    text.append("\n" + "─" * 40 + "\n", style="dim")
+                    text.append("\n" + "-" * 40 + "\n", style="dim")
 
                 if display_content:
                     text.append(display_content)
@@ -248,7 +248,10 @@ class ConsoleManager:
 
             def _render(self, force: bool = False):
                 now = time.monotonic()
-                if force or (now - self._last_render_at) >= self._min_render_interval_seconds:
+                if (
+                    force
+                    or (now - self._last_render_at) >= self._min_render_interval_seconds
+                ):
                     self.live.update(self._build_panel(), refresh=True)
                     self._last_render_at = now
 
@@ -286,7 +289,7 @@ class ConsoleManager:
         if len(arg_str) > 100:
             arg_str = arg_str[:100] + "..."
         self.console.print(
-            f"🔧 [tool_name]Tool Call: {tool_name}[/tool_name] [tool_args]{arg_str}[/tool_args]"
+            f"[tool_name]Tool Call: {tool_name}[/tool_name] [tool_args]{arg_str}[/tool_args]"
         )
 
     def print_tool_result(self, tool_name: str, result: str):
@@ -297,7 +300,7 @@ class ConsoleManager:
             summary = result[:150].replace("\n", " ") + "..."
 
         self.console.print(
-            f"✅ [tool_name]Tool Result ({tool_name}):[/tool_name] [tool_result]{summary}[/tool_result]"
+            f"[tool_name]Tool Result ({tool_name}):[/tool_name] [tool_result]{summary}[/tool_result]"
         )
         self.console.print()
 

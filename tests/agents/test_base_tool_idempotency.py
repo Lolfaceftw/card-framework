@@ -18,8 +18,13 @@ if "numpy" not in sys.modules:
     numpy_module.ndarray = _NDArray
     sys.modules["numpy"] = numpy_module
 
-# Provide minimal `jinja2` module stub for prompt_manager imports.
-if "jinja2" not in sys.modules:
+# Provide minimal `jinja2` module stub for prompt_manager imports only when unavailable.
+try:
+    import jinja2 as _jinja2
+except Exception:
+    _jinja2 = None
+
+if _jinja2 is None or getattr(_jinja2, "__spec__", None) is None:
     jinja2_module = types.ModuleType("jinja2")
 
     class _FileSystemLoader:
@@ -32,7 +37,11 @@ if "jinja2" not in sys.modules:
             self.kwargs = kwargs
 
         def get_template(self, _template_name: str):  # noqa: ANN204
-            raise RuntimeError("Template rendering is not used in this unit test.")
+            class _Template:
+                def render(self, **kwargs: Any) -> str:
+                    return str(kwargs)
+
+            return _Template()
 
     def _select_autoescape() -> bool:
         return False
@@ -99,8 +108,21 @@ class FakeLLM:
     def __init__(self, responses: list[FakeResponse]) -> None:
         self._responses = responses
         self._index = 0
+        self.chat_kwargs_history: list[dict[str, Any]] = []
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> FakeResponse:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | str | None = None,
+        max_tokens: int | None = None,
+    ) -> FakeResponse:
+        self.chat_kwargs_history.append(
+            {
+                "tool_choice": tool_choice,
+                "max_tokens": max_tokens,
+            }
+        )
         if self._index >= len(self._responses):
             return FakeResponse(content="done", tool_calls=None)
         response = self._responses[self._index]
@@ -419,6 +441,96 @@ def test_base_loop_enforces_max_tool_calls_per_turn() -> None:
     assert payload["status"] == "skipped"
     assert payload["reason"] == "max_tool_calls_per_turn"
     assert payload["max_tool_calls_per_turn"] == 1
+
+
+def test_base_loop_forwards_tool_choice_and_chat_max_tokens() -> None:
+    llm = FakeLLM(responses=[FakeResponse(tool_calls=None)])
+    executor = DummyExecutor(llm)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "x"}]
+
+    asyncio.run(
+        executor.run_agent_loop(
+            messages=messages,
+            tools=[],
+            max_turns=1,
+            context_data={
+                "tool_choice": {"type": "function", "function": {"name": "count_words"}},
+                "chat_max_tokens": 77,
+            },
+        )
+    )
+
+    assert len(llm.chat_kwargs_history) == 1
+    assert llm.chat_kwargs_history[0]["max_tokens"] == 77
+    assert llm.chat_kwargs_history[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "count_words"},
+    }
+
+
+def test_base_loop_ignores_invalid_tool_choice_type() -> None:
+    llm = FakeLLM(responses=[FakeResponse(tool_calls=None)])
+    executor = DummyExecutor(llm)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "x"}]
+
+    asyncio.run(
+        executor.run_agent_loop(
+            messages=messages,
+            tools=[],
+            max_turns=1,
+            context_data={
+                "tool_choice": ["invalid"],
+                "chat_max_tokens": 55,
+            },
+        )
+    )
+
+    assert len(llm.chat_kwargs_history) == 1
+    assert llm.chat_kwargs_history[0]["max_tokens"] == 55
+    assert llm.chat_kwargs_history[0]["tool_choice"] is None
+
+
+def test_base_loop_resets_no_tool_call_count_for_reused_context() -> None:
+    first_llm = FakeLLM(
+        responses=[
+            FakeResponse(tool_calls=None),
+            FakeResponse(tool_calls=None),
+        ]
+    )
+    executor = DummyExecutor(first_llm)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "x"}]
+    shared_context: dict[str, Any] = {"no_tool_call_patience": 2}
+
+    asyncio.run(
+        executor.run_agent_loop(
+            messages=messages,
+            tools=[],
+            max_turns=2,
+            context_data=shared_context,
+        )
+    )
+    assert shared_context["no_tool_call_count"] == 2
+
+    second_llm = FakeLLM(
+        responses=[
+            FakeResponse(tool_calls=None),
+            FakeResponse(tool_calls=[_tool_call("call_1", "SPEAKER_00", "Hello")]),
+        ]
+    )
+    executor.llm = second_llm
+    messages_second: list[dict[str, Any]] = [{"role": "system", "content": "x"}]
+
+    asyncio.run(
+        executor.run_agent_loop(
+            messages=messages_second,
+            tools=[],
+            max_turns=2,
+            context_data=shared_context,
+        )
+    )
+
+    assert len(executor.executed_calls) == 1
+    assert executor.executed_calls[0][0] == "call_1"
 
 
 def test_base_loop_does_not_id_dedupe_synthetic_fallback_ids() -> None:

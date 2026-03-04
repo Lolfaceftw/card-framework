@@ -1,0 +1,17 @@
+<Objective>
+Create a validated QA set with exactly {{ factual_question_count + naturalness_question_count }} items.
+</Objective>
+<Context>
+Dimension split is fixed:
+- factualness: {{ factual_question_count }}
+- naturalness: {{ naturalness_question_count }}
+Naturalness here means speaker-style fidelity cues observable in the source transcript.
+</Context>
+<Inputs>
+Source transcript with evidence ids:
+{{ source_text }}
+</Inputs>
+<Output contract>
+Return a single JSON object with top-level key "questions" only.
+No prose, no markdown fences.
+</Output contract>
