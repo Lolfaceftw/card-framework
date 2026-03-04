@@ -186,12 +186,42 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         )
         max_tool_calls_per_turn_raw = runtime_context.get("max_tool_calls_per_turn")
         max_tool_calls_per_turn: int | None = None
-        if isinstance(max_tool_calls_per_turn_raw, int) and max_tool_calls_per_turn_raw > 0:
+        if (
+            isinstance(max_tool_calls_per_turn_raw, int)
+            and max_tool_calls_per_turn_raw > 0
+        ):
             max_tool_calls_per_turn = max_tool_calls_per_turn_raw
+        tool_choice_raw = runtime_context.get("tool_choice")
+        tool_choice: str | dict[str, Any] | None
+        if isinstance(tool_choice_raw, str):
+            tool_choice = tool_choice_raw
+        elif isinstance(tool_choice_raw, dict):
+            tool_choice = tool_choice_raw
+        elif tool_choice_raw is None:
+            tool_choice = None
+        else:
+            logger.warning(
+                "[%s] Ignoring invalid tool_choice type: %s",
+                self.name,
+                type(tool_choice_raw).__name__,
+            )
+            tool_choice = None
+        chat_max_tokens_raw = runtime_context.get("chat_max_tokens")
+        chat_max_tokens: int | None = None
+        if isinstance(chat_max_tokens_raw, int) and chat_max_tokens_raw > 0:
+            chat_max_tokens = chat_max_tokens_raw
+        no_tool_call_patience_raw = runtime_context.get("no_tool_call_patience")
+        no_tool_call_patience = (
+            no_tool_call_patience_raw
+            if isinstance(no_tool_call_patience_raw, int)
+            and no_tool_call_patience_raw > 0
+            else None
+        )
 
         runtime_context["seen_tool_call_ids"] = seen_tool_call_ids
         runtime_context["seen_tool_signature_turns"] = seen_tool_signature_turns
         runtime_context.setdefault("tool_replay_window", "run")
+        runtime_context["no_tool_call_count"] = 0
         enable_extended_text_tool_parser = bool(
             runtime_context.get("enable_extended_text_tool_parser", False)
         )
@@ -207,10 +237,15 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         for turn in range(max_turns):
             typed_messages = [Message.from_mapping(message) for message in messages]
             typed_tools = [ToolDefinition.from_mapping(tool) for tool in tools]
-            response_message = self.llm.chat(
-                messages=typed_messages,
-                tools=typed_tools,
-            )
+            chat_kwargs: dict[str, Any] = {
+                "messages": typed_messages,
+                "tools": typed_tools,
+            }
+            if tool_choice is not None:
+                chat_kwargs["tool_choice"] = tool_choice
+            if chat_max_tokens is not None:
+                chat_kwargs["max_tokens"] = chat_max_tokens
+            response_message = self.llm.chat(**chat_kwargs)
             if hasattr(response_message, "model_dump"):
                 msg_dict = response_message.model_dump()
                 msg_dict = {
@@ -243,7 +278,20 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             tool_calls = parser.parse(msg_dict)
             total_parsed_calls += len(tool_calls)
             if not tool_calls:
+                if no_tool_call_patience is not None:
+                    no_tool_call_count = (
+                        int(runtime_context.get("no_tool_call_count", 0)) + 1
+                    )
+                    runtime_context["no_tool_call_count"] = no_tool_call_count
+                    if no_tool_call_count >= no_tool_call_patience:
+                        logger.warning(
+                            "[%s] No tool calls emitted for %s consecutive turns; stopping loop.",
+                            self.name,
+                            no_tool_call_count,
+                        )
+                        break
                 continue
+            runtime_context["no_tool_call_count"] = 0
 
             executable_tool_calls: list[dict[str, Any]] = []
             executable_call_metadata: list[dict[str, Any]] = []
@@ -268,7 +316,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                         duplicate_reason = "signature"
 
                 if duplicate_reason is not None:
-                    skip_payload = {
+                    skip_payload: dict[str, Any] = {
                         "status": "skipped_duplicate",
                         "reason": duplicate_reason,
                         "tool_name": tool_name,
@@ -318,7 +366,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                 for tc in overflow_tool_calls:
                     tool_name = str(tc.get("name") or "unknown_tool")
                     tool_id = str(tc.get("id") or "unknown")
-                    skip_payload = {
+                    skip_payload_cap: dict[str, Any] = {
                         "status": "skipped",
                         "reason": "max_tool_calls_per_turn",
                         "max_tool_calls_per_turn": max_tool_calls_per_turn,
@@ -330,7 +378,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                             "role": "tool",
                             "tool_call_id": tool_id,
                             "name": tool_name,
-                            "content": json.dumps(skip_payload),
+                            "content": json.dumps(skip_payload_cap),
                         }
                     )
                     total_skipped_calls += 1
@@ -340,14 +388,17 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                     event_bus.publish(
                         "tool_result",
                         tool_name=f"{tool_name} (skipped turn cap)",
-                        result=json.dumps(skip_payload, indent=2),
+                        result=json.dumps(skip_payload_cap, indent=2),
                     )
 
             for meta in executable_call_metadata:
                 tool_id = str(meta["tool_id"])
                 if not bool(meta["is_synthetic_id"]):
                     seen_tool_call_ids.add(tool_id)
-                if bool(meta["enforce_signature_dedupe"]) and signature_window_turns > 0:
+                if (
+                    bool(meta["enforce_signature_dedupe"])
+                    and signature_window_turns > 0
+                ):
                     signature = str(meta["signature"])
                     seen_tool_signature_turns[signature] = turn
 

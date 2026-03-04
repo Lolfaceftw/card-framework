@@ -1,0 +1,23 @@
+vllm:
+  base_url: "http://PRIVATE_ENDPOINT_REDACTED/v1"
+  api_key: "EMPTY"
+  timeout_seconds: 30
+  chat_template_kwargs:
+    enable_thinking: false
+
+qa:
+  input_guard:
+    mode: "error"
+    min_overlap_ratio: 0.03
+    min_shared_tokens: 12
+    min_shared_distinctive_tokens: 3
+    min_shared_name_phrases: 2
+  creator:
+    max_generation_attempts: 8
+  evaluator:
+    max_tool_turns: 320
+    max_attempts_per_question: 3
+  timeouts:
+    creator_request_seconds: 300
+    evaluator_request_seconds: 1200
+    server_stop_seconds: 10

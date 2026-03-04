@@ -1,4 +1,4 @@
-from typing import List, Literal, cast
+from typing import Any, List, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -72,6 +72,36 @@ class CriticTaskResponse(BaseModel):
         if normalized not in {"pass", "fail"}:
             raise ValueError("status must be 'pass' or 'fail'")
         return cast(CriticStatus, normalized)
+
+
+# QA benchmark DTOs
+class GroundTruthCreatorTaskRequest(BaseModel):
+    """Request payload for source-grounded QA question generation."""
+
+    source_text: str
+    factual_question_count: int = 50
+    naturalness_question_count: int = 50
+
+
+class GroundTruthCreatorTaskResponse(BaseModel):
+    """Response payload for generated QA ground-truth questions."""
+
+    questions: list[dict[str, Any]]
+
+
+class QAEvaluatorTaskRequest(BaseModel):
+    """Request payload for QA evaluator execution."""
+
+    summary_xml: str
+    source_text: str
+    questions: list[dict[str, Any]]
+
+
+class QAEvaluatorTaskResponse(BaseModel):
+    """Response payload for QA evaluator scoring and trace records."""
+
+    score: dict[str, Any]
+    answers: list[dict[str, Any]]
 
 
 # Common LLM DTOs
