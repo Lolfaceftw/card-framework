@@ -38,6 +38,8 @@ class SummarizerTaskRequest(BaseModel):
     min_words: int = 50
     max_words: int = 100
     retrieval_port: int
+    speaker_samples_manifest_path: str = ""
+    draft_audio_state_path: str = ""
     feedback: str = ""
     previous_draft: str = ""
     loop_context: str = ""
@@ -55,6 +57,7 @@ class CriticTaskRequest(BaseModel):
     duration_tolerance_ratio: float = 0.05
     min_words: int = 50
     max_words: int = 100
+    draft_audio_state_path: str = ""
     full_transcript: str = ""
 
 

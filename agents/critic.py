@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 
 from a2a.server.agent_execution import RequestContext
@@ -13,6 +14,10 @@ from agents.client import AgentTaskClient, get_default_agent_client
 from agents.dtos import RetrieveTaskRequest
 from agents.utils import count_words
 from audio_pipeline.calibration import VoiceCloneCalibration
+from audio_pipeline.live_draft_voice_clone import (
+    _snapshot_matches_summary_xml,
+    load_live_draft_voice_clone_state,
+)
 from events import EventBus, get_event_bus
 from llm_provider import LLMProvider
 from prompt_manager import PromptManager
@@ -22,10 +27,12 @@ from summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml
 class CriticExecutor(BaseA2AExecutor):
     """Evaluate a draft summary using deterministic checks plus an LLM critic."""
 
+    _DEFAULT_NEUTRAL_WPM = 150.0
+
     def __init__(
         self,
         llm: LLMProvider,
-        calibration: VoiceCloneCalibration,
+        calibration: VoiceCloneCalibration | None,
         max_tool_turns: int = 5,
         retrieval_port: int = 9012,
         is_embedding_enabled: bool = True,
@@ -49,11 +56,51 @@ class CriticExecutor(BaseA2AExecutor):
         if target_seconds is not None and int(target_seconds) > 0:
             return int(target_seconds)
         midpoint_words = max(1, int((min_words + max_words) / 2))
-        neutral_wpm = self.calibration.wpm_for(
-            speaker="",
-            emo_preset=DEFAULT_EMO_PRESET,
-        )
+        if self.calibration is not None:
+            neutral_wpm = self.calibration.wpm_for(
+                speaker="",
+                emo_preset=DEFAULT_EMO_PRESET,
+            )
+        else:
+            neutral_wpm = self._DEFAULT_NEUTRAL_WPM
         return max(1, int(round((midpoint_words / neutral_wpm) * 60.0)))
+
+    def _resolve_draft_duration_seconds(
+        self,
+        *,
+        draft: str,
+        turns: list,
+        draft_audio_state_path: Path | None,
+    ) -> tuple[float, str]:
+        """Resolve duration from live rendered audio when available, else fallback estimate."""
+        if draft_audio_state_path is not None and draft_audio_state_path.exists():
+            try:
+                state = load_live_draft_voice_clone_state(draft_audio_state_path)
+            except Exception:
+                state = None
+            if state is not None and _snapshot_matches_summary_xml(state.current_snapshot, draft):
+                total_seconds = round(
+                    sum(
+                        record.duration_ms / 1000.0
+                        for record in state.turn_audio.values()
+                        if any(
+                            str(item.get("turn_id", "")).strip() == record.turn_id
+                            for item in state.current_snapshot
+                        )
+                    ),
+                    3,
+                )
+                return total_seconds, "actual_audio"
+        if turns:
+            if self.calibration is not None:
+                return self.calibration.estimate_turns_seconds(turns), "estimated_wpm"
+            actual_count = count_words(draft)
+            derived_seconds = round(
+                (actual_count / self._DEFAULT_NEUTRAL_WPM) * 60.0,
+                3,
+            )
+            return derived_seconds, "default_wpm"
+        return 0.0, "empty"
 
     def _run_deterministic_checks(
         self,
@@ -61,6 +108,7 @@ class CriticExecutor(BaseA2AExecutor):
         draft: str,
         target_seconds: int,
         duration_tolerance_ratio: float,
+        draft_audio_state_path: Path | None = None,
     ) -> dict[str, object]:
         """Run non-LLM checks for duration, truncation, and XML coherence."""
         actual_count = count_words(draft)
@@ -74,7 +122,11 @@ class CriticExecutor(BaseA2AExecutor):
         except ValueError:
             turns = []
 
-        estimated_seconds = self.calibration.estimate_turns_seconds(turns) if turns else 0.0
+        estimated_seconds, duration_source = self._resolve_draft_duration_seconds(
+            draft=draft,
+            turns=turns,
+            draft_audio_state_path=draft_audio_state_path,
+        )
 
         if not (min_seconds <= estimated_seconds <= max_seconds):
             failures.append(
@@ -99,6 +151,7 @@ class CriticExecutor(BaseA2AExecutor):
         return {
             "actual_word_count": actual_count,
             "actual_estimated_seconds": round(estimated_seconds, 3),
+            "duration_source": duration_source,
             "failures": failures,
             "status": "pass" if not failures else "fail",
         }
@@ -119,6 +172,11 @@ class CriticExecutor(BaseA2AExecutor):
         )
         duration_tolerance_ratio = float(req.duration_tolerance_ratio or 0.05)
         tolerance_seconds = target_seconds * duration_tolerance_ratio
+        draft_audio_state_path = (
+            Path(req.draft_audio_state_path).resolve()
+            if str(req.draft_audio_state_path).strip()
+            else None
+        )
         full_transcript = req.full_transcript
 
         self.event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
@@ -216,6 +274,7 @@ class CriticExecutor(BaseA2AExecutor):
             "draft": draft,
             "target_seconds": target_seconds,
             "duration_tolerance_ratio": duration_tolerance_ratio,
+            "draft_audio_state_path": draft_audio_state_path,
         }
         final_verdict = await self.run_agent_loop(
             messages, tools, self.max_tool_turns, context_data
@@ -226,6 +285,7 @@ class CriticExecutor(BaseA2AExecutor):
                 draft=draft,
                 target_seconds=target_seconds,
                 duration_tolerance_ratio=duration_tolerance_ratio,
+                draft_audio_state_path=draft_audio_state_path,
             )
             final_verdict = {
                 "status": stats["status"],
@@ -254,6 +314,7 @@ class CriticExecutor(BaseA2AExecutor):
         draft = context_data["draft"]
         target_seconds = int(context_data["target_seconds"])
         duration_tolerance_ratio = float(context_data["duration_tolerance_ratio"])
+        draft_audio_state_path = context_data.get("draft_audio_state_path")
         final_verdict = None
 
         for tc in tool_calls:
@@ -271,6 +332,7 @@ class CriticExecutor(BaseA2AExecutor):
                     draft=draft,
                     target_seconds=target_seconds,
                     duration_tolerance_ratio=duration_tolerance_ratio,
+                    draft_audio_state_path=draft_audio_state_path,
                 )
                 messages.append(
                     {

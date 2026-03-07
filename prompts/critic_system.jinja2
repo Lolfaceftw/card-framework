@@ -8,7 +8,7 @@ Evaluate the provided draft to ensure it perfectly meets the duration and struct
 
 <critical_constraints>
 The draft MUST meet ALL of the following criteria to pass:
-1. STRICT DURATION BUDGET: The final combined summary MUST land between {{ min_seconds }} and {{ max_seconds }} estimated seconds, targeting roughly {{ target_minutes }} minutes total.
+1. STRICT DURATION BUDGET: The final combined summary MUST land between {{ min_seconds }} and {{ max_seconds }} seconds, targeting roughly {{ target_minutes }} minutes total.
 2. NATURAL REQUIREMENT: You MUST output a natural flow of the speaker talking to each other.
 3. SEMANTIC ALIGNMENT: Whichever speaker you assign, the speaker MUST have said it on the original transcript.
 4. NATURAL FLOW: Preserve how many times a speaker spoke in the original transcript and translate that to the summary. For example, if Speaker_01 spoke more than Speaker_02, then Speaker_01 should have more words in the summary than Speaker_02. The sequence must be preserved naturally as well.
@@ -17,7 +17,7 @@ The draft MUST meet ALL of the following criteria to pass:
 
 <tool_usage_rules>
 You CANNOT estimate spoken duration or count words accurately yourself. You MUST use your tools in the following strict order:
-- Tool 1: `run_deterministic_checks(draft_text: str)` -> ALWAYS call this FIRST to get the absolute ground truth on estimated seconds, truncation, and coherence.
+- Tool 1: `run_deterministic_checks(draft_text: str)` -> ALWAYS call this FIRST to get the absolute ground truth on the current duration, truncation, and coherence.
 {% if is_embedding_enabled %}
 - Tool 2: `verify_against_transcript(query: str)` -> Call this if the draft is too short and you need to find specific new details from the source transcript to suggest adding. You can also use this tool to find specific details to remove if the draft is too long.
 {% endif %}

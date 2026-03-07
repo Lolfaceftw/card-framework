@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
 from audio_pipeline.eta import LinearStageEtaStrategy, StageSpeedProfile
 from orchestration.stage_orchestrator import StageOrchestrator
 from orchestration.transcript import Transcript
@@ -28,6 +29,14 @@ class _FakeOrchestrator:
     async def run_loop(self, **kwargs: Any) -> str:
         self.loop_kwargs = kwargs
         return "<SPEAKER_00>loop</SPEAKER_00>"
+
+
+class _FakeDiagnosticsOrchestrator(_FakeOrchestrator):
+    """Capture the diagnostics-aware loop entrypoint used by live drafting."""
+
+    async def run_loop_with_diagnostics(self, **kwargs: Any) -> dict[str, Any]:
+        self.loop_kwargs = kwargs
+        return {"converged": False, "draft": ""}
 
 
 @dataclass(slots=True)
@@ -104,6 +113,36 @@ class _FakeGpuHeartbeat:
 
     def stop(self) -> None:
         self.stop_calls += 1
+
+
+class _StubLiveVoiceCloneProvider:
+    """Write placeholder turn audio for live-draft stage-orchestrator tests."""
+
+    def __init__(self) -> None:
+        self.reference_calls: list[Path] = []
+
+    def synthesize(
+        self,
+        *,
+        reference_audio_path: Path,
+        text: str,
+        output_audio_path: Path,
+        emo_text: str | None = None,
+        progress_callback=None,
+    ) -> Path:
+        del text, emo_text, progress_callback
+        self.reference_calls.append(reference_audio_path)
+        output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        output_audio_path.write_bytes(b"wav")
+        return output_audio_path
+
+
+def _write_speaker_manifest(tmp_path: Path, samples: list[dict[str, object]]) -> Path:
+    """Persist a minimal speaker-sample manifest for stage-orchestrator tests."""
+    manifest_path = tmp_path / "speaker_samples" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({"samples": samples}), encoding="utf-8")
+    return manifest_path
 
 
 def _build_stage_orchestrator(
@@ -427,6 +466,116 @@ def test_run_stage_two_prepares_deferred_speaker_samples_for_voice_clone(
 
     assert prepared_calls == ["called"]
     assert fake_voice_clone.manifest_path == manifest_path.resolve()
+
+
+def test_live_draft_loop_prepares_samples_and_passes_state_paths(
+    tmp_path: Path,
+) -> None:
+    """Prepare speaker samples before the loop and forward live-draft state paths."""
+    fake_orchestrator = _FakeDiagnosticsOrchestrator()
+    fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
+    manifest_path = tmp_path / "speaker_samples" / "manifest.json"
+    prepared_calls: list[str] = []
+
+    def _prepare_speaker_samples(transcript: Transcript) -> Transcript:
+        prepared_calls.append("called")
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text('{"samples": []}', encoding="utf-8")
+        return transcript.with_metadata(
+            {
+                **transcript.metadata,
+                "speaker_samples_manifest_path": str(manifest_path),
+            }
+        )
+
+    stage_orchestrator = StageOrchestrator(
+        orchestrator=fake_orchestrator,  # type: ignore[arg-type]
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
+        max_iterations=3,
+        voice_clone_orchestrator=fake_voice_clone,  # type: ignore[arg-type]
+        speaker_sample_preparer=_prepare_speaker_samples,
+        live_draft_audio_enabled=True,
+    )
+
+    asyncio.run(
+        stage_orchestrator.run(
+            transcript={"segments": [{"speaker": "SPEAKER_00", "text": "hello world"}]},
+            retrieval_enabled=False,
+        )
+    )
+
+    assert prepared_calls == ["called"]
+    assert fake_orchestrator.loop_kwargs is not None
+    assert fake_orchestrator.loop_kwargs["speaker_samples_manifest_path"] == (
+        manifest_path.resolve()
+    )
+    draft_audio_state_path = fake_orchestrator.loop_kwargs["draft_audio_state_path"]
+    assert isinstance(draft_audio_state_path, Path)
+    assert draft_audio_state_path.parent == (tmp_path / "voice_clone").resolve()
+
+
+def test_run_stage_three_uses_live_draft_renderer_when_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Route stage-3-only synthesis through the live-draft renderer when enabled."""
+    sample_path = tmp_path / "speaker_00.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = _write_speaker_manifest(
+        tmp_path,
+        samples=[
+            {"speaker": "SPEAKER_00", "path": str(sample_path), "duration_ms": 30_000}
+        ],
+    )
+    final_summary_path = tmp_path / "summary.xml"
+    final_summary_path.write_text("<SPEAKER_00>hello there</SPEAKER_00>", encoding="utf-8")
+    provider = _StubLiveVoiceCloneProvider()
+    voice_clone_orchestrator = VoiceCloneOrchestrator(
+        provider=provider,
+        output_dir=tmp_path / "voice_clone",
+        merge_segments=False,
+    )
+
+    monkeypatch.setattr(
+        "audio_pipeline.live_draft_voice_clone.probe_audio_duration_ms",
+        lambda _path: 2_500,
+    )
+
+    stage_orchestrator = StageOrchestrator(
+        orchestrator=_FakeOrchestrator(),  # type: ignore[arg-type]
+        stage_plan=PipelineStagePlan(
+            start_stage="stage-3",
+            final_summary_path=final_summary_path,
+        ),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
+        max_iterations=3,
+        voice_clone_orchestrator=voice_clone_orchestrator,
+        live_draft_audio_enabled=True,
+    )
+
+    asyncio.run(
+        stage_orchestrator.run(
+            transcript={
+                "segments": [],
+                "metadata": {"speaker_samples_manifest_path": str(manifest_path)},
+            },
+            retrieval_enabled=False,
+        )
+    )
+
+    manifest_payload = json.loads(
+        (tmp_path / "voice_clone" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest_payload["artifact_count"] == 1
+    assert manifest_payload["artifacts"][0]["turn_id"] == "stage3-turn-001"
+    assert manifest_payload["artifacts"][0]["duration_ms"] == 2_500
+    assert manifest_payload["artifacts"][0]["actual_wpm"] > 0
+    assert provider.reference_calls == [sample_path]
 
 
 def test_run_stage_four_uses_existing_summary_and_manifest(tmp_path: Path) -> None:

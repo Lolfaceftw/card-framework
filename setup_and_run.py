@@ -1562,13 +1562,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             repo_key_path=("audio", "voice_clone", "enabled"),
             fallback=True,
         )
+        live_draft_audio_enabled = resolve_repo_backed_boolean_override(
+            combined_bootstrap_overrides,
+            key="audio.voice_clone.live_drafting.enabled",
+            repo_key_path=("audio", "voice_clone", "live_drafting", "enabled"),
+            fallback=True,
+        )
+        live_draft_audio_enabled = voice_clone_enabled and live_draft_audio_enabled
         interjector_enabled = resolve_repo_backed_boolean_override(
             combined_bootstrap_overrides,
             key="audio.interjector.enabled",
             repo_key_path=("audio", "interjector", "enabled"),
             fallback=False,
         )
-        synthesis_enabled = voice_clone_enabled or interjector_enabled
+        calibration_runtime_enabled = (
+            effective_start_stage in {"stage-1", "stage-2"}
+            and not live_draft_audio_enabled
+        )
+        synthesis_enabled = (
+            voice_clone_enabled or interjector_enabled or calibration_runtime_enabled
+        )
         speaker_samples_enabled = resolve_repo_backed_boolean_override(
             combined_bootstrap_overrides,
             key="audio.speaker_samples.enabled",
@@ -1607,8 +1620,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     name="repo_sync",
                     status="skipped",
                     detail=(
-                        "Skipped because audio.voice_clone.enabled=false and "
-                        "audio.interjector.enabled=false."
+                        "Skipped because voice-clone runtime is not required for the "
+                        "selected stage and overrides."
                     ),
                 )
             )
@@ -1641,8 +1654,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     name="model_download",
                     status="skipped",
                     detail=(
-                        "Skipped because audio.voice_clone.enabled=false and "
-                        "audio.interjector.enabled=false."
+                        "Skipped because voice-clone runtime is not required for the "
+                        "selected stage and overrides."
                     ),
                 )
             )
@@ -1752,17 +1765,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
 
-        print("[6/7] Calibration")
-        resolved_transcript_override = resolve_calibration_transcript_path(
-            overrides=overrides,
-            start_stage=effective_start_stage,
-        )
-        calibration_warning_message = build_calibration_warning_message(
-            start_stage=effective_start_stage,
-        )
-        if calibration_warning_message is not None:
-            print(f"Note: {calibration_warning_message}")
-        if effective_start_stage == "stage-1":
+        print("[6/7] Duration setup")
+        if effective_start_stage == "stage-1" and calibration_runtime_enabled:
+            calibration_warning_message = build_calibration_warning_message(
+                start_stage=effective_start_stage,
+            )
+            if calibration_warning_message is not None:
+                print(f"Note: {calibration_warning_message}")
             records.append(
                 StepRecord(
                     name="calibration",
@@ -1770,6 +1779,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     detail=(
                         "Deferred to main.py after transcript generation so the audio "
                         "stage does not run twice."
+                    ),
+                )
+            )
+        elif live_draft_audio_enabled:
+            records.append(
+                StepRecord(
+                    name="calibration",
+                    status="skipped",
+                    detail=(
+                        "Skipped because live stage-2/stage-3 drafting uses actual "
+                        "rendered audio durations."
                     ),
                 )
             )
@@ -1781,7 +1801,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     detail="Skipped because stage-4 interjection does not require calibration.",
                 )
             )
+        elif effective_start_stage == "stage-3":
+            records.append(
+                StepRecord(
+                    name="calibration",
+                    status="skipped",
+                    detail="Skipped because stage-3 voice cloning does not require calibration.",
+                )
+            )
         else:
+            resolved_transcript_override = resolve_calibration_transcript_path(
+                overrides=overrides,
+                start_stage=effective_start_stage,
+            )
+            calibration_warning_message = build_calibration_warning_message(
+                start_stage=effective_start_stage,
+            )
+            if calibration_warning_message is not None:
+                print(f"Note: {calibration_warning_message}")
             run_calibration(
                 uv_executable=args.uv_executable,
                 transcript_path=resolved_transcript_override,

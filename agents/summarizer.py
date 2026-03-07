@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from a2a.server.agent_execution import RequestContext
@@ -20,6 +21,8 @@ from agents.summarizer_tool_dispatcher import (
 )
 from agents.tool_handlers import build_revise_tools, build_summarizer_tools
 from audio_pipeline.calibration import VoiceCloneCalibration
+from audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
+from audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
 from events import EventBus, get_event_bus
 from llm_provider import LLMProvider
 from prompt_manager import PromptManager
@@ -28,6 +31,8 @@ from summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml, serialize_summary
 
 class SummarizerExecutor(BaseA2AExecutor):
     """Produce an abstractive, duration-targeted summary of a transcript."""
+
+    _DEFAULT_NEUTRAL_WPM = 150.0
 
     _DEFAULT_LOOP_GUARDRAILS: dict[str, Any] = {
         "enabled": False,
@@ -49,9 +54,12 @@ class SummarizerExecutor(BaseA2AExecutor):
         llm: LLMProvider,
         retrieval_port: int,
         max_tool_turns: int,
-        calibration: VoiceCloneCalibration,
+        calibration: VoiceCloneCalibration | None,
         is_embedding_enabled: bool = True,
         loop_guardrails: dict[str, Any] | None = None,
+        voice_clone_orchestrator: VoiceCloneOrchestrator | None = None,
+        live_draft_audio_enabled: bool = False,
+        emo_preset_catalog: dict[str, str] | None = None,
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
     ) -> None:
@@ -63,6 +71,18 @@ class SummarizerExecutor(BaseA2AExecutor):
         self.calibration = calibration
         self.is_embedding_enabled = is_embedding_enabled
         self.loop_guardrails = dict(loop_guardrails or {})
+        self.voice_clone_orchestrator = voice_clone_orchestrator
+        self.live_draft_audio_enabled = bool(
+            live_draft_audio_enabled and voice_clone_orchestrator is not None
+        )
+        if emo_preset_catalog:
+            self.emo_preset_catalog = dict(emo_preset_catalog)
+        elif calibration is not None:
+            self.emo_preset_catalog = dict(calibration.preset_emo_texts)
+        else:
+            self.emo_preset_catalog = {
+                DEFAULT_EMO_PRESET: "calm, neutral, steady conversational tone."
+            }
         self.agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
         )
@@ -204,10 +224,13 @@ class SummarizerExecutor(BaseA2AExecutor):
         if explicit_target_seconds is not None and int(explicit_target_seconds) > 0:
             return int(explicit_target_seconds)
         mid_words = max(1, int((int(req.min_words) + int(req.max_words)) / 2))
-        neutral_wpm = self.calibration.wpm_for(
-            speaker="",
-            emo_preset=DEFAULT_EMO_PRESET,
-        )
+        if self.calibration is not None:
+            neutral_wpm = self.calibration.wpm_for(
+                speaker="",
+                emo_preset=DEFAULT_EMO_PRESET,
+            )
+        else:
+            neutral_wpm = self._DEFAULT_NEUTRAL_WPM
         derived_seconds = int(round((mid_words / neutral_wpm) * 60.0))
         self.event_bus.publish(
             "system_message",
@@ -222,7 +245,7 @@ class SummarizerExecutor(BaseA2AExecutor):
         """Render the preset catalog as prompt-ready lines."""
         return "\n".join(
             f"- `{name}`: {emo_text}"
-            for name, emo_text in self.calibration.preset_emo_texts.items()
+            for name, emo_text in self.emo_preset_catalog.items()
         )
 
     async def handle_task(
@@ -236,6 +259,12 @@ class SummarizerExecutor(BaseA2AExecutor):
         retrieval_port = req.retrieval_port
         previous_draft = req.previous_draft
         full_transcript = req.full_transcript
+        speaker_samples_manifest_path = str(
+            getattr(req, "speaker_samples_manifest_path", "")
+        ).strip()
+        draft_audio_state_path = str(
+            getattr(req, "draft_audio_state_path", "")
+        ).strip()
         loop_context = getattr(req, "loop_context", task_data.get("loop_context", ""))
         loop_context_block = self._build_loop_context_prompt_block(loop_context)
         target_seconds = self._resolve_target_seconds(task_data=task_data, req=req)
@@ -249,6 +278,23 @@ class SummarizerExecutor(BaseA2AExecutor):
         emo_preset_guide = self._build_emo_preset_guide()
 
         revise_mode = bool(previous_draft and feedback)
+        live_draft_session: LiveDraftVoiceCloneSession | None = None
+        if self.live_draft_audio_enabled:
+            if not speaker_samples_manifest_path:
+                raise RuntimeError(
+                    "Live drafting requires speaker_samples_manifest_path."
+                )
+            if not draft_audio_state_path:
+                raise RuntimeError("Live drafting requires draft_audio_state_path.")
+            if self.voice_clone_orchestrator is None:
+                raise RuntimeError(
+                    "Live drafting is enabled but voice_clone_orchestrator is missing."
+                )
+            live_draft_session = LiveDraftVoiceCloneSession.from_orchestrator(
+                orchestrator=self.voice_clone_orchestrator,
+                state_path=Path(draft_audio_state_path),
+                speaker_samples_manifest_path=Path(speaker_samples_manifest_path),
+            )
 
         loop_guardrails = self._resolve_loop_guardrails()
         if loop_guardrails["active"]:
@@ -273,7 +319,31 @@ class SummarizerExecutor(BaseA2AExecutor):
         registry = MessageRegistry()
 
         if revise_mode:
-            self._load_draft_into_registry(registry, previous_draft)
+            restored_live_snapshot = None
+            if live_draft_session is not None:
+                restored_live_snapshot = live_draft_session.restore_snapshot_for_draft(
+                    previous_draft
+                )
+            if restored_live_snapshot is not None:
+                registry.load_from_snapshot(restored_live_snapshot)
+                self.event_bus.publish(
+                    "system_message",
+                    (
+                        "REVISE MODE - restored live draft audio state for "
+                        f"{len(registry)} messages"
+                    ),
+                )
+            else:
+                self._load_draft_into_registry(registry, previous_draft)
+                if live_draft_session is not None and len(registry) > 0:
+                    live_draft_session.bootstrap_from_snapshot(registry.snapshot())
+                    self.event_bus.publish(
+                        "system_message",
+                        (
+                            "REVISE MODE - regenerated live draft audio state for "
+                            f"{len(registry)} messages"
+                        ),
+                    )
             tool_registry = build_revise_tools(
                 registry,
                 retrieval_port,
@@ -282,12 +352,16 @@ class SummarizerExecutor(BaseA2AExecutor):
                 duration_tolerance_ratio,
                 self.is_embedding_enabled,
                 agent_client=self.agent_client,
+                live_draft_session=live_draft_session,
             )
-            self.event_bus.publish(
-                "system_message",
-                f"REVISE MODE - loaded {len(registry)} messages from previous draft",
-            )
+            if restored_live_snapshot is None:
+                self.event_bus.publish(
+                    "system_message",
+                    f"REVISE MODE - loaded {len(registry)} messages from previous draft",
+                )
         else:
+            if live_draft_session is not None:
+                live_draft_session.clear()
             tool_registry = build_summarizer_tools(
                 registry,
                 retrieval_port,
@@ -296,6 +370,7 @@ class SummarizerExecutor(BaseA2AExecutor):
                 duration_tolerance_ratio,
                 self.is_embedding_enabled,
                 agent_client=self.agent_client,
+                live_draft_session=live_draft_session,
             )
 
         transcript_excerpt = ""

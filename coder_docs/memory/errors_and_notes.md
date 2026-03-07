@@ -1,5 +1,9 @@
 # Errors And Notes
 
+### 2026-03-07T19:21:54+08:00 - Live Stage-2 Audio Needs Stable Turn IDs And A Persisted Draft-Audio Sidecar
+- Problem: The old stage-2 flow estimated duration from one upfront calibration artifact, then ran stage-3 as a second full render pass after critic approval. That meant actual cloned durations could drift away from stage-2 decisions, revise mode could not safely reuse already-rendered turn audio, and deleted or re-added lines had no stable identity across retries.
+- Solution: Give every registry line a stable `turn_id`, persist live draft audio state keyed by those IDs, synthesize changed turns immediately during stage-2 when `audio.voice_clone.live_drafting.enabled=true`, feed critic checks from the persisted actual segment durations, and finalize the approved live turn cache directly into the stage-3 manifest instead of re-rendering the whole summary.
+
 ### 2026-03-07T18:44:23+08:00 - IndexTTS Emotion Presets And Beam Search Needed A Repo-Level Low-Latency Path
 - Problem: Even after the warm IndexTTS runtime fix, repeated stage-3 and stage-4 turns still paid unnecessary latency because preset `emo_text` guidance re-ran Qwen emotion analysis on every synth call, and the vendored IndexTTS defaults still used `num_beams=3` for mel-token generation.
 - Solution: Cache `emo_text -> emo_vector` inside the warm runtime boundary, pass cached vectors directly into IndexTTS inference so repeated preset prompts skip Qwen analysis, and expose generation knobs in repo config with `audio.voice_clone.num_beams=1` as the repo default for faster steady-state synthesis.
