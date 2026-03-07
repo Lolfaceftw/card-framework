@@ -197,6 +197,15 @@ def _should_defer_speaker_samples(audio_cfg_dict: dict[str, Any]) -> bool:
     )
 
 
+def _is_live_draft_audio_requested(audio_cfg_dict: dict[str, Any]) -> bool:
+    """Return whether live stage-2/stage-3 audio drafting is enabled in config."""
+    voice_clone_cfg = _to_plain_dict(audio_cfg_dict.get("voice_clone", {}))
+    live_drafting_cfg = _to_plain_dict(voice_clone_cfg.get("live_drafting", {}))
+    return bool(voice_clone_cfg.get("enabled", False)) and bool(
+        live_drafting_cfg.get("enabled", True)
+    )
+
+
 def _save_eta_profile_if_supported(
     *,
     eta_strategy: StageEtaStrategy | None,
@@ -545,6 +554,7 @@ def main(cfg: DictConfig) -> None:
     project_root = Path(hydra.utils.get_original_cwd())
     audio_cfg_dict = _to_plain_dict(cfg.get("audio", {}))
     voice_clone_cfg_dict = _to_plain_dict(audio_cfg_dict.get("voice_clone", {}))
+    live_draft_audio_requested = _is_live_draft_audio_requested(audio_cfg_dict)
     orchestrator_cfg_dict = _to_plain_dict(cfg.get("orchestrator", {}))
     target_seconds, duration_tolerance_ratio = _resolve_duration_targets(
         orchestrator_cfg_dict
@@ -662,7 +672,12 @@ def main(cfg: DictConfig) -> None:
     elif _should_defer_speaker_samples(audio_cfg_dict):
         event_bus.publish(
             "system_message",
-            "Speaker sample generation deferred until voice clone stage.",
+            (
+                "Speaker sample generation deferred until live draft voice-clone "
+                "preparation."
+                if live_draft_audio_requested
+                else "Speaker sample generation deferred until voice clone stage."
+            ),
         )
         speaker_sample_preparer = _build_speaker_sample_preparer(
             stage_start=stage_plan.start_stage,
@@ -693,14 +708,19 @@ def main(cfg: DictConfig) -> None:
             eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
         )
     calibration = None
-    if (
+    if live_draft_audio_requested and (
         stage_plan.run_summarizer_stage
         or stage_plan.run_critic_stage
-        or (
-            stage_plan.start_stage != "stage-4"
-            and bool(voice_clone_cfg_dict.get("enabled", False))
-        )
+        or stage_plan.start_stage == "stage-3"
     ):
+        event_bus.publish(
+            "system_message",
+            "Live draft voice-clone mode enabled. Skipping calibration and using rendered audio durations during stage-2.",
+        )
+    needs_calibration = (
+        stage_plan.run_summarizer_stage or stage_plan.run_critic_stage
+    ) and not live_draft_audio_requested
+    if needs_calibration:
         speaker_manifest_path: Path | None = None
         if stage_plan.start_stage != "stage-4":
             manifest_value = str(
@@ -804,11 +824,19 @@ def main(cfg: DictConfig) -> None:
         audio_cfg_dict,
         project_root=project_root,
     )
+    live_draft_audio_enabled = (
+        live_draft_audio_requested and voice_clone_orchestrator is not None
+    )
     interjector_orchestrator = build_interjector_orchestrator(
         audio_cfg_dict,
         llm=interjector_llm,
         project_root=project_root,
     )
+    if stage_plan.start_stage == "stage-3" and voice_clone_orchestrator is None:
+        raise ValueError(
+            "audio.voice_clone.enabled must be true when "
+            "pipeline.start_stage=stage-3."
+        )
     if stage_plan.start_stage == "stage-4" and interjector_orchestrator is None:
         raise ValueError(
             "audio.interjector.enabled must be true when "
@@ -966,9 +994,9 @@ def main(cfg: DictConfig) -> None:
         event_bus.publish("system_message", "Info Retrieval Agent disabled.")
 
     if stage_plan.run_summarizer_stage:
-        if calibration is None:
+        if calibration is None and not live_draft_audio_enabled:
             raise RuntimeError(
-                "Summarizer stage requires a loaded voice-clone calibration artifact."
+                "Summarizer stage requires a loaded voice-clone calibration artifact when live drafting is disabled."
             )
         event_bus.publish(
             "system_message",
@@ -985,6 +1013,15 @@ def main(cfg: DictConfig) -> None:
                 max_tool_turns=int(summarizer_cfg.get("max_tool_turns", 3)),
                 is_embedding_enabled=is_embedding_enabled,
                 loop_guardrails=_to_plain_dict(summarizer_cfg.get("loop_guardrails")),
+                voice_clone_orchestrator=voice_clone_orchestrator,
+                live_draft_audio_enabled=live_draft_audio_enabled,
+                emo_preset_catalog={
+                    str(name).strip(): str(emo_text).strip()
+                    for name, emo_text in _to_plain_dict(
+                        voice_clone_cfg_dict.get("emo_presets", {})
+                    ).items()
+                    if str(name).strip() and str(emo_text).strip()
+                },
                 agent_client=shared_agent_client,
                 event_bus=event_bus,
             ),
@@ -994,9 +1031,9 @@ def main(cfg: DictConfig) -> None:
         event_bus.publish("system_message", "Summarizer stage disabled by pipeline plan.")
 
     if stage_plan.run_critic_stage:
-        if calibration is None:
+        if calibration is None and not live_draft_audio_enabled:
             raise RuntimeError(
-                "Critic stage requires a loaded voice-clone calibration artifact."
+                "Critic stage requires a loaded voice-clone calibration artifact when live drafting is disabled."
             )
         event_bus.publish(
             "system_message",
@@ -1074,6 +1111,7 @@ def main(cfg: DictConfig) -> None:
         eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
         voice_clone_gpu_heartbeat=voice_clone_gpu_heartbeat,
         loop_memory_artifact_path=loop_memory_artifact_path,
+        live_draft_audio_enabled=live_draft_audio_enabled,
     )
     try:
         asyncio.run(

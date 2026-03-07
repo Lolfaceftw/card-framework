@@ -13,8 +13,8 @@
     </sessionStartChecklist>
     <primaryWorkflow>
       <stage id="stage-1">Audio stage: source separation, ASR, diarization, alignment, and transcript JSON emission.</stage>
-      <stage id="stage-2">Summarization stage: local A2A retrieval, summarizer, and critic agents cooperate until convergence or iteration cap.</stage>
-      <stage id="stage-3">Voice-clone stage: summary XML plus generated speaker samples are rendered into per-turn cloned audio and optional merged output.</stage>
+      <stage id="stage-2">Summarization stage: local A2A retrieval, summarizer, and critic agents cooperate until convergence or iteration cap. When `audio.voice_clone.live_drafting.enabled=true` and voice cloning is enabled, each mutating draft step also renders per-turn audio immediately and uses actual measured segment duration instead of WPM estimates.</stage>
+      <stage id="stage-3">Voice-clone stage: summary XML plus generated speaker samples are rendered into per-turn cloned audio and optional merged output. In live-draft mode this stage usually finalizes already-rendered turn audio into the persisted manifest instead of re-synthesizing every turn.</stage>
       <stage id="stage-4">Interjector stage: the next speaker can add short overlapping backchannels or echo-agreements onto the stage-3 merged audio using summary-aware token anchors.</stage>
     </primaryWorkflow>
     <agentOperatingPrinciples>
@@ -26,7 +26,7 @@
 
   <section id="repo-layout" title="Repository Layout">
     <directory path="agents">A2A executor implementations, task DTOs, tool dispatch, loop control, parsing, correction guidance, and client transport helpers.</directory>
-    <directory path="audio_pipeline">Stage-1 and stage-3 use-case orchestration, contracts, ETA tracking, runtime helpers, gateways, runners, speaker-sample generation, and voice-clone orchestration.</directory>
+    <directory path="audio_pipeline">Stage-1 and stage-3 use-case orchestration, contracts, ETA tracking, runtime helpers, gateways, runners, speaker-sample generation, voice-clone orchestration, and the live draft voice-clone session used by merged stage-2/stage-3 runs.</directory>
     <directory path="benchmark">Summarization benchmark CLI, reference-free evaluation pipeline, QA benchmark CLI, manifests, rubrics, metrics, matrix construction, and report artifact helpers.</directory>
     <directory path="providers">Concrete LLM and embedding adapters such as vLLM, Transformers, DeepSeek, GLM, Google GenAI, Hugging Face, Nanbeige, sentence-transformer embeddings, and logging wrappers.</directory>
     <directory path="prompts">Jinja2 prompt templates for summarizer, critic, QA ground-truth generation, QA evaluator, and corrector flows.</directory>
@@ -51,19 +51,19 @@
     <stagePlanning>
       <rule>pipeline.start_stage controls execution mode and is validated by pipeline_plan.build_pipeline_stage_plan.</rule>
       <mode id="stage-1">Run audio stage, then summarizer/critic loop, then optional voice clone and optional stage-4 interjector.</mode>
-      <mode id="stage-2">Skip audio generation and start from an existing transcript JSON, then run summarizer/critic loop and optional voice clone and interjector.</mode>
-      <mode id="stage-3">Skip to voice clone using an existing summary XML and transcript metadata that already points to a speaker-sample manifest.</mode>
+      <mode id="stage-2">Skip audio generation and start from an existing transcript JSON, then run summarizer/critic loop and optional voice clone and interjector. With live drafting enabled, stage-2 owns per-turn stage-3 rendering while the draft is being built.</mode>
+      <mode id="stage-3">Skip to voice clone using an existing summary XML and transcript metadata that already points to a speaker-sample manifest. With live drafting enabled, this path still routes through the incremental live renderer in one batch so it emits the same manifest shape as stage-2 finalization.</mode>
       <mode id="stage-4">Skip directly to the interjector using an existing summary XML plus an existing stage-3 voice-clone manifest.</mode>
     </stagePlanning>
     <runtimeFlow>
       <step>Resolve logging, project root, pipeline config, audio config, and runtime device.</step>
       <step>If stage-1 is active, run audio_pipeline.AudioToScriptOrchestrator to emit transcript JSON and stage artifacts.</step>
       <step>Load transcript JSON into orchestration.transcript.Transcript unless pipeline.start_stage=stage-4, which runs from summary XML plus voice-clone manifest only.</step>
-      <step>Generate speaker samples after transcript availability when configured, or defer them until just before stage-3 voice cloning when audio.speaker_samples.defer_until_voice_clone=true. Speaker-sample extraction prefers transcript metadata `vocals_audio_path` and falls back to configured `audio.audio_path` when reusable transcripts do not carry stem metadata.</step>
-      <step>Ensure the project-level voice-clone calibration artifact exists before duration-aware summarization, critic evaluation, or stage-3 voice cloning. The calibration path can reuse an existing speaker-sample manifest or bootstrap one from transcript or audio context, but it must be regenerated when the active manifest or calibrated speaker coverage changes.</step>
+      <step>Generate speaker samples after transcript availability when configured, or defer them until just before the voice-clone work begins when `audio.speaker_samples.defer_until_voice_clone=true`. In live-draft mode the deferred path is still pulled forward before the stage-2 summarizer loop starts because actual audio rendering needs the manifest immediately. Speaker-sample extraction prefers transcript metadata `vocals_audio_path` and falls back to configured `audio.audio_path` when reusable transcripts do not carry stem metadata.</step>
+      <step>When live drafting is enabled and voice cloning is active, skip calibration entirely and let the summarizer and critic consume actual rendered turn durations from the persisted live-draft sidecar. When live drafting is disabled, ensure the project-level voice-clone calibration artifact exists before duration-aware summarization or critic evaluation. The calibration path can reuse an existing speaker-sample manifest or bootstrap one from transcript or audio context, but it must be regenerated when the active manifest or calibrated speaker coverage changes.</step>
       <step>When `orchestrator.loop_memory.artifact_path` is configured, the stage orchestrator scopes summarizer loop-memory artifacts by transcript hash and duration target so repeated failed critic remedies can be surfaced on later revise passes instead of being retried verbatim.</step>
       <step>Instantiate shared or per-stage LLM providers, including the optional stage_llm.interjector override, embedding provider, transcript index, local A2A apps, and the orchestrator stack.</step>
-      <step>Run the stage orchestrator, persist final summary XML to summary.xml, optionally run stage-3 voice cloning, and optionally run the stage-4 interjector.</step>
+      <step>Run the stage orchestrator, persist final summary XML to summary.xml, optionally finalize or render stage-3 voice cloning, and optionally run the stage-4 interjector.</step>
     </runtimeFlow>
     <retrievalPolicy>
       <rule>When a real embedding provider is configured, transcript segments are indexed into embeddings.TranscriptIndex and retrieved through the retrieval agent.</rule>
@@ -81,8 +81,8 @@
 
   <section id="agents-and-prompts" title="Agents And Prompts">
     <executors>
-      <executor name="SummarizerExecutor">Tool-loop summarizer that mutates a message registry, supports revise mode, loop-context carryover, optional discovery guardrails, and retrieval-backed query tools. The summarizer is now duration-first: each line carries an `emo_preset`, the tool loop auto-runs `estimate_duration`, and convergence is measured in estimated seconds rather than target word count.</executor>
-      <executor name="CriticExecutor">LLM critic that combines deterministic duration, truncation, and XML checks with optional transcript verification and emits pass/fail verdict JSON including `estimated_seconds`.</executor>
+      <executor name="SummarizerExecutor">Tool-loop summarizer that mutates a message registry, supports revise mode, loop-context carryover, optional discovery guardrails, and retrieval-backed query tools. The summarizer is duration-first: each line carries an `emo_preset`, the tool loop auto-runs `estimate_duration`, and convergence is measured in seconds rather than target word count. In live-draft mode, add/edit/remove mutations synthesize or delete turn audio immediately through `audio_pipeline/live_draft_voice_clone.py`.</executor>
+      <executor name="CriticExecutor">LLM critic that combines deterministic duration, truncation, and XML checks with optional transcript verification and emits pass/fail verdict JSON including `estimated_seconds`. When a matching live-draft audio sidecar exists, critic duration checks prefer actual rendered seconds and mark the payload with `duration_source=actual_audio`.</executor>
       <executor name="InfoRetrievalExecutor">Indexes transcript segments and serves MMR-based retrieval results from embeddings.TranscriptIndex.</executor>
       <executor name="GroundTruthCreatorExecutor">Generates contract-bound QA questions from source text for the QA benchmark.</executor>
       <executor name="QAEvaluatorExecutor">Scores a candidate summary against generated QA questions, validates quote grounding, and aggregates correctness metrics.</executor>
@@ -127,8 +127,8 @@
       <assumption>Critic logic and downstream processing expect speaker-tagged XML blocks rather than plain prose summaries.</assumption>
     </summaryContract>
     <agentTaskContracts>
-      <contract>SummarizerTaskRequest carries `target_seconds`, `duration_tolerance_ratio`, retrieval port, feedback, previous draft, loop context, and optional full transcript. Legacy `min_words` and `max_words` fields still exist only as compatibility fallback, while loop context now includes repeated-remedy warnings derived from persisted critic-failure history.</contract>
-      <contract>CriticTaskRequest carries the candidate draft, `target_seconds`, `duration_tolerance_ratio`, and optional full transcript. Critic responses now include both `word_count` telemetry and `estimated_seconds`.</contract>
+      <contract>SummarizerTaskRequest carries `target_seconds`, `duration_tolerance_ratio`, retrieval port, feedback, previous draft, loop context, optional full transcript, and live-draft wiring fields such as `speaker_samples_manifest_path` and `draft_audio_state_path`. Legacy `min_words` and `max_words` fields still exist only as compatibility fallback, while loop context now includes repeated-remedy warnings derived from persisted critic-failure history.</contract>
+      <contract>CriticTaskRequest carries the candidate draft, `target_seconds`, `duration_tolerance_ratio`, optional full transcript, and optional `draft_audio_state_path` so deterministic checks can reuse actual rendered duration telemetry. Critic responses now include both `word_count` telemetry and `estimated_seconds`.</contract>
       <contract>RetrieveTaskRequest and IndexTaskRequest define the retrieval agent boundary.</contract>
       <contract>QA benchmark DTOs in agents/dtos.py define creator, evaluator, and corrector payload shapes.</contract>
     </agentTaskContracts>
@@ -151,8 +151,9 @@
     <postTranscriptFlow>
       <step>SpeakerSampleGenerator extracts per-speaker reference audio clips from the selected source audio.</step>
       <step>A manifest is written and its path is stored in transcript metadata.</step>
-      <step>Voice-clone calibration measures per-speaker WPM for the fixed emotion preset catalog by synthesizing punctuation-rich temporary phrases against the discovered speaker samples and persisting a single project artifact under `artifacts/calibration`.</step>
-      <step>VoiceCloneOrchestrator consumes summary XML plus the manifest to create per-turn cloned segments and optional merged output. Each turn resolves its stored `emo_preset` to repo-configured `emo_text` before calling IndexTTS.</step>
+      <step>`audio_pipeline/live_draft_voice_clone.py` can keep a persisted live-draft sidecar keyed by stable `turn_id`, synthesize only changed turns, report actual segment durations back into stage-2 tooling, and finalize the live turn set into the normal stage-3 manifest without a second full render pass.</step>
+      <step>Voice-clone calibration remains the legacy fallback path for stage-2 duration estimation when live drafting is disabled. It measures per-speaker WPM for the fixed emotion preset catalog by synthesizing punctuation-rich temporary phrases against the discovered speaker samples and persisting a single project artifact under `artifacts/calibration`.</step>
+      <step>VoiceCloneOrchestrator consumes summary XML plus the manifest to create per-turn cloned segments and optional merged output. Live-draft finalization now emits the same manifest shape plus extra fields such as `turn_id`, `duration_ms`, `word_count`, and `actual_wpm` for downstream consumers. Each turn resolves its stored `emo_preset` to repo-configured `emo_text` before calling IndexTTS.</step>
       <step>The default IndexTTS subprocess backend now keeps one warm nested worker per matching voice-clone config, so calibration, stage-3 cloning, and stage-4 interjection reuse the same loaded weights until the provider is explicitly closed or the parent process exits.</step>
       <step>Within that warm runtime, repeated `emo_text` preset prompts are cached as resolved emotion vectors and forwarded back into IndexTTS directly, avoiding repeated Qwen emotion-analysis passes for common presets such as `neutral`, `warm`, or `engaged`.</step>
       <step>InterjectorOrchestrator can then analyze eligible host turns, align stage-3 audio back to summary text, synthesize short overlaps from the next speaker, and emit a second merged WAV plus its own manifest.</step>
@@ -177,6 +178,7 @@
       <artifact>Default calibration artifact path: artifacts/calibration/voice_clone_calibration.json</artifact>
       <artifact>Speaker sample artifacts live under the configured speaker sample output directory inside the audio work directory.</artifact>
       <artifact>Voice clone artifacts live under the configured voice clone output directory inside the audio work directory.</artifact>
+      <artifact>Live-draft turn audio is cached under `voice_clone/live_draft_turns`, and the corresponding sidecar state file is written alongside other voice-clone artifacts inside the voice clone output directory.</artifact>
       <artifact>Interjector artifacts live under the configured interjector output directory inside the audio work directory and include an `interjector_manifest.json` plus a merged overlap WAV.</artifact>
     </artifacts>
   </section>
@@ -203,7 +205,7 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="conf/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, voice-clone emotion presets, calibration artifact path, duration targets, loop-memory artifact path, loop guardrails, and logging.</file>
+      <file path="conf/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, live draft voice-clone toggles, voice-clone emotion presets, calibration artifact path, duration targets, loop-memory artifact path, loop guardrails, and logging.</file>
       <file path="benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa.</file>
       <file path="benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts.</file>
       <file path="pyproject.toml">Python version floor, dependencies, uv source/index policy, and pytest configuration.</file>
@@ -233,13 +235,14 @@
       <note>setup_and_run.py is the preferred convenience wrapper when the task involves third-party IndexTTS setup and full end-to-end stage execution.</note>
       <note>When no explicit start stage is provided, setup_and_run.py now auto-selects stage-2 if it finds a reusable transcript, preferring repo-root `transcript.json` or `*.transcript.json` before `artifacts/transcripts/*.transcript.json`.</note>
       <note>When stage-2 is auto-selected while a repo-root `summary.xml` already exists, setup_and_run.py prints that it will still rerun summarization before voice cloning and points operators at `--voiceclone-from-summary` for stage-3 clone-only runs.</note>
-      <note>For stage-2 reusable transcripts that lack `metadata.vocals_audio_path`, setup_and_run.py auto-uses a repo-root `audio.wav`-style source file when present and otherwise prompts for source audio so speaker-sample generation and calibration can still run.</note>
+      <note>For stage-2 reusable transcripts that lack `metadata.vocals_audio_path`, setup_and_run.py auto-uses a repo-root `audio.wav`-style source file when present and otherwise prompts for source audio so speaker-sample generation and the legacy calibration path can still run.</note>
       <note>When a stage-2 reusable transcript already carries a valid `metadata.speaker_samples_manifest_path`, the runtime now reuses that manifest instead of regenerating speaker samples from fallback source audio.</note>
-      <note>setup_and_run.py pre-runs calibration for stage-2 and stage-3 flows, and explicitly defers calibration to `main.py` for fresh stage-1 runs so it does not duplicate the audio stage.</note>
-      <note>Stage-2 and stage-3 calibration can emit IndexTTS inference logs before summarization or the final voice-clone pass starts; those syntheses are temporary calibration phrases, not the persisted stage-3 output.</note>
+      <note>`audio.voice_clone.live_drafting.enabled=true` is now the default merged stage-2/stage-3 path when voice cloning is enabled. In that mode setup_and_run.py skips calibration and the runtime uses actual rendered turn durations instead of WPM estimates.</note>
+      <note>setup_and_run.py pre-runs calibration only for the legacy stage-2 estimate path, skips calibration for stage-3 clone-only runs, and explicitly defers calibration to `main.py` for fresh stage-1 runs when the legacy estimate path is active so it does not duplicate the audio stage.</note>
+      <note>Stage-2 calibration logs only appear in the legacy estimate path now. Live drafting should emit actual turn renders during the summarizer loop instead of temporary calibration syntheses.</note>
       <note>When CLI overrides do not specify `audio.voice_clone.enabled`, `audio.interjector.enabled`, or `audio.speaker_samples.enabled`, setup_and_run.py now respects the defaults declared in `conf/config.yaml` instead of forcing wrapper-local fallback values.</note>
-      <note>setup_and_run.py now skips IndexTTS repo sync, nested uv sync, and model provisioning only when both audio.voice_clone.enabled=false and audio.interjector.enabled=false.</note>
-      <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of stage-3.</note>
+      <note>setup_and_run.py now skips IndexTTS repo sync, nested uv sync, and model provisioning only when neither final synthesis nor the legacy calibration-backed estimate path needs the voice-clone runtime.</note>
+      <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of live drafting or stage-3 rendering.</note>
     </commandNotes>
   </section>
 

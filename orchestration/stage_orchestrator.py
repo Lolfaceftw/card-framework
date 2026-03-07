@@ -11,6 +11,7 @@ import threading
 import time
 
 from audio_pipeline.gpu_heartbeat import VoiceCloneGpuHeartbeatService
+from audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
 from audio_pipeline.interjector import InterjectorOrchestrator, InterjectorRunResult
 from audio_pipeline.eta import (
     DynamicEtaTracker,
@@ -30,7 +31,7 @@ from audio_pipeline.voice_clone_orchestrator import (
 from events import event_bus
 from orchestrator import Orchestrator
 from pipeline_plan import PipelineStagePlan
-from summary_xml import count_summary_turns
+from summary_xml import count_summary_turns, parse_summary_xml
 from summary_output import write_summary_xml_to_workspace
 from orchestration.transcript import Transcript, TranscriptLike, coerce_transcript
 
@@ -57,6 +58,7 @@ class StageOrchestrator:
     eta_headroom_seconds: float = 1.0
     voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
     loop_memory_artifact_path: Path | None = None
+    live_draft_audio_enabled: bool = False
 
     async def run(
         self,
@@ -83,6 +85,11 @@ class StageOrchestrator:
 
     def _run_stage_three_only(self, *, transcript: Transcript) -> None:
         """Run stage-3 voice cloning using a pre-existing summary XML file."""
+        if self.voice_clone_orchestrator is None:
+            raise ValueError(
+                "audio.voice_clone.enabled must be true when "
+                "pipeline.start_stage=stage-3."
+            )
         if self.stage_plan.final_summary_path is None:
             raise ValueError(
                 "pipeline.final_summary_path must be set when pipeline.start_stage=stage-3."
@@ -112,10 +119,16 @@ class StageOrchestrator:
                 f"{self.stage_plan.final_summary_path}"
             ),
         )
-        voice_clone_result = self._run_voice_clone_stage(
-            summary_xml=final_summary,
-            transcript=transcript,
-        )
+        if self.live_draft_audio_enabled:
+            voice_clone_result = self._run_live_batch_voice_clone_stage(
+                summary_xml=final_summary,
+                transcript=transcript,
+            )
+        else:
+            voice_clone_result = self._run_voice_clone_stage(
+                summary_xml=final_summary,
+                transcript=transcript,
+            )
         self._run_interjector_stage(
             summary_xml=final_summary,
             voice_clone_result=voice_clone_result,
@@ -167,14 +180,50 @@ class StageOrchestrator:
 
     async def _run_full_loop(self, *, full_text: str, transcript: Transcript) -> None:
         """Run the full summarizer-critic loop until convergence or max iterations."""
-        result = await self.orchestrator.run_loop(
-            target_seconds=self.target_seconds,
-            duration_tolerance_ratio=self.duration_tolerance_ratio,
-            max_iterations=self.max_iterations,
-            full_transcript_text=full_text,
-            loop_memory_artifact_path=self.loop_memory_artifact_path,
-            loop_memory_context=self._build_loop_memory_context(transcript=transcript),
+        prepared_transcript = transcript
+        speaker_samples_manifest_path: Path | None = None
+        draft_audio_state_path: Path | None = None
+        if self.live_draft_audio_enabled and self.voice_clone_orchestrator is not None:
+            prepared_transcript, speaker_samples_manifest_path = (
+                self._prepare_transcript_for_live_draft_voice_clone(transcript=transcript)
+            )
+            draft_audio_state_path = self._build_draft_audio_state_path(
+                transcript=prepared_transcript
+            )
+
+        run_loop_with_diagnostics = getattr(
+            self.orchestrator,
+            "run_loop_with_diagnostics",
+            None,
         )
+        if callable(run_loop_with_diagnostics):
+            diagnostics = await run_loop_with_diagnostics(
+                target_seconds=self.target_seconds,
+                duration_tolerance_ratio=self.duration_tolerance_ratio,
+                max_iterations=self.max_iterations,
+                full_transcript_text=full_text,
+                loop_memory_artifact_path=self.loop_memory_artifact_path,
+                loop_memory_context=self._build_loop_memory_context(
+                    transcript=prepared_transcript
+                ),
+                speaker_samples_manifest_path=speaker_samples_manifest_path,
+                draft_audio_state_path=draft_audio_state_path,
+            )
+        else:
+            result = await self.orchestrator.run_loop(
+                target_seconds=self.target_seconds,
+                duration_tolerance_ratio=self.duration_tolerance_ratio,
+                max_iterations=self.max_iterations,
+                full_transcript_text=full_text,
+                loop_memory_artifact_path=self.loop_memory_artifact_path,
+                loop_memory_context=self._build_loop_memory_context(
+                    transcript=prepared_transcript
+                ),
+                speaker_samples_manifest_path=speaker_samples_manifest_path,
+                draft_audio_state_path=draft_audio_state_path,
+            )
+            diagnostics = {"converged": bool(result), "draft": result}
+        result = diagnostics["draft"] if diagnostics["converged"] else ""
         if not result:
             return
 
@@ -188,10 +237,37 @@ class StageOrchestrator:
             "status_message",
             f"Saved final summary to {summary_path}",
         )
-        voice_clone_result = self._run_voice_clone_stage(
-            summary_xml=result,
-            transcript=transcript,
-        )
+        if (
+            self.live_draft_audio_enabled
+            and self.voice_clone_orchestrator is not None
+            and draft_audio_state_path is not None
+            and speaker_samples_manifest_path is not None
+        ):
+            event_bus.publish(
+                "system_message",
+                (
+                    "Finalizing live draft voice-clone manifest from rendered turn "
+                    f"audio in {draft_audio_state_path}"
+                ),
+            )
+            live_session = LiveDraftVoiceCloneSession.from_orchestrator(
+                orchestrator=self.voice_clone_orchestrator,
+                state_path=draft_audio_state_path,
+                speaker_samples_manifest_path=speaker_samples_manifest_path,
+            )
+            voice_clone_result = live_session.finalize()
+            event_bus.publish(
+                "status_message",
+                (
+                    f"Voice cloning complete: {len(voice_clone_result.artifacts)} artifacts "
+                    f"written to {voice_clone_result.output_dir}"
+                ),
+            )
+        else:
+            voice_clone_result = self._run_voice_clone_stage(
+                summary_xml=result,
+                transcript=prepared_transcript,
+            )
         self._run_interjector_stage(
             summary_xml=result,
             voice_clone_result=voice_clone_result,
@@ -207,6 +283,123 @@ class StageOrchestrator:
             "target_seconds": str(self.target_seconds),
             "duration_tolerance_ratio": f"{self.duration_tolerance_ratio:.6f}",
         }
+
+    def _build_draft_audio_state_path(self, *, transcript: Transcript) -> Path:
+        """Build the persisted live-draft state path for one transcript/target pair."""
+        if self.voice_clone_orchestrator is None:
+            raise ValueError("voice_clone_orchestrator is required for live drafting.")
+        transcript_hash = hashlib.sha256(
+            transcript.to_full_text().encode("utf-8")
+        ).hexdigest()[:12]
+        filename = f"live_draft_{transcript_hash}_{self.target_seconds}s.state.json"
+        return (self.voice_clone_orchestrator.output_dir / filename).resolve()
+
+    def _prepare_transcript_for_live_draft_voice_clone(
+        self,
+        *,
+        transcript: Transcript,
+    ) -> tuple[Transcript, Path]:
+        """Ensure speaker samples exist before live drafting begins."""
+        prepared_transcript = transcript
+        manifest_path_value = str(
+            prepared_transcript.metadata.get("speaker_samples_manifest_path", "")
+        ).strip()
+        if not manifest_path_value and self.speaker_sample_preparer is not None:
+            event_bus.publish(
+                "system_message",
+                "Preparing speaker samples before live drafting...",
+            )
+            prepared_transcript = self.speaker_sample_preparer(prepared_transcript)
+            manifest_path_value = str(
+                prepared_transcript.metadata.get("speaker_samples_manifest_path", "")
+            ).strip()
+        if not manifest_path_value:
+            raise ValueError(
+                "Speaker sample manifest is required for live drafting. "
+                "Expected transcript metadata key: speaker_samples_manifest_path."
+            )
+        manifest_path = Path(manifest_path_value)
+        if not manifest_path.is_absolute():
+            manifest_path = (self.project_root / manifest_path).resolve()
+        return prepared_transcript, manifest_path
+
+    def _run_live_batch_voice_clone_stage(
+        self,
+        *,
+        summary_xml: str,
+        transcript: Transcript,
+    ) -> VoiceCloneRunResult:
+        """Render stage-3 audio through the live-draft session in one batch."""
+        if self.voice_clone_orchestrator is None:
+            raise ValueError("voice_clone_orchestrator is required for stage-3 audio.")
+        prepared_transcript, manifest_path = (
+            self._prepare_transcript_for_live_draft_voice_clone(transcript=transcript)
+        )
+        state_path = self._build_draft_audio_state_path(transcript=prepared_transcript)
+        live_session = LiveDraftVoiceCloneSession.from_orchestrator(
+            orchestrator=self.voice_clone_orchestrator,
+            state_path=state_path,
+            speaker_samples_manifest_path=manifest_path,
+        )
+        snapshot = [
+            {
+                "line": index,
+                "turn_id": f"stage3-turn-{index:03d}",
+                "speaker_id": turn.speaker,
+                "content": turn.text,
+                "emo_preset": turn.emo_preset,
+            }
+            for index, turn in enumerate(parse_summary_xml(summary_xml), start=1)
+        ]
+        if not snapshot:
+            raise ValueError("Summary XML is empty; cannot run stage-3 voice cloning.")
+
+        event_bus.publish(
+            "system_message",
+            (
+                "Running stage-3 voice cloning through the live draft renderer using "
+                f"manifest {manifest_path}"
+            ),
+        )
+
+        started_at = time.monotonic()
+        try:
+            live_session.clear()
+            if self.voice_clone_gpu_heartbeat is not None:
+                self.voice_clone_gpu_heartbeat.start(pipeline_root_pid=os.getpid())
+            live_session.bootstrap_from_snapshot(snapshot)
+            result = live_session.finalize()
+        finally:
+            if self.voice_clone_gpu_heartbeat is not None:
+                self.voice_clone_gpu_heartbeat.stop()
+
+        elapsed_seconds = max(0.0, time.monotonic() - started_at)
+        if (
+            isinstance(self.eta_strategy, UnitStageEtaLearner)
+            and len(result.artifacts) > 0
+        ):
+            try:
+                self.eta_strategy.observe_unit_stage_duration(
+                    stage="voice_clone",
+                    total_units=len(result.artifacts),
+                    elapsed_seconds=elapsed_seconds,
+                )
+                self._save_eta_profile(
+                    failure_message="Voice clone stage: ETA profile save failed.",
+                )
+            except Exception:
+                event_bus.publish(
+                    "system_message",
+                    "Voice clone stage: ETA learning update skipped.",
+                )
+        event_bus.publish(
+            "status_message",
+            (
+                f"Voice cloning complete: {len(result.artifacts)} artifacts "
+                f"written to {result.output_dir} in {format_eta_seconds(elapsed_seconds)}"
+            ),
+        )
+        return result
 
     def _run_voice_clone_stage(
         self,

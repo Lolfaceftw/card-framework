@@ -2,10 +2,14 @@
 Message Registry
 =================
 Tracks speaker messages incrementally during summarizer generation.
-Each message is assigned a 1-indexed line number. Provides word-count
-breakdowns and supports surgical edits / removals so the LLM can
-stay within its duration budget while preserving telemetry.
+Each message is assigned a 1-indexed line number for prompt-facing
+operations, while a stable turn_id remains the durable identity used by
+audio-backed drafting flows.
 """
+
+from __future__ import annotations
+
+import uuid
 
 from agents.utils import count_words
 from audio_pipeline.calibration import VoiceCloneCalibration
@@ -26,11 +30,17 @@ class MessageRegistry:
         speaker_id: str,
         content: str,
         emo_preset: str = DEFAULT_EMO_PRESET,
+        *,
+        turn_id: str | None = None,
     ) -> dict:
         """Append a speaker message and return its line info."""
         normalized_preset = emo_preset.strip() or DEFAULT_EMO_PRESET
+        resolved_turn_id = (turn_id or uuid.uuid4().hex).strip()
+        if not resolved_turn_id:
+            resolved_turn_id = uuid.uuid4().hex
         self._messages.append(
             {
+                "turn_id": resolved_turn_id,
                 "speaker_id": speaker_id,
                 "content": content,
                 "emo_preset": normalized_preset,
@@ -40,6 +50,7 @@ class MessageRegistry:
         wc = count_words(content)
         return {
             "line": line,
+            "turn_id": resolved_turn_id,
             "speaker_id": speaker_id,
             "emo_preset": normalized_preset,
             "word_count": wc,
@@ -57,6 +68,7 @@ class MessageRegistry:
             messages.append(
                 {
                     "line": idx,
+                    "turn_id": msg["turn_id"],
                     "speaker_id": msg["speaker_id"],
                     "emo_preset": msg.get("emo_preset", DEFAULT_EMO_PRESET),
                     "word_count": wc,
@@ -87,6 +99,7 @@ class MessageRegistry:
             messages.append(
                 {
                     "line": idx,
+                    "turn_id": turn.turn_id if hasattr(turn, "turn_id") else msg["turn_id"],
                     "speaker_id": turn.speaker,
                     "emo_preset": turn.emo_preset,
                     "word_count": count_words(turn.text),
@@ -125,6 +138,8 @@ class MessageRegistry:
         )
         old_wc = count_words(old_content)
         new_emo_preset = old_emo_preset
+        turn_id = str(self._messages[idx].get("turn_id", "")).strip() or uuid.uuid4().hex
+        self._messages[idx]["turn_id"] = turn_id
         if emo_preset is not None:
             normalized_preset = emo_preset.strip()
             if normalized_preset:
@@ -132,6 +147,7 @@ class MessageRegistry:
         if old_content == new_content and old_emo_preset == new_emo_preset:
             return {
                 "line": line,
+                "turn_id": turn_id,
                 "old_word_count": old_wc,
                 "new_word_count": old_wc,
                 "delta_words": 0,
@@ -148,6 +164,7 @@ class MessageRegistry:
 
         return {
             "line": line,
+            "turn_id": turn_id,
             "old_word_count": old_wc,
             "new_word_count": new_wc,
             "delta_words": new_wc - old_wc,
@@ -166,10 +183,30 @@ class MessageRegistry:
         removed = self._messages.pop(idx)
         return {
             "removed_line": line,
+            "removed_turn_id": removed.get("turn_id", ""),
             "removed_speaker": removed["speaker_id"],
             "removed_emo_preset": removed.get("emo_preset", DEFAULT_EMO_PRESET),
             "total_word_count": self.get_counts()["total_word_count"],
             "remaining_messages": len(self._messages),
+        }
+
+    def get_message(self, line: int) -> dict:
+        """Return one message snapshot by 1-indexed line number."""
+        idx = line - 1
+        if idx < 0 or idx >= len(self._messages):
+            return {
+                "error": f"Line {line} does not exist.",
+                "error_code": "line_not_found",
+                "line": line,
+            }
+        message = self._messages[idx]
+        return {
+            "line": line,
+            "turn_id": message["turn_id"],
+            "speaker_id": message["speaker_id"],
+            "content": message["content"],
+            "emo_preset": message.get("emo_preset", DEFAULT_EMO_PRESET),
+            "word_count": count_words(message["content"]),
         }
 
     def get_all(self) -> list[SummaryTurn]:
@@ -188,6 +225,7 @@ class MessageRegistry:
         return [
             {
                 "line": idx,
+                "turn_id": m["turn_id"],
                 "speaker_id": m["speaker_id"],
                 "content": m["content"],
                 "emo_preset": m.get("emo_preset", DEFAULT_EMO_PRESET),
@@ -199,6 +237,7 @@ class MessageRegistry:
         """Restore registry state from a previous snapshot."""
         self._messages = [
             {
+                "turn_id": str(m.get("turn_id", "")).strip() or uuid.uuid4().hex,
                 "speaker_id": m["speaker_id"],
                 "content": m["content"],
                 "emo_preset": m.get("emo_preset", DEFAULT_EMO_PRESET),

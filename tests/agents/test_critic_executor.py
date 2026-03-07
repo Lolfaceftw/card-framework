@@ -270,3 +270,76 @@ def test_verify_against_transcript_uses_injected_agent_client() -> None:
     assert should_break is False
     assert final_verdict is None
     assert fake_client.calls == [{"port": 9123, "timeout": 120.0}]
+
+
+def test_run_deterministic_checks_prefers_live_draft_audio_state(tmp_path: Path) -> None:
+    """Use persisted live-draft audio durations when the state snapshot matches."""
+    speaker_manifest_path = tmp_path / "speaker_samples" / "manifest.json"
+    speaker_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    speaker_manifest_path.write_text('{"samples": []}', encoding="utf-8")
+    output_audio_path = tmp_path / "voice_clone" / "turn.wav"
+    output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+    output_audio_path.write_bytes(b"wav")
+    draft = "<SPEAKER_00>Short finalized draft.</SPEAKER_00>"
+    state_path = tmp_path / "live_draft.state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "generated_at_utc": "2026-03-07T00:00:00+00:00",
+                "speaker_samples_manifest_path": str(speaker_manifest_path),
+                "current_snapshot": [
+                    {
+                        "line": 1,
+                        "turn_id": "turn-001",
+                        "speaker_id": "SPEAKER_00",
+                        "content": "Short finalized draft.",
+                        "emo_preset": "neutral",
+                    }
+                ],
+                "turn_audio": {
+                    "turn-001": {
+                        "turn_id": "turn-001",
+                        "speaker": "SPEAKER_00",
+                        "text": "Short finalized draft.",
+                        "emo_preset": "neutral",
+                        "output_audio_path": str(output_audio_path),
+                        "duration_ms": 2_400,
+                        "word_count": 3,
+                        "actual_wpm": 75.0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
+    messages: list[dict[str, Any]] = []
+
+    asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_4",
+                    "name": "run_deterministic_checks",
+                    "arguments": {"draft_text": draft},
+                }
+            ],
+            messages=messages,
+            context_data={
+                "draft": draft,
+                "target_seconds": 2,
+                "duration_tolerance_ratio": 0.25,
+                "draft_audio_state_path": state_path,
+            },
+        )
+    )
+    tool_msg = next(m for m in messages if m.get("name") == "run_deterministic_checks")
+    payload = json.loads(tool_msg["content"])
+
+    assert payload["duration_source"] == "actual_audio"
+    assert payload["actual_estimated_seconds"] == 2.4
+    assert payload["status"] == "pass"

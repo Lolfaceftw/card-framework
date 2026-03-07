@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any
 
 from agents.client import AgentTaskClient, get_default_agent_client
 from agents.message_registry import MessageRegistry
 from audio_pipeline.calibration import VoiceCloneCalibration
+from audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
 from summary_xml import DEFAULT_EMO_PRESET, SummaryTurn, serialize_summary_turns
 
 
@@ -65,19 +67,31 @@ class BudgetContext:
     def __init__(
         self,
         registry: MessageRegistry,
-        calibration: VoiceCloneCalibration,
+        calibration: VoiceCloneCalibration | None,
         target_seconds: int,
         duration_tolerance_ratio: float,
+        live_draft_session: LiveDraftVoiceCloneSession | None = None,
     ) -> None:
         self._registry = registry
         self._calibration = calibration
         self.target_seconds = target_seconds
         self.duration_tolerance_ratio = duration_tolerance_ratio
+        self._live_draft_session = live_draft_session
+
+    def duration_breakdown(self) -> dict[str, Any]:
+        """Return duration telemetry using live audio when enabled."""
+        if self._live_draft_session is not None:
+            return self._live_draft_session.get_duration_breakdown(
+                snapshot=self._registry.snapshot()
+            )
+        if self._calibration is None:
+            raise ValueError("Calibration is required when live drafting is disabled.")
+        return self._registry.get_duration_breakdown(self._calibration)
 
     def compute_stats(self) -> dict[str, Any]:
         """Return duration-budget guidance derived from the current registry."""
         counts = self._registry.get_counts()
-        duration = self._registry.get_duration_breakdown(self._calibration)
+        duration = self.duration_breakdown()
         total_seconds = float(duration["total_estimated_seconds"])
         num_lines = len(self._registry)
         avg_seconds_per_line = round(total_seconds / num_lines, 3) if num_lines > 0 else 0.0
@@ -124,9 +138,15 @@ class BudgetContext:
 class AddSpeakerMessageHandler(ToolHandler):
     """Append one speaker message to the registry."""
 
-    def __init__(self, registry: MessageRegistry, budget: BudgetContext) -> None:
+    def __init__(
+        self,
+        registry: MessageRegistry,
+        budget: BudgetContext,
+        live_draft_session: LiveDraftVoiceCloneSession | None = None,
+    ) -> None:
         self._registry = registry
         self._budget = budget
+        self._live_draft_session = live_draft_session
 
     @property
     def name(self) -> str:
@@ -162,22 +182,36 @@ class AddSpeakerMessageHandler(ToolHandler):
         }
 
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        speaker_id = str(arguments["speaker_id"])
+        content = str(arguments["content"])
+        emo_preset = str(arguments["emo_preset"])
+        turn_id = uuid.uuid4().hex
+        if self._live_draft_session is not None:
+            self._live_draft_session.render_turn(
+                turn_id=turn_id,
+                speaker=speaker_id,
+                text=content,
+                emo_preset=emo_preset,
+            )
         result = self._registry.add(
-            str(arguments["speaker_id"]),
-            str(arguments["content"]),
-            str(arguments["emo_preset"]),
+            speaker_id,
+            content,
+            emo_preset,
+            turn_id=turn_id,
         )
+        if self._live_draft_session is not None:
+            self._live_draft_session.sync_snapshot(self._registry.snapshot())
         return {**result, **self._budget.compute_stats()}
 
 
 class EstimateDurationHandler(ToolHandler):
-    """Return the calibrated duration estimate breakdown."""
+    """Return the current duration breakdown for the active drafting mode."""
 
     def __init__(
         self,
         registry: MessageRegistry,
         budget: BudgetContext,
-        calibration: VoiceCloneCalibration,
+        calibration: VoiceCloneCalibration | None,
     ) -> None:
         self._registry = registry
         self._budget = budget
@@ -192,8 +226,9 @@ class EstimateDurationHandler(ToolHandler):
         return {
             "name": "estimate_duration",
             "description": (
-                "Returns the current estimated spoken-duration breakdown using "
-                "calibrated per-speaker WPM and the chosen emo preset for each line."
+                "Returns the current spoken-duration breakdown. In live drafting mode "
+                "this uses actual rendered audio durations; otherwise it uses "
+                "calibrated per-speaker WPM estimates."
             ),
             "parameters": {
                 "type": "object",
@@ -203,7 +238,7 @@ class EstimateDurationHandler(ToolHandler):
 
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         del arguments
-        duration = self._registry.get_duration_breakdown(self._calibration)
+        duration = self._budget.duration_breakdown()
         return {**duration, **self._budget.compute_stats()}
 
 
@@ -241,9 +276,15 @@ class CountWordsHandler(ToolHandler):
 class EditMessageHandler(ToolHandler):
     """Replace the content or preset of an existing message."""
 
-    def __init__(self, registry: MessageRegistry, budget: BudgetContext) -> None:
+    def __init__(
+        self,
+        registry: MessageRegistry,
+        budget: BudgetContext,
+        live_draft_session: LiveDraftVoiceCloneSession | None = None,
+    ) -> None:
         self._registry = registry
         self._budget = budget
+        self._live_draft_session = live_draft_session
 
     @property
     def name(self) -> str:
@@ -306,8 +347,34 @@ class EditMessageHandler(ToolHandler):
                 "line": line,
             }
 
+        existing = self._registry.get_message(line)
+        if "error" in existing:
+            return existing
+        existing_content = str(existing["content"])
+        existing_emo_preset = str(existing["emo_preset"])
+        turn_id = str(existing["turn_id"])
+        next_emo_preset = existing_emo_preset
+        if isinstance(emo_preset, str):
+            normalized_emo_preset = emo_preset.strip()
+            if normalized_emo_preset:
+                next_emo_preset = normalized_emo_preset
+        if (
+            self._live_draft_session is not None
+            and (
+                existing_content != new_content
+                or existing_emo_preset != next_emo_preset
+            )
+        ):
+            self._live_draft_session.render_turn(
+                turn_id=turn_id,
+                speaker=str(existing["speaker_id"]),
+                text=new_content,
+                emo_preset=next_emo_preset,
+            )
         result = self._registry.edit(line, new_content, emo_preset=emo_preset)
         if "error" not in result:
+            if self._live_draft_session is not None:
+                self._live_draft_session.sync_snapshot(self._registry.snapshot())
             result.update(self._budget.compute_stats())
         return result
 
@@ -315,9 +382,15 @@ class EditMessageHandler(ToolHandler):
 class RemoveMessageHandler(ToolHandler):
     """Remove one message by line number."""
 
-    def __init__(self, registry: MessageRegistry, budget: BudgetContext) -> None:
+    def __init__(
+        self,
+        registry: MessageRegistry,
+        budget: BudgetContext,
+        live_draft_session: LiveDraftVoiceCloneSession | None = None,
+    ) -> None:
         self._registry = registry
         self._budget = budget
+        self._live_draft_session = live_draft_session
 
     @property
     def name(self) -> str:
@@ -354,8 +427,15 @@ class RemoveMessageHandler(ToolHandler):
                 "line": raw_line,
             }
 
+        existing = self._registry.get_message(line)
+        if "error" in existing:
+            return existing
+        if self._live_draft_session is not None:
+            self._live_draft_session.remove_turn(str(existing["turn_id"]))
         result = self._registry.remove(line)
         if "error" not in result:
+            if self._live_draft_session is not None:
+                self._live_draft_session.sync_snapshot(self._registry.snapshot())
             result.update(self._budget.compute_stats())
         return result
 
@@ -513,11 +593,12 @@ def _snapshot_to_xml(snapshot: list[dict[str, Any]]) -> str:
 def build_summarizer_tools(
     registry: MessageRegistry,
     retrieval_port: int,
-    calibration: VoiceCloneCalibration,
+    calibration: VoiceCloneCalibration | None,
     target_seconds: int,
     duration_tolerance_ratio: float,
     is_embedding_enabled: bool = True,
     agent_client: AgentTaskClient | None = None,
+    live_draft_session: LiveDraftVoiceCloneSession | None = None,
 ) -> ToolRegistry:
     """Build the full summarizer tool registry."""
     budget = BudgetContext(
@@ -525,13 +606,32 @@ def build_summarizer_tools(
         calibration,
         target_seconds,
         duration_tolerance_ratio,
+        live_draft_session=live_draft_session,
     )
     tool_registry = ToolRegistry()
-    tool_registry.register(AddSpeakerMessageHandler(registry, budget))
+    tool_registry.register(
+        AddSpeakerMessageHandler(
+            registry,
+            budget,
+            live_draft_session=live_draft_session,
+        )
+    )
     tool_registry.register(EstimateDurationHandler(registry, budget, calibration))
     tool_registry.register(CountWordsHandler(registry, budget))
-    tool_registry.register(EditMessageHandler(registry, budget))
-    tool_registry.register(RemoveMessageHandler(registry, budget))
+    tool_registry.register(
+        EditMessageHandler(
+            registry,
+            budget,
+            live_draft_session=live_draft_session,
+        )
+    )
+    tool_registry.register(
+        RemoveMessageHandler(
+            registry,
+            budget,
+            live_draft_session=live_draft_session,
+        )
+    )
     if is_embedding_enabled:
         tool_registry.register(
             QueryTranscriptHandler(retrieval_port, agent_client=agent_client)
@@ -544,24 +644,45 @@ def build_summarizer_tools(
 def build_revise_tools(
     registry: MessageRegistry,
     retrieval_port: int,
-    calibration: VoiceCloneCalibration,
+    calibration: VoiceCloneCalibration | None,
     target_seconds: int,
     duration_tolerance_ratio: float,
     is_embedding_enabled: bool = True,
     agent_client: AgentTaskClient | None = None,
+    live_draft_session: LiveDraftVoiceCloneSession | None = None,
 ) -> ToolRegistry:
-    """Build revise-mode tools without add_speaker_message."""
+    """Build revise-mode tools with add/edit/remove support."""
     budget = BudgetContext(
         registry,
         calibration,
         target_seconds,
         duration_tolerance_ratio,
+        live_draft_session=live_draft_session,
     )
     tool_registry = ToolRegistry()
+    tool_registry.register(
+        AddSpeakerMessageHandler(
+            registry,
+            budget,
+            live_draft_session=live_draft_session,
+        )
+    )
     tool_registry.register(EstimateDurationHandler(registry, budget, calibration))
     tool_registry.register(CountWordsHandler(registry, budget))
-    tool_registry.register(EditMessageHandler(registry, budget))
-    tool_registry.register(RemoveMessageHandler(registry, budget))
+    tool_registry.register(
+        EditMessageHandler(
+            registry,
+            budget,
+            live_draft_session=live_draft_session,
+        )
+    )
+    tool_registry.register(
+        RemoveMessageHandler(
+            registry,
+            budget,
+            live_draft_session=live_draft_session,
+        )
+    )
     if is_embedding_enabled:
         tool_registry.register(
             QueryTranscriptHandler(retrieval_port, agent_client=agent_client)

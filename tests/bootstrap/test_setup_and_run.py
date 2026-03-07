@@ -799,3 +799,178 @@ def test_run_pipeline_streams_output(
     assert call["cwd"] == Path("C:/repo")
     assert call["stream_output"] is True
     assert call["command"] == ["uv", "run", "main.py", "pipeline.start_stage=stage-1"]
+
+
+def test_main_skips_calibration_when_live_draft_audio_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skip the calibration step when live stage-2 audio drafting is enabled."""
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    index_tts_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_calls: list[dict[str, object]] = []
+    model_calls: list[dict[str, object]] = []
+    calibration_calls: list[dict[str, object]] = []
+    pipeline_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+    monkeypatch.setattr(bootstrap, "check_prerequisites", lambda **kwargs: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_indextts_repo",
+        lambda **kwargs: repo_calls.append(dict(kwargs))
+        or bootstrap.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(bootstrap, "smart_sync_projects", lambda **kwargs: ())
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_indextts_model",
+        lambda **kwargs: model_calls.append(dict(kwargs))
+        or bootstrap.ModelProvisionResult(downloaded=False, source="cached"),
+    )
+    monkeypatch.setattr(bootstrap, "utc_now_compact", lambda: "20260307_000000")
+    monkeypatch.setattr(
+        bootstrap,
+        "build_start_stage_selection_detail",
+        lambda **kwargs: "pipeline.start_stage=stage-2",
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_transcript_override_for_stage",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "resolve_transcript_override_path",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "resolve_audio_override_path",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "stage_two_requires_audio_fallback",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_calibration",
+        lambda **kwargs: calibration_calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_pipeline",
+        lambda **kwargs: pipeline_calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(bootstrap, "print_summary", lambda **kwargs: None)
+
+    result = bootstrap.main(["--override", "pipeline.start_stage=stage-2"])
+
+    assert result == 0
+    assert len(repo_calls) == 1
+    assert len(model_calls) == 1
+    assert calibration_calls == []
+    assert len(pipeline_calls) == 1
+
+
+def test_main_keeps_calibration_runtime_when_live_draft_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Provision IndexTTS and run calibration for the legacy stage-2 estimate path."""
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    index_tts_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_calls: list[dict[str, object]] = []
+    model_calls: list[dict[str, object]] = []
+    calibration_calls: list[dict[str, object]] = []
+    pipeline_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+    monkeypatch.setattr(bootstrap, "check_prerequisites", lambda **kwargs: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_indextts_repo",
+        lambda **kwargs: repo_calls.append(dict(kwargs))
+        or bootstrap.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(bootstrap, "smart_sync_projects", lambda **kwargs: ())
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_indextts_model",
+        lambda **kwargs: model_calls.append(dict(kwargs))
+        or bootstrap.ModelProvisionResult(downloaded=False, source="cached"),
+    )
+    monkeypatch.setattr(bootstrap, "utc_now_compact", lambda: "20260307_000000")
+    monkeypatch.setattr(
+        bootstrap,
+        "build_start_stage_selection_detail",
+        lambda **kwargs: "pipeline.start_stage=stage-2",
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_transcript_override_for_stage",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "resolve_transcript_override_path",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "resolve_audio_override_path",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "stage_two_requires_audio_fallback",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_calibration",
+        lambda **kwargs: calibration_calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_pipeline",
+        lambda **kwargs: pipeline_calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(bootstrap, "print_summary", lambda **kwargs: None)
+
+    result = bootstrap.main(
+        [
+            "--override",
+            "pipeline.start_stage=stage-2",
+            "--override",
+            "audio.voice_clone.enabled=false",
+            "--override",
+            "audio.voice_clone.live_drafting.enabled=false",
+        ]
+    )
+
+    assert result == 0
+    assert len(repo_calls) == 1
+    assert len(model_calls) == 1
+    assert len(calibration_calls) == 1
+    assert len(pipeline_calls) == 1

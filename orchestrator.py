@@ -127,6 +127,8 @@ class Orchestrator:
         full_transcript_text: str = "",
         loop_memory_artifact_path: Path | None = None,
         loop_memory_context: Mapping[str, str] | None = None,
+        speaker_samples_manifest_path: Path | None = None,
+        draft_audio_state_path: Path | None = None,
     ) -> str | None:
         """Run the iterative summarizer-critic loop and return the converged draft."""
         diagnostics = await self.run_loop_with_diagnostics(
@@ -136,6 +138,8 @@ class Orchestrator:
             full_transcript_text=full_transcript_text,
             loop_memory_artifact_path=loop_memory_artifact_path,
             loop_memory_context=loop_memory_context,
+            speaker_samples_manifest_path=speaker_samples_manifest_path,
+            draft_audio_state_path=draft_audio_state_path,
         )
         if diagnostics["converged"]:
             return diagnostics["draft"]
@@ -205,6 +209,8 @@ class Orchestrator:
         full_transcript_text: str = "",
         loop_memory_artifact_path: Path | None = None,
         loop_memory_context: Mapping[str, str] | None = None,
+        speaker_samples_manifest_path: Path | None = None,
+        draft_audio_state_path: Path | None = None,
     ) -> LoopDiagnostics:
         """Run the loop and return structured per-iteration diagnostics."""
         feedback = ""
@@ -262,6 +268,16 @@ class Orchestrator:
                 target_seconds=target_seconds,
                 duration_tolerance_ratio=duration_tolerance_ratio,
                 retrieval_port=self.retrieval_port,
+                speaker_samples_manifest_path=(
+                    str(speaker_samples_manifest_path)
+                    if speaker_samples_manifest_path is not None
+                    else ""
+                ),
+                draft_audio_state_path=(
+                    str(draft_audio_state_path)
+                    if draft_audio_state_path is not None
+                    else ""
+                ),
                 feedback=feedback,
                 previous_draft=draft if feedback else "",
                 loop_context=loop_context,
@@ -284,6 +300,11 @@ class Orchestrator:
                 draft=draft,
                 target_seconds=target_seconds,
                 duration_tolerance_ratio=duration_tolerance_ratio,
+                draft_audio_state_path=(
+                    str(draft_audio_state_path)
+                    if draft_audio_state_path is not None
+                    else ""
+                ),
                 full_transcript=full_transcript_text,
             )
             critic_started = time.perf_counter()
