@@ -218,9 +218,6 @@ def ensure_voice_clone_calibration(
         project_root=project_root,
         audio_cfg=audio_cfg,
     )
-    if artifact_path.exists() and not force:
-        return load_voice_clone_calibration(artifact_path)
-
     presets = resolve_emo_preset_catalog(audio_cfg)
     resolved_manifest = _resolve_or_prepare_speaker_samples_manifest(
         project_root=project_root,
@@ -229,6 +226,18 @@ def ensure_voice_clone_calibration(
         explicit_transcript_path=transcript_path,
         explicit_audio_path=audio_path,
     )
+    if artifact_path.exists() and not force:
+        try:
+            calibration = load_voice_clone_calibration(artifact_path)
+        except Exception:
+            calibration = None
+        if calibration is not None and _calibration_matches_current_inputs(
+            calibration=calibration,
+            speaker_samples_manifest_path=resolved_manifest,
+            preset_emo_texts=presets,
+        ):
+            return calibration
+
     provider = build_voice_clone_provider(audio_cfg, project_root=project_root)
     sample_refs = _load_speaker_sample_paths(resolved_manifest)
 
@@ -287,6 +296,34 @@ def ensure_voice_clone_calibration(
         encoding="utf-8",
     )
     return calibration
+
+
+def _calibration_matches_current_inputs(
+    *,
+    calibration: VoiceCloneCalibration,
+    speaker_samples_manifest_path: Path,
+    preset_emo_texts: Mapping[str, str],
+) -> bool:
+    """Return whether a persisted calibration still matches current runtime inputs."""
+    if (
+        calibration.speaker_samples_manifest_path.resolve()
+        != speaker_samples_manifest_path.resolve()
+    ):
+        return False
+    if dict(calibration.preset_emo_texts) != dict(preset_emo_texts):
+        return False
+    try:
+        manifest_speakers = set(
+            _load_speaker_sample_paths(speaker_samples_manifest_path).keys()
+        )
+    except FileNotFoundError:
+        return False
+    calibrated_speakers = {
+        speaker
+        for speaker, preset_map in calibration.speaker_preset_wpm.items()
+        if preset_map
+    }
+    return manifest_speakers.issubset(calibrated_speakers)
 
 
 def _resolve_or_prepare_speaker_samples_manifest(

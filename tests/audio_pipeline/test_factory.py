@@ -298,6 +298,7 @@ def test_factory_builds_indextts_subprocess_provider_defaults(tmp_path: Path) ->
     assert isinstance(provider, IndexTTSVoiceCloneGateway)
     assert provider.execution_backend == "subprocess"
     assert provider.stream_subprocess_output is True
+    assert provider.num_beams == 1
     assert provider.runner_project_dir == (tmp_path / "third_party" / "index_tts").resolve()
     assert provider.cfg_path == (
         tmp_path / "third_party" / "index_tts" / "checkpoints" / "config.yaml"
@@ -323,6 +324,36 @@ def test_factory_respects_indextts_stream_subprocess_override(tmp_path: Path) ->
     provider = orchestrator.provider
     assert isinstance(provider, IndexTTSVoiceCloneGateway)
     assert provider.stream_subprocess_output is False
+
+
+def test_factory_respects_indextts_generation_overrides(tmp_path: Path) -> None:
+    orchestrator = build_voice_clone_orchestrator(
+        {
+            "voice_clone": {
+                "enabled": True,
+                "provider": "indextts",
+                "num_beams": 2,
+                "top_p": 0.9,
+                "top_k": 40,
+                "temperature": 0.7,
+                "length_penalty": 0.2,
+                "repetition_penalty": 8.0,
+                "max_mel_tokens": 1200,
+            }
+        },
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    provider = orchestrator.provider
+    assert isinstance(provider, IndexTTSVoiceCloneGateway)
+    assert provider.num_beams == 2
+    assert provider.top_p == 0.9
+    assert provider.top_k == 40
+    assert provider.temperature == 0.7
+    assert provider.length_penalty == 0.2
+    assert provider.repetition_penalty == 8.0
+    assert provider.max_mel_tokens == 1200
 
 
 def test_factory_respects_voice_clone_merged_output_override(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import threading
@@ -55,6 +56,7 @@ class StageOrchestrator:
     eta_overrun_factor: float = 1.15
     eta_headroom_seconds: float = 1.0
     voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
+    loop_memory_artifact_path: Path | None = None
 
     async def run(
         self,
@@ -170,6 +172,8 @@ class StageOrchestrator:
             duration_tolerance_ratio=self.duration_tolerance_ratio,
             max_iterations=self.max_iterations,
             full_transcript_text=full_text,
+            loop_memory_artifact_path=self.loop_memory_artifact_path,
+            loop_memory_context=self._build_loop_memory_context(transcript=transcript),
         )
         if not result:
             return
@@ -192,6 +196,17 @@ class StageOrchestrator:
             summary_xml=result,
             voice_clone_result=voice_clone_result,
         )
+
+    def _build_loop_memory_context(self, *, transcript: Transcript) -> dict[str, str]:
+        """Build a stable persistence scope for summarizer loop memory artifacts."""
+        transcript_hash = hashlib.sha256(
+            transcript.to_full_text().encode("utf-8")
+        ).hexdigest()
+        return {
+            "transcript_sha256": transcript_hash,
+            "target_seconds": str(self.target_seconds),
+            "duration_tolerance_ratio": f"{self.duration_tolerance_ratio:.6f}",
+        }
 
     def _run_voice_clone_stage(
         self,

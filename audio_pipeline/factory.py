@@ -521,6 +521,16 @@ def build_voice_clone_provider(
             max_text_tokens_per_segment=int(
                 voice_clone_cfg.get("max_text_tokens_per_segment", 120)
             ),
+            do_sample=bool(voice_clone_cfg.get("do_sample", True)),
+            top_p=float(voice_clone_cfg.get("top_p", 0.8)),
+            top_k=int(voice_clone_cfg.get("top_k", 30)),
+            temperature=float(voice_clone_cfg.get("temperature", 0.8)),
+            length_penalty=float(voice_clone_cfg.get("length_penalty", 0.0)),
+            num_beams=int(voice_clone_cfg.get("num_beams", 1)),
+            repetition_penalty=float(
+                voice_clone_cfg.get("repetition_penalty", 10.0)
+            ),
+            max_mel_tokens=int(voice_clone_cfg.get("max_mel_tokens", 1500)),
             execution_backend=execution_backend,
             runner_project_dir=runner_project_dir,
             uv_executable=str(voice_clone_cfg.get("uv_executable", "uv")),

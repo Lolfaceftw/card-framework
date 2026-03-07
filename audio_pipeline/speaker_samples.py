@@ -628,7 +628,7 @@ def resolve_sample_source_audio_path(
 
     selected_path: Path | None = None
     if normalized_mode == "vocals":
-        selected_path = vocals_path
+        selected_path = vocals_path or configured_path
     elif normalized_mode == "source":
         selected_path = source_path or configured_path
     else:

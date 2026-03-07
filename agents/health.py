@@ -29,7 +29,9 @@ class HealthCheckStrategy(ABC):
 class AgentHealthChecker(HealthCheckStrategy):
     """
     Concrete strategy that checks the health of an A2A agent by hitting
-    its '/.well-known/agent.json' endpoint. Uses the Retry pattern with
+    its agent-card endpoint. Prefer the current `/.well-known/agent-card.json`
+    path and fall back to the legacy `/.well-known/agent.json` path only when
+    older servers do not expose the new endpoint. Uses the Retry pattern with
     exponential backoff.
     """
 
@@ -70,10 +72,17 @@ class AgentHealthChecker(HealthCheckStrategy):
         request_timeout_seconds: float = 1.0,
     ) -> tuple[bool, str | None]:
         """Probe one agent health endpoint without retrying."""
-        url = f"http://127.0.0.1:{port}/.well-known/agent.json"
+        timeout_seconds = max(0.1, request_timeout_seconds)
+        url = f"http://127.0.0.1:{port}/.well-known/agent-card.json"
         try:
-            response = requests.get(url, timeout=max(0.1, request_timeout_seconds))
-            response.raise_for_status()
+            response = requests.get(url, timeout=timeout_seconds)
+            if response.status_code not in {404, 405}:
+                response.raise_for_status()
+                return True, None
+
+            legacy_url = f"http://127.0.0.1:{port}/.well-known/agent.json"
+            legacy_response = requests.get(legacy_url, timeout=timeout_seconds)
+            legacy_response.raise_for_status()
         except requests.exceptions.RequestException as exc:
             return False, str(exc)
         return True, None

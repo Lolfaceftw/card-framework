@@ -245,6 +245,56 @@ def test_post_transcript_step_hides_first_run_eta_and_persists_learning(
     assert payload["unit_stages"]["speaker_samples"]["samples"] == 1
 
 
+def test_post_transcript_stage_two_reuses_existing_manifest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app_main = _import_app_main()
+    manifest_path = tmp_path / "speaker_samples" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text('{"samples": []}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        app_main,
+        "resolve_sample_source_audio_path",
+        lambda **kwargs: pytest.fail("speaker samples should be reused, not regenerated"),
+    )
+    monkeypatch.setattr(
+        app_main,
+        "build_speaker_sample_generator",
+        lambda cfg: pytest.fail("speaker sample generator should not run"),
+    )
+    monkeypatch.setattr(
+        app_main,
+        "write_transcript_atomic",
+        lambda payload, path: pytest.fail("transcript should not be rewritten"),
+    )
+
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [{"speaker": "SPEAKER_00", "text": "text"}],
+            "metadata": {"speaker_samples_manifest_path": str(manifest_path)},
+        }
+    )
+
+    reused_transcript = app_main._run_post_transcript_speaker_sample_step(
+        stage_start="stage-2",
+        audio_cfg_dict={
+            "audio_path": "audio.wav",
+            "work_dir": "artifacts/audio_stage",
+            "speaker_samples": {
+                "enabled": True,
+                "output_dir_name": "speaker_samples",
+            },
+        },
+        project_root=tmp_path,
+        transcript_path="artifacts/transcripts/latest.transcript.json",
+        transcript=transcript,
+    )
+
+    assert reused_transcript == transcript
+
+
 def test_wait_for_agent_servers_uses_shared_wait_strategy(monkeypatch) -> None:
     app_main = _import_app_main()
     calls: list[dict[str, object]] = []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 from pathlib import Path
 import subprocess
@@ -349,6 +350,131 @@ def test_resolve_start_stage_accepts_stage_four() -> None:
     )
 
 
+def test_resolve_bootstrap_start_stage_defaults_to_stage_two_for_transcript_override() -> None:
+    assert (
+        bootstrap.resolve_bootstrap_start_stage(
+            shortcut_overrides=(),
+            pass_through_overrides=["transcript_path=transcript.json"],
+            cli_audio_path=None,
+        )
+        == "stage-2"
+    )
+
+
+def test_resolve_bootstrap_start_stage_defaults_to_stage_two_when_root_transcript_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "transcript.json").write_text('{"segments": []}', encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    assert (
+        bootstrap.resolve_bootstrap_start_stage(
+            shortcut_overrides=(),
+            pass_through_overrides=(),
+            cli_audio_path=None,
+        )
+        == "stage-2"
+    )
+
+
+def test_resolve_bootstrap_start_stage_keeps_stage_one_when_audio_path_cli_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "transcript.json").write_text('{"segments": []}', encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    assert (
+        bootstrap.resolve_bootstrap_start_stage(
+            shortcut_overrides=(),
+            pass_through_overrides=(),
+            cli_audio_path="audio.wav",
+        )
+        == "stage-1"
+    )
+
+
+def test_build_start_stage_selection_detail_reports_reused_transcript_and_summary_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    transcript_path = repo_root / "transcript.json"
+    transcript_path.write_text('{"segments": []}', encoding="utf-8")
+    summary_path = repo_root / "summary.xml"
+    summary_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    detail = bootstrap.build_start_stage_selection_detail(
+        start_stage="stage-2",
+        voiceclone_from_summary=None,
+        pass_through_overrides=(),
+        cli_audio_path=None,
+    )
+
+    assert "pipeline.start_stage=stage-2" in detail
+    assert str(transcript_path.resolve()) in detail
+    assert "--voiceclone-from-summary" in detail
+    assert summary_path.resolve().as_posix() in detail
+
+
+def test_build_start_stage_selection_detail_reports_voiceclone_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    summary_path = repo_root / "summary.xml"
+    summary_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    detail = bootstrap.build_start_stage_selection_detail(
+        start_stage="stage-3",
+        voiceclone_from_summary="summary.xml",
+        pass_through_overrides=(),
+        cli_audio_path=None,
+    )
+
+    assert "pipeline.start_stage=stage-3" in detail
+    assert "--voiceclone-from-summary" in detail
+    assert str(summary_path.resolve()) in detail
+
+
+def test_build_calibration_warning_message_for_stage_two() -> None:
+    message = bootstrap.build_calibration_warning_message(start_stage="stage-2")
+
+    assert message is not None
+    assert "before summarization" in message
+
+
+def test_resolve_audio_override_path_supports_relative_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    audio_path = repo_root / "audio.wav"
+    audio_path.write_bytes(b"wav")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    resolved = bootstrap.resolve_audio_override_path(
+        overrides=["audio.audio_path=audio.wav"]
+    )
+
+    assert resolved == audio_path.resolve()
+
+
 def test_normalize_cli_overrides_rejects_malformed_values() -> None:
     with pytest.raises(bootstrap.BootstrapError, match="Expected KEY=VALUE"):
         bootstrap.normalize_cli_overrides(["pipeline.start_stage"])
@@ -461,6 +587,31 @@ def test_ensure_transcript_override_for_stage_three_creates_synthetic_transcript
     assert payload["metadata"]["speaker_samples_manifest_path"] == manifest_path.as_posix()
 
 
+def test_ensure_transcript_override_for_stage_two_prefers_root_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    root_transcript = repo_root / "transcript.json"
+    root_transcript.write_text('{"segments": []}', encoding="utf-8")
+    artifact_transcript = repo_root / "artifacts" / "transcripts" / "latest.transcript.json"
+    artifact_transcript.parent.mkdir(parents=True, exist_ok=True)
+    artifact_transcript.write_text('{"segments": [{"speaker": "S"}]}', encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    overrides = ["pipeline.start_stage=stage-2"]
+    bootstrap.ensure_transcript_override_for_stage(
+        overrides=overrides,
+        start_stage="stage-2",
+        run_id="20260302_130000",
+    )
+
+    override_map = dict(entry.split("=", 1) for entry in overrides)
+    assert Path(override_map["transcript_path"]) == root_transcript.resolve()
+
+
 def test_ensure_transcript_override_for_stage_four_does_not_add_transcript(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -483,6 +634,129 @@ def test_ensure_transcript_override_for_stage_four_does_not_add_transcript(
 
     override_map = dict(entry.split("=", 1) for entry in overrides)
     assert "transcript_path" not in override_map
+
+
+def test_resolve_calibration_transcript_path_skips_stage_one_future_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    resolved = bootstrap.resolve_calibration_transcript_path(
+        overrides=[
+            "pipeline.start_stage=stage-1",
+            "transcript_path=artifacts/transcripts/20260302_130000.transcript.json",
+        ],
+        start_stage="stage-1",
+    )
+
+    assert resolved is None
+
+
+def test_stage_two_requires_audio_fallback_when_transcript_lacks_vocals_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    transcript_path = repo_root / "transcript.json"
+    transcript_path.write_text('{"segments": [], "metadata": {}}', encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    assert (
+        bootstrap.stage_two_requires_audio_fallback(
+            transcript_path=transcript_path,
+            speaker_samples_enabled=True,
+        )
+        is True
+    )
+
+
+def test_stage_two_requires_audio_fallback_skips_when_vocals_metadata_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    vocals_path = repo_root / "vocals.wav"
+    vocals_path.write_bytes(b"vocals")
+    transcript_path = repo_root / "transcript.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "segments": [],
+                "metadata": {"vocals_audio_path": "vocals.wav"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    assert (
+        bootstrap.stage_two_requires_audio_fallback(
+            transcript_path=transcript_path,
+            speaker_samples_enabled=True,
+        )
+        is False
+    )
+
+
+def test_stage_two_requires_audio_fallback_skips_when_manifest_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = repo_root / "speaker_samples" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text('{"samples": []}', encoding="utf-8")
+    transcript_path = repo_root / "transcript.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "segments": [],
+                "metadata": {"speaker_samples_manifest_path": "speaker_samples/manifest.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    assert (
+        bootstrap.stage_two_requires_audio_fallback(
+            transcript_path=transcript_path,
+            speaker_samples_enabled=True,
+        )
+        is False
+    )
+
+
+def test_stage_two_requires_audio_fallback_accepts_utf8_bom_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    transcript_path = repo_root / "transcript.json"
+    transcript_path.write_bytes(
+        codecs.BOM_UTF8 + b'{"segments": [], "metadata": {}}'
+    )
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    assert (
+        bootstrap.stage_two_requires_audio_fallback(
+            transcript_path=transcript_path,
+            speaker_samples_enabled=True,
+        )
+        is True
+    )
 
 
 def test_resolve_audio_input_supports_relative_path(

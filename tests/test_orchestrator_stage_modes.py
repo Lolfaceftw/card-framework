@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Awaitable, Callable
 
 import pytest
@@ -190,6 +191,109 @@ def test_run_loop_sends_non_empty_loop_context_on_retry_after_fail() -> None:
     assert len(summarizer_loop_contexts) == 2
     assert summarizer_loop_contexts[0].strip() == ""
     assert summarizer_loop_contexts[1].strip() != ""
+
+
+def test_run_loop_restores_persisted_repeated_remedy_history_across_runs(
+    tmp_path: Path,
+) -> None:
+    """Reload persisted remedy history so the next retry warns against repeats."""
+    artifact_path = tmp_path / "loop_memory.json"
+    loop_memory_context = {
+        "transcript_sha256": "abc123",
+        "target_seconds": "300",
+        "duration_tolerance_ratio": "0.050000",
+    }
+
+    async def _first_send_task(
+        port,
+        task_data,
+        timeout=120.0,
+        max_retries=3,
+        metadata=None,
+    ):
+        del task_data, timeout, max_retries, metadata
+        if port == 9010:
+            return "<summary>draft</summary>"
+        if port == 9011:
+            return (
+                '{"status":"fail","word_count":58,'
+                '"estimated_seconds":220.0,'
+                '"feedback":"[] Expand missing middle section coverage."}'
+            )
+        raise AssertionError(f"Unexpected port: {port}")
+
+    first_orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_first_send_task),
+    )
+
+    first_result = asyncio.run(
+        first_orchestrator.run_loop(
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            full_transcript_text="",
+            loop_memory_artifact_path=artifact_path,
+            loop_memory_context=loop_memory_context,
+        )
+    )
+    assert first_result is None
+    assert artifact_path.exists()
+
+    summarizer_loop_contexts: list[str] = []
+    critic_calls = 0
+
+    async def _second_send_task(
+        port,
+        task_data,
+        timeout=120.0,
+        max_retries=3,
+        metadata=None,
+    ):
+        nonlocal critic_calls
+        del timeout, max_retries, metadata
+        if port == 9010:
+            summarizer_loop_contexts.append(str(getattr(task_data, "loop_context", "")))
+            return "<summary>draft</summary>"
+        if port == 9011:
+            critic_calls += 1
+            if critic_calls == 1:
+                return (
+                    '{"status":"fail","word_count":58,'
+                    '"estimated_seconds":220.0,'
+                    '"feedback":"[] Include missing middle section coverage."}'
+                )
+            return (
+                '{"status":"pass","word_count":74,'
+                '"estimated_seconds":300.0,'
+                '"feedback":"ok"}'
+            )
+        raise AssertionError(f"Unexpected port: {port}")
+
+    second_orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_second_send_task),
+    )
+
+    second_result = asyncio.run(
+        second_orchestrator.run_loop(
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
+            max_iterations=2,
+            full_transcript_text="",
+            loop_memory_artifact_path=artifact_path,
+            loop_memory_context=loop_memory_context,
+        )
+    )
+
+    assert second_result == "<summary>draft</summary>"
+    assert len(summarizer_loop_contexts) == 2
+    assert summarizer_loop_contexts[0].strip() == ""
+    assert "repeated remedy alert" in summarizer_loop_contexts[1].lower()
 
 
 def test_run_summarizer_once_uses_full_transcript_timeout_floor() -> None:

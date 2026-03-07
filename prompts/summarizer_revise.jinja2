@@ -41,6 +41,7 @@ The draft has been loaded into your message registry with the following line map
 [CRITICAL NOTE]: The system will AUTOMATICALLY call `estimate_duration` and `count_words` after every edit or removal. When the duration budget is met, the system saves automatically. You MUST call `finalize_draft` when you are satisfied with the changes.
 You MUST emit exactly ONE tool call per assistant response. Never emit multiple `<tool_call>` blocks in one response.
 Do not repeat unchanged edits. Every `edit_message` must materially change the selected line.
+If <loop_context> warns about a repeated remedy, you MUST NOT replay that fix verbatim; pick a materially different edit strategy or verify with `query_transcript` first.
 If you receive a stall or repetition warning: OVER duration -> remove or shorten a line; UNDER duration -> expand a line; IN budget -> finalize unless a substantive fix is still needed.
 </critical_constraints>
 

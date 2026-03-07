@@ -284,6 +284,20 @@ def _run_post_transcript_speaker_sample_step(
     if not bool(speaker_samples_cfg.get("enabled", True)):
         return transcript
 
+    existing_manifest_path = _resolve_existing_speaker_samples_manifest_path(
+        transcript=transcript,
+        project_root=project_root,
+    )
+    if stage_start == "stage-2" and existing_manifest_path is not None:
+        event_bus.publish(
+            "system_message",
+            (
+                "Reusing speaker sample manifest from transcript metadata: "
+                f"{existing_manifest_path}"
+            ),
+        )
+        return transcript
+
     work_dir = resolve_path(
         str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
         base_dir=project_root,
@@ -292,8 +306,8 @@ def _run_post_transcript_speaker_sample_step(
     if not output_dir_name.strip():
         raise ValueError("audio.speaker_samples.output_dir_name must be non-empty.")
     samples_output_dir = resolve_path(output_dir_name, base_dir=work_dir)
-    # Voice sample extraction is constrained to the vocals stem to maximize
-    # speaker separation quality and avoid background bleed from full-mix audio.
+    # Prefer the vocals stem when transcript metadata provides it, but fall back
+    # to configured audio for reusable transcripts that do not carry stem paths.
     source_audio_path = resolve_sample_source_audio_path(
         source_mode="vocals",
         transcript_metadata=transcript.metadata,
@@ -458,6 +472,23 @@ def _run_post_transcript_speaker_sample_step(
         f"Speaker sample manifest written to {sample_result.manifest_path}",
     )
     return updated_transcript
+
+
+def _resolve_existing_speaker_samples_manifest_path(
+    *,
+    transcript: Transcript,
+    project_root: Path,
+) -> Path | None:
+    """Resolve an existing transcript-linked speaker-sample manifest when present."""
+    manifest_value = str(
+        transcript.metadata.get("speaker_samples_manifest_path", "")
+    ).strip()
+    if not manifest_value:
+        return None
+    candidate = Path(manifest_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (project_root / candidate).resolve()
+    return candidate if candidate.is_file() else None
 
 
 def _wait_for_agent_servers(
@@ -1006,6 +1037,15 @@ def main(cfg: DictConfig) -> None:
         request_timeout_seconds=1.0,
     )
 
+    loop_memory_cfg = _to_plain_dict(orchestrator_cfg_dict.get("loop_memory", {}))
+    loop_memory_artifact_path: Path | None = None
+    loop_memory_artifact_value = str(loop_memory_cfg.get("artifact_path", "")).strip()
+    if loop_memory_artifact_value:
+        loop_memory_artifact_path = resolve_path(
+            loop_memory_artifact_value,
+            base_dir=project_root,
+        )
+
     event_bus.publish("system_message", "Starting orchestration loop...")
     orchestrator = Orchestrator(
         retrieval_port=retrieval_port,
@@ -1033,6 +1073,7 @@ def main(cfg: DictConfig) -> None:
         eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
         eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
         voice_clone_gpu_heartbeat=voice_clone_gpu_heartbeat,
+        loop_memory_artifact_path=loop_memory_artifact_path,
     )
     try:
         asyncio.run(

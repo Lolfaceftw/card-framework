@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
+from pathlib import Path
 import time
 from typing import TypedDict
 
@@ -31,6 +33,8 @@ class IterationDiagnostic(TypedDict):
     unresolved_issue_count: int
     persisted_issue_signatures: list[str]
     stagnation_detected: bool
+    repeated_remedy_detected: bool
+    repeated_remedy_signatures: list[str]
 
 
 class LoopDiagnostics(TypedDict):
@@ -121,6 +125,8 @@ class Orchestrator:
         duration_tolerance_ratio: float,
         max_iterations: int,
         full_transcript_text: str = "",
+        loop_memory_artifact_path: Path | None = None,
+        loop_memory_context: Mapping[str, str] | None = None,
     ) -> str | None:
         """Run the iterative summarizer-critic loop and return the converged draft."""
         diagnostics = await self.run_loop_with_diagnostics(
@@ -128,6 +134,8 @@ class Orchestrator:
             duration_tolerance_ratio=duration_tolerance_ratio,
             max_iterations=max_iterations,
             full_transcript_text=full_transcript_text,
+            loop_memory_artifact_path=loop_memory_artifact_path,
+            loop_memory_context=loop_memory_context,
         )
         if diagnostics["converged"]:
             return diagnostics["draft"]
@@ -195,6 +203,8 @@ class Orchestrator:
         duration_tolerance_ratio: float,
         max_iterations: int,
         full_transcript_text: str = "",
+        loop_memory_artifact_path: Path | None = None,
+        loop_memory_context: Mapping[str, str] | None = None,
     ) -> LoopDiagnostics:
         """Run the loop and return structured per-iteration diagnostics."""
         feedback = ""
@@ -204,10 +214,38 @@ class Orchestrator:
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
         )
+        if (
+            loop_memory_artifact_path is not None
+            and loop_memory.load_artifact(
+                loop_memory_artifact_path,
+                context=loop_memory_context,
+            )
+        ):
+            self.event_bus.publish(
+                "system_message",
+                (
+                    "Loaded persisted summarizer loop memory from "
+                    f"{loop_memory_artifact_path}"
+                ),
+            )
         summarizer_timeout = self._resolve_stage_timeout(
             "summarizer", full_transcript_text
         )
         critic_timeout = self._resolve_stage_timeout("critic", full_transcript_text)
+
+        def _persist_loop_memory() -> None:
+            if loop_memory_artifact_path is None:
+                return
+            try:
+                loop_memory.save_artifact(
+                    loop_memory_artifact_path,
+                    context=loop_memory_context,
+                )
+            except OSError as exc:
+                self.event_bus.publish(
+                    "system_message",
+                    f"Loop memory persistence skipped: {exc}",
+                )
 
         for iteration in range(1, max_iterations + 1):
             self.event_bus.publish(
@@ -219,7 +257,7 @@ class Orchestrator:
                 max_iterations=max_iterations,
             )
 
-            loop_context = loop_memory.to_compact_prompt_block()
+            loop_context = loop_memory.to_compact_prompt_block() if feedback else ""
             summarizer_task = SummarizerTaskRequest(
                 target_seconds=target_seconds,
                 duration_tolerance_ratio=duration_tolerance_ratio,
@@ -285,7 +323,10 @@ class Orchestrator:
                     persisted_issue_signatures=memory_update.persisted_issue_signatures,
                     stagnation_detected=memory_update.stagnation_detected,
                     early_stop_recommended=memory_update.early_stop_recommended,
+                    repeated_remedy_detected=memory_update.repeated_remedy_detected,
+                    repeated_remedy_signatures=memory_update.repeated_remedy_signatures,
                 )
+                _persist_loop_memory()
                 for signature in memory_update.persisted_issue_signatures:
                     self.event_bus.publish(
                         "orchestrator_loop_issue_persisted",
@@ -304,6 +345,8 @@ class Orchestrator:
                         "unresolved_issue_count": memory_update.unresolved_issue_count,
                         "persisted_issue_signatures": memory_update.persisted_issue_signatures,
                         "stagnation_detected": memory_update.stagnation_detected,
+                        "repeated_remedy_detected": memory_update.repeated_remedy_detected,
+                        "repeated_remedy_signatures": memory_update.repeated_remedy_signatures,
                     }
                 )
                 self.event_bus.publish(
@@ -367,7 +410,10 @@ class Orchestrator:
                     persisted_issue_signatures=persisted_issue_signatures,
                     stagnation_detected=stagnation_detected,
                     early_stop_recommended=memory_update.early_stop_recommended,
+                    repeated_remedy_detected=memory_update.repeated_remedy_detected,
+                    repeated_remedy_signatures=memory_update.repeated_remedy_signatures,
                 )
+                _persist_loop_memory()
                 for signature in persisted_issue_signatures:
                     self.event_bus.publish(
                         "orchestrator_loop_issue_persisted",
@@ -386,6 +432,12 @@ class Orchestrator:
                     "unresolved_issue_count": unresolved_issue_count,
                     "persisted_issue_signatures": persisted_issue_signatures,
                     "stagnation_detected": stagnation_detected,
+                    "repeated_remedy_detected": (
+                        memory_update.repeated_remedy_detected if status != "pass" else False
+                    ),
+                    "repeated_remedy_signatures": (
+                        memory_update.repeated_remedy_signatures if status != "pass" else []
+                    ),
                 }
             )
 

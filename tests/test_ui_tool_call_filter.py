@@ -1,6 +1,10 @@
 """Unit tests for terminal display filtering of tool-call markup."""
 
-from ui import _strip_tool_call_blocks
+from ui import (
+    _capture_live_agent_message_output,
+    _sanitize_console_text,
+    _strip_tool_call_blocks,
+)
 
 
 def test_strip_tool_call_blocks_removes_closed_blocks() -> None:
@@ -11,3 +15,19 @@ def test_strip_tool_call_blocks_removes_closed_blocks() -> None:
 def test_strip_tool_call_blocks_removes_dangling_open_block() -> None:
     raw = "prefix\n<tool_call>{\"name\":\"x\"}"
     assert _strip_tool_call_blocks(raw) == "prefix\n"
+
+
+def test_sanitize_console_text_rewrites_unicode_for_cp1252() -> None:
+    raw = "Summarizer \u2192 pass\u2026"
+    assert _sanitize_console_text(raw, encoding="cp1252") == "Summarizer -> pass..."
+
+
+def test_live_agent_message_output_keeps_one_final_panel_before_next_status() -> None:
+    output = _capture_live_agent_message_output(
+        "Critic",
+        content="full critic analysis",
+        trailing_status="Voice cloning complete",
+    )
+
+    assert output.count("full critic analysis") == 1
+    assert "Voice cloning complete" in output
