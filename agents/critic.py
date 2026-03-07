@@ -1,3 +1,7 @@
+"""Critic executor for duration-aware summary evaluation."""
+
+from __future__ import annotations
+
 import json
 import re
 
@@ -8,20 +12,20 @@ from agents.base import BaseA2AExecutor
 from agents.client import AgentTaskClient, get_default_agent_client
 from agents.dtos import RetrieveTaskRequest
 from agents.utils import count_words
+from audio_pipeline.calibration import VoiceCloneCalibration
 from events import EventBus, get_event_bus
 from llm_provider import LLMProvider
 from prompt_manager import PromptManager
+from summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml
 
 
 class CriticExecutor(BaseA2AExecutor):
-    """
-    A2A executor that evaluates a draft summary using an LLM critic
-    supported by deterministic verification tools.
-    """
+    """Evaluate a draft summary using deterministic checks plus an LLM critic."""
 
     def __init__(
         self,
         llm: LLMProvider,
+        calibration: VoiceCloneCalibration,
         max_tool_turns: int = 5,
         retrieval_port: int = 9012,
         is_embedding_enabled: bool = True,
@@ -31,6 +35,7 @@ class CriticExecutor(BaseA2AExecutor):
         """Initialize critic executor and injected collaborators."""
         super().__init__("Critic")
         self.llm = llm
+        self.calibration = calibration
         self.max_tool_turns = max_tool_turns
         self.retrieval_port = retrieval_port
         self.is_embedding_enabled = is_embedding_enabled
@@ -39,39 +44,61 @@ class CriticExecutor(BaseA2AExecutor):
         )
         self.event_bus = event_bus if event_bus is not None else get_event_bus()
 
-    def _run_deterministic_checks(
-        self, draft: str, min_words: int, max_words: int
-    ) -> dict:
-        actual_count = count_words(draft)
-        failures = []
+    def _resolve_target_seconds(self, *, target_seconds: int | None, min_words: int, max_words: int) -> int:
+        """Resolve the intended duration target for the critic pass."""
+        if target_seconds is not None and int(target_seconds) > 0:
+            return int(target_seconds)
+        midpoint_words = max(1, int((min_words + max_words) / 2))
+        neutral_wpm = self.calibration.wpm_for(
+            speaker="",
+            emo_preset=DEFAULT_EMO_PRESET,
+        )
+        return max(1, int(round((midpoint_words / neutral_wpm) * 60.0)))
 
-        # -- Check 1: Word count --
-        if not (min_words <= actual_count <= max_words):
+    def _run_deterministic_checks(
+        self,
+        *,
+        draft: str,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
+    ) -> dict[str, object]:
+        """Run non-LLM checks for duration, truncation, and XML coherence."""
+        actual_count = count_words(draft)
+        failures: list[str] = []
+        tolerance_seconds = target_seconds * duration_tolerance_ratio
+        min_seconds = target_seconds - tolerance_seconds
+        max_seconds = target_seconds + tolerance_seconds
+
+        try:
+            turns = parse_summary_xml(draft)
+        except ValueError:
+            turns = []
+
+        estimated_seconds = self.calibration.estimate_turns_seconds(turns) if turns else 0.0
+
+        if not (min_seconds <= estimated_seconds <= max_seconds):
             failures.append(
-                f"WORD COUNT: {actual_count} words, outside {min_words}-{max_words}."
+                "DURATION: "
+                f"{estimated_seconds:.2f}s outside {min_seconds:.2f}-{max_seconds:.2f}s."
             )
 
-        # -- Check 2: Truncation detection --
-        speaker_blocks = re.findall(
-            r"<SPEAKER_\d+>(.*?)</SPEAKER_\d+>", draft, re.DOTALL
-        )
-        if speaker_blocks:
-            last_block_text = speaker_blocks[-1].strip()
+        if turns:
+            last_block_text = turns[-1].text.strip()
             if last_block_text and not re.search(r"[.!?]\s*$", last_block_text):
                 failures.append(
                     "TRUNCATION: The last speaker block does not end with sentence-ending punctuation (. ! ?)."
                 )
         else:
-            failures.append("TRUNCATION: No properly closed <SPEAKER_XX> blocks found.")
+            failures.append("COHERENCE: No properly closed speaker-tagged XML blocks found.")
 
-        # -- Check 3: Coherence --
-        open_tags = re.findall(r"<(SPEAKER_\d+)>", draft)
-        close_tags = re.findall(r"</(SPEAKER_\d+)>", draft)
+        open_tags = re.findall(r"<([A-Za-z0-9_.-]+)(?:\s[^>]*)?>", draft)
+        close_tags = re.findall(r"</([A-Za-z0-9_.-]+)>", draft)
         if open_tags != close_tags:
             failures.append("COHERENCE: Mismatched speaker tags.")
 
         return {
             "actual_word_count": actual_count,
+            "actual_estimated_seconds": round(estimated_seconds, 3),
             "failures": failures,
             "status": "pass" if not failures else "fail",
         }
@@ -79,20 +106,31 @@ class CriticExecutor(BaseA2AExecutor):
     async def handle_task(
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
+        """Execute one critic task end to end."""
+        del context
         from agents.dtos import CriticTaskRequest
 
         req = CriticTaskRequest.model_validate(task_data)
         draft = req.draft
-        min_words = req.min_words
-        max_words = req.max_words
+        target_seconds = self._resolve_target_seconds(
+            target_seconds=req.target_seconds,
+            min_words=req.min_words,
+            max_words=req.max_words,
+        )
+        duration_tolerance_ratio = float(req.duration_tolerance_ratio or 0.05)
+        tolerance_seconds = target_seconds * duration_tolerance_ratio
         full_transcript = req.full_transcript
 
         self.event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
 
         system_prompt = PromptManager.get_prompt(
             "critic_system",
-            min_words=min_words,
-            max_words=max_words,
+            target_seconds=target_seconds,
+            target_minutes=round(target_seconds / 60.0, 2),
+            duration_tolerance_ratio=duration_tolerance_ratio,
+            duration_tolerance_percent=round(duration_tolerance_ratio * 100.0, 2),
+            min_seconds=round(target_seconds - tolerance_seconds, 2),
+            max_seconds=round(target_seconds + tolerance_seconds, 2),
             is_embedding_enabled=self.is_embedding_enabled,
         )
 
@@ -101,7 +139,7 @@ class CriticExecutor(BaseA2AExecutor):
                 "type": "function",
                 "function": {
                     "name": "run_deterministic_checks",
-                    "description": "Runs hard checks on word count, truncation, coherence, and naturalness.",
+                    "description": "Runs hard checks on duration, truncation, and coherence.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -119,13 +157,16 @@ class CriticExecutor(BaseA2AExecutor):
                     "type": "function",
                     "function": {
                         "name": "verify_against_transcript",
-                        "description": "Retrieves original transcript segments matching a semantic query for factual verification.",
+                        "description": (
+                            "Retrieves original transcript segments matching a semantic "
+                            "query for factual verification."
+                        ),
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "query": {
                                     "type": "string",
-                                    "description": "The semantic query (e.g., 'details about server architecture').",
+                                    "description": "The semantic query for transcript verification.",
                                 },
                             },
                             "required": ["query"],
@@ -145,9 +186,15 @@ class CriticExecutor(BaseA2AExecutor):
                         "properties": {
                             "status": {"type": "string", "enum": ["pass", "fail"]},
                             "actual_word_count": {"type": "integer"},
+                            "estimated_seconds": {"type": "number"},
                             "feedback": {"type": "string"},
                         },
-                        "required": ["status", "actual_word_count", "feedback"],
+                        "required": [
+                            "status",
+                            "actual_word_count",
+                            "estimated_seconds",
+                            "feedback",
+                        ],
                     },
                 },
             }
@@ -167,19 +214,23 @@ class CriticExecutor(BaseA2AExecutor):
 
         context_data = {
             "draft": draft,
-            "min_words": min_words,
-            "max_words": max_words,
+            "target_seconds": target_seconds,
+            "duration_tolerance_ratio": duration_tolerance_ratio,
         }
         final_verdict = await self.run_agent_loop(
             messages, tools, self.max_tool_turns, context_data
         )
 
         if not final_verdict:
-            # Fallback if LLM failed to call submit_verdict
-            stats = self._run_deterministic_checks(draft, min_words, max_words)
+            stats = self._run_deterministic_checks(
+                draft=draft,
+                target_seconds=target_seconds,
+                duration_tolerance_ratio=duration_tolerance_ratio,
+            )
             final_verdict = {
                 "status": stats["status"],
                 "word_count": stats["actual_word_count"],
+                "estimated_seconds": stats["actual_estimated_seconds"],
                 "feedback": "CRITIC ERROR: LLM failed to submit a structured verdict. "
                 + " | ".join(stats["failures"]),
             }
@@ -199,9 +250,10 @@ class CriticExecutor(BaseA2AExecutor):
     async def process_tool_calls(
         self, tool_calls: list[dict], messages: list, context_data: dict
     ) -> tuple[bool, dict | None]:
+        """Execute critic tool calls."""
         draft = context_data["draft"]
-        min_words = context_data["min_words"]
-        max_words = context_data["max_words"]
+        target_seconds = int(context_data["target_seconds"])
+        duration_tolerance_ratio = float(context_data["duration_tolerance_ratio"])
         final_verdict = None
 
         for tc in tool_calls:
@@ -215,7 +267,11 @@ class CriticExecutor(BaseA2AExecutor):
                         "system_message",
                         "Ignoring LLM-supplied draft_text and using finalized draft from task payload.",
                     )
-                results = self._run_deterministic_checks(draft, min_words, max_words)
+                results = self._run_deterministic_checks(
+                    draft=draft,
+                    target_seconds=target_seconds,
+                    duration_tolerance_ratio=duration_tolerance_ratio,
+                )
                 messages.append(
                     {
                         "role": "tool",
@@ -227,7 +283,10 @@ class CriticExecutor(BaseA2AExecutor):
                 self.event_bus.publish(
                     "tool_result",
                     tool_name="run_deterministic_checks",
-                    result=f"Status: {results.get('status')} ({len(results.get('failures', []))} failures)",
+                    result=(
+                        "Status: "
+                        f"{results.get('status')} ({len(results.get('failures', []))} failures)"
+                    ),
                 )
             elif name == "verify_against_transcript":
                 query_text = args.get("query", "")
@@ -254,6 +313,7 @@ class CriticExecutor(BaseA2AExecutor):
                 final_verdict = {
                     "status": args["status"],
                     "word_count": args["actual_word_count"],
+                    "estimated_seconds": args.get("estimated_seconds", 0.0),
                     "feedback": args["feedback"],
                 }
                 break
@@ -261,4 +321,3 @@ class CriticExecutor(BaseA2AExecutor):
         if final_verdict:
             return True, final_verdict
         return False, None
-

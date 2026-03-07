@@ -30,6 +30,10 @@ from audio_pipeline import (
     build_speaker_sample_generator,
     build_voice_clone_orchestrator,
 )
+from audio_pipeline.calibration import (
+    DEFAULT_DURATION_TOLERANCE_RATIO,
+    ensure_voice_clone_calibration,
+)
 from audio_pipeline.contracts import TranscriptPayload
 from audio_pipeline.eta import (
     DynamicEtaTracker,
@@ -478,6 +482,26 @@ def _wait_for_agent_servers(
     sys.exit(1)
 
 
+def _resolve_duration_targets(
+    orchestrator_cfg: dict[str, Any],
+) -> tuple[int, float]:
+    """Resolve target duration and tolerance from config."""
+    target_minutes = float(orchestrator_cfg.get("target_minutes", 5.0))
+    if target_minutes <= 0:
+        raise ValueError("orchestrator.target_minutes must be greater than zero.")
+    duration_tolerance_ratio = float(
+        orchestrator_cfg.get(
+            "duration_tolerance_ratio",
+            DEFAULT_DURATION_TOLERANCE_RATIO,
+        )
+    )
+    if not 0.0 < duration_tolerance_ratio < 1.0:
+        raise ValueError(
+            "orchestrator.duration_tolerance_ratio must be within (0.0, 1.0)."
+        )
+    return max(1, int(round(target_minutes * 60.0))), duration_tolerance_ratio
+
+
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Run the configured summarization pipeline."""
@@ -489,6 +513,11 @@ def main(cfg: DictConfig) -> None:
 
     project_root = Path(hydra.utils.get_original_cwd())
     audio_cfg_dict = _to_plain_dict(cfg.get("audio", {}))
+    voice_clone_cfg_dict = _to_plain_dict(audio_cfg_dict.get("voice_clone", {}))
+    orchestrator_cfg_dict = _to_plain_dict(cfg.get("orchestrator", {}))
+    target_seconds, duration_tolerance_ratio = _resolve_duration_targets(
+        orchestrator_cfg_dict
+    )
     pipeline_cfg_dict = _to_plain_dict(cfg.get("pipeline", {}))
     stage_plan = build_pipeline_stage_plan(pipeline_cfg_dict, project_root=project_root)
     runtime_device = resolve_device(str(audio_cfg_dict.get("device", "auto")))
@@ -514,6 +543,16 @@ def main(cfg: DictConfig) -> None:
     )
 
     transcript_path = str(cfg.transcript_path)
+    input_audio_path: Path | None = None
+    configured_audio_path_value = str(audio_cfg_dict.get("audio_path", "")).strip()
+    if configured_audio_path_value:
+        candidate_audio_path = resolve_path(
+            configured_audio_path_value,
+            base_dir=project_root,
+        )
+        if candidate_audio_path.exists():
+            input_audio_path = candidate_audio_path
+
     if stage_plan.run_audio_stage:
         audio_path_value = str(audio_cfg_dict.get("audio_path", "")).strip()
         if not audio_path_value:
@@ -622,6 +661,56 @@ def main(cfg: DictConfig) -> None:
             eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
             eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
         )
+    calibration = None
+    if (
+        stage_plan.run_summarizer_stage
+        or stage_plan.run_critic_stage
+        or (
+            stage_plan.start_stage != "stage-4"
+            and bool(voice_clone_cfg_dict.get("enabled", False))
+        )
+    ):
+        speaker_manifest_path: Path | None = None
+        if stage_plan.start_stage != "stage-4":
+            manifest_value = str(
+                transcript.metadata.get("speaker_samples_manifest_path", "")
+            ).strip()
+            if manifest_value:
+                speaker_manifest_path = Path(manifest_value)
+                if not speaker_manifest_path.is_absolute():
+                    speaker_manifest_path = (
+                        project_root / speaker_manifest_path
+                    ).resolve()
+        event_bus.publish(
+            "system_message",
+            "Ensuring voice-clone calibration artifact is available...",
+        )
+        calibration = ensure_voice_clone_calibration(
+            project_root=project_root,
+            audio_cfg=audio_cfg_dict,
+            speaker_samples_manifest_path=speaker_manifest_path,
+            transcript_path=(
+                resolve_path(transcript_path, base_dir=project_root)
+                if stage_plan.start_stage != "stage-4"
+                else None
+            ),
+            audio_path=input_audio_path,
+        )
+        event_bus.publish(
+            "status_message",
+            (
+                "Voice calibration ready at "
+                f"{calibration.artifact_path}"
+            ),
+        )
+        if stage_plan.start_stage != "stage-4":
+            refreshed_transcript_path = resolve_path(
+                transcript_path,
+                base_dir=project_root,
+            )
+            if refreshed_transcript_path.exists():
+                transcript_payload = load_transcript(str(refreshed_transcript_path))
+                transcript = Transcript.from_mapping(transcript_payload)
     if stage_plan.run_summarizer_stage or stage_plan.run_critic_stage:
         stage_terminal_logging = bool(
             logging_cfg.get(
@@ -846,6 +935,10 @@ def main(cfg: DictConfig) -> None:
         event_bus.publish("system_message", "Info Retrieval Agent disabled.")
 
     if stage_plan.run_summarizer_stage:
+        if calibration is None:
+            raise RuntimeError(
+                "Summarizer stage requires a loaded voice-clone calibration artifact."
+            )
         event_bus.publish(
             "system_message",
             f"Starting Summarizer A2A server on port {summarizer_port}...",
@@ -856,6 +949,7 @@ def main(cfg: DictConfig) -> None:
             port=summarizer_port,
             executor=SummarizerExecutor(
                 llm=summarizer_llm,
+                calibration=calibration,
                 retrieval_port=retrieval_port,
                 max_tool_turns=int(summarizer_cfg.get("max_tool_turns", 3)),
                 is_embedding_enabled=is_embedding_enabled,
@@ -869,6 +963,10 @@ def main(cfg: DictConfig) -> None:
         event_bus.publish("system_message", "Summarizer stage disabled by pipeline plan.")
 
     if stage_plan.run_critic_stage:
+        if calibration is None:
+            raise RuntimeError(
+                "Critic stage requires a loaded voice-clone calibration artifact."
+            )
         event_bus.publish(
             "system_message",
             f"Starting Critic A2A server on port {critic_port}...",
@@ -879,6 +977,7 @@ def main(cfg: DictConfig) -> None:
             port=critic_port,
             executor=CriticExecutor(
                 llm=critic_llm,
+                calibration=calibration,
                 max_tool_turns=int(critic_cfg.get("max_tool_turns", 5)),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=is_embedding_enabled,
@@ -920,9 +1019,9 @@ def main(cfg: DictConfig) -> None:
         orchestrator=orchestrator,
         stage_plan=stage_plan,
         project_root=project_root,
-        min_words=int(cfg.orchestrator.min_words),
-        max_words=int(cfg.orchestrator.max_words),
-        max_iterations=int(cfg.orchestrator.max_iterations),
+        target_seconds=target_seconds,
+        duration_tolerance_ratio=duration_tolerance_ratio,
+        max_iterations=int(orchestrator_cfg_dict.get("max_iterations", 60)),
         voice_clone_orchestrator=voice_clone_orchestrator,
         interjector_orchestrator=interjector_orchestrator,
         speaker_sample_preparer=speaker_sample_preparer,

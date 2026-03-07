@@ -4,7 +4,7 @@ from agents.loop_context import SummarizerLoopMemory
 
 
 def test_issue_extraction_dedupes_duplicate_feedback_fragments() -> None:
-    memory = SummarizerLoopMemory(min_words=70, max_words=78)
+    memory = SummarizerLoopMemory(target_seconds=74)
 
     issues = memory.extract_issue_signatures(
         feedback=(
@@ -12,7 +12,7 @@ def test_issue_extraction_dedupes_duplicate_feedback_fragments() -> None:
             "[] Chronology jump in middle section.\n"
             "[] Incorrect attribution."
         ),
-        word_count=72,
+        estimated_seconds=72,
     )
 
     signatures = [issue.signature for issue in issues]
@@ -22,7 +22,7 @@ def test_issue_extraction_dedupes_duplicate_feedback_fragments() -> None:
 
 
 def test_compact_prompt_serializer_respects_length_cap() -> None:
-    memory = SummarizerLoopMemory(min_words=70, max_words=78, prompt_char_limit=220)
+    memory = SummarizerLoopMemory(target_seconds=74, prompt_char_limit=220)
     memory.update_from_critic(
         iteration=1,
         critic_status="fail",
@@ -31,7 +31,7 @@ def test_compact_prompt_serializer_respects_length_cap() -> None:
             "[] Awkward and robotic flow.\n"
             "[] Incorrect attribution in closing section."
         ),
-        word_count=60,
+        estimated_seconds=72,
     )
 
     compact = memory.to_compact_prompt_block()
@@ -42,39 +42,39 @@ def test_compact_prompt_serializer_respects_length_cap() -> None:
 
 
 def test_stale_issue_resolution_and_reopen_across_iterations() -> None:
-    memory = SummarizerLoopMemory(min_words=70, max_words=78)
+    memory = SummarizerLoopMemory(target_seconds=74)
 
     first = memory.update_from_critic(
         iteration=1,
         critic_status="fail",
         feedback="[] Missing middle section.\n[] Incorrect attribution.",
-        word_count=72,
+        estimated_seconds=72,
     )
     second = memory.update_from_critic(
         iteration=2,
         critic_status="fail",
         feedback="[] Incorrect attribution.",
-        word_count=72,
+        estimated_seconds=72,
     )
     third = memory.update_from_critic(
         iteration=3,
         critic_status="fail",
         feedback="[] Missing middle section.\n[] Incorrect attribution.",
-        word_count=72,
+        estimated_seconds=72,
     )
 
     first_signatures = {
         issue.signature
         for issue in memory.extract_issue_signatures(
             feedback="[] Missing middle section.\n[] Incorrect attribution.",
-            word_count=72,
+            estimated_seconds=72,
         )
     }
     second_signatures = {
         issue.signature
         for issue in memory.extract_issue_signatures(
             feedback="[] Incorrect attribution.",
-            word_count=72,
+            estimated_seconds=72,
         )
     }
     reopened_signature = next(iter(first_signatures - second_signatures))
@@ -93,8 +93,7 @@ def test_stale_issue_resolution_and_reopen_across_iterations() -> None:
 
 def test_stagnation_strategy_shift_and_early_stop_thresholds() -> None:
     memory = SummarizerLoopMemory(
-        min_words=70,
-        max_words=78,
+        target_seconds=74,
         early_stop_stagnation_threshold=3,
     )
 
@@ -102,25 +101,25 @@ def test_stagnation_strategy_shift_and_early_stop_thresholds() -> None:
         iteration=1,
         critic_status="fail",
         feedback="[] Tighten chronology.",
-        word_count=60,
+        estimated_seconds=60,
     )
     second = memory.update_from_critic(
         iteration=2,
         critic_status="fail",
         feedback="[] Tighten chronology.",
-        word_count=60,
+        estimated_seconds=60,
     )
     third = memory.update_from_critic(
         iteration=3,
         critic_status="fail",
         feedback="[] Tighten chronology.",
-        word_count=60,
+        estimated_seconds=60,
     )
     fourth = memory.update_from_critic(
         iteration=4,
         critic_status="fail",
         feedback="[] Tighten chronology.",
-        word_count=60,
+        estimated_seconds=60,
     )
 
     assert first.stagnation_detected is False

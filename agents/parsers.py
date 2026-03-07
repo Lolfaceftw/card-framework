@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
 from agents.tool_call_utils import dedupe_tool_calls_by_signature
+from summary_xml import DEFAULT_EMO_PRESET
 
 
 class OutputParser(ABC):
@@ -106,13 +107,20 @@ class TextFallbackParser(OutputParser):
         add_pattern = re.compile(
             r"add_speaker_message\s*\(\s*"
             r"(?:speaker_id\s*=\s*)?[\"']?(SPEAKER_\d+)[\"']?\s*,\s*"
-            r"(?:content\s*=\s*)?(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')\s*\)",
+            r"(?:content\s*=\s*)?(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
+            r"(?:\s*,\s*(?:emo_preset\s*=\s*)?"
+            r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'))?\s*\)",
             re.DOTALL,
         )
         for match in add_pattern.finditer(content):
             decoded_content = self._decode_string_literal(match.group(2))
             if decoded_content is None:
                 continue
+            decoded_preset = DEFAULT_EMO_PRESET
+            if match.group(3) is not None:
+                maybe_preset = self._decode_string_literal(match.group(3))
+                if maybe_preset is not None and maybe_preset.strip():
+                    decoded_preset = maybe_preset
             calls_with_positions.append(
                 (
                     match.start(),
@@ -121,6 +129,7 @@ class TextFallbackParser(OutputParser):
                         "arguments": {
                             "speaker_id": match.group(1),
                             "content": decoded_content,
+                            "emo_preset": decoded_preset,
                         },
                     },
                 )
@@ -136,6 +145,7 @@ class TextFallbackParser(OutputParser):
                 continue
             speaker_id = parsed_object.get("speaker_id")
             message_content = parsed_object.get("content")
+            emo_preset = parsed_object.get("emo_preset", DEFAULT_EMO_PRESET)
             if isinstance(speaker_id, str) and isinstance(message_content, str):
                 calls_with_positions.append(
                     (
@@ -145,6 +155,7 @@ class TextFallbackParser(OutputParser):
                             "arguments": {
                                 "speaker_id": speaker_id,
                                 "content": message_content,
+                                "emo_preset": str(emo_preset),
                             },
                         },
                     )
@@ -167,22 +178,32 @@ class TextFallbackParser(OutputParser):
         edit_pattern = re.compile(
             r"edit_message\s*\(\s*"
             r"(?:line\s*=\s*)?[\"']?(\d+)[\"']?\s*,\s*"
-            r"(?:new_content\s*=\s*)?(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')\s*\)",
+            r"(?:new_content\s*=\s*)?(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
+            r"(?:\s*,\s*(?:emo_preset\s*=\s*)?"
+            r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'))?\s*\)",
             re.DOTALL,
         )
         for match in edit_pattern.finditer(content):
             decoded_content = self._decode_string_literal(match.group(2))
             if decoded_content is None:
                 continue
+            decoded_preset: str | None = None
+            if match.group(3) is not None:
+                maybe_preset = self._decode_string_literal(match.group(3))
+                if maybe_preset is not None and maybe_preset.strip():
+                    decoded_preset = maybe_preset
+            arguments: dict[str, Any] = {
+                "line": int(match.group(1)),
+                "new_content": decoded_content,
+            }
+            if decoded_preset is not None:
+                arguments["emo_preset"] = decoded_preset
             calls_with_positions.append(
                 (
                     match.start(),
                     {
                         "name": "edit_message",
-                        "arguments": {
-                            "line": int(match.group(1)),
-                            "new_content": decoded_content,
-                        },
+                        "arguments": arguments,
                     },
                 )
             )
@@ -197,16 +218,20 @@ class TextFallbackParser(OutputParser):
                 continue
             line_value = parsed_object.get("line")
             new_content = parsed_object.get("new_content")
+            emo_preset = parsed_object.get("emo_preset")
             if isinstance(new_content, str) and isinstance(line_value, (int, str)):
+                arguments: dict[str, Any] = {
+                    "line": line_value,
+                    "new_content": new_content,
+                }
+                if isinstance(emo_preset, str) and emo_preset.strip():
+                    arguments["emo_preset"] = emo_preset
                 calls_with_positions.append(
                     (
                         match.start(),
                         {
                             "name": "edit_message",
-                            "arguments": {
-                                "line": line_value,
-                                "new_content": new_content,
-                            },
+                            "arguments": arguments,
                         },
                     )
                 )

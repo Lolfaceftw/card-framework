@@ -1,5 +1,8 @@
+"""Summarizer executor with duration-aware incremental tool use."""
+
+from __future__ import annotations
+
 import json
-import re
 from typing import Any
 
 from a2a.server.agent_execution import RequestContext
@@ -16,18 +19,15 @@ from agents.summarizer_tool_dispatcher import (
     coerce_positive_int,
 )
 from agents.tool_handlers import build_revise_tools, build_summarizer_tools
+from audio_pipeline.calibration import VoiceCloneCalibration
 from events import EventBus, get_event_bus
 from llm_provider import LLMProvider
 from prompt_manager import PromptManager
+from summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml, serialize_summary_turns
 
 
 class SummarizerExecutor(BaseA2AExecutor):
-    """
-    A2A executor that produces an abstractive summary of a transcript.
-
-    It uses an incremental tool loop where the LLM mutates a line registry
-    via add/edit/remove tools and explicitly calls finalize when done.
-    """
+    """Produce an abstractive, duration-targeted summary of a transcript."""
 
     _DEFAULT_LOOP_GUARDRAILS: dict[str, Any] = {
         "enabled": False,
@@ -43,11 +43,13 @@ class SummarizerExecutor(BaseA2AExecutor):
         "target_models": [],
         "target_providers": [],
     }
+
     def __init__(
         self,
         llm: LLMProvider,
         retrieval_port: int,
         max_tool_turns: int,
+        calibration: VoiceCloneCalibration,
         is_embedding_enabled: bool = True,
         loop_guardrails: dict[str, Any] | None = None,
         agent_client: AgentTaskClient | None = None,
@@ -58,6 +60,7 @@ class SummarizerExecutor(BaseA2AExecutor):
         self.llm = llm
         self.retrieval_port = retrieval_port
         self.max_tool_turns = max_tool_turns
+        self.calibration = calibration
         self.is_embedding_enabled = is_embedding_enabled
         self.loop_guardrails = dict(loop_guardrails or {})
         self.agent_client = (
@@ -123,13 +126,7 @@ class SummarizerExecutor(BaseA2AExecutor):
         return provider_name, model_id
 
     def _resolve_loop_guardrails(self) -> dict[str, Any]:
-        """
-        Resolve model-gated loop guardrail policy for this summarizer execution.
-
-        Guardrails are considered active only when:
-        - `enabled` is true
-        - target provider/model matchers (if configured) match this provider
-        """
+        """Resolve model-gated loop guardrail policy for this summarizer execution."""
         resolved = dict(self._DEFAULT_LOOP_GUARDRAILS)
         resolved.update(self.loop_guardrails)
 
@@ -201,20 +198,55 @@ class SummarizerExecutor(BaseA2AExecutor):
             "model_match": model_match,
         }
 
+    def _resolve_target_seconds(self, *, task_data: dict[str, Any], req: Any) -> int:
+        """Resolve the requested summary duration in seconds."""
+        explicit_target_seconds = getattr(req, "target_seconds", None)
+        if explicit_target_seconds is not None and int(explicit_target_seconds) > 0:
+            return int(explicit_target_seconds)
+        mid_words = max(1, int((int(req.min_words) + int(req.max_words)) / 2))
+        neutral_wpm = self.calibration.wpm_for(
+            speaker="",
+            emo_preset=DEFAULT_EMO_PRESET,
+        )
+        derived_seconds = int(round((mid_words / neutral_wpm) * 60.0))
+        self.event_bus.publish(
+            "system_message",
+            (
+                "Legacy word-budget task detected; derived duration target of "
+                f"{derived_seconds}s from midpoint word count."
+            ),
+        )
+        return max(1, derived_seconds)
+
+    def _build_emo_preset_guide(self) -> str:
+        """Render the preset catalog as prompt-ready lines."""
+        return "\n".join(
+            f"- `{name}`: {emo_text}"
+            for name, emo_text in self.calibration.preset_emo_texts.items()
+        )
+
     async def handle_task(
-        self, task_data: dict, context: RequestContext, event_queue: EventQueue
+        self, task_data: dict[str, Any], context: RequestContext, event_queue: EventQueue
     ) -> None:
         from agents.dtos import SummarizerTaskRequest
 
+        del context
         req = SummarizerTaskRequest.model_validate(task_data)
-        min_words = req.min_words
-        max_words = req.max_words
         feedback = req.feedback
         retrieval_port = req.retrieval_port
         previous_draft = req.previous_draft
         full_transcript = req.full_transcript
         loop_context = getattr(req, "loop_context", task_data.get("loop_context", ""))
         loop_context_block = self._build_loop_context_prompt_block(loop_context)
+        target_seconds = self._resolve_target_seconds(task_data=task_data, req=req)
+        duration_tolerance_ratio = float(
+            getattr(req, "duration_tolerance_ratio", 0.05) or 0.05
+        )
+        target_minutes = round(target_seconds / 60.0, 2)
+        tolerance_seconds = round(target_seconds * duration_tolerance_ratio, 2)
+        min_seconds = round(target_seconds - tolerance_seconds, 2)
+        max_seconds = round(target_seconds + tolerance_seconds, 2)
+        emo_preset_guide = self._build_emo_preset_guide()
 
         revise_mode = bool(previous_draft and feedback)
 
@@ -245,8 +277,9 @@ class SummarizerExecutor(BaseA2AExecutor):
             tool_registry = build_revise_tools(
                 registry,
                 retrieval_port,
-                min_words,
-                max_words,
+                self.calibration,
+                target_seconds,
+                duration_tolerance_ratio,
                 self.is_embedding_enabled,
                 agent_client=self.agent_client,
             )
@@ -258,8 +291,9 @@ class SummarizerExecutor(BaseA2AExecutor):
             tool_registry = build_summarizer_tools(
                 registry,
                 retrieval_port,
-                min_words,
-                max_words,
+                self.calibration,
+                target_seconds,
+                duration_tolerance_ratio,
                 self.is_embedding_enabled,
                 agent_client=self.agent_client,
             )
@@ -272,7 +306,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             query_sys_prompt = PromptManager.get_prompt("query_generation_system")
             query_user_prompt = (
                 "Goal: Find main topics, key arguments, and important lessons for a "
-                f"{min_words}-{max_words} word summary.\n"
+                f"roughly {target_minutes} minute summary.\n"
                 f"Feedback from previous attempt: {feedback if feedback else 'None'}"
             )
             self.event_bus.publish(
@@ -332,37 +366,36 @@ class SummarizerExecutor(BaseA2AExecutor):
                 total_words=total_words,
             )
 
+        prompt_kwargs = {
+            "target_seconds": target_seconds,
+            "target_minutes": target_minutes,
+            "duration_tolerance_ratio": duration_tolerance_ratio,
+            "duration_tolerance_percent": round(duration_tolerance_ratio * 100.0, 2),
+            "min_seconds": min_seconds,
+            "max_seconds": max_seconds,
+            "emo_preset_guide": emo_preset_guide,
+            "is_embedding_enabled": self.is_embedding_enabled,
+            "staged_discovery_enabled": self.is_embedding_enabled
+            and loop_guardrails["enable_staged_discovery"],
+            "required_discovery_queries": loop_guardrails["required_discovery_queries"],
+            "max_discovery_queries": loop_guardrails["max_discovery_queries"],
+            "require_unique_discovery_queries": loop_guardrails[
+                "require_unique_discovery_queries"
+            ],
+        }
         if revise_mode:
             system_prompt = PromptManager.get_prompt(
                 "summarizer_revise",
-                min_words=min_words,
-                max_words=max_words,
                 previous_draft=previous_draft,
                 draft_line_map=json.dumps(registry.snapshot(), indent=2),
                 feedback=feedback,
                 loop_context_block=loop_context_block,
-                is_embedding_enabled=self.is_embedding_enabled,
-                staged_discovery_enabled=self.is_embedding_enabled
-                and loop_guardrails["enable_staged_discovery"],
-                required_discovery_queries=loop_guardrails["required_discovery_queries"],
-                max_discovery_queries=loop_guardrails["max_discovery_queries"],
-                require_unique_discovery_queries=loop_guardrails[
-                    "require_unique_discovery_queries"
-                ],
+                **prompt_kwargs,
             )
         else:
             system_prompt = PromptManager.get_prompt(
                 "summarizer_system",
-                min_words=min_words,
-                max_words=max_words,
-                is_embedding_enabled=self.is_embedding_enabled,
-                staged_discovery_enabled=self.is_embedding_enabled
-                and loop_guardrails["enable_staged_discovery"],
-                required_discovery_queries=loop_guardrails["required_discovery_queries"],
-                max_discovery_queries=loop_guardrails["max_discovery_queries"],
-                require_unique_discovery_queries=loop_guardrails[
-                    "require_unique_discovery_queries"
-                ],
+                **prompt_kwargs,
             )
 
         messages = [
@@ -390,15 +423,12 @@ class SummarizerExecutor(BaseA2AExecutor):
         await self._loop_controller.run(
             messages=messages,
             tool_registry=tool_registry,
-            min_words=min_words,
-            max_words=max_words,
+            target_seconds=target_seconds,
+            duration_tolerance_ratio=duration_tolerance_ratio,
             loop_guardrails=loop_guardrails,
         )
 
-        result_xml = ""
-        for speaker_id, content in registry.get_all():
-            result_xml += f"<{speaker_id}>{content}</{speaker_id}>\n"
-        result_xml = result_xml.strip()
+        result_xml = serialize_summary_turns(registry.get_all()).strip()
 
         self.event_bus.publish(
             "agent_message",
@@ -409,19 +439,16 @@ class SummarizerExecutor(BaseA2AExecutor):
 
     @staticmethod
     def _load_draft_into_registry(registry: MessageRegistry, draft_xml: str) -> None:
-        """Parse <SPEAKER_XX>content</SPEAKER_XX> XML back into the registry."""
-        pattern = re.compile(r"<(SPEAKER_\d+)>(.*?)</\1>", re.DOTALL)
-        for match in pattern.finditer(draft_xml):
-            speaker_id = match.group(1)
-            content = match.group(2).strip()
-            registry.add(speaker_id, content)
+        """Parse existing summary XML back into the registry."""
+        for turn in parse_summary_xml(draft_xml):
+            registry.add(turn.speaker, turn.text, turn.emo_preset)
 
     async def process_tool_calls(
-        self, tool_calls: list[dict], messages: list, context_data: dict
+        self, tool_calls: list[dict[str, Any]], messages: list, context_data: dict
     ) -> tuple[bool, dict | None]:
+        """Delegate tool execution to the shared dispatcher."""
         return await self._tool_dispatcher.process_tool_calls(
             tool_calls=tool_calls,
             messages=messages,
             context_data=context_data,
         )
-

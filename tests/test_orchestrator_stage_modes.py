@@ -33,8 +33,8 @@ def test_run_summarizer_once_returns_agent_output() -> None:
 
     result = asyncio.run(
         orchestrator.run_summarizer_once(
-            min_words=50,
-            max_words=80,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             full_transcript_text="",
         )
     )
@@ -47,7 +47,7 @@ def test_run_critic_once_parses_valid_json() -> None:
         assert port == 9011
         assert metadata is not None
         assert metadata.get("stage") == "critic_single_pass"
-        return '{"status":"pass","word_count":72,"feedback":"ok"}'
+        return '{"status":"pass","word_count":72,"estimated_seconds":300.0,"feedback":"ok"}'
 
     orchestrator = Orchestrator(
         retrieval_port=9012,
@@ -59,8 +59,8 @@ def test_run_critic_once_parses_valid_json() -> None:
     verdict = asyncio.run(
         orchestrator.run_critic_once(
             draft="<summary>ok</summary>",
-            min_words=70,
-            max_words=78,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             full_transcript_text="",
         )
     )
@@ -74,7 +74,7 @@ def test_run_critic_once_normalizes_status() -> None:
         assert port == 9011
         assert metadata is not None
         assert metadata.get("stage") == "critic_single_pass"
-        return '{"status":" PASS ","word_count":72,"feedback":"ok"}'
+        return '{"status":" PASS ","word_count":72,"estimated_seconds":300.0,"feedback":"ok"}'
 
     orchestrator = Orchestrator(
         retrieval_port=9012,
@@ -86,8 +86,8 @@ def test_run_critic_once_normalizes_status() -> None:
     verdict = asyncio.run(
         orchestrator.run_critic_once(
             draft="<summary>ok</summary>",
-            min_words=70,
-            max_words=78,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             full_transcript_text="",
         )
     )
@@ -111,8 +111,8 @@ def test_run_critic_once_raises_for_invalid_json() -> None:
         asyncio.run(
             orchestrator.run_critic_once(
                 draft="draft",
-                min_words=10,
-                max_words=20,
+                target_seconds=120,
+                duration_tolerance_ratio=0.05,
                 full_transcript_text="",
             )
         )
@@ -127,7 +127,7 @@ def test_run_loop_sends_empty_loop_context_on_first_pass() -> None:
             summarizer_loop_contexts.append(str(getattr(task_data, "loop_context", "")))
             return "<summary>draft</summary>"
         if port == 9011:
-            return '{"status":"pass","word_count":72,"feedback":"ok"}'
+            return '{"status":"pass","word_count":72,"estimated_seconds":300.0,"feedback":"ok"}'
         raise AssertionError(f"Unexpected port: {port}")
 
     orchestrator = Orchestrator(
@@ -139,8 +139,8 @@ def test_run_loop_sends_empty_loop_context_on_first_pass() -> None:
 
     result = asyncio.run(
         orchestrator.run_loop(
-            min_words=70,
-            max_words=78,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             max_iterations=2,
             full_transcript_text="",
         )
@@ -165,9 +165,10 @@ def test_run_loop_sends_non_empty_loop_context_on_retry_after_fail() -> None:
             if critic_calls == 1:
                 return (
                     '{"status":"fail","word_count":58,'
+                    '"estimated_seconds":220.0,'
                     '"feedback":"[] Fix chronology\\n[] Fix chronology\\n[] Expand coverage"}'
                 )
-            return '{"status":"pass","word_count":74,"feedback":"ok"}'
+            return '{"status":"pass","word_count":74,"estimated_seconds":300.0,"feedback":"ok"}'
         raise AssertionError(f"Unexpected port: {port}")
 
     orchestrator = Orchestrator(
@@ -179,8 +180,8 @@ def test_run_loop_sends_non_empty_loop_context_on_retry_after_fail() -> None:
 
     result = asyncio.run(
         orchestrator.run_loop(
-            min_words=70,
-            max_words=78,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             max_iterations=3,
             full_transcript_text="",
         )
@@ -210,8 +211,8 @@ def test_run_summarizer_once_uses_full_transcript_timeout_floor() -> None:
 
     asyncio.run(
         orchestrator.run_summarizer_once(
-            min_words=50,
-            max_words=80,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             full_transcript_text="full transcript present",
         )
     )
@@ -225,7 +226,7 @@ def test_run_critic_once_uses_full_transcript_timeout_floor() -> None:
         del task_data, max_retries, metadata
         assert port == 9011
         observed_timeout["value"] = float(timeout)
-        return '{"status":"pass","word_count":72,"feedback":"ok"}'
+        return '{"status":"pass","word_count":72,"estimated_seconds":300.0,"feedback":"ok"}'
 
     orchestrator = Orchestrator(
         retrieval_port=9012,
@@ -238,8 +239,8 @@ def test_run_critic_once_uses_full_transcript_timeout_floor() -> None:
     verdict = asyncio.run(
         orchestrator.run_critic_once(
             draft="<summary>ok</summary>",
-            min_words=70,
-            max_words=78,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             full_transcript_text="full transcript present",
         )
     )

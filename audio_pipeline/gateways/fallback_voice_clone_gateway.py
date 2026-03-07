@@ -19,6 +19,7 @@ class PassthroughVoiceCloneGateway(VoiceCloneProvider):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        emo_text: str | None = None,
         progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
@@ -33,7 +34,7 @@ class PassthroughVoiceCloneGateway(VoiceCloneProvider):
         Returns:
             Output WAV path.
         """
-        del text
+        del text, emo_text
         if not reference_audio_path.exists():
             raise NonRetryableAudioStageError(
                 f"Reference audio path does not exist: {reference_audio_path}"

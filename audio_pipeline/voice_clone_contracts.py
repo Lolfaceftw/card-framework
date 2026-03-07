@@ -15,12 +15,15 @@ class VoiceCloneTurn:
 
     speaker: str
     text: str
+    emo_preset: str = "neutral"
 
     def __post_init__(self) -> None:
         if not self.speaker.strip():
             raise ValueError("speaker must be non-empty")
         if not self.text.strip():
             raise ValueError("text must be non-empty")
+        if not self.emo_preset.strip():
+            raise ValueError("emo_preset must be non-empty")
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,6 +50,7 @@ class VoiceCloneArtifact:
     text: str
     reference_audio_path: Path
     output_audio_path: Path
+    emo_preset: str = "neutral"
 
     def __post_init__(self) -> None:
         if self.turn_index <= 0:
@@ -55,6 +59,8 @@ class VoiceCloneArtifact:
             raise ValueError("speaker must be non-empty")
         if not self.text.strip():
             raise ValueError("text must be non-empty")
+        if not self.emo_preset.strip():
+            raise ValueError("emo_preset must be non-empty")
 
 
 @runtime_checkable
@@ -67,6 +73,7 @@ class VoiceCloneProvider(Protocol):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        emo_text: str | None = None,
         progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
@@ -76,6 +83,7 @@ class VoiceCloneProvider(Protocol):
             reference_audio_path: Speaker reference audio artifact.
             text: Text to synthesize.
             output_audio_path: Target output WAV path.
+            emo_text: Optional emotion-guidance text for expressive synthesis.
             progress_callback: Optional callback for synthesis progress updates.
 
         Returns:

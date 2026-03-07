@@ -37,6 +37,7 @@
     <file path="AGENTS.md">Repo-local coding-agent instructions, including the required Scrapling web-research policy and the rule to keep coder_docs aligned with prompt changes.</file>
     <entrypoints>
       <entrypoint path="main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
+      <entrypoint path="calibrate.py">One-time voice-clone calibration helper that discovers or bootstraps speaker samples, renders punctuation-rich calibration phrases, and prints the persisted preset/WPM mapping.</entrypoint>
       <entrypoint path="setup_and_run.py">Bootstrap and convenience runner for dependency checks, stage-aware third-party sync/model provisioning, and full pipeline execution.</entrypoint>
       <entrypoint path="benchmark/run.py">CLI for summarization benchmark matrix execution and manifest preparation.</entrypoint>
       <entrypoint path="benchmark/qa.py">CLI for source-grounded QA benchmark execution against an existing summary and source transcript.</entrypoint>
@@ -59,6 +60,7 @@
       <step>If stage-1 is active, run audio_pipeline.AudioToScriptOrchestrator to emit transcript JSON and stage artifacts.</step>
       <step>Load transcript JSON into orchestration.transcript.Transcript unless pipeline.start_stage=stage-4, which runs from summary XML plus voice-clone manifest only.</step>
       <step>Generate speaker samples after transcript availability when configured, or defer them until just before stage-3 voice cloning when audio.speaker_samples.defer_until_voice_clone=true.</step>
+      <step>Ensure the project-level voice-clone calibration artifact exists before duration-aware summarization, critic evaluation, or stage-3 voice cloning. The calibration path can reuse an existing speaker-sample manifest or bootstrap one from transcript or audio context.</step>
       <step>Instantiate shared or per-stage LLM providers, including the optional stage_llm.interjector override, embedding provider, transcript index, local A2A apps, and the orchestrator stack.</step>
       <step>Run the stage orchestrator, persist final summary XML to summary.xml, optionally run stage-3 voice cloning, and optionally run the stage-4 interjector.</step>
     </runtimeFlow>
@@ -78,8 +80,8 @@
 
   <section id="agents-and-prompts" title="Agents And Prompts">
     <executors>
-      <executor name="SummarizerExecutor">Tool-loop summarizer that mutates a message registry, supports revise mode, loop-context carryover, optional discovery guardrails, and retrieval-backed query tools.</executor>
-      <executor name="CriticExecutor">LLM critic that combines deterministic structural checks with optional transcript verification and emits pass/fail verdict JSON.</executor>
+      <executor name="SummarizerExecutor">Tool-loop summarizer that mutates a message registry, supports revise mode, loop-context carryover, optional discovery guardrails, and retrieval-backed query tools. The summarizer is now duration-first: each line carries an `emo_preset`, the tool loop auto-runs `estimate_duration`, and convergence is measured in estimated seconds rather than target word count.</executor>
+      <executor name="CriticExecutor">LLM critic that combines deterministic duration, truncation, and XML checks with optional transcript verification and emits pass/fail verdict JSON including `estimated_seconds`.</executor>
       <executor name="InfoRetrievalExecutor">Indexes transcript segments and serves MMR-based retrieval results from embeddings.TranscriptIndex.</executor>
       <executor name="GroundTruthCreatorExecutor">Generates contract-bound QA questions from source text for the QA benchmark.</executor>
       <executor name="QAEvaluatorExecutor">Scores a candidate summary against generated QA questions, validates quote grounding, and aggregates correctness metrics.</executor>
@@ -119,12 +121,13 @@
     </transcriptContract>
     <summaryContract>
       <shape>The final summary is XML text persisted to workspace-root summary.xml through summary_output.write_summary_xml_to_workspace.</shape>
+      <turnContract>Each speaker turn is stored as XML with an optional `emo_preset` attribute. Missing attributes remain backward-compatible and default to `neutral`.</turnContract>
       <consumer>Stage-3 voice cloning uses summary XML speaker turns to decide how many voice-clone artifacts to generate and which speaker samples to match; stage-4 interjection reuses the same summary XML plus the stage-3 manifest to place overlaps against synthesized audio timing.</consumer>
       <assumption>Critic logic and downstream processing expect speaker-tagged XML blocks rather than plain prose summaries.</assumption>
     </summaryContract>
     <agentTaskContracts>
-      <contract>SummarizerTaskRequest carries word budget, retrieval port, feedback, previous draft, loop context, and optional full transcript.</contract>
-      <contract>CriticTaskRequest carries the candidate draft, word budget, and optional full transcript.</contract>
+      <contract>SummarizerTaskRequest carries `target_seconds`, `duration_tolerance_ratio`, retrieval port, feedback, previous draft, loop context, and optional full transcript. Legacy `min_words` and `max_words` fields still exist only as compatibility fallback.</contract>
+      <contract>CriticTaskRequest carries the candidate draft, `target_seconds`, `duration_tolerance_ratio`, and optional full transcript. Critic responses now include both `word_count` telemetry and `estimated_seconds`.</contract>
       <contract>RetrieveTaskRequest and IndexTaskRequest define the retrieval agent boundary.</contract>
       <contract>QA benchmark DTOs in agents/dtos.py define creator, evaluator, and corrector payload shapes.</contract>
     </agentTaskContracts>
@@ -147,7 +150,8 @@
     <postTranscriptFlow>
       <step>SpeakerSampleGenerator extracts per-speaker reference audio clips from the selected source audio.</step>
       <step>A manifest is written and its path is stored in transcript metadata.</step>
-      <step>VoiceCloneOrchestrator consumes summary XML plus the manifest to create per-turn cloned segments and optional merged output.</step>
+      <step>Voice-clone calibration measures per-speaker WPM for the fixed emotion preset catalog by synthesizing punctuation-rich temporary phrases against the discovered speaker samples and persisting a single project artifact under `artifacts/calibration`.</step>
+      <step>VoiceCloneOrchestrator consumes summary XML plus the manifest to create per-turn cloned segments and optional merged output. Each turn resolves its stored `emo_preset` to repo-configured `emo_text` before calling IndexTTS.</step>
       <step>InterjectorOrchestrator can then analyze eligible host turns, align stage-3 audio back to summary text, synthesize short overlaps from the next speaker, and emit a second merged WAV plus its own manifest.</step>
     </postTranscriptFlow>
     <adapterMap>
@@ -167,6 +171,7 @@
     <artifacts>
       <artifact>Default transcript output path: artifacts/transcripts/latest.transcript.json</artifact>
       <artifact>Default audio working directory: artifacts/audio_stage</artifact>
+      <artifact>Default calibration artifact path: artifacts/calibration/voice_clone_calibration.json</artifact>
       <artifact>Speaker sample artifacts live under the configured speaker sample output directory inside the audio work directory.</artifact>
       <artifact>Voice clone artifacts live under the configured voice clone output directory inside the audio work directory.</artifact>
       <artifact>Interjector artifacts live under the configured interjector output directory inside the audio work directory and include an `interjector_manifest.json` plus a merged overlap WAV.</artifact>
@@ -195,7 +200,7 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="conf/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, ports, orchestrator budgets, loop guardrails, and logging.</file>
+      <file path="conf/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, voice-clone emotion presets, calibration artifact path, duration targets, loop guardrails, and logging.</file>
       <file path="benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa.</file>
       <file path="benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts.</file>
       <file path="pyproject.toml">Python version floor, dependencies, uv source/index policy, and pytest configuration.</file>
@@ -209,6 +214,7 @@
     </providerPolicy>
     <canonicalCommands>
       <command>uv sync --dev</command>
+      <command>uv run python calibrate.py</command>
       <command>uv run python main.py</command>
       <command>uv run python setup_and_run.py --audio-path &lt;path-to-audio&gt;</command>
       <command>uv run python -m benchmark.run execute --preset hourly</command>
@@ -220,7 +226,9 @@
     <commandNotes>
       <note>Use uv run for repo commands so execution stays inside the locked environment.</note>
       <note>Benchmark and QA CLIs are module entrypoints; main.py is a direct script entrypoint under Hydra.</note>
+      <note>`calibrate.py` is the project-level one-time calibration helper. It prints the persisted preset/WPM mapping and can bootstrap speaker samples from a manifest, transcript, or raw audio path.</note>
       <note>setup_and_run.py is the preferred convenience wrapper when the task involves third-party IndexTTS setup and full end-to-end stage execution.</note>
+      <note>setup_and_run.py pre-runs calibration for stage-2 and stage-3 flows, and explicitly defers calibration to `main.py` for fresh stage-1 runs so it does not duplicate the audio stage.</note>
       <note>setup_and_run.py now skips IndexTTS repo sync, nested uv sync, and model provisioning only when both audio.voice_clone.enabled=false and audio.interjector.enabled=false.</note>
       <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of stage-3.</note>
     </commandNotes>

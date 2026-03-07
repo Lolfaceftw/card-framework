@@ -33,6 +33,8 @@ class RetrieveTaskResponse(BaseModel):
 
 # Summarizer DTOs
 class SummarizerTaskRequest(BaseModel):
+    target_seconds: int | None = None
+    duration_tolerance_ratio: float = 0.05
     min_words: int = 50
     max_words: int = 100
     retrieval_port: int
@@ -49,6 +51,8 @@ class SummarizerTaskResponse(BaseModel):
 # Critic DTOs
 class CriticTaskRequest(BaseModel):
     draft: str
+    target_seconds: int | None = None
+    duration_tolerance_ratio: float = 0.05
     min_words: int = 50
     max_words: int = 100
     full_transcript: str = ""
@@ -60,6 +64,7 @@ CriticStatus = Literal["pass", "fail"]
 class CriticTaskResponse(BaseModel):
     status: CriticStatus
     word_count: int
+    estimated_seconds: float = 0.0
     feedback: str
 
     @field_validator("status", mode="before")

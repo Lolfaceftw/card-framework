@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import sys
 import types
 from typing import Any
@@ -85,6 +86,7 @@ if "a2a.server.agent_execution" not in sys.modules:
 
 from agents.base import BaseA2AExecutor
 from agents.summarizer import SummarizerExecutor
+from audio_pipeline.calibration import VoiceCloneCalibration
 
 
 class FakeResponse:
@@ -186,6 +188,15 @@ class FakeToolRegistry:
         if name == "add_speaker_message":
             self._line_count += 1
             return {"status": "added"}
+        if name == "estimate_duration":
+            return {
+                "total_estimated_seconds": 60.0,
+                "budget": {
+                    "in_budget": True,
+                    "min_seconds": 50.0,
+                    "max_seconds": 70.0,
+                },
+            }
         if name == "count_words":
             return {"total_word_count": 10}
         if name == "save_draft":
@@ -203,17 +214,32 @@ class FakeEditToolRegistry:
         *,
         edit_results: list[dict[str, Any]],
         count_totals: list[int],
+        duration_totals: list[float],
     ) -> None:
         self._edit_results = edit_results
         self._count_totals = count_totals
+        self._duration_totals = duration_totals
         self._edit_index = 0
         self._count_index = 0
+        self._duration_index = 0
 
     async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         if name == "edit_message":
             idx = min(self._edit_index, len(self._edit_results) - 1)
             self._edit_index += 1
             return dict(self._edit_results[idx])
+        if name == "estimate_duration":
+            idx = min(self._duration_index, len(self._duration_totals) - 1)
+            self._duration_index += 1
+            total_seconds = float(self._duration_totals[idx])
+            return {
+                "total_estimated_seconds": total_seconds,
+                "budget": {
+                    "in_budget": 285.0 <= total_seconds <= 315.0,
+                    "min_seconds": 285.0,
+                    "max_seconds": 315.0,
+                },
+            }
         if name == "count_words":
             idx = min(self._count_index, len(self._count_totals) - 1)
             self._count_index += 1
@@ -231,7 +257,13 @@ def _tool_call(tool_id: str, speaker_id: str, content: str) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "add_speaker_message",
-            "arguments": json.dumps({"speaker_id": speaker_id, "content": content}),
+            "arguments": json.dumps(
+                {
+                    "speaker_id": speaker_id,
+                    "content": content,
+                    "emo_preset": "neutral",
+                }
+            ),
         },
     }
 
@@ -242,6 +274,19 @@ def _raw_tool_call(tool_id: str, name: str, arguments: Any) -> dict[str, Any]:
         "type": "function",
         "function": {"name": name, "arguments": arguments},
     }
+
+
+def _build_calibration() -> VoiceCloneCalibration:
+    """Return a minimal calibration object for summarizer executor tests."""
+    return VoiceCloneCalibration(
+        artifact_path=Path("artifact.json"),
+        generated_at_utc="2026-03-07T00:00:00+00:00",
+        speaker_samples_manifest_path=Path("."),
+        preset_emo_texts={"neutral": "Speak in a calm, neutral tone."},
+        calibration_phrases=("Hello, world.",),
+        speaker_preset_wpm={"SPEAKER_00": {"neutral": 120.0}},
+        preset_default_wpm={"neutral": 120.0},
+    )
 
 
 def test_base_loop_sanitizes_python_literal_tool_arguments() -> None:
@@ -568,6 +613,7 @@ def test_summarizer_skips_duplicate_without_auto_count_or_save() -> None:
     )
     executor = SummarizerExecutor(
         llm=llm,
+        calibration=_build_calibration(),
         retrieval_port=12345,
         max_tool_turns=2,
         is_embedding_enabled=False,
@@ -582,8 +628,8 @@ def test_summarizer_skips_duplicate_without_auto_count_or_save() -> None:
             max_turns=2,
             context_data={
                 "tool_registry": fake_registry,
-                "min_words": 1,
-                "max_words": 100,
+                "target_seconds": 60,
+                "duration_tolerance_ratio": 0.05,
                 "signature_dedupe_window_turns": 1,
                 "replay_dedupe_tools": {
                     "add_speaker_message",
@@ -597,6 +643,7 @@ def test_summarizer_skips_duplicate_without_auto_count_or_save() -> None:
 
     called_tools = [name for name, _ in fake_registry.calls]
     assert called_tools.count("add_speaker_message") == 1
+    assert called_tools.count("estimate_duration") == 1
     assert called_tools.count("count_words") == 1
     assert called_tools.count("save_draft") == 1
 
@@ -614,6 +661,7 @@ def test_summarizer_executes_only_first_mutating_call_per_turn() -> None:
     )
     executor = SummarizerExecutor(
         llm=llm,
+        calibration=_build_calibration(),
         retrieval_port=12345,
         max_tool_turns=1,
         is_embedding_enabled=False,
@@ -628,8 +676,8 @@ def test_summarizer_executes_only_first_mutating_call_per_turn() -> None:
             max_turns=1,
             context_data={
                 "tool_registry": fake_registry,
-                "min_words": 1,
-                "max_words": 100,
+                "target_seconds": 60,
+                "duration_tolerance_ratio": 0.05,
                 "signature_dedupe_window_turns": 1,
                 "replay_dedupe_tools": {
                     "add_speaker_message",
@@ -643,6 +691,7 @@ def test_summarizer_executes_only_first_mutating_call_per_turn() -> None:
 
     called_tools = [name for name, _ in fake_registry.calls]
     assert called_tools.count("add_speaker_message") == 1
+    assert called_tools.count("estimate_duration") == 1
     assert called_tools.count("count_words") == 1
     assert called_tools.count("save_draft") == 1
 
@@ -662,6 +711,7 @@ def test_summarizer_executes_only_first_mutating_call_per_turn() -> None:
 def test_summarizer_injects_stall_guidance_after_repeated_noop_edits() -> None:
     executor = SummarizerExecutor(
         llm=FakeLLM([]),
+        calibration=_build_calibration(),
         retrieval_port=12345,
         max_tool_turns=5,
         is_embedding_enabled=False,
@@ -691,11 +741,12 @@ def test_summarizer_injects_stall_guidance_after_repeated_noop_edits() -> None:
             },
         ],
         count_totals=[556, 556, 556],
+        duration_totals=[340.0, 340.0, 340.0],
     )
     context_data: dict[str, Any] = {
         "tool_registry": tool_registry,
-        "min_words": 500,
-        "max_words": 550,
+        "target_seconds": 300,
+        "duration_tolerance_ratio": 0.05,
         "enable_stall_guidance": True,
         "enable_noop_edit_detection": True,
         "stall_guidance_threshold_turns": 3,
@@ -705,6 +756,7 @@ def test_summarizer_injects_stall_guidance_after_repeated_noop_edits() -> None:
         "loop_turn_index": 0,
         "last_mutation_signature": None,
         "last_total_word_count": None,
+        "last_total_estimated_seconds": None,
         "recent_line_edit_fingerprints": [],
     }
     messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]
@@ -735,6 +787,7 @@ def test_summarizer_injects_stall_guidance_after_repeated_noop_edits() -> None:
 def test_summarizer_resets_stagnation_after_meaningful_edit() -> None:
     executor = SummarizerExecutor(
         llm=FakeLLM([]),
+        calibration=_build_calibration(),
         retrieval_port=12345,
         max_tool_turns=5,
         is_embedding_enabled=False,
@@ -757,11 +810,12 @@ def test_summarizer_resets_stagnation_after_meaningful_edit() -> None:
             },
         ],
         count_totals=[552, 546],
+        duration_totals=[340.0, 300.0],
     )
     context_data: dict[str, Any] = {
         "tool_registry": tool_registry,
-        "min_words": 500,
-        "max_words": 550,
+        "target_seconds": 300,
+        "duration_tolerance_ratio": 0.05,
         "enable_stall_guidance": True,
         "enable_noop_edit_detection": True,
         "stall_guidance_threshold_turns": 3,
@@ -771,6 +825,7 @@ def test_summarizer_resets_stagnation_after_meaningful_edit() -> None:
         "loop_turn_index": 0,
         "last_mutation_signature": None,
         "last_total_word_count": None,
+        "last_total_estimated_seconds": None,
         "recent_line_edit_fingerprints": [],
     }
     messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]

@@ -1039,6 +1039,37 @@ def run_pipeline(*, uv_executable: str, overrides: Sequence[str]) -> None:
     )
 
 
+def run_calibration(
+    *,
+    uv_executable: str,
+    transcript_path: Path | None = None,
+    audio_path: Path | None = None,
+    speaker_samples_manifest_path: Path | None = None,
+    force: bool = False,
+) -> None:
+    """Run the dedicated calibration helper with resolved inputs."""
+    command = [uv_executable, "run", "calibrate.py"]
+    if speaker_samples_manifest_path is not None:
+        command.extend(
+            [
+                "--speaker-samples-manifest",
+                _path_for_override(speaker_samples_manifest_path),
+            ]
+        )
+    if transcript_path is not None:
+        command.extend(["--transcript-path", _path_for_override(transcript_path)])
+    if audio_path is not None:
+        command.extend(["--audio-path", _path_for_override(audio_path)])
+    if force:
+        command.append("--force")
+    run_cmd(
+        step="calibration",
+        command=command,
+        cwd=REPO_ROOT,
+        stream_output=True,
+    )
+
+
 def print_summary(
     *,
     records: Sequence[StepRecord],
@@ -1189,7 +1220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print_summary(records=records, run_id=None)
             return 0
 
-        print("[5/6] Resolve runtime input")
+        print("[5/7] Resolve runtime input")
         run_id = utc_now_compact()
         shortcut_overrides = build_shortcut_overrides(
             voiceclone_from_summary=args.voiceclone_from_summary,
@@ -1232,7 +1263,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
 
-        print("[6/6] Running pipeline")
+        print("[6/7] Calibration")
+        transcript_override = _resolve_last_override_value(
+            overrides=overrides,
+            key="transcript_path",
+            default="",
+        ).strip()
+        resolved_transcript_override = (
+            resolve_path_input(transcript_override, field_name="Transcript path")
+            if transcript_override
+            else None
+        )
+        if effective_start_stage == "stage-1":
+            records.append(
+                StepRecord(
+                    name="calibration",
+                    status="deferred",
+                    detail=(
+                        "Deferred to main.py after transcript generation so the audio "
+                        "stage does not run twice."
+                    ),
+                )
+            )
+        elif effective_start_stage == "stage-4":
+            records.append(
+                StepRecord(
+                    name="calibration",
+                    status="skipped",
+                    detail="Skipped because stage-4 interjection does not require calibration.",
+                )
+            )
+        else:
+            run_calibration(
+                uv_executable=args.uv_executable,
+                transcript_path=resolved_transcript_override,
+            )
+            records.append(
+                StepRecord(
+                    name="calibration",
+                    status="ok",
+                    detail="Calibration artifact is ready.",
+                )
+            )
+
+        print("[7/7] Running pipeline")
         run_pipeline(uv_executable=args.uv_executable, overrides=overrides)
         records.append(
             StepRecord(

@@ -21,6 +21,15 @@ class FakeToolRegistry:
         if name == "add_speaker_message":
             self._line_count += 1
             return {"status": "added"}
+        if name == "estimate_duration":
+            return {
+                "total_estimated_seconds": 60.0,
+                "budget": {
+                    "in_budget": True,
+                    "min_seconds": 50.0,
+                    "max_seconds": 70.0,
+                },
+            }
         if name == "count_words":
             return {"total_word_count": 12}
         if name == "save_draft":
@@ -74,8 +83,8 @@ def test_loop_controller_builds_context_and_invokes_run_loop() -> None:
         controller.run(
             messages=messages,
             tool_registry=registry,
-            min_words=100,
-            max_words=200,
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
             loop_guardrails=guardrails,
         )
     )
@@ -84,8 +93,8 @@ def test_loop_controller_builds_context_and_invokes_run_loop() -> None:
     assert captured["tools"] == registry.get_tool_schemas()
     assert captured["max_turns"] == 3
     assert captured["context_data"] is context_data
-    assert context_data["min_words"] == 100
-    assert context_data["max_words"] == 200
+    assert context_data["target_seconds"] == 300
+    assert context_data["duration_tolerance_ratio"] == 0.05
     assert context_data["enable_staged_discovery"] is True
     assert context_data["required_discovery_queries"] == 2
 
@@ -99,8 +108,8 @@ def test_tool_dispatcher_executes_only_first_mutating_call_per_turn() -> None:
 
     context_data: dict[str, Any] = {
         "tool_registry": registry,
-        "min_words": 1,
-        "max_words": 100,
+        "target_seconds": 60,
+        "duration_tolerance_ratio": 0.05,
         "signature_dedupe_window_turns": 1,
         "replay_dedupe_tools": {
             "add_speaker_message",
@@ -117,12 +126,20 @@ def test_tool_dispatcher_executes_only_first_mutating_call_per_turn() -> None:
                 {
                     "id": "call_1",
                     "name": "add_speaker_message",
-                    "arguments": {"speaker_id": "SPEAKER_00", "content": "First line"},
+                    "arguments": {
+                        "speaker_id": "SPEAKER_00",
+                        "content": "First line",
+                        "emo_preset": "neutral",
+                    },
                 },
                 {
                     "id": "call_2",
                     "name": "add_speaker_message",
-                    "arguments": {"speaker_id": "SPEAKER_01", "content": "Second line"},
+                    "arguments": {
+                        "speaker_id": "SPEAKER_01",
+                        "content": "Second line",
+                        "emo_preset": "neutral",
+                    },
                 },
             ],
             messages=messages,
@@ -132,6 +149,7 @@ def test_tool_dispatcher_executes_only_first_mutating_call_per_turn() -> None:
 
     called_tools = [name for name, _ in registry.calls]
     assert called_tools.count("add_speaker_message") == 1
+    assert called_tools.count("estimate_duration") == 1
     assert called_tools.count("count_words") == 1
     assert called_tools.count("save_draft") == 1
 
