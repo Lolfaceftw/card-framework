@@ -1,3 +1,4 @@
+from collections.abc import Callable, Sequence
 import asyncio
 import logging
 import os
@@ -179,6 +180,45 @@ def _resolve_stage_llm(
             "override",
         )
     return shared_llm, "shared"
+
+
+def _should_defer_speaker_samples(audio_cfg_dict: dict[str, Any]) -> bool:
+    """Return whether speaker-sample generation should move off the summary critical path."""
+    speaker_samples_cfg = _to_plain_dict(audio_cfg_dict.get("speaker_samples", {}))
+    return bool(speaker_samples_cfg.get("enabled", True)) and bool(
+        speaker_samples_cfg.get("defer_until_voice_clone", False)
+    )
+
+
+def _build_speaker_sample_preparer(
+    *,
+    stage_start: str,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    transcript_path: str,
+    eta_strategy: StageEtaStrategy | None = None,
+    eta_update_interval_seconds: float = 10.0,
+    eta_progress_smoothing: float = 0.25,
+    eta_overrun_factor: float = 1.15,
+    eta_headroom_seconds: float = 1.0,
+) -> Callable[[Transcript], Transcript]:
+    """Build a callback that can prepare speaker samples immediately before voice cloning."""
+
+    def _prepare(transcript: Transcript) -> Transcript:
+        return _run_post_transcript_speaker_sample_step(
+            stage_start=stage_start,
+            audio_cfg_dict=audio_cfg_dict,
+            project_root=project_root,
+            transcript_path=transcript_path,
+            transcript=transcript,
+            eta_strategy=eta_strategy,
+            eta_update_interval_seconds=eta_update_interval_seconds,
+            eta_progress_smoothing=eta_progress_smoothing,
+            eta_overrun_factor=eta_overrun_factor,
+            eta_headroom_seconds=eta_headroom_seconds,
+        )
+
+    return _prepare
 
 
 def _run_post_transcript_speaker_sample_step(
@@ -381,6 +421,28 @@ def _run_post_transcript_speaker_sample_step(
     return updated_transcript
 
 
+def _wait_for_agent_servers(
+    *,
+    checker: AgentHealthChecker,
+    servers: Sequence[tuple[str, int]],
+    overall_timeout_seconds: float = 10.0,
+    poll_interval_seconds: float = 0.2,
+    request_timeout_seconds: float = 1.0,
+) -> None:
+    """Block until required A2A servers are healthy or terminate the process."""
+    if not servers:
+        return
+    event_bus.publish("system_message", "Waiting for A2A servers to start...")
+    if checker.wait_for_many(
+        servers,
+        overall_timeout_seconds=overall_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        request_timeout_seconds=request_timeout_seconds,
+    ):
+        return
+    sys.exit(1)
+
+
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Run the configured summarization pipeline."""
@@ -477,18 +539,36 @@ def main(cfg: DictConfig) -> None:
         "system_message",
         f"Loaded {len(transcript.segments)} segments",
     )
-    transcript = _run_post_transcript_speaker_sample_step(
-        stage_start=stage_plan.start_stage,
-        audio_cfg_dict=audio_cfg_dict,
-        project_root=project_root,
-        transcript_path=transcript_path,
-        transcript=transcript,
-        eta_strategy=audio_orchestrator.eta_strategy,
-        eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
-        eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
-        eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
-        eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
-    )
+    speaker_sample_preparer: Callable[[Transcript], Transcript] | None = None
+    if _should_defer_speaker_samples(audio_cfg_dict):
+        event_bus.publish(
+            "system_message",
+            "Speaker sample generation deferred until voice clone stage.",
+        )
+        speaker_sample_preparer = _build_speaker_sample_preparer(
+            stage_start=stage_plan.start_stage,
+            audio_cfg_dict=audio_cfg_dict,
+            project_root=project_root,
+            transcript_path=transcript_path,
+            eta_strategy=audio_orchestrator.eta_strategy,
+            eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
+            eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
+            eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
+            eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
+        )
+    else:
+        transcript = _run_post_transcript_speaker_sample_step(
+            stage_start=stage_plan.start_stage,
+            audio_cfg_dict=audio_cfg_dict,
+            project_root=project_root,
+            transcript_path=transcript_path,
+            transcript=transcript,
+            eta_strategy=audio_orchestrator.eta_strategy,
+            eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
+            eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
+            eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
+            eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
+        )
     if stage_plan.run_summarizer_stage or stage_plan.run_critic_stage:
         stage_terminal_logging = bool(
             logging_cfg.get(
@@ -713,9 +793,6 @@ def main(cfg: DictConfig) -> None:
     else:
         event_bus.publish("system_message", "Critic stage disabled by pipeline plan.")
 
-    event_bus.publish("system_message", "Waiting for A2A servers to start...")
-    time.sleep(2)
-
     servers_to_check: list[tuple[str, int]] = []
     if transcript_index is not None:
         servers_to_check.append(("InfoRetrieval", retrieval_port))
@@ -725,13 +802,13 @@ def main(cfg: DictConfig) -> None:
         servers_to_check.append(("Critic", critic_port))
 
     checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
-    for name, port in servers_to_check:
-        if not checker.check(name, port):
-            event_bus.publish(
-                "error_message",
-                f"[ERR] {name} server failed to start after multiple attempts.",
-            )
-            sys.exit(1)
+    _wait_for_agent_servers(
+        checker=checker,
+        servers=servers_to_check,
+        overall_timeout_seconds=10.0,
+        poll_interval_seconds=0.2,
+        request_timeout_seconds=1.0,
+    )
 
     event_bus.publish("system_message", "Starting orchestration loop...")
     orchestrator = Orchestrator(
@@ -750,6 +827,7 @@ def main(cfg: DictConfig) -> None:
         max_words=int(cfg.orchestrator.max_words),
         max_iterations=int(cfg.orchestrator.max_iterations),
         voice_clone_orchestrator=voice_clone_orchestrator,
+        speaker_sample_preparer=speaker_sample_preparer,
         eta_strategy=audio_orchestrator.eta_strategy,
         eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
         eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,

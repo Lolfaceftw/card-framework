@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -38,6 +39,7 @@ class StageOrchestrator:
     max_words: int
     max_iterations: int
     voice_clone_orchestrator: VoiceCloneOrchestrator | None = None
+    speaker_sample_preparer: Callable[[Transcript], Transcript] | None = None
     eta_strategy: StageEtaStrategy | None = None
     eta_update_interval_seconds: float = 10.0
     eta_progress_smoothing: float = 0.25
@@ -130,9 +132,19 @@ class StageOrchestrator:
         """Run post-summary voice cloning when configured."""
         if self.voice_clone_orchestrator is None:
             return
+        prepared_transcript = transcript
         manifest_path_value = str(
-            transcript.metadata.get("speaker_samples_manifest_path", "")
+            prepared_transcript.metadata.get("speaker_samples_manifest_path", "")
         ).strip()
+        if not manifest_path_value and self.speaker_sample_preparer is not None:
+            event_bus.publish(
+                "system_message",
+                "Preparing deferred speaker samples for voice clone stage...",
+            )
+            prepared_transcript = self.speaker_sample_preparer(prepared_transcript)
+            manifest_path_value = str(
+                prepared_transcript.metadata.get("speaker_samples_manifest_path", "")
+            ).strip()
         if not manifest_path_value:
             raise ValueError(
                 "Speaker sample manifest is required for voice cloning. "

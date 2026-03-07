@@ -1,19 +1,34 @@
-"""Concrete provider implementations for LLM and Embedding strategies."""
+"""Expose provider implementations without eager importing heavy backends."""
 
-from providers.deepseek_provider import DeepSeekProvider
-from providers.glm_provider import GLMProvider
-from providers.huggingface_provider import HuggingfaceProvider
-from providers.nanbeige_provider import NanbeigeProvider
-from providers.sentence_transformer_provider import SentenceTransformerEmbeddingProvider
-from providers.transformers_provider import TransformersProvider
-from providers.vllm_provider import VLLMProvider
+from __future__ import annotations
 
-__all__ = [
-    "VLLMProvider",
-    "SentenceTransformerEmbeddingProvider",
-    "DeepSeekProvider",
-    "GLMProvider",
-    "HuggingfaceProvider",
-    "NanbeigeProvider",
-    "TransformersProvider",
-]
+from importlib import import_module
+from typing import Any
+
+_PROVIDER_EXPORTS = {
+    "DeepSeekProvider": "providers.deepseek_provider",
+    "GLMProvider": "providers.glm_provider",
+    "HuggingfaceProvider": "providers.huggingface_provider",
+    "NanbeigeProvider": "providers.nanbeige_provider",
+    "SentenceTransformerEmbeddingProvider": "providers.sentence_transformer_provider",
+    "TransformersProvider": "providers.transformers_provider",
+    "VLLMProvider": "providers.vllm_provider",
+}
+
+__all__ = list(_PROVIDER_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    """Load provider symbols on first access to avoid cold-start fan-out."""
+    module_path = _PROVIDER_EXPORTS.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(module_path)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """Return module attributes plus lazily exposed provider symbols."""
+    return sorted(set(globals()) | set(__all__))

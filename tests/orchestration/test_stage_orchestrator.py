@@ -239,3 +239,51 @@ def test_run_stage_two_starts_and_stops_gpu_heartbeat(tmp_path: Path) -> None:
 
     assert fake_gpu_heartbeat.started_with_pid is not None
     assert fake_gpu_heartbeat.stop_calls == 1
+
+
+def test_run_stage_two_prepares_deferred_speaker_samples_for_voice_clone(
+    tmp_path: Path,
+) -> None:
+    """Generate speaker samples on demand when manifest creation is deferred."""
+    fake_orchestrator = _FakeOrchestrator()
+    fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
+    prepared_calls: list[str] = []
+    manifest_path = tmp_path / "speaker_samples" / "manifest.json"
+
+    def _prepare_speaker_samples(transcript: Transcript) -> Transcript:
+        prepared_calls.append("called")
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text('{"samples": []}', encoding="utf-8")
+        return transcript.with_metadata(
+            {
+                **transcript.metadata,
+                "speaker_samples_manifest_path": str(manifest_path),
+            }
+        )
+
+    stage_orchestrator = _build_stage_orchestrator(
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        fake_orchestrator=fake_orchestrator,
+        project_root=tmp_path,
+        fake_voice_clone_orchestrator=fake_voice_clone,
+    )
+    stage_orchestrator = StageOrchestrator(
+        orchestrator=stage_orchestrator.orchestrator,
+        stage_plan=stage_orchestrator.stage_plan,
+        project_root=stage_orchestrator.project_root,
+        min_words=stage_orchestrator.min_words,
+        max_words=stage_orchestrator.max_words,
+        max_iterations=stage_orchestrator.max_iterations,
+        voice_clone_orchestrator=stage_orchestrator.voice_clone_orchestrator,
+        speaker_sample_preparer=_prepare_speaker_samples,
+    )
+
+    asyncio.run(
+        stage_orchestrator.run(
+            transcript={"segments": [{"speaker": "SPEAKER_00", "text": "hello world"}]},
+            retrieval_enabled=False,
+        )
+    )
+
+    assert prepared_calls == ["called"]
+    assert fake_voice_clone.manifest_path == manifest_path.resolve()

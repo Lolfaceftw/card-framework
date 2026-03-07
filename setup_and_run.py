@@ -19,9 +19,11 @@ INDEX_TTS_DIR = REPO_ROOT / "third_party" / "index_tts"
 SETUP_STATE_PATH = REPO_ROOT / "artifacts" / "bootstrap" / "setup_state.json"
 MIN_WEIGHT_BYTES = 1_000_000
 WEIGHT_SUFFIXES = {".safetensors", ".pt", ".pth", ".bin", ".ckpt"}
-REQUIRED_REPO_PATHS = (
+BASE_REQUIRED_REPO_PATHS = (
     "main.py",
     "conf/config.yaml",
+)
+VOICE_CLONE_REQUIRED_REPO_PATHS = (
     "audio_pipeline/runners/indextts_infer_runner.py",
 )
 PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3"]
@@ -205,17 +207,28 @@ def run_cmd(
     return completed
 
 
-def check_prerequisites(*, git_executable: str) -> None:
+def check_prerequisites(
+    *,
+    git_executable: str,
+    require_git: bool = True,
+    require_ffmpeg: bool = True,
+) -> None:
     """
     Validate system and repository prerequisites before setup begins.
 
     Args:
         git_executable: Git binary name/path.
+        require_git: Whether bootstrap needs git and git-lfs.
+        require_ffmpeg: Whether runtime stages require ffmpeg.
 
     Raises:
         BootstrapError: If tools or required repo paths are missing.
     """
-    required_tools = ("uv", "git", "ffmpeg")
+    required_tools = ["uv"]
+    if require_git:
+        required_tools.append("git")
+    if require_ffmpeg:
+        required_tools.append("ffmpeg")
     missing_tools = [tool for tool in required_tools if shutil.which(tool) is None]
     if missing_tools:
         raise BootstrapError(
@@ -226,22 +239,26 @@ def check_prerequisites(*, git_executable: str) -> None:
             ),
         )
 
-    try:
-        run_cmd(
-            step="preflight",
-            command=[git_executable, "lfs", "version"],
-            cwd=REPO_ROOT,
-        )
-    except BootstrapError as exc:
-        raise BootstrapError(
-            step="preflight",
-            message="Git LFS is required but unavailable. Install Git LFS and re-run.",
-            command=exc.command,
-            stderr_tail=exc.stderr_tail,
-        ) from exc
+    if require_git:
+        try:
+            run_cmd(
+                step="preflight",
+                command=[git_executable, "lfs", "version"],
+                cwd=REPO_ROOT,
+            )
+        except BootstrapError as exc:
+            raise BootstrapError(
+                step="preflight",
+                message="Git LFS is required but unavailable. Install Git LFS and re-run.",
+                command=exc.command,
+                stderr_tail=exc.stderr_tail,
+            ) from exc
 
+    required_paths = list(BASE_REQUIRED_REPO_PATHS)
+    if require_git:
+        required_paths.extend(VOICE_CLONE_REQUIRED_REPO_PATHS)
     missing_paths = [
-        rel_path for rel_path in REQUIRED_REPO_PATHS if not (REPO_ROOT / rel_path).exists()
+        rel_path for rel_path in required_paths if not (REPO_ROOT / rel_path).exists()
     ]
     if missing_paths:
         raise BootstrapError(
@@ -338,13 +355,19 @@ def _is_git_dirty(*, git_executable: str, repo_dir: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def smart_sync_projects(*, uv_executable: str, force_sync: bool) -> tuple[str, ...]:
+def smart_sync_projects(
+    *,
+    uv_executable: str,
+    force_sync: bool,
+    include_index_tts: bool = True,
+) -> tuple[str, ...]:
     """
     Run ``uv sync --locked`` for project roots only when required.
 
     Args:
         uv_executable: uv binary name/path.
         force_sync: Force sync regardless of state.
+        include_index_tts: Whether to sync the nested IndexTTS project.
 
     Returns:
         Tuple of project keys that were synced.
@@ -352,10 +375,9 @@ def smart_sync_projects(*, uv_executable: str, force_sync: bool) -> tuple[str, .
     Raises:
         BootstrapError: If required project files are missing or sync command fails.
     """
-    project_specs = (
-        ("root", REPO_ROOT),
-        ("index_tts", INDEX_TTS_DIR),
-    )
+    project_specs = [("root", REPO_ROOT)]
+    if include_index_tts:
+        project_specs.append(("index_tts", INDEX_TTS_DIR))
     state = _read_setup_state()
     projects_state = state.get("projects", {})
     if not isinstance(projects_state, dict):
@@ -803,6 +825,29 @@ def _has_override_key(overrides: Sequence[str], key: str) -> bool:
     return any(override.startswith(prefix) for override in overrides)
 
 
+def resolve_boolean_override(
+    overrides: Sequence[str],
+    *,
+    key: str,
+    default: bool,
+) -> bool:
+    """Resolve a boolean Hydra override using last-wins semantics."""
+    raw_value = _resolve_last_override_value(
+        overrides=overrides,
+        key=key,
+        default="true" if default else "false",
+    )
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise BootstrapError(
+        step="input",
+        message=f"{key} must be a boolean value (for example true or false).",
+    )
+
+
 def resolve_start_stage(overrides: Sequence[str]) -> PipelineStartStage:
     """
     Resolve and validate effective ``pipeline.start_stage`` from overrides.
@@ -850,6 +895,7 @@ def build_run_overrides(
     run_id: str,
     start_stage: PipelineStartStage = "stage-1",
     audio_path: Path | None = None,
+    enable_voice_clone: bool = True,
 ) -> list[str]:
     """
     Build deterministic Hydra overrides for full pipeline + voice cloning run.
@@ -858,6 +904,7 @@ def build_run_overrides(
         run_id: UTC run identifier.
         start_stage: Effective stage that should drive default overrides.
         audio_path: Optional resolved source audio path.
+        enable_voice_clone: Whether wrapper defaults should enable stage-3 voice cloning.
 
     Returns:
         Ordered list of Hydra override key-value strings.
@@ -871,18 +918,28 @@ def build_run_overrides(
         "audio.speaker_samples.enabled=true",
         "audio.speaker_samples.source_audio=vocals",
         "audio.speaker_samples.target_duration_seconds=30",
-        "audio.voice_clone.enabled=true",
-        "audio.voice_clone.provider=indextts",
-        "audio.voice_clone.execution_backend=subprocess",
         "logging.print_to_terminal=true",
         "logging.summarizer_critic_print_to_terminal=false",
-        f"audio.voice_clone.runner_project_dir={_path_for_override(INDEX_TTS_DIR)}",
-        (
-            "audio.voice_clone.cfg_path="
-            f"{_path_for_override(INDEX_TTS_DIR / 'checkpoints' / 'config.yaml')}"
-        ),
-        f"audio.voice_clone.model_dir={_path_for_override(INDEX_TTS_DIR / 'checkpoints')}",
     ]
+    if enable_voice_clone:
+        overrides.extend(
+            [
+                "audio.voice_clone.enabled=true",
+                "audio.voice_clone.provider=indextts",
+                "audio.voice_clone.execution_backend=subprocess",
+                f"audio.voice_clone.runner_project_dir={_path_for_override(INDEX_TTS_DIR)}",
+                (
+                    "audio.voice_clone.cfg_path="
+                    f"{_path_for_override(INDEX_TTS_DIR / 'checkpoints' / 'config.yaml')}"
+                ),
+                (
+                    "audio.voice_clone.model_dir="
+                    f"{_path_for_override(INDEX_TTS_DIR / 'checkpoints')}"
+                ),
+            ]
+        )
+    else:
+        overrides.append("audio.voice_clone.enabled=false")
     if start_stage == "stage-1":
         overrides.extend(
             [
@@ -1011,26 +1068,69 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id: str | None = None
 
     try:
+        pass_through_overrides = normalize_cli_overrides(args.override)
+        preflight_shortcut_overrides: list[str] = []
+        if args.voiceclone_from_summary is not None:
+            preflight_shortcut_overrides.extend(
+                [
+                    "pipeline.start_stage=stage-3",
+                    "audio.speaker_samples.enabled=false",
+                    "audio.voice_clone.enabled=true",
+                ]
+            )
+        effective_start_stage = resolve_start_stage(
+            [*preflight_shortcut_overrides, *pass_through_overrides]
+        )
+        voice_clone_enabled = resolve_boolean_override(
+            [*preflight_shortcut_overrides, *pass_through_overrides],
+            key="audio.voice_clone.enabled",
+            default=True,
+        )
+        speaker_samples_enabled = resolve_boolean_override(
+            [*preflight_shortcut_overrides, *pass_through_overrides],
+            key="audio.speaker_samples.enabled",
+            default=True,
+        )
+        ffmpeg_required = (
+            effective_start_stage == "stage-1"
+            or speaker_samples_enabled
+            or voice_clone_enabled
+        )
+
         print("[1/6] Preflight checks")
-        check_prerequisites(git_executable=args.git_executable)
+        check_prerequisites(
+            git_executable=args.git_executable,
+            require_git=voice_clone_enabled,
+            require_ffmpeg=ffmpeg_required,
+        )
         records.append(StepRecord(name="preflight", status="ok", detail="Tools and paths validated."))
 
         print("[2/6] IndexTTS repository sync")
-        repo_result = ensure_indextts_repo(
-            git_executable=args.git_executable,
-            skip_update=bool(args.skip_repo_update),
-        )
-        repo_detail = (
-            f"cloned={repo_result.cloned}, updated={repo_result.updated}, "
-            f"pull_skipped_dirty={repo_result.pull_skipped_dirty}, "
-            f"lfs_pulled={repo_result.lfs_pulled}"
-        )
-        records.append(StepRecord(name="repo_sync", status="ok", detail=repo_detail))
+        if voice_clone_enabled:
+            repo_result = ensure_indextts_repo(
+                git_executable=args.git_executable,
+                skip_update=bool(args.skip_repo_update),
+            )
+            repo_detail = (
+                f"cloned={repo_result.cloned}, updated={repo_result.updated}, "
+                f"pull_skipped_dirty={repo_result.pull_skipped_dirty}, "
+                f"lfs_pulled={repo_result.lfs_pulled}"
+            )
+            records.append(StepRecord(name="repo_sync", status="ok", detail=repo_detail))
+        else:
+            records.append(
+                StepRecord(
+                    name="repo_sync",
+                    status="skipped",
+                    detail="Skipped because audio.voice_clone.enabled=false.",
+                )
+            )
 
         print("[3/6] Dependency sync")
         synced_projects = smart_sync_projects(
             uv_executable=args.uv_executable,
             force_sync=bool(args.force_sync),
+            include_index_tts=voice_clone_enabled,
         )
         if synced_projects:
             detail = f"synced projects: {', '.join(synced_projects)}"
@@ -1039,14 +1139,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         records.append(StepRecord(name="dependency_sync", status="ok", detail=detail))
 
         print("[4/6] Model provisioning")
-        model_result = ensure_indextts_model(
-            uv_executable=args.uv_executable,
-            force_download=bool(args.force_model_download),
-        )
-        model_detail = (
-            f"downloaded={model_result.downloaded}, source={model_result.source}"
-        )
-        records.append(StepRecord(name="model_download", status="ok", detail=model_detail))
+        if voice_clone_enabled:
+            model_result = ensure_indextts_model(
+                uv_executable=args.uv_executable,
+                force_download=bool(args.force_model_download),
+            )
+            model_detail = (
+                f"downloaded={model_result.downloaded}, source={model_result.source}"
+            )
+            records.append(StepRecord(name="model_download", status="ok", detail=model_detail))
+        else:
+            records.append(
+                StepRecord(
+                    name="model_download",
+                    status="skipped",
+                    detail="Skipped because audio.voice_clone.enabled=false.",
+                )
+            )
 
         if args.setup_only:
             print("[5/6] Setup-only mode enabled; skipping pipeline execution.")
@@ -1066,13 +1175,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             voiceclone_from_summary=args.voiceclone_from_summary,
             run_id=run_id,
         )
-        pass_through_overrides = normalize_cli_overrides(args.override)
-        effective_start_stage = resolve_start_stage(
-            [*shortcut_overrides, *pass_through_overrides]
-        )
         base_overrides = build_run_overrides(
             run_id=run_id,
             start_stage=effective_start_stage,
+            enable_voice_clone=voice_clone_enabled,
         )
         overrides = [*base_overrides, *shortcut_overrides, *pass_through_overrides]
         ensure_transcript_override_for_stage(

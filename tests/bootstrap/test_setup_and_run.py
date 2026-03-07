@@ -96,6 +96,49 @@ def test_smart_sync_projects_skips_when_fingerprints_unchanged(
     assert captured == []
 
 
+def test_smart_sync_projects_can_skip_nested_indextts_project(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    _write_project_files(repo_root)
+    (repo_root / ".venv").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+    monkeypatch.setattr(
+        bootstrap,
+        "SETUP_STATE_PATH",
+        repo_root / "artifacts" / "bootstrap" / "setup_state.json",
+    )
+
+    captured: list[list[str]] = []
+
+    def _fake_run_cmd(
+        *,
+        step: str,
+        command: list[str],
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del step, env
+        captured.append(command)
+        assert cwd == repo_root
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bootstrap, "run_cmd", _fake_run_cmd)
+
+    synced = bootstrap.smart_sync_projects(
+        uv_executable="uv",
+        force_sync=False,
+        include_index_tts=False,
+    )
+
+    assert synced == ("root",)
+    assert captured == [["uv", "sync", "--locked"]]
+
+
 def test_ensure_indextts_repo_skips_pull_when_git_tree_dirty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -227,6 +270,31 @@ def test_build_run_overrides_can_omit_audio_path(
 
     assert "audio.audio_path" not in override_map
     assert override_map["pipeline.start_stage"] == "stage-1"
+
+
+def test_build_run_overrides_can_disable_voice_clone_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    index_tts_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+
+    overrides = bootstrap.build_run_overrides(
+        run_id="20260302_120000",
+        enable_voice_clone=False,
+    )
+    override_map = dict(entry.split("=", 1) for entry in overrides)
+
+    assert override_map["audio.voice_clone.enabled"] == "false"
+    assert "audio.voice_clone.provider" not in override_map
+    assert "audio.voice_clone.execution_backend" not in override_map
+    assert "audio.voice_clone.runner_project_dir" not in override_map
+    assert "audio.voice_clone.cfg_path" not in override_map
+    assert "audio.voice_clone.model_dir" not in override_map
 
 
 def test_build_run_overrides_stage_three_omits_stage_one_transcript_defaults(
