@@ -191,32 +191,6 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             and max_tool_calls_per_turn_raw > 0
         ):
             max_tool_calls_per_turn = max_tool_calls_per_turn_raw
-        tool_choice_raw = runtime_context.get("tool_choice")
-        tool_choice: str | dict[str, Any] | None
-        if isinstance(tool_choice_raw, str):
-            tool_choice = tool_choice_raw
-        elif isinstance(tool_choice_raw, dict):
-            tool_choice = tool_choice_raw
-        elif tool_choice_raw is None:
-            tool_choice = None
-        else:
-            logger.warning(
-                "[%s] Ignoring invalid tool_choice type: %s",
-                self.name,
-                type(tool_choice_raw).__name__,
-            )
-            tool_choice = None
-        chat_max_tokens_raw = runtime_context.get("chat_max_tokens")
-        chat_max_tokens: int | None = None
-        if isinstance(chat_max_tokens_raw, int) and chat_max_tokens_raw > 0:
-            chat_max_tokens = chat_max_tokens_raw
-        no_tool_call_patience_raw = runtime_context.get("no_tool_call_patience")
-        no_tool_call_patience = (
-            no_tool_call_patience_raw
-            if isinstance(no_tool_call_patience_raw, int)
-            and no_tool_call_patience_raw > 0
-            else None
-        )
 
         runtime_context["seen_tool_call_ids"] = seen_tool_call_ids
         runtime_context["seen_tool_signature_turns"] = seen_tool_signature_turns
@@ -235,6 +209,35 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         )
 
         for turn in range(max_turns):
+            tool_choice_raw = runtime_context.get("tool_choice")
+            tool_choice: str | dict[str, Any] | None
+            if isinstance(tool_choice_raw, str):
+                tool_choice = tool_choice_raw
+            elif isinstance(tool_choice_raw, dict):
+                tool_choice = tool_choice_raw
+            elif tool_choice_raw is None:
+                tool_choice = None
+            else:
+                logger.warning(
+                    "[%s] Ignoring invalid tool_choice type: %s",
+                    self.name,
+                    type(tool_choice_raw).__name__,
+                )
+                tool_choice = None
+
+            chat_max_tokens_raw = runtime_context.get("chat_max_tokens")
+            chat_max_tokens: int | None = None
+            if isinstance(chat_max_tokens_raw, int) and chat_max_tokens_raw > 0:
+                chat_max_tokens = chat_max_tokens_raw
+
+            no_tool_call_patience_raw = runtime_context.get("no_tool_call_patience")
+            no_tool_call_patience = (
+                no_tool_call_patience_raw
+                if isinstance(no_tool_call_patience_raw, int)
+                and no_tool_call_patience_raw > 0
+                else None
+            )
+
             typed_messages = [Message.from_mapping(message) for message in messages]
             typed_tools = [ToolDefinition.from_mapping(tool) for tool in tools]
             chat_kwargs: dict[str, Any] = {
@@ -278,6 +281,22 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             tool_calls = parser.parse(msg_dict)
             total_parsed_calls += len(tool_calls)
             if not tool_calls:
+                if bool(
+                    runtime_context.get("break_on_no_tool_call_when_draft_ready", False)
+                ) and bool(runtime_context.get("draft_ready_for_review", False)):
+                    logger.info(
+                        "[%s] Draft review response emitted no tool call after auto-save; "
+                        "submitting current draft.",
+                        self.name,
+                    )
+                    event_bus.publish(
+                        "status_message",
+                        message=(
+                            "Draft already in budget and auto-saved; no tool call "
+                            "arrived during review, submitting the current draft."
+                        ),
+                    )
+                    break
                 if no_tool_call_patience is not None:
                     no_tool_call_count = (
                         int(runtime_context.get("no_tool_call_count", 0)) + 1

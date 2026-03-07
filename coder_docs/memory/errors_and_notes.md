@@ -1,5 +1,25 @@
 # Errors And Notes
 
+### 2026-03-07T21:36:42+08:00 - Stage-4 Planner Output Must Stay Sparse And Survive Truncated JSON
+- Problem: The interjector prompt asked for one decision object per eligible host turn, including explicit false entries. On longer summaries that bloated the planner response enough for the model to stop mid-JSON, after which stage-4 parsed nothing and silently fell back to all-false decisions with `artifact_count=0`.
+- Solution: Make the planner return only positive interjection decisions, keep missing turns implicitly false, and salvage any fully formed decision objects from a truncated `decisions` array so stage-4 can still render usable overlaps when the model response stops early.
+
+### 2026-03-07T21:32:09+08:00 - Stage-4 Planner Anchors Must Respect The Runtime Overlap Window
+- Problem: The interjector planner only saw raw host tokens, so it could choose a syntactically valid anchor very early in the turn. Stage-4 then accepted the planner decision, but the runtime overlap gate rejected it later because the configured host-progress window starts at 35% of the host turn, producing `should_interject=true` decisions with `artifact_count=0`.
+- Solution: Include a per-turn preferred anchor token window in the stage-4 planner prompt, pass the configured host-progress ratios into planner validation, and reject anchors outside that approximate window before synthesis so planner output matches what the runtime can actually render.
+
+### 2026-03-07T20:50:06+08:00 - In-Budget Auto-Saved Summaries Must Not Wait Indefinitely For A Finalize Tool Call
+- Problem: During live drafting, the summarizer could hit the target duration, auto-save a solid draft, and then spend the next DeepSeek turn narrating its review in plain text instead of calling `finalize_draft()`. Because that review turn was unbounded, the localhost A2A request could time out after 900 seconds even though the draft itself was already ready.
+- Solution: Enter a bounded draft-review mode after auto-save: inject an explicit review-only instruction, cap the next review turn token budget, and if the model still replies with plain text instead of a tool call after the draft is in budget, submit the current saved draft instead of waiting indefinitely.
+
+### 2026-03-07T20:02:49+08:00 - Stage-2 Bootstrap Audio Must Match The Reusable Transcript Before Live Drafting Starts
+- Problem: Stage-2 speaker-sample bootstrap could accept a fallback `audio.audio_path` that was unrelated to the reusable `transcript.json`, generate a manifest with missing or misaligned speaker labels, and only fail later inside live draft voice cloning with a missing speaker-sample error.
+- Solution: Validate the inferred bootstrap transcript against the reusable transcript before accepting its speaker samples, remap bootstrap speaker labels back onto the reusable transcript labels when the audio matches but label IDs differ, and fail early with a direct mismatch error when the bootstrap audio or speaker coverage is incompatible.
+
+### 2026-03-07T19:41:15+08:00 - Stage-2 Missing Speaker Samples Must Rebuild From Audio, Not Reclip The Transcript
+- Problem: `setup_and_run.py` auto-promoted reusable `transcript.json` inputs to stage-2 correctly, but when `metadata.speaker_samples_manifest_path` was missing the runtime only re-clipped samples from transcript timings plus fallback `audio.audio_path`. That path was very fast, but it skipped fresh separation and diarization, so coarse or mixed reusable transcripts produced contaminated voice references.
+- Solution: Treat stage-2 missing speaker samples as an audio-bootstrap requirement: resolve real source audio, run a fresh audio inference pass to produce a vocals stem and aligned speaker transcript, generate samples from that inferred vocals audio under the current run work directory, and write only the new speaker-sample metadata back to the reusable transcript for later reuse.
+
 ### 2026-03-07T19:21:54+08:00 - Live Stage-2 Audio Needs Stable Turn IDs And A Persisted Draft-Audio Sidecar
 - Problem: The old stage-2 flow estimated duration from one upfront calibration artifact, then ran stage-3 as a second full render pass after critic approval. That meant actual cloned durations could drift away from stage-2 decisions, revise mode could not safely reuse already-rendered turn audio, and deleted or re-added lines had no stable identity across retries.
 - Solution: Give every registry line a stable `turn_id`, persist live draft audio state keyed by those IDs, synthesize changed turns immediately during stage-2 when `audio.voice_clone.live_drafting.enabled=true`, feed critic checks from the persisted actual segment durations, and finalize the approved live turn cache directly into the stage-3 manifest instead of re-rendering the whole summary.

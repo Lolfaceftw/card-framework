@@ -1,8 +1,9 @@
-Decide one overlap action for each eligible host turn below.
+Decide which eligible host turns below should receive an overlap.
 
 Use `echo_agreement` when the next speaker would naturally agree while the host phrase is still being spoken.
 Use `backchannel` when a short response should land just after the anchor phrase.
-If neither is natural, return `should_interject: false`.
+If neither is natural, omit that turn entirely.
+The preferred anchor token window for each turn approximates the valid {{ min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of that host turn. Stay inside it.
 
 Eligible turns:
 {{ eligible_turns_block }}

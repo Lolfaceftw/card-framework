@@ -1369,23 +1369,11 @@ def transcript_has_usable_vocals_audio_path(transcript_path: Path) -> bool:
     Raises:
         BootstrapError: If the transcript JSON cannot be read or decoded.
     """
-    try:
-        payload = json.loads(transcript_path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BootstrapError(
-            step="input",
-            message=f"Failed to read transcript metadata: {transcript_path}",
-        ) from exc
-    metadata = payload.get("metadata", {})
-    if not isinstance(metadata, dict):
-        return False
-    raw_vocals_path = str(metadata.get("vocals_audio_path", "")).strip()
-    if not raw_vocals_path:
-        return False
-    candidate = Path(raw_vocals_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = (REPO_ROOT / candidate).resolve()
-    return candidate.is_file()
+    candidate = resolve_transcript_metadata_path(
+        transcript_path=transcript_path,
+        metadata_key="vocals_audio_path",
+    )
+    return candidate is not None and candidate.is_file()
 
 
 def transcript_has_usable_speaker_samples_manifest(transcript_path: Path) -> bool:
@@ -1402,6 +1390,65 @@ def transcript_has_usable_speaker_samples_manifest(transcript_path: Path) -> boo
     Raises:
         BootstrapError: If the transcript JSON cannot be read or decoded.
     """
+    candidate = resolve_transcript_metadata_path(
+        transcript_path=transcript_path,
+        metadata_key="speaker_samples_manifest_path",
+    )
+    return candidate is not None and candidate.is_file()
+
+
+def resolve_transcript_source_audio_path(transcript_path: Path) -> Path | None:
+    """
+    Resolve an existing source audio path from transcript metadata when present.
+
+    Args:
+        transcript_path: Transcript JSON file to inspect.
+
+    Returns:
+        Existing resolved source audio path, otherwise ``None``.
+
+    Raises:
+        BootstrapError: If the transcript JSON cannot be read or decoded.
+    """
+    candidate = resolve_transcript_metadata_path(
+        transcript_path=transcript_path,
+        metadata_key="source_audio_path",
+    )
+    if candidate is None or not candidate.is_file():
+        return None
+    return candidate
+
+
+def resolve_transcript_metadata_path(
+    *,
+    transcript_path: Path,
+    metadata_key: str,
+) -> Path | None:
+    """
+    Resolve one optional transcript metadata path relative to the repo root.
+
+    Args:
+        transcript_path: Transcript JSON file to inspect.
+        metadata_key: Metadata key containing the path-like value.
+
+    Returns:
+        Resolved path when the metadata entry is present, otherwise ``None``.
+
+    Raises:
+        BootstrapError: If the transcript JSON cannot be read or decoded.
+    """
+    metadata = _load_transcript_metadata(transcript_path)
+    raw_value = str(metadata.get(metadata_key, "")).strip()
+    if not raw_value:
+        return None
+    candidate = Path(raw_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (REPO_ROOT / candidate).resolve()
+    return candidate
+
+
+def _load_transcript_metadata(transcript_path: Path) -> dict[str, object]:
+    """Read transcript metadata payload using UTF-8 BOM-tolerant decoding."""
     try:
         payload = json.loads(transcript_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1411,14 +1458,8 @@ def transcript_has_usable_speaker_samples_manifest(transcript_path: Path) -> boo
         ) from exc
     metadata = payload.get("metadata", {})
     if not isinstance(metadata, dict):
-        return False
-    raw_manifest_path = str(metadata.get("speaker_samples_manifest_path", "")).strip()
-    if not raw_manifest_path:
-        return False
-    candidate = Path(raw_manifest_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = (REPO_ROOT / candidate).resolve()
-    return candidate.is_file()
+        return {}
+    return metadata
 
 
 def stage_two_requires_audio_fallback(
@@ -1434,14 +1475,12 @@ def stage_two_requires_audio_fallback(
         speaker_samples_enabled: Whether the pipeline will generate speaker samples.
 
     Returns:
-        ``True`` when stage-2 speaker-sample generation lacks usable vocals
-        metadata and therefore still needs ``audio.audio_path``.
+        ``True`` when stage-2 must bootstrap fresh speaker samples from source
+        audio because no reusable speaker-sample manifest exists yet.
     """
     if not speaker_samples_enabled or transcript_path is None:
         return False
-    if transcript_has_usable_speaker_samples_manifest(transcript_path):
-        return False
-    return not transcript_has_usable_vocals_audio_path(transcript_path)
+    return not transcript_has_usable_speaker_samples_manifest(transcript_path)
 
 
 def _path_for_override(path: Path) -> str:
@@ -1734,12 +1773,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             transcript_path=runtime_transcript_path,
             speaker_samples_enabled=speaker_samples_enabled,
         ):
-            resolved_audio_path = _discover_existing_audio_path()
+            detail_suffix = ""
+            resolved_audio_path = (
+                resolve_transcript_source_audio_path(runtime_transcript_path)
+                if runtime_transcript_path is not None
+                else None
+            )
+            if resolved_audio_path is not None:
+                detail_suffix = "from transcript metadata for stage-2 speaker-sample inference"
+            else:
+                resolved_audio_path = _discover_existing_audio_path()
+                if resolved_audio_path is not None:
+                    detail_suffix = "auto-detected for stage-2 speaker-sample inference"
             if resolved_audio_path is None:
                 resolved_audio_path = prompt_or_validate_audio_path(None)
-                detail_suffix = "required for stage-2 speaker samples"
-            else:
-                detail_suffix = "auto-detected for stage-2 speaker samples"
+                detail_suffix = "required for stage-2 speaker-sample inference"
             overrides.append(f"audio.audio_path={_path_for_override(resolved_audio_path)}")
             records.append(
                 StepRecord(

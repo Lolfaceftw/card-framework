@@ -1,8 +1,11 @@
 from collections.abc import Callable, Sequence
 import asyncio
+import json
+from itertools import permutations
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -32,6 +35,7 @@ from audio_pipeline import (
 )
 from audio_pipeline.calibration import (
     DEFAULT_DURATION_TOLERANCE_RATIO,
+    bootstrap_speaker_samples_from_audio,
     ensure_voice_clone_calibration,
 )
 from audio_pipeline.contracts import TranscriptPayload
@@ -46,6 +50,7 @@ from audio_pipeline.eta import (
     UnitStageEtaStrategy,
     format_eta_seconds,
 )
+from audio_pipeline.errors import NonRetryableAudioStageError
 from audio_pipeline.gpu_heartbeat import (
     VoiceCloneGpuHeartbeatService,
     WindowsNvidiaDedicatedGpuProbe,
@@ -64,6 +69,43 @@ from pipeline_plan import build_pipeline_stage_plan
 from providers.logging_provider import LoggingLLMProvider
 from providers.response_callbacks import RichConsoleResponseCallback
 from orchestration.transcript import Transcript
+
+
+_STAGE_TWO_BOOTSTRAP_WINDOW_MS = 30_000
+_STAGE_TWO_BOOTSTRAP_MAX_WINDOWS = 12
+_STAGE_TWO_BOOTSTRAP_MIN_AVG_WINDOW_SIMILARITY = 0.18
+_STAGE_TWO_BOOTSTRAP_MIN_STRONG_WINDOW_RATIO = 0.25
+_STAGE_TWO_BOOTSTRAP_STRONG_WINDOW_SIMILARITY = 0.2
+_STAGE_TWO_BOOTSTRAP_SHORT_RUN_MIN_AVG_WINDOW_SIMILARITY = 0.5
+_STAGE_TWO_BOOTSTRAP_MIN_SPEAKER_OVERLAP_RATIO = 0.45
+_STAGE_TWO_BOOTSTRAP_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "he",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "was",
+    "were",
+    "will",
+    "with",
+}
 
 
 def _suppress_chatty_logger_propagation() -> None:
@@ -315,6 +357,14 @@ def _run_post_transcript_speaker_sample_step(
     if not output_dir_name.strip():
         raise ValueError("audio.speaker_samples.output_dir_name must be non-empty.")
     samples_output_dir = resolve_path(output_dir_name, base_dir=work_dir)
+    if stage_start == "stage-2":
+        return _bootstrap_stage_two_speaker_samples_from_audio(
+            audio_cfg_dict=audio_cfg_dict,
+            project_root=project_root,
+            transcript_path=transcript_path,
+            transcript=transcript,
+            samples_output_dir=samples_output_dir,
+        )
     # Prefer the vocals stem when transcript metadata provides it, but fall back
     # to configured audio for reusable transcripts that do not carry stem paths.
     source_audio_path = resolve_sample_source_audio_path(
@@ -498,6 +548,480 @@ def _resolve_existing_speaker_samples_manifest_path(
     if not candidate.is_absolute():
         candidate = (project_root / candidate).resolve()
     return candidate if candidate.is_file() else None
+
+
+def _load_bootstrap_transcript(bootstrap_transcript_path: Path) -> Transcript:
+    """Load the stage-2 bootstrap transcript artifact."""
+    payload = json.loads(bootstrap_transcript_path.read_text(encoding="utf-8-sig"))
+    return Transcript.from_mapping(payload)
+
+
+def _ordered_transcript_speakers(transcript: Transcript) -> tuple[str, ...]:
+    """Return speaker IDs in first-seen order from one transcript."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for segment in transcript.segments:
+        speaker = segment.speaker.strip()
+        if not speaker or speaker in seen:
+            continue
+        seen.add(speaker)
+        ordered.append(speaker)
+    return tuple(ordered)
+
+
+def _tokenize_stage_two_bootstrap_text(text: str) -> set[str]:
+    """Extract normalized lexical tokens for stage-2 transcript matching."""
+    candidates = re.findall(r"[A-Za-z][A-Za-z0-9_'-]{1,}", text.lower())
+    return {
+        token
+        for token in candidates
+        if len(token) >= 4 and token not in _STAGE_TWO_BOOTSTRAP_STOPWORDS
+    }
+
+
+def _stage_two_text_similarity(text_a: str, text_b: str) -> float:
+    """Return Jaccard similarity for two transcript text windows."""
+    tokens_a = _tokenize_stage_two_bootstrap_text(text_a)
+    tokens_b = _tokenize_stage_two_bootstrap_text(text_b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / float(len(tokens_a | tokens_b))
+
+
+def _build_stage_two_time_window_texts(
+    transcript: Transcript,
+) -> dict[int, str]:
+    """Bucket transcript text into fixed windows for stage-2 compatibility checks."""
+    windows: dict[int, list[str]] = {}
+    max_time_ms = _STAGE_TWO_BOOTSTRAP_WINDOW_MS * _STAGE_TWO_BOOTSTRAP_MAX_WINDOWS
+    for segment in transcript.segments:
+        if segment.start_time >= max_time_ms:
+            continue
+        bucket = max(0, segment.start_time // _STAGE_TWO_BOOTSTRAP_WINDOW_MS)
+        windows.setdefault(bucket, []).append(segment.text)
+    return {
+        bucket: " ".join(parts).strip()
+        for bucket, parts in windows.items()
+        if any(part.strip() for part in parts)
+    }
+
+
+def _stage_two_bootstrap_window_similarities(
+    *,
+    transcript: Transcript,
+    bootstrap_transcript: Transcript,
+) -> dict[int, float]:
+    """Compare overlapping stage-2 transcript windows and return per-window scores."""
+    transcript_windows = _build_stage_two_time_window_texts(transcript)
+    bootstrap_windows = _build_stage_two_time_window_texts(bootstrap_transcript)
+    similarities: dict[int, float] = {}
+    for bucket in sorted(set(transcript_windows) & set(bootstrap_windows)):
+        score = _stage_two_text_similarity(
+            transcript_windows[bucket],
+            bootstrap_windows[bucket],
+        )
+        similarities[bucket] = score
+    return similarities
+
+
+def _validate_stage_two_bootstrap_transcript_compatibility(
+    *,
+    transcript: Transcript,
+    bootstrap_transcript: Transcript,
+    bootstrap_audio_path: Path,
+    bootstrap_transcript_path: Path,
+) -> None:
+    """Fail early when bootstrap audio does not appear to match the reusable transcript."""
+    window_similarities = _stage_two_bootstrap_window_similarities(
+        transcript=transcript,
+        bootstrap_transcript=bootstrap_transcript,
+    )
+    if not window_similarities:
+        raise NonRetryableAudioStageError(
+            "Stage-2 speaker-sample bootstrap could not compare the reusable "
+            "transcript against the inferred bootstrap transcript. "
+            f"Bootstrap transcript: {bootstrap_transcript_path}. "
+            "Provide matching source audio via audio.audio_path or reuse a "
+            "transcript that already carries speaker_samples_manifest_path."
+        )
+    compared_window_count = len(window_similarities)
+    average_similarity = sum(window_similarities.values()) / float(compared_window_count)
+    strong_window_ratio = (
+        sum(
+            1
+            for score in window_similarities.values()
+            if score >= _STAGE_TWO_BOOTSTRAP_STRONG_WINDOW_SIMILARITY
+        )
+        / float(compared_window_count)
+    )
+    if compared_window_count < 3:
+        is_compatible = (
+            average_similarity
+            >= _STAGE_TWO_BOOTSTRAP_SHORT_RUN_MIN_AVG_WINDOW_SIMILARITY
+        )
+    else:
+        is_compatible = (
+            average_similarity >= _STAGE_TWO_BOOTSTRAP_MIN_AVG_WINDOW_SIMILARITY
+            and strong_window_ratio >= _STAGE_TWO_BOOTSTRAP_MIN_STRONG_WINDOW_RATIO
+        )
+    if is_compatible:
+        return
+    raise NonRetryableAudioStageError(
+        "Stage-2 speaker-sample bootstrap audio does not appear to match the "
+        "reusable transcript. "
+        f"Compared {compared_window_count} overlapping "
+        f"{_STAGE_TWO_BOOTSTRAP_WINDOW_MS // 1000}-second transcript windows "
+        f"from {bootstrap_transcript_path} using audio {bootstrap_audio_path}; "
+        f"average lexical similarity={average_similarity:.3f}, "
+        f"strong_window_ratio={strong_window_ratio:.3f}. "
+        "Provide the matching source audio via audio.audio_path or reuse a "
+        "transcript that already carries speaker_samples_manifest_path."
+    )
+
+
+def _speaker_interval_overlap_ms(
+    *,
+    transcript: Transcript,
+    bootstrap_transcript: Transcript,
+) -> dict[str, dict[str, int]]:
+    """Measure overlap milliseconds between bootstrap and reusable speaker labels."""
+    overlap_by_bootstrap_speaker: dict[str, dict[str, int]] = {}
+    transcript_speakers = _ordered_transcript_speakers(transcript)
+    for bootstrap_speaker in _ordered_transcript_speakers(bootstrap_transcript):
+        overlap_by_bootstrap_speaker[bootstrap_speaker] = {
+            transcript_speaker: 0 for transcript_speaker in transcript_speakers
+        }
+    for bootstrap_segment in bootstrap_transcript.segments:
+        bootstrap_speaker = bootstrap_segment.speaker.strip()
+        if bootstrap_speaker not in overlap_by_bootstrap_speaker:
+            continue
+        for transcript_segment in transcript.segments:
+            transcript_speaker = transcript_segment.speaker.strip()
+            if transcript_speaker not in overlap_by_bootstrap_speaker[bootstrap_speaker]:
+                continue
+            overlap_ms = min(
+                bootstrap_segment.end_time,
+                transcript_segment.end_time,
+            ) - max(
+                bootstrap_segment.start_time,
+                transcript_segment.start_time,
+            )
+            if overlap_ms <= 0:
+                continue
+            overlap_by_bootstrap_speaker[bootstrap_speaker][transcript_speaker] += (
+                overlap_ms
+            )
+    return overlap_by_bootstrap_speaker
+
+
+def _speaker_total_duration_ms(transcript: Transcript) -> dict[str, int]:
+    """Return accumulated segment duration per speaker."""
+    durations: dict[str, int] = {}
+    for segment in transcript.segments:
+        speaker = segment.speaker.strip()
+        if not speaker:
+            continue
+        durations[speaker] = durations.get(speaker, 0) + max(
+            0, segment.end_time - segment.start_time
+        )
+    return durations
+
+
+def _resolve_stage_two_bootstrap_speaker_mapping(
+    *,
+    transcript: Transcript,
+    bootstrap_transcript: Transcript,
+) -> dict[str, str]:
+    """Map bootstrap speaker labels back onto reusable transcript labels."""
+    transcript_speakers = _ordered_transcript_speakers(transcript)
+    bootstrap_speakers = _ordered_transcript_speakers(bootstrap_transcript)
+    if not transcript_speakers:
+        raise NonRetryableAudioStageError(
+            "Reusable stage-2 transcript does not contain any speaker labels."
+        )
+    if not bootstrap_speakers:
+        raise NonRetryableAudioStageError(
+            "Bootstrap transcript does not contain any speaker labels."
+        )
+    if len(transcript_speakers) != len(bootstrap_speakers):
+        raise NonRetryableAudioStageError(
+            "Stage-2 speaker-sample bootstrap speaker coverage does not match the "
+            "reusable transcript. "
+            f"Reusable transcript speakers: {list(transcript_speakers)}. "
+            f"Bootstrap transcript speakers: {list(bootstrap_speakers)}. "
+            "Provide matching source audio or reuse a transcript that already "
+            "includes a valid speaker_samples_manifest_path."
+        )
+    overlap_ms = _speaker_interval_overlap_ms(
+        transcript=transcript,
+        bootstrap_transcript=bootstrap_transcript,
+    )
+    bootstrap_durations = _speaker_total_duration_ms(bootstrap_transcript)
+    if len(bootstrap_speakers) <= 6:
+        best_mapping: dict[str, str] | None = None
+        best_total_overlap = -1
+        for transcript_permutation in permutations(
+            transcript_speakers,
+            len(bootstrap_speakers),
+        ):
+            candidate_mapping = {
+                bootstrap_speaker: transcript_speaker
+                for bootstrap_speaker, transcript_speaker in zip(
+                    bootstrap_speakers,
+                    transcript_permutation,
+                    strict=True,
+                )
+            }
+            total_overlap = sum(
+                overlap_ms[bootstrap_speaker][candidate_mapping[bootstrap_speaker]]
+                for bootstrap_speaker in bootstrap_speakers
+            )
+            if total_overlap > best_total_overlap:
+                best_total_overlap = total_overlap
+                best_mapping = candidate_mapping
+        if best_mapping is None:
+            raise NonRetryableAudioStageError(
+                "Unable to determine bootstrap speaker mapping for stage-2 "
+                "speaker-sample generation."
+            )
+        mapping = best_mapping
+    else:
+        scored_pairs = sorted(
+            (
+                (
+                    overlap_ms[bootstrap_speaker][transcript_speaker],
+                    bootstrap_speaker,
+                    transcript_speaker,
+                )
+                for bootstrap_speaker in bootstrap_speakers
+                for transcript_speaker in transcript_speakers
+            ),
+            reverse=True,
+        )
+        mapping: dict[str, str] = {}
+        used_transcript_speakers: set[str] = set()
+        for score, bootstrap_speaker, transcript_speaker in scored_pairs:
+            if bootstrap_speaker in mapping or transcript_speaker in used_transcript_speakers:
+                continue
+            mapping[bootstrap_speaker] = transcript_speaker
+            used_transcript_speakers.add(transcript_speaker)
+            if len(mapping) == len(bootstrap_speakers):
+                break
+        if len(mapping) != len(bootstrap_speakers):
+            raise NonRetryableAudioStageError(
+                "Unable to determine bootstrap speaker mapping for stage-2 "
+                "speaker-sample generation."
+            )
+    for bootstrap_speaker, transcript_speaker in mapping.items():
+        duration_ms = bootstrap_durations.get(bootstrap_speaker, 0)
+        speaker_overlap_ratio = (
+            overlap_ms[bootstrap_speaker][transcript_speaker] / float(duration_ms)
+            if duration_ms > 0
+            else 0.0
+        )
+        if speaker_overlap_ratio < _STAGE_TWO_BOOTSTRAP_MIN_SPEAKER_OVERLAP_RATIO:
+            raise NonRetryableAudioStageError(
+                "Stage-2 bootstrap inferred speaker labels could not be aligned "
+                "confidently back to the reusable transcript. "
+                f"Speaker '{bootstrap_speaker}' best matched '{transcript_speaker}' "
+                f"with overlap ratio={speaker_overlap_ratio:.3f}. "
+                "Provide matching source audio or reuse a transcript that already "
+                "includes a valid speaker_samples_manifest_path."
+            )
+    return mapping
+
+
+def _rewrite_stage_two_speaker_sample_manifest(
+    *,
+    manifest_path: Path,
+    speaker_mapping: dict[str, str],
+) -> None:
+    """Rewrite a bootstrap speaker-sample manifest using reusable transcript labels."""
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise NonRetryableAudioStageError(
+            "Stage-2 speaker-sample manifest could not be read for speaker "
+            f"label remapping: {manifest_path}"
+        ) from exc
+    samples = payload.get("samples", [])
+    if not isinstance(samples, list) or not samples:
+        raise NonRetryableAudioStageError(
+            "Stage-2 speaker-sample manifest does not contain any sample entries "
+            f"to remap: {manifest_path}"
+        )
+    seen_manifest_speakers: set[str] = set()
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        bootstrap_speaker = str(sample.get("speaker", "")).strip()
+        if not bootstrap_speaker:
+            continue
+        seen_manifest_speakers.add(bootstrap_speaker)
+        mapped_speaker = speaker_mapping.get(bootstrap_speaker)
+        if mapped_speaker is None:
+            raise NonRetryableAudioStageError(
+                "Stage-2 bootstrap manifest contains a speaker that could not be "
+                f"mapped back to the reusable transcript: {bootstrap_speaker}"
+            )
+        sample["bootstrap_speaker"] = bootstrap_speaker
+        sample["speaker"] = mapped_speaker
+    missing_manifest_speakers = sorted(set(speaker_mapping) - seen_manifest_speakers)
+    if missing_manifest_speakers:
+        raise NonRetryableAudioStageError(
+            "Stage-2 bootstrap manifest is missing sample entries for bootstrap "
+            f"speaker(s): {missing_manifest_speakers}"
+        )
+    payload["stage_two_bootstrap_speaker_mapping"] = dict(speaker_mapping)
+    temp_path = manifest_path.with_suffix(f"{manifest_path.suffix}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(manifest_path)
+    except Exception as exc:
+        raise NonRetryableAudioStageError(
+            "Failed to rewrite the stage-2 speaker-sample manifest after "
+            f"speaker-label remapping: {manifest_path}"
+        ) from exc
+
+
+def _bootstrap_stage_two_speaker_samples_from_audio(
+    *,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    transcript_path: str,
+    transcript: Transcript,
+    samples_output_dir: Path,
+) -> Transcript:
+    """Bootstrap stage-2 speaker samples from source audio when manifest is missing."""
+    bootstrap_audio_path = _resolve_stage_two_speaker_sample_bootstrap_audio_path(
+        transcript=transcript,
+        audio_cfg_dict=audio_cfg_dict,
+        project_root=project_root,
+    )
+    work_dir = resolve_path(
+        str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
+        base_dir=project_root,
+    )
+    bootstrap_transcript_path = work_dir / "speaker_sample_bootstrap.transcript.json"
+    bootstrap_audio_work_dir = work_dir / "speaker_sample_bootstrap_audio"
+    event_bus.publish(
+        "system_message",
+        (
+            "Speaker sample manifest missing for stage-2 transcript. "
+            "Bootstrapping fresh speaker samples from source audio via source "
+            "separation, transcription, and diarization."
+        ),
+    )
+    started_at = time.monotonic()
+    bootstrap_result = bootstrap_speaker_samples_from_audio(
+        project_root=project_root,
+        audio_cfg=audio_cfg_dict,
+        audio_path=bootstrap_audio_path,
+        bootstrap_transcript_path=bootstrap_transcript_path,
+        bootstrap_audio_work_dir=bootstrap_audio_work_dir,
+        speaker_samples_output_dir=samples_output_dir,
+    )
+    elapsed_seconds = max(0.0, time.monotonic() - started_at)
+    bootstrap_transcript = _load_bootstrap_transcript(
+        bootstrap_result.transcript_path
+    )
+    _validate_stage_two_bootstrap_transcript_compatibility(
+        transcript=transcript,
+        bootstrap_transcript=bootstrap_transcript,
+        bootstrap_audio_path=bootstrap_audio_path,
+        bootstrap_transcript_path=bootstrap_result.transcript_path,
+    )
+    sample_result = bootstrap_result.generation_result
+    speaker_mapping = _resolve_stage_two_bootstrap_speaker_mapping(
+        transcript=transcript,
+        bootstrap_transcript=bootstrap_transcript,
+    )
+    if any(
+        bootstrap_speaker != transcript_speaker
+        for bootstrap_speaker, transcript_speaker in speaker_mapping.items()
+    ):
+        _rewrite_stage_two_speaker_sample_manifest(
+            manifest_path=sample_result.manifest_path,
+            speaker_mapping=speaker_mapping,
+        )
+        event_bus.publish(
+            "system_message",
+            (
+                "Remapped stage-2 bootstrap speaker labels onto the reusable "
+                "transcript speaker IDs: "
+                + ", ".join(
+                    f"{bootstrap_speaker}->{transcript_speaker}"
+                    for bootstrap_speaker, transcript_speaker in sorted(
+                        speaker_mapping.items()
+                    )
+                )
+            ),
+        )
+    event_bus.publish(
+        "status_message",
+        (
+            f"Generated {len(sample_result.artifacts)} speaker samples "
+            f"at {sample_result.output_dir} in {format_eta_seconds(elapsed_seconds)}"
+        ),
+    )
+    metadata = dict(transcript.metadata)
+    metadata.update(
+        {
+            "speaker_samples_manifest_path": str(sample_result.manifest_path),
+            "speaker_samples_dir": str(sample_result.output_dir),
+            "speaker_sample_count": len(sample_result.artifacts),
+            "speaker_samples_generated_at_utc": sample_result.generated_at_utc,
+        }
+    )
+    updated_transcript = transcript.with_metadata(metadata)
+    resolved_transcript_path = resolve_path(transcript_path, base_dir=project_root)
+    write_transcript_atomic(
+        cast(TranscriptPayload, updated_transcript.to_payload()),
+        resolved_transcript_path,
+    )
+    event_bus.publish(
+        "status_message",
+        f"Speaker sample manifest written to {sample_result.manifest_path}",
+    )
+    return updated_transcript
+
+
+def _resolve_stage_two_speaker_sample_bootstrap_audio_path(
+    *,
+    transcript: Transcript,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+) -> Path:
+    """Resolve source audio required to rebuild stage-2 speaker samples."""
+    configured_audio_path = str(audio_cfg_dict.get("audio_path", "")).strip()
+    if configured_audio_path:
+        candidate = resolve_path(configured_audio_path, base_dir=project_root)
+        if candidate.exists():
+            return candidate
+        raise NonRetryableAudioStageError(
+            "Configured audio.audio_path for stage-2 speaker-sample bootstrap "
+            f"does not exist: {candidate}"
+        )
+    source_audio_value = str(transcript.metadata.get("source_audio_path", "")).strip()
+    if source_audio_value:
+        candidate = Path(source_audio_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = (project_root / candidate).resolve()
+        if candidate.exists():
+            return candidate
+        raise NonRetryableAudioStageError(
+            "Transcript metadata source_audio_path for stage-2 speaker-sample "
+            f"bootstrap does not exist: {candidate}"
+        )
+    raise NonRetryableAudioStageError(
+        "Stage-2 speaker-sample bootstrap requires source audio when the "
+        "transcript does not already carry a reusable "
+        "speaker_samples_manifest_path. Set audio.audio_path or provide "
+        "metadata.source_audio_path."
+    )
 
 
 def _wait_for_agent_servers(

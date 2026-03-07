@@ -8,6 +8,7 @@ import sys
 import types
 
 import pytest
+from audio_pipeline.errors import NonRetryableAudioStageError
 from audio_pipeline.eta import LinearStageEtaStrategy, StageSpeedProfile
 from orchestration.transcript import Transcript
 
@@ -79,6 +80,30 @@ class _SampleResult:
     artifacts: tuple[object, ...]
 
 
+def _write_stage_two_manifest(
+    *,
+    manifest_path: Path,
+    speakers: list[str],
+) -> None:
+    """Persist a minimal speaker-sample manifest for stage-2 bootstrap tests."""
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    samples: list[dict[str, object]] = []
+    for speaker in speakers:
+        sample_path = manifest_path.parent / f"{speaker}.wav"
+        sample_path.write_bytes(b"sample")
+        samples.append(
+            {
+                "speaker": speaker,
+                "path": str(sample_path),
+                "duration_ms": 30_000,
+            }
+        )
+    manifest_path.write_text(
+        json.dumps({"samples": samples}),
+        encoding="utf-8",
+    )
+
+
 class _StubSampleGenerator:
     def generate(
         self,
@@ -119,6 +144,12 @@ class _LearningSampleGenerator:
             generated_at_utc="2026-01-01T00:00:00+00:00",
             artifacts=(object(),),
         )
+
+
+@dataclass(slots=True, frozen=True)
+class _BootstrapResult:
+    transcript_path: Path
+    generation_result: _SampleResult
 
 
 def test_post_transcript_step_enforces_vocals_source_mode(
@@ -293,6 +324,482 @@ def test_post_transcript_stage_two_reuses_existing_manifest(
     )
 
     assert reused_transcript == transcript
+
+
+def test_post_transcript_stage_two_bootstraps_missing_manifest_from_audio(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app_main = _import_app_main()
+    source_audio_path = tmp_path / "audio.wav"
+    source_audio_path.write_bytes(b"audio")
+    written_payloads: list[tuple[dict[str, object], Path]] = []
+    captured: dict[str, Path] = {}
+
+    def _bootstrap_speaker_samples(
+        *,
+        project_root: Path,
+        audio_cfg: dict[str, object],
+        audio_path: Path,
+        bootstrap_transcript_path: Path,
+        bootstrap_audio_work_dir: Path,
+        speaker_samples_output_dir: Path,
+    ) -> _BootstrapResult:
+        del project_root, audio_cfg
+        captured["audio_path"] = audio_path
+        captured["bootstrap_transcript_path"] = bootstrap_transcript_path
+        captured["bootstrap_audio_work_dir"] = bootstrap_audio_work_dir
+        captured["speaker_samples_output_dir"] = speaker_samples_output_dir
+        bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        bootstrap_transcript_path.write_text(
+            json.dumps(
+                {
+                    "segments": [
+                        {
+                            "speaker": "SPEAKER_00",
+                            "start_time": 0,
+                            "end_time": 10_000,
+                            "text": "alpha beta gamma delta",
+                        }
+                    ],
+                    "metadata": {"vocals_audio_path": "vocals.wav"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        speaker_samples_output_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = speaker_samples_output_dir / "manifest.json"
+        _write_stage_two_manifest(
+            manifest_path=manifest_path,
+            speakers=["SPEAKER_00"],
+        )
+        return _BootstrapResult(
+            transcript_path=bootstrap_transcript_path,
+            generation_result=_SampleResult(
+                output_dir=speaker_samples_output_dir,
+                manifest_path=manifest_path,
+                generated_at_utc="2026-01-01T00:00:00+00:00",
+                artifacts=(object(), object()),
+            ),
+        )
+
+    monkeypatch.setattr(
+        app_main,
+        "bootstrap_speaker_samples_from_audio",
+        _bootstrap_speaker_samples,
+    )
+    monkeypatch.setattr(
+        app_main,
+        "resolve_sample_source_audio_path",
+        lambda **kwargs: pytest.fail("stage-2 should bootstrap from audio, not clip transcript"),
+    )
+    monkeypatch.setattr(
+        app_main,
+        "build_speaker_sample_generator",
+        lambda cfg: pytest.fail("direct speaker sample generator should not run in stage-2 bootstrap"),
+    )
+    monkeypatch.setattr(
+        app_main,
+        "write_transcript_atomic",
+        lambda payload, path: written_payloads.append((payload, path)),
+    )
+
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 10_000,
+                    "text": "alpha beta gamma delta",
+                }
+            ],
+            "metadata": {"source_audio_path": str(source_audio_path)},
+        }
+    )
+
+    updated_transcript = app_main._run_post_transcript_speaker_sample_step(
+        stage_start="stage-2",
+        audio_cfg_dict={
+            "work_dir": "artifacts/audio_stage/runs/test_run",
+            "speaker_samples": {
+                "enabled": True,
+                "output_dir_name": "speaker_samples",
+            },
+        },
+        project_root=tmp_path,
+        transcript_path="transcript.json",
+        transcript=transcript,
+    )
+
+    expected_work_dir = tmp_path / "artifacts" / "audio_stage" / "runs" / "test_run"
+    assert captured["audio_path"] == source_audio_path.resolve()
+    assert captured["bootstrap_transcript_path"] == (
+        expected_work_dir / "speaker_sample_bootstrap.transcript.json"
+    )
+    assert captured["bootstrap_audio_work_dir"] == (
+        expected_work_dir / "speaker_sample_bootstrap_audio"
+    )
+    assert captured["speaker_samples_output_dir"] == (
+        expected_work_dir / "speaker_samples"
+    )
+    assert updated_transcript.metadata["speaker_samples_manifest_path"] == str(
+        expected_work_dir / "speaker_samples" / "manifest.json"
+    )
+    assert written_payloads[0][1] == (tmp_path / "transcript.json")
+    assert (
+        written_payloads[0][0]["metadata"]["speaker_samples_manifest_path"]
+        == str(expected_work_dir / "speaker_samples" / "manifest.json")
+    )
+
+
+def test_post_transcript_stage_two_bootstrap_remaps_speaker_labels(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app_main = _import_app_main()
+    source_audio_path = tmp_path / "audio.wav"
+    source_audio_path.write_bytes(b"audio")
+    manifest_path = (
+        tmp_path
+        / "artifacts"
+        / "audio_stage"
+        / "runs"
+        / "test_run"
+        / "speaker_samples"
+        / "manifest.json"
+    )
+
+    def _bootstrap_speaker_samples(
+        *,
+        project_root: Path,
+        audio_cfg: dict[str, object],
+        audio_path: Path,
+        bootstrap_transcript_path: Path,
+        bootstrap_audio_work_dir: Path,
+        speaker_samples_output_dir: Path,
+    ) -> _BootstrapResult:
+        del project_root, audio_cfg, audio_path, bootstrap_audio_work_dir
+        bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        bootstrap_transcript_path.write_text(
+            json.dumps(
+                {
+                    "segments": [
+                        {
+                            "speaker": "BOOT_A",
+                            "start_time": 0,
+                            "end_time": 15_000,
+                            "text": "alpha beta gamma delta",
+                        },
+                        {
+                            "speaker": "BOOT_B",
+                            "start_time": 15_000,
+                            "end_time": 30_000,
+                            "text": "theta lambda mu nu",
+                        },
+                    ],
+                    "metadata": {"vocals_audio_path": "vocals.wav"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        _write_stage_two_manifest(
+            manifest_path=manifest_path,
+            speakers=["BOOT_A", "BOOT_B"],
+        )
+        return _BootstrapResult(
+            transcript_path=bootstrap_transcript_path,
+            generation_result=_SampleResult(
+                output_dir=speaker_samples_output_dir,
+                manifest_path=manifest_path,
+                generated_at_utc="2026-01-01T00:00:00+00:00",
+                artifacts=(object(), object()),
+            ),
+        )
+
+    monkeypatch.setattr(
+        app_main,
+        "bootstrap_speaker_samples_from_audio",
+        _bootstrap_speaker_samples,
+    )
+    monkeypatch.setattr(app_main, "write_transcript_atomic", lambda payload, path: None)
+
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 15_000,
+                    "text": "alpha beta gamma delta",
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "start_time": 15_000,
+                    "end_time": 30_000,
+                    "text": "theta lambda mu nu",
+                },
+            ],
+            "metadata": {"source_audio_path": str(source_audio_path)},
+        }
+    )
+
+    app_main._run_post_transcript_speaker_sample_step(
+        stage_start="stage-2",
+        audio_cfg_dict={
+            "work_dir": "artifacts/audio_stage/runs/test_run",
+            "speaker_samples": {
+                "enabled": True,
+                "output_dir_name": "speaker_samples",
+            },
+        },
+        project_root=tmp_path,
+        transcript_path="transcript.json",
+        transcript=transcript,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert [sample["speaker"] for sample in payload["samples"]] == [
+        "SPEAKER_00",
+        "SPEAKER_01",
+    ]
+    assert [sample["bootstrap_speaker"] for sample in payload["samples"]] == [
+        "BOOT_A",
+        "BOOT_B",
+    ]
+    assert payload["stage_two_bootstrap_speaker_mapping"] == {
+        "BOOT_A": "SPEAKER_00",
+        "BOOT_B": "SPEAKER_01",
+    }
+
+
+def test_post_transcript_stage_two_bootstrap_rejects_incompatible_audio(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app_main = _import_app_main()
+    source_audio_path = tmp_path / "audio.wav"
+    source_audio_path.write_bytes(b"audio")
+    write_calls: list[tuple[dict[str, object], Path]] = []
+
+    def _bootstrap_speaker_samples(
+        *,
+        project_root: Path,
+        audio_cfg: dict[str, object],
+        audio_path: Path,
+        bootstrap_transcript_path: Path,
+        bootstrap_audio_work_dir: Path,
+        speaker_samples_output_dir: Path,
+    ) -> _BootstrapResult:
+        del project_root, audio_cfg, audio_path, bootstrap_audio_work_dir
+        bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        bootstrap_transcript_path.write_text(
+            json.dumps(
+                {
+                    "segments": [
+                        {
+                            "speaker": "SPEAKER_00",
+                            "start_time": 0,
+                            "end_time": 10_000,
+                            "text": "zebra yak xylophone walrus",
+                        },
+                        {
+                            "speaker": "SPEAKER_00",
+                            "start_time": 30_000,
+                            "end_time": 40_000,
+                            "text": "violet umber topaz saffron",
+                        },
+                        {
+                            "speaker": "SPEAKER_00",
+                            "start_time": 60_000,
+                            "end_time": 70_000,
+                            "text": "quartz ruby silver titanium",
+                        },
+                    ],
+                    "metadata": {"vocals_audio_path": "vocals.wav"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest_path = speaker_samples_output_dir / "manifest.json"
+        _write_stage_two_manifest(
+            manifest_path=manifest_path,
+            speakers=["SPEAKER_00"],
+        )
+        return _BootstrapResult(
+            transcript_path=bootstrap_transcript_path,
+            generation_result=_SampleResult(
+                output_dir=speaker_samples_output_dir,
+                manifest_path=manifest_path,
+                generated_at_utc="2026-01-01T00:00:00+00:00",
+                artifacts=(object(),),
+            ),
+        )
+
+    monkeypatch.setattr(
+        app_main,
+        "bootstrap_speaker_samples_from_audio",
+        _bootstrap_speaker_samples,
+    )
+    monkeypatch.setattr(
+        app_main,
+        "write_transcript_atomic",
+        lambda payload, path: write_calls.append((payload, path)),
+    )
+
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 10_000,
+                    "text": "alpha beta gamma delta",
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 30_000,
+                    "end_time": 40_000,
+                    "text": "epsilon zeta eta theta",
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 60_000,
+                    "end_time": 70_000,
+                    "text": "iota kappa lambda mu",
+                },
+            ],
+            "metadata": {"source_audio_path": str(source_audio_path)},
+        }
+    )
+
+    with pytest.raises(
+        NonRetryableAudioStageError,
+        match="does not appear to match the reusable transcript",
+    ):
+        app_main._run_post_transcript_speaker_sample_step(
+            stage_start="stage-2",
+            audio_cfg_dict={
+                "work_dir": "artifacts/audio_stage/runs/test_run",
+                "speaker_samples": {
+                    "enabled": True,
+                    "output_dir_name": "speaker_samples",
+                },
+            },
+            project_root=tmp_path,
+            transcript_path="transcript.json",
+            transcript=transcript,
+        )
+
+    assert write_calls == []
+
+
+def test_post_transcript_stage_two_bootstrap_rejects_missing_speaker_coverage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app_main = _import_app_main()
+    source_audio_path = tmp_path / "audio.wav"
+    source_audio_path.write_bytes(b"audio")
+
+    def _bootstrap_speaker_samples(
+        *,
+        project_root: Path,
+        audio_cfg: dict[str, object],
+        audio_path: Path,
+        bootstrap_transcript_path: Path,
+        bootstrap_audio_work_dir: Path,
+        speaker_samples_output_dir: Path,
+    ) -> _BootstrapResult:
+        del project_root, audio_cfg, audio_path, bootstrap_audio_work_dir
+        bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        bootstrap_transcript_path.write_text(
+            json.dumps(
+                {
+                    "segments": [
+                        {
+                            "speaker": "SPEAKER_00",
+                            "start_time": 0,
+                            "end_time": 15_000,
+                            "text": "alpha beta gamma delta",
+                        },
+                        {
+                            "speaker": "SPEAKER_01",
+                            "start_time": 15_000,
+                            "end_time": 30_000,
+                            "text": "theta lambda mu nu",
+                        },
+                    ],
+                    "metadata": {"vocals_audio_path": "vocals.wav"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest_path = speaker_samples_output_dir / "manifest.json"
+        _write_stage_two_manifest(
+            manifest_path=manifest_path,
+            speakers=["SPEAKER_00", "SPEAKER_01"],
+        )
+        return _BootstrapResult(
+            transcript_path=bootstrap_transcript_path,
+            generation_result=_SampleResult(
+                output_dir=speaker_samples_output_dir,
+                manifest_path=manifest_path,
+                generated_at_utc="2026-01-01T00:00:00+00:00",
+                artifacts=(object(), object()),
+            ),
+        )
+
+    monkeypatch.setattr(
+        app_main,
+        "bootstrap_speaker_samples_from_audio",
+        _bootstrap_speaker_samples,
+    )
+    monkeypatch.setattr(app_main, "write_transcript_atomic", lambda payload, path: None)
+
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 15_000,
+                    "text": "alpha beta gamma delta",
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "start_time": 15_000,
+                    "end_time": 30_000,
+                    "text": "theta lambda mu nu",
+                },
+                {
+                    "speaker": "SPEAKER_02",
+                    "start_time": 30_000,
+                    "end_time": 45_000,
+                    "text": "omicron pi rho sigma",
+                },
+            ],
+            "metadata": {"source_audio_path": str(source_audio_path)},
+        }
+    )
+
+    with pytest.raises(
+        NonRetryableAudioStageError,
+        match="speaker coverage does not match the reusable transcript",
+    ):
+        app_main._run_post_transcript_speaker_sample_step(
+            stage_start="stage-2",
+            audio_cfg_dict={
+                "work_dir": "artifacts/audio_stage/runs/test_run",
+                "speaker_samples": {
+                    "enabled": True,
+                    "output_dir_name": "speaker_samples",
+                },
+            },
+            project_root=tmp_path,
+            transcript_path="transcript.json",
+            transcript=transcript,
+        )
 
 
 def test_wait_for_agent_servers_uses_shared_wait_strategy(monkeypatch) -> None:

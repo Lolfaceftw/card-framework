@@ -59,7 +59,7 @@
       <step>Resolve logging, project root, pipeline config, audio config, and runtime device.</step>
       <step>If stage-1 is active, run audio_pipeline.AudioToScriptOrchestrator to emit transcript JSON and stage artifacts.</step>
       <step>Load transcript JSON into orchestration.transcript.Transcript unless pipeline.start_stage=stage-4, which runs from summary XML plus voice-clone manifest only.</step>
-      <step>Generate speaker samples after transcript availability when configured, or defer them until just before the voice-clone work begins when `audio.speaker_samples.defer_until_voice_clone=true`. In live-draft mode the deferred path is still pulled forward before the stage-2 summarizer loop starts because actual audio rendering needs the manifest immediately. Speaker-sample extraction prefers transcript metadata `vocals_audio_path` and falls back to configured `audio.audio_path` when reusable transcripts do not carry stem metadata.</step>
+      <step>Generate speaker samples after transcript availability when configured, or defer them until just before the voice-clone work begins when `audio.speaker_samples.defer_until_voice_clone=true`. In live-draft mode the deferred path is still pulled forward before the stage-2 summarizer loop starts because actual audio rendering needs the manifest immediately. When stage-2 reuses a transcript that does not already carry a valid `metadata.speaker_samples_manifest_path`, the runtime now bootstraps a fresh audio inference pass from source audio, validates that inferred transcript against the reusable transcript before accepting it, remaps bootstrap speaker IDs back onto the reusable transcript speaker labels when possible, and writes only the new speaker-sample metadata back onto the reusable transcript.</step>
       <step>When live drafting is enabled and voice cloning is active, skip calibration entirely and let the summarizer and critic consume actual rendered turn durations from the persisted live-draft sidecar. When live drafting is disabled, ensure the project-level voice-clone calibration artifact exists before duration-aware summarization or critic evaluation. The calibration path can reuse an existing speaker-sample manifest or bootstrap one from transcript or audio context, but it must be regenerated when the active manifest or calibrated speaker coverage changes.</step>
       <step>When `orchestrator.loop_memory.artifact_path` is configured, the stage orchestrator scopes summarizer loop-memory artifacts by transcript hash and duration target so repeated failed critic remedies can be surfaced on later revise passes instead of being retried verbatim.</step>
       <step>Instantiate shared or per-stage LLM providers, including the optional stage_llm.interjector override, embedding provider, transcript index, local A2A apps, and the orchestrator stack.</step>
@@ -81,7 +81,7 @@
 
   <section id="agents-and-prompts" title="Agents And Prompts">
     <executors>
-      <executor name="SummarizerExecutor">Tool-loop summarizer that mutates a message registry, supports revise mode, loop-context carryover, optional discovery guardrails, and retrieval-backed query tools. The summarizer is duration-first: each line carries an `emo_preset`, the tool loop auto-runs `estimate_duration`, and convergence is measured in seconds rather than target word count. In live-draft mode, add/edit/remove mutations synthesize or delete turn audio immediately through `audio_pipeline/live_draft_voice_clone.py`.</executor>
+      <executor name="SummarizerExecutor">Tool-loop summarizer that mutates a message registry, supports revise mode, loop-context carryover, optional discovery guardrails, and retrieval-backed query tools. The summarizer is duration-first: each line carries an `emo_preset`, the tool loop auto-runs `estimate_duration`, and convergence is measured in seconds rather than target word count. Once a mutation lands in budget, the loop auto-saves the draft, injects a bounded review-only follow-up, and falls back to submitting the current draft if the model answers that review turn with plain text instead of another tool call. In live-draft mode, add/edit/remove mutations synthesize or delete turn audio immediately through `audio_pipeline/live_draft_voice_clone.py`.</executor>
       <executor name="CriticExecutor">LLM critic that combines deterministic duration, truncation, and XML checks with optional transcript verification and emits pass/fail verdict JSON including `estimated_seconds`. When a matching live-draft audio sidecar exists, critic duration checks prefer actual rendered seconds and mark the payload with `duration_source=actual_audio`.</executor>
       <executor name="InfoRetrievalExecutor">Indexes transcript segments and serves MMR-based retrieval results from embeddings.TranscriptIndex.</executor>
       <executor name="GroundTruthCreatorExecutor">Generates contract-bound QA questions from source text for the QA benchmark.</executor>
@@ -156,12 +156,13 @@
       <step>VoiceCloneOrchestrator consumes summary XML plus the manifest to create per-turn cloned segments and optional merged output. Live-draft finalization now emits the same manifest shape plus extra fields such as `turn_id`, `duration_ms`, `word_count`, and `actual_wpm` for downstream consumers. Each turn resolves its stored `emo_preset` to repo-configured `emo_text` before calling IndexTTS.</step>
       <step>The default IndexTTS subprocess backend now keeps one warm nested worker per matching voice-clone config, so calibration, stage-3 cloning, and stage-4 interjection reuse the same loaded weights until the provider is explicitly closed or the parent process exits.</step>
       <step>Within that warm runtime, repeated `emo_text` preset prompts are cached as resolved emotion vectors and forwarded back into IndexTTS directly, avoiding repeated Qwen emotion-analysis passes for common presets such as `neutral`, `warm`, or `engaged`.</step>
-      <step>InterjectorOrchestrator can then analyze eligible host turns, align stage-3 audio back to summary text, synthesize short overlaps from the next speaker, and emit a second merged WAV plus its own manifest.</step>
+      <step>InterjectorOrchestrator can then analyze eligible host turns, align stage-3 audio back to summary text, synthesize short overlaps from the next speaker, and emit a second merged WAV plus its own manifest. The stage-4 planner prompt now includes a per-turn preferred anchor token window derived from the configured host-progress ratios, requests only positive overlap decisions so long runs do not waste tokens on explicit false entries, and the parser can salvage fully formed decisions from a truncated JSON array before synthesis.</step>
     </postTranscriptFlow>
     <adapterMap>
       <adapter>Demucs handles source separation when separation.provider=demucs.</adapter>
       <adapter>Faster-Whisper handles transcription and optional forced alignment.</adapter>
-      <adapter>NeMo handles diarization, with optional single-speaker fallback behavior controlled in config.</adapter>
+      <adapter>NeMo MSDD remains the default diarization backend, with optional single-speaker fallback behavior controlled in config.</adapter>
+      <adapter>Alternative diarization backends now include pyannote Community-1 plus NeMo Sortformer offline and streaming checkpoints, all wired through `audio_pipeline.factory.build_speaker_diarizer` and selected by `audio.diarization.provider`.</adapter>
       <adapter>FFmpeg-backed export is used for speaker sample generation.</adapter>
       <adapter>IndexTTS and passthrough voice-clone providers are composed through the voice-clone gateway layer, and the IndexTTS gateway exposes explicit runtime-release hooks for module offload paths plus repo-level generation tuning such as the default low-latency `num_beams=1` setting.</adapter>
     </adapterMap>
@@ -190,6 +191,13 @@
       <subcommand name="prepare-manifest">Builds a frozen manifest from supported sources such as local, QMSum, or AMI.</subcommand>
       <referenceFreeMetrics>Reference-free evaluation combines AlignScore-like scoring and LLM-as-judge scoring, including order-swap and repeat diagnostics.</referenceFreeMetrics>
     </summarizationBenchmark>
+    <diarizationBenchmark>
+      <workflow>benchmark.diarization executes the repo's actual speaker-diarizer providers against a manifest of audio files plus reference RTTM and optional UEM files, writes predicted RTTMs per provider, and aggregates DER, optional JER, runtime, real-time factor, and peak GPU memory. The same module now also prepares a default public AMI manifest by downloading `Mix-Headset.wav` audio plus RTTM/UEM/list files from the AMI corpus and `BUTSpeechFIT/AMI-diarization-setup`.</workflow>
+      <subcommand name="execute">Runs diarization provider comparisons such as NeMo MSDD, pyannote Community-1, and NeMo Sortformer variants using the same adapter factory used by stage-1 audio inference.</subcommand>
+      <subcommand name="prepare-manifest">Builds the default AMI diarization manifest at `benchmark/manifests/diarization_ami_test.json` and caches downloaded public assets under `artifacts/diarization_datasets/ami`.</subcommand>
+      <manifestShape>The diarization manifest expects per-sample audio, reference RTTM, optional UEM, dataset, subset, and optional speaker-count metadata. Use `benchmark/manifests/diarization_manifest.example.json` as the manual template for CALLHOME, DIHARD, or other local datasets.</manifestShape>
+      <scoringPolicy>Diarization scoring uses `pyannote.metrics` DER for every sample and computes JER only when a UEM file is available. The default CLI policy is strict scoring with zero collar and overlapping speech included.</scoringPolicy>
+    </diarizationBenchmark>
     <qaBenchmark>
       <workflow>benchmark/qa.py evaluates an existing summary.xml against a source transcript by generating QA ground truth, then asking an evaluator agent to answer from the summary.</workflow>
       <providerSelection>Creator and evaluator providers may share one provider profile or be split through explicit CLI overrides.</providerSelection>
@@ -224,19 +232,24 @@
       <command>uv run python setup_and_run.py --audio-path &lt;path-to-audio&gt;</command>
       <command>uv run python -m benchmark.run execute --preset hourly</command>
       <command>uv run python -m benchmark.run prepare-manifest --sources local --output benchmark/manifests/benchmark_v1.json</command>
+      <command>uv run python -m benchmark.diarization prepare-manifest</command>
+      <command>uv run python -m benchmark.diarization</command>
       <command>uv run python -m benchmark.qa --summary-xml &lt;path-to-summary.xml&gt; --source-transcript &lt;path-to-transcript&gt;</command>
       <command>uv run ruff check .</command>
       <command>uv run pytest</command>
     </canonicalCommands>
     <commandNotes>
       <note>Use uv run for repo commands so execution stays inside the locked environment.</note>
-      <note>Benchmark and QA CLIs are module entrypoints; main.py is a direct script entrypoint under Hydra.</note>
+      <note>Benchmark, diarization benchmark, and QA CLIs are module entrypoints; main.py is a direct script entrypoint under Hydra.</note>
+      <note>The diarization benchmark uses the same `audio_pipeline.factory.build_speaker_diarizer(...)` path as the runtime so provider benchmark results stay aligned with stage-1 behavior.</note>
+      <note>The default AMI prep path currently targets the public `Mix-Headset` stream and the `only_words` RTTM/UEM setup from `BUTSpeechFIT/AMI-diarization-setup`.</note>
+      <note>`audio.diarization.provider` now supports the default NeMo MSDD path, `pyannote_community1`, `nemo_sortformer_offline`, `nemo_sortformer_streaming`, and the existing `single_speaker` fallback backend.</note>
       <note>`calibrate.py` is the project-level one-time calibration helper. It prints the persisted preset/WPM mapping and can bootstrap speaker samples from a manifest, transcript, or raw audio path.</note>
       <note>setup_and_run.py is the preferred convenience wrapper when the task involves third-party IndexTTS setup and full end-to-end stage execution.</note>
       <note>When no explicit start stage is provided, setup_and_run.py now auto-selects stage-2 if it finds a reusable transcript, preferring repo-root `transcript.json` or `*.transcript.json` before `artifacts/transcripts/*.transcript.json`.</note>
       <note>When stage-2 is auto-selected while a repo-root `summary.xml` already exists, setup_and_run.py prints that it will still rerun summarization before voice cloning and points operators at `--voiceclone-from-summary` for stage-3 clone-only runs.</note>
-      <note>For stage-2 reusable transcripts that lack `metadata.vocals_audio_path`, setup_and_run.py auto-uses a repo-root `audio.wav`-style source file when present and otherwise prompts for source audio so speaker-sample generation and the legacy calibration path can still run.</note>
-      <note>When a stage-2 reusable transcript already carries a valid `metadata.speaker_samples_manifest_path`, the runtime now reuses that manifest instead of regenerating speaker samples from fallback source audio.</note>
+      <note>For stage-2 reusable transcripts that lack a valid `metadata.speaker_samples_manifest_path`, setup_and_run.py now resolves source audio from transcript metadata first, then from a repo-root `audio.wav`-style file, and otherwise prompts so the runtime can bootstrap fresh separation, transcription, diarization, and speaker-sample generation. The runtime will reject that bootstrap result early when the inferred transcript or speaker coverage does not match the reusable transcript.</note>
+      <note>When a stage-2 reusable transcript already carries a valid `metadata.speaker_samples_manifest_path`, the runtime reuses that manifest and skips the speaker-sample bootstrap audio pass.</note>
       <note>`audio.voice_clone.live_drafting.enabled=true` is now the default merged stage-2/stage-3 path when voice cloning is enabled. In that mode setup_and_run.py skips calibration and the runtime uses actual rendered turn durations instead of WPM estimates.</note>
       <note>setup_and_run.py pre-runs calibration only for the legacy stage-2 estimate path, skips calibration for stage-3 clone-only runs, and explicitly defers calibration to `main.py` for fresh stage-1 runs when the legacy estimate path is active so it does not duplicate the audio stage.</note>
       <note>Stage-2 calibration logs only appear in the legacy estimate path now. Live drafting should emit actual turn renders during the summarizer loop instead of temporary calibration syntheses.</note>
