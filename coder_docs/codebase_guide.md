@@ -7,7 +7,7 @@
       <step>Read this file first to understand subsystem boundaries, entrypoints, and data flow.</step>
       <step>Review coder_docs/memory/errors_and_notes.md for previously captured pitfalls before repeating work in an area.</step>
       <step>Use coder_docs/academic_standards.md for formulas, thresholds, scoring logic, or methodology-sensitive implementations.</step>
-      <step>Use coder_docs/ruff.md for lint workflow, coder_docs/uv_package_manager.md for dependency and environment workflow, and coder_docs/scrapling.md for external web retrieval workflow.</step>
+      <step>Use coder_docs/ruff.md for lint workflow, coder_docs/uv_package_manager.md for dependency and environment workflow, coder_docs/git_github_workflow.md for contributor Git and GitHub workflow, and coder_docs/scrapling.md for external web retrieval workflow.</step>
       <step>Inspect the exact config and prompt files for the subsystem you are changing before editing behavior.</step>
       <step>When behavior, configuration, commands, or workflow changes materially, update this guide in the same change.</step>
     </sessionStartChecklist>
@@ -32,11 +32,11 @@
     <directory path="orchestration">Typed transcript DTOs and the stage orchestrator that bridges stage plans with runtime execution.</directory>
     <directory path="conf">Hydra application configuration, including provider selection, stage controls, audio settings, ports, orchestrator limits, and logging.</directory>
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
-    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover methodology, linting, package management, and web retrieval workflow.</directory>
+    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover methodology, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
     <directory path="agentic_coder_prompts/skills">Additional local guidance files for code structure, prompt engineering, logging, type hinting, and package-manager usage.</directory>
     <entrypoints>
       <entrypoint path="main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
-      <entrypoint path="setup_and_run.py">Bootstrap and convenience runner for dependency checks, third-party sync, model provisioning, and full pipeline execution.</entrypoint>
+      <entrypoint path="setup_and_run.py">Bootstrap and convenience runner for dependency checks, stage-aware third-party sync/model provisioning, and full pipeline execution.</entrypoint>
       <entrypoint path="benchmark/run.py">CLI for summarization benchmark matrix execution and manifest preparation.</entrypoint>
       <entrypoint path="benchmark/qa.py">CLI for source-grounded QA benchmark execution against an existing summary and source transcript.</entrypoint>
       <entrypoint path="eval.py">Compatibility wrapper that forwards to the benchmark smoke preset.</entrypoint>
@@ -56,7 +56,7 @@
       <step>Resolve logging, project root, pipeline config, audio config, and runtime device.</step>
       <step>If stage-1 is active, run audio_pipeline.AudioToScriptOrchestrator to emit transcript JSON and stage artifacts.</step>
       <step>Load transcript JSON into orchestration.transcript.Transcript.</step>
-      <step>Generate speaker samples after transcript availability when configured.</step>
+      <step>Generate speaker samples after transcript availability when configured, or defer them until just before stage-3 voice cloning when audio.speaker_samples.defer_until_voice_clone=true.</step>
       <step>Instantiate shared or per-stage LLM providers, embedding provider, transcript index, local A2A apps, and the orchestrator stack.</step>
       <step>Run the stage orchestrator, persist final summary XML to summary.xml, and optionally run stage-3 voice cloning.</step>
     </runtimeFlow>
@@ -70,6 +70,7 @@
       <agent>Critic agent runs on the configured critic localhost port.</agent>
       <agent>Retrieval agent runs on the configured retrieval localhost port.</agent>
       <transport>agents.client.AgentClient is the internal transport used by the orchestrator and executor layers.</transport>
+      <startup>main.py now waits for local A2A servers with a shared parallel health-poll loop instead of a fixed preflight sleep followed by serial checks.</startup>
     </localAgentTopology>
   </section>
 
@@ -196,6 +197,7 @@
       <rule>Do not copy deploy-specific credentials, tokens, or endpoint secrets into docs or code comments.</rule>
       <rule>Prefer provider profile changes and Hydra config changes over scattered per-module constants.</rule>
       <rule>When changing provider request or response normalization, inspect llm_provider.py and the affected provider adapter tests together.</rule>
+      <rule>Preserve the lazy-export behavior in providers/__init__.py so importing one provider module does not eagerly import unrelated heavy backends.</rule>
     </providerPolicy>
     <canonicalCommands>
       <command>uv sync --dev</command>
@@ -211,6 +213,8 @@
       <note>Use uv run for repo commands so execution stays inside the locked environment.</note>
       <note>Benchmark and QA CLIs are module entrypoints; main.py is a direct script entrypoint under Hydra.</note>
       <note>setup_and_run.py is the preferred convenience wrapper when the task involves third-party IndexTTS setup and full end-to-end stage execution.</note>
+      <note>setup_and_run.py now skips IndexTTS repo sync, nested uv sync, and model provisioning when the effective overrides disable audio.voice_clone.enabled.</note>
+      <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of stage-3.</note>
     </commandNotes>
   </section>
 
@@ -236,6 +240,8 @@
       <rule>When changing runtime flow, prompts, provider behavior, contracts, benchmark workflow, or operator-facing commands, update this guide in the same change.</rule>
       <rule>When a change affects tested behavior, add or update tests in the corresponding subsystem.</rule>
       <rule>When you fix a meaningful error, recurring pitfall, or debugging trap, prepend a short dated and timed Problem and Solution note to the top of coder_docs/memory/errors_and_notes.md.</rule>
+      <rule>When contributor Git or GitHub workflow expectations change materially, update coder_docs/git_github_workflow.md and this guide in the same change.</rule>
+      <rule>Before commit or pull request, review staged diffs for secrets, private endpoints such as vLLM URLs, credentials, tokens, and other private data. Do not let them enter repo history.</rule>
       <rule>When methodology-sensitive benchmark logic changes, update coder_docs/academic_standards.md usage at the implementation site and keep citations or gap notes current.</rule>
       <rule>Keep README.md, benchmark/README.md, and coder_docs files aligned when commands or workflows move.</rule>
       <rule>Prefer architecture-preserving edits: orchestration logic in orchestration or main, protocol and adapter logic in audio_pipeline or providers, benchmark-specific behavior in benchmark, and A2A task behavior in agents.</rule>

@@ -1,13 +1,73 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
 from pathlib import Path
+import sys
+import types
 
 import pytest
 from orchestration.transcript import Transcript
 
 pytest.importorskip("a2a")
-import main as app_main
+
+
+def _import_app_main():
+    """Import ``main`` while tolerating environments where numpy is unavailable to pytest."""
+    if "main" in sys.modules:
+        return sys.modules["main"]
+
+    stubbed_numpy = False
+    if "numpy" not in sys.modules:
+        try:
+            importlib.import_module("numpy")
+        except ModuleNotFoundError:
+            numpy_stub = types.ModuleType("numpy")
+            numpy_stub.ndarray = object
+            sys.modules["numpy"] = numpy_stub
+            stubbed_numpy = True
+
+    stubbed_jinja2 = False
+    if "jinja2" not in sys.modules:
+        try:
+            importlib.import_module("jinja2")
+        except ModuleNotFoundError:
+            jinja2_stub = types.ModuleType("jinja2")
+
+            class _FileSystemLoader:
+                def __init__(self, _path: str) -> None:
+                    self.path = _path
+
+            class _Environment:
+                def __init__(self, *args, **kwargs) -> None:
+                    self.args = args
+                    self.kwargs = kwargs
+
+                def get_template(self, template_name: str):  # noqa: ANN204
+                    class _Template:
+                        def __init__(self, name: str) -> None:
+                            self.name = name
+
+                        def render(self, **kwargs) -> str:
+                            return f"{self.name}:{kwargs}"
+
+                    return _Template(template_name)
+
+            def _select_autoescape() -> bool:
+                return False
+
+            jinja2_stub.Environment = _Environment
+            jinja2_stub.FileSystemLoader = _FileSystemLoader
+            jinja2_stub.select_autoescape = _select_autoescape
+            sys.modules["jinja2"] = jinja2_stub
+            stubbed_jinja2 = True
+
+    module = importlib.import_module("main")
+    if stubbed_numpy:
+        sys.modules.pop("numpy", None)
+    if stubbed_jinja2:
+        sys.modules.pop("jinja2", None)
+    return module
 
 @dataclass(slots=True, frozen=True)
 class _SampleResult:
@@ -24,8 +84,9 @@ class _StubSampleGenerator:
         transcript_payload: dict[str, object],
         source_audio_path: Path,
         output_dir: Path,
+        progress_callback=None,
     ) -> _SampleResult:
-        del transcript_payload, source_audio_path
+        del transcript_payload, source_audio_path, progress_callback
         output_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = output_dir / "manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
@@ -41,6 +102,7 @@ def test_post_transcript_step_enforces_vocals_source_mode(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    app_main = _import_app_main()
     captured_source_modes: list[str] = []
 
     def _capture_source_mode(
@@ -71,7 +133,7 @@ def test_post_transcript_step_enforces_vocals_source_mode(
         }
     )
     updated_transcript = app_main._run_post_transcript_speaker_sample_step(
-        stage_start="audio",
+        stage_start="stage-1",
         audio_cfg_dict={
             "audio_path": "audio.wav",
             "work_dir": "artifacts/audio_stage",
@@ -91,3 +153,48 @@ def test_post_transcript_step_enforces_vocals_source_mode(
         updated_transcript.metadata.get("speaker_samples_manifest_path")
         == str(tmp_path / "artifacts" / "audio_stage" / "speaker_samples" / "manifest.json")
     )
+
+
+def test_wait_for_agent_servers_uses_shared_wait_strategy(monkeypatch) -> None:
+    app_main = _import_app_main()
+    calls: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+
+    class _FakeChecker:
+        def wait_for_many(
+            self,
+            servers,
+            *,
+            overall_timeout_seconds: float,
+            poll_interval_seconds: float,
+            request_timeout_seconds: float,
+        ) -> bool:
+            calls.append(
+                {
+                    "servers": list(servers),
+                    "overall_timeout_seconds": overall_timeout_seconds,
+                    "poll_interval_seconds": poll_interval_seconds,
+                    "request_timeout_seconds": request_timeout_seconds,
+                }
+            )
+            return True
+
+    monkeypatch.setattr(app_main.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    app_main._wait_for_agent_servers(
+        checker=_FakeChecker(),  # type: ignore[arg-type]
+        servers=[("Summarizer", 9010), ("Critic", 9011)],
+        overall_timeout_seconds=8.0,
+        poll_interval_seconds=0.1,
+        request_timeout_seconds=0.5,
+    )
+
+    assert sleep_calls == []
+    assert calls == [
+        {
+            "servers": [("Summarizer", 9010), ("Critic", 9011)],
+            "overall_timeout_seconds": 8.0,
+            "poll_interval_seconds": 0.1,
+            "request_timeout_seconds": 0.5,
+        }
+    ]
