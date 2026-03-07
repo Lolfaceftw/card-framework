@@ -81,15 +81,15 @@
     <rule>Prefer secure defaults over opt-out security toggles in production paths.</rule>
   </section>
 
-  <section id="github-pushing-practices" title="Secure and Recommended Practices for GitHub Pushing">
+  <section id="git-and-github-workflow" title="Git and GitHub Workflow">
     <rule>Use a pull-request-first workflow for integration branches. Do not push directly to shared protected branches.</rule>
     <rule>Protect integration branches with rulesets or branch protection, required reviews, and required status checks.</rule>
-    <rule>Require CODEOWNERS review on sensitive paths such as workflows, deployment code, and security-critical modules.</rule>
+    <rule>Require CODEOWNERS review on sensitive paths such as workflows, deployment code, security-critical modules, and the CODEOWNERS file itself when present.</rule>
     <rule>Treat CI checks as merge gates, not advisory signals.</rule>
     <rule>Enable secret scanning and push protection, and rotate exposed credentials immediately if a secret is detected.</rule>
+    <rule>Never stage, commit, or open a pull request with files that contain API keys, access tokens, secrets, private service URLs such as vLLM endpoints, or other private information.</rule>
     <rule>Sign commits and release tags where repository policy supports it.</rule>
     <rule>Use force push only on your own topic branches when necessary, and prefer force-with-lease over force.</rule>
-    <rule>Keep pushes small, atomic, and logically scoped so reviews and rollbacks stay precise.</rule>
     <rule>Review dependency and workflow changes with extra scrutiny before merging.</rule>
     <rule>Prefer git revert on shared branches rather than rewriting published history.</rule>
     <rule>Preserve traceability from commit to release artifact wherever possible.</rule>
@@ -133,25 +133,27 @@
     <rule>When you encounter a meaningful error or fix a mistake worth preserving, prepend a brief entry to the top of coder_docs/memory/errors_and_notes.md with the date and time, a Problem field, and the Solution that resolved it.</rule>
     <rule>Use coder_docs/academic_standards.md as the source of truth for formulas, algorithms, heuristics, scoring rules, or other robustness-sensitive implementations that require academic backing.</rule>
     <rule>For methodology-sensitive implementations, search academic journals first, avoid unsupported magic formulas, and add inline IEEE-style citation comments at the implementation site with a fuller same-file reference whenever practical.</rule>
+    <rule>Use coder_docs/git_github_workflow.md as the source of truth for local Git staging, commit construction, push safety, and GitHub pull request workflow in this repository.</rule>
     <rule>Use coder_docs/ruff.md as the source of truth for linting workflow and coder_docs/uv_package_manager.md as the source of truth for dependency and environment management.</rule>
     <rule>Use uv as the package manager for this repository and use ruff as the linter for this repository.</rule>
     <rule>When implementation changes affect tested behavior, contracts, or outputs, update the relevant tests in the same change before considering the work complete.</rule>
     <rule>When code changes affect behavior, interfaces, setup, outputs, workflows, or operator expectations, update the relevant Markdown documentation in the same change, including files such as README.md, docs/*.md, and applicable coder_docs/*.md.</rule>
     <rule>Treat Markdown documentation review as part of every implementation, review, and verification pass so documentation updates are considered before concluding the task.</rule>
     <rule>When code, configuration, prompts, runtime flow, tooling, or developer workflow changes materially, update coder_docs/codebase_guide.md in the same change so it stays current.</rule>
-    <rule>When linting, dependency-management, or academic-methodology policy changes materially, update the corresponding file in coder_docs in the same change.</rule>
+    <rule>When linting, dependency-management, Git and GitHub workflow, or academic-methodology policy changes materially, update the corresponding file in coder_docs in the same change.</rule>
     <rule>Keep coder_docs content specific to this repository's actual behavior, current commands, and constraints. Do not let it drift into generic Python advice.</rule>
     <rule>If AGENTS.md conflicts with a repo-specific operational detail documented in coder_docs, reconcile the documents immediately rather than ignoring the mismatch.</rule>
   </section>
   <section id="scrapling-mcp-web-research" title="Scrapling MCP Web Research">
     <rule>Use coder_docs/scrapling.md as the source of truth for external web retrieval and page extraction workflow.</rule>
-    <rule>Use Scrapling MCP as the default web-search and web-browsing tool for this repository whenever external page retrieval is required.</rule>
+    <rule>Use Scrapling MCP as the required tool for external web search, page retrieval, and browsing in this repository whenever open-web information is needed.</rule>
+    <rule>Treat generic non-Scrapling web-search and browsing tools as disallowed when Scrapling MCP can satisfy the task.</rule>
     <rule>If the user already provided a URL or the authoritative source URL is known, go directly to Scrapling MCP instead of another web tool.</rule>
     <rule>Prefer the cheapest Scrapling tier that fits the target: get or bulk_get for simple static pages, fetch or bulk_fetch for JavaScript or explicit waits, stealthy_fetch or bulk_stealthy_fetch for Cloudflare, anti-bot protections, or lower-tier failures.</rule>
     <rule>Use bulk Scrapling tools for independent multi-URL retrieval instead of serial single-page requests.</rule>
     <rule>Use Scrapling features aggressively to reduce noise and token use: main_content_only, css_selector, extraction_type selection, disable_resources where safe, network_idle, and wait_selector.</rule>
     <rule>Prefer authoritative direct pages over search-result pages, and prefer targeted page extraction over whole-page dumps.</rule>
-    <rule>If a URL must be discovered first or a hard requirement cannot be satisfied by Scrapling alone, use only minimal non-Scrapling fallback for that discovery step, then return to Scrapling immediately for actual retrieval and extraction.</rule>
-    <rule>Do not keep using non-Scrapling web tools for page retrieval when Scrapling MCP can complete the task.</rule>
+    <rule>If a URL must be discovered first or a hard requirement cannot be satisfied by Scrapling alone, use only the smallest possible non-Scrapling fallback for that discovery step, then return to Scrapling immediately for actual retrieval and extraction.</rule>
+    <rule>Do not keep using non-Scrapling web tools for discovery, page retrieval, or ongoing browsing after the target URL is known and Scrapling MCP can complete the task.</rule>
   </section>
 </repoEngineeringStandards>

@@ -4,6 +4,7 @@ import pytest
 
 from audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
+    build_interjector_orchestrator,
     build_speaker_sample_generator,
     build_voice_clone_orchestrator,
 )
@@ -22,6 +23,30 @@ from audio_pipeline.gateways.fallback_gateways import (
 )
 from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
 from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
+from llm_provider import LLMProvider
+
+
+class _FakeLLMProvider(LLMProvider):
+    """Minimal LLM provider used for factory wiring tests."""
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        del system_prompt, user_prompt, max_tokens
+        return '{"decisions": []}'
+
+    def chat(
+        self,
+        messages,
+        tools=None,
+        tool_choice=None,
+        max_tokens: int | None = None,
+    ):
+        del messages, tools, tool_choice, max_tokens
+        return {}
 
 
 def test_factory_builds_default_strategies() -> None:
@@ -210,6 +235,40 @@ def test_factory_disables_voice_clone_orchestrator_by_default(tmp_path: Path) ->
     assert orchestrator is None
 
 
+def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) -> None:
+    orchestrator = build_interjector_orchestrator(
+        {
+            "work_dir": "artifacts/audio_stage",
+            "voice_clone": {
+                "provider": "passthrough",
+            },
+            "interjector": {
+                "enabled": True,
+                "output_dir_name": "interjector",
+            },
+        },
+        llm=_FakeLLMProvider(),
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    assert isinstance(orchestrator.provider, PassthroughVoiceCloneGateway)
+    assert orchestrator.output_dir == (
+        tmp_path / "artifacts" / "audio_stage" / "interjector"
+    ).resolve()
+    assert orchestrator.merged_output_filename == "voice_cloned_interjected.wav"
+
+
+def test_factory_disables_interjector_orchestrator_by_default(tmp_path: Path) -> None:
+    orchestrator = build_interjector_orchestrator(
+        {},
+        llm=_FakeLLMProvider(),
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is None
+
+
 def test_factory_raises_for_unknown_voice_clone_provider(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unsupported voice clone provider"):
         build_voice_clone_orchestrator(
@@ -282,3 +341,23 @@ def test_factory_respects_voice_clone_merged_output_override(tmp_path: Path) -> 
     assert orchestrator is not None
     assert orchestrator.merge_segments is True
     assert orchestrator.merged_output_filename == "custom_voice_mix.wav"
+
+
+def test_factory_builds_interjector_with_indextts_defaults(tmp_path: Path) -> None:
+    orchestrator = build_interjector_orchestrator(
+        {
+            "interjector": {
+                "enabled": True,
+            },
+            "voice_clone": {
+                "provider": "indextts",
+            },
+        },
+        llm=_FakeLLMProvider(),
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    provider = orchestrator.provider
+    assert isinstance(provider, IndexTTSVoiceCloneGateway)
+    assert provider.runner_project_dir == (tmp_path / "third_party" / "index_tts").resolve()

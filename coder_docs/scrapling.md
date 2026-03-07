@@ -1,6 +1,6 @@
 # Scrapling MCP Guide
 
-This repository uses Scrapling MCP as the default toolset for external web retrieval and page extraction.
+This repository uses Scrapling MCP as the required toolset for external web search, page retrieval, and page extraction, except for narrow discovery-only fallback cases.
 
 Use this document as the source of truth for how an agent should choose and operate Scrapling MCP tools in this repo. This is a workflow document, not a general Scrapling tutorial.
 
@@ -12,12 +12,14 @@ Authoritative upstream references:
 
 ## Policy
 
-- Use Scrapling MCP for external page retrieval and extraction by default.
+- Use Scrapling MCP for external web search, page retrieval, and extraction as the required default workflow.
+- Treat generic non-Scrapling web-search and browsing tools as disallowed whenever Scrapling can satisfy the task.
 - Prefer direct authoritative URLs over generic search-result pages whenever the destination is already known.
 - If the user gives a URL or names a known primary source, go straight to Scrapling instead of using another web tool first.
 - Use Scrapling to reduce noise before reasoning: prefer `main_content_only=true`, targeted `css_selector`, and the smallest useful extraction scope.
 - Use bulk Scrapling tools when multiple URLs can be fetched independently.
 - If a URL must be discovered first, minimal non-Scrapling fallback is allowed only for URL discovery or another hard requirement. Once a target URL is known, return to Scrapling immediately for retrieval and extraction.
+- Do not keep using non-Scrapling web tools for discovery, retrieval, or browsing after the target URL is known and Scrapling can complete the task.
 - Do not weaken security defaults just to force a lower-tier request through. If a lower tier fails, escalate to a browser-backed Scrapling tool before considering any looser network behavior.
 
 ## Tool Inventory

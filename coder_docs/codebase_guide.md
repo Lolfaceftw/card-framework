@@ -15,6 +15,7 @@
       <stage id="stage-1">Audio stage: source separation, ASR, diarization, alignment, and transcript JSON emission.</stage>
       <stage id="stage-2">Summarization stage: local A2A retrieval, summarizer, and critic agents cooperate until convergence or iteration cap.</stage>
       <stage id="stage-3">Voice-clone stage: summary XML plus generated speaker samples are rendered into per-turn cloned audio and optional merged output.</stage>
+      <stage id="stage-4">Interjector stage: the next speaker can add short overlapping backchannels or echo-agreements onto the stage-3 merged audio using summary-aware token anchors.</stage>
     </primaryWorkflow>
     <agentOperatingPrinciples>
       <principle>Treat configuration as authoritative; prefer overrides and config edits over hardcoded values.</principle>
@@ -33,7 +34,7 @@
     <directory path="conf">Hydra application configuration, including provider selection, stage controls, audio settings, ports, orchestrator limits, and logging.</directory>
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
     <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover methodology, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
-    <directory path="agentic_coder_prompts/skills">Additional local guidance files for code structure, prompt engineering, logging, type hinting, and package-manager usage.</directory>
+    <file path="AGENTS.md">Repo-local coding-agent instructions, including the required Scrapling web-research policy and the rule to keep coder_docs aligned with prompt changes.</file>
     <entrypoints>
       <entrypoint path="main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
       <entrypoint path="setup_and_run.py">Bootstrap and convenience runner for dependency checks, stage-aware third-party sync/model provisioning, and full pipeline execution.</entrypoint>
@@ -48,17 +49,18 @@
     <compositionRoot>The runtime composes from main.py using Hydra config from conf/config.yaml and resolves paths relative to the original working directory.</compositionRoot>
     <stagePlanning>
       <rule>pipeline.start_stage controls execution mode and is validated by pipeline_plan.build_pipeline_stage_plan.</rule>
-      <mode id="stage-1">Run audio stage, then summarizer/critic loop, then optional voice clone.</mode>
-      <mode id="stage-2">Skip audio generation and start from an existing transcript JSON, then run summarizer/critic loop and optional voice clone.</mode>
+      <mode id="stage-1">Run audio stage, then summarizer/critic loop, then optional voice clone and optional stage-4 interjector.</mode>
+      <mode id="stage-2">Skip audio generation and start from an existing transcript JSON, then run summarizer/critic loop and optional voice clone and interjector.</mode>
       <mode id="stage-3">Skip to voice clone using an existing summary XML and transcript metadata that already points to a speaker-sample manifest.</mode>
+      <mode id="stage-4">Skip directly to the interjector using an existing summary XML plus an existing stage-3 voice-clone manifest.</mode>
     </stagePlanning>
     <runtimeFlow>
       <step>Resolve logging, project root, pipeline config, audio config, and runtime device.</step>
       <step>If stage-1 is active, run audio_pipeline.AudioToScriptOrchestrator to emit transcript JSON and stage artifacts.</step>
-      <step>Load transcript JSON into orchestration.transcript.Transcript.</step>
+      <step>Load transcript JSON into orchestration.transcript.Transcript unless pipeline.start_stage=stage-4, which runs from summary XML plus voice-clone manifest only.</step>
       <step>Generate speaker samples after transcript availability when configured, or defer them until just before stage-3 voice cloning when audio.speaker_samples.defer_until_voice_clone=true.</step>
-      <step>Instantiate shared or per-stage LLM providers, embedding provider, transcript index, local A2A apps, and the orchestrator stack.</step>
-      <step>Run the stage orchestrator, persist final summary XML to summary.xml, and optionally run stage-3 voice cloning.</step>
+      <step>Instantiate shared or per-stage LLM providers, including the optional stage_llm.interjector override, embedding provider, transcript index, local A2A apps, and the orchestrator stack.</step>
+      <step>Run the stage orchestrator, persist final summary XML to summary.xml, optionally run stage-3 voice cloning, and optionally run the stage-4 interjector.</step>
     </runtimeFlow>
     <retrievalPolicy>
       <rule>When a real embedding provider is configured, transcript segments are indexed into embeddings.TranscriptIndex and retrieved through the retrieval agent.</rule>
@@ -94,6 +96,8 @@
       <prompt path="prompts/summarizer_system.jinja2">Primary summarizer system instructions.</prompt>
       <prompt path="prompts/summarizer_revise.jinja2">Revision-mode summarizer instructions.</prompt>
       <prompt path="prompts/critic_system.jinja2">Critic system instructions.</prompt>
+      <prompt path="prompts/interjector_system.jinja2">Stage-4 planner instructions for overlap decisions and anchor spans.</prompt>
+      <prompt path="prompts/interjector_user.jinja2">Stage-4 planner user payload describing eligible host turns and token indices.</prompt>
       <prompt path="prompts/qa_ground_truth_system.jinja2">QA ground-truth generation instructions.</prompt>
       <prompt path="prompts/qa_evaluator_system.jinja2">QA evaluator instructions.</prompt>
       <prompt path="prompts/corrector_system.jinja2">Corrector retry-guidance instructions.</prompt>
@@ -115,7 +119,7 @@
     </transcriptContract>
     <summaryContract>
       <shape>The final summary is XML text persisted to workspace-root summary.xml through summary_output.write_summary_xml_to_workspace.</shape>
-      <consumer>Stage-3 voice cloning uses summary XML speaker turns to decide how many voice-clone artifacts to generate and which speaker samples to match.</consumer>
+      <consumer>Stage-3 voice cloning uses summary XML speaker turns to decide how many voice-clone artifacts to generate and which speaker samples to match; stage-4 interjection reuses the same summary XML plus the stage-3 manifest to place overlaps against synthesized audio timing.</consumer>
       <assumption>Critic logic and downstream processing expect speaker-tagged XML blocks rather than plain prose summaries.</assumption>
     </summaryContract>
     <agentTaskContracts>
@@ -144,6 +148,7 @@
       <step>SpeakerSampleGenerator extracts per-speaker reference audio clips from the selected source audio.</step>
       <step>A manifest is written and its path is stored in transcript metadata.</step>
       <step>VoiceCloneOrchestrator consumes summary XML plus the manifest to create per-turn cloned segments and optional merged output.</step>
+      <step>InterjectorOrchestrator can then analyze eligible host turns, align stage-3 audio back to summary text, synthesize short overlaps from the next speaker, and emit a second merged WAV plus its own manifest.</step>
     </postTranscriptFlow>
     <adapterMap>
       <adapter>Demucs handles source separation when separation.provider=demucs.</adapter>
@@ -154,6 +159,8 @@
     </adapterMap>
     <etaAndObservability>
       <rule>ETA estimation and learning live in audio_pipeline/eta.py and are reused across audio and voice-clone stages.</rule>
+      <rule>Operator-facing ETA messages are shown only after the matching stage has learned or loaded persisted throughput history; first-run stages stay silent until history exists.</rule>
+      <rule>Learned ETA throughput is persisted immediately after each completed audio, speaker-sample, and voice-clone stage so interrupted pipelines retain finished-stage history.</rule>
       <rule>Windows-only dedicated GPU heartbeat monitoring can run during voice cloning when enabled and when the resolved provider device is CUDA.</rule>
       <rule>events.py provides the shared event bus used by UI and logging subscribers.</rule>
     </etaAndObservability>
@@ -162,6 +169,7 @@
       <artifact>Default audio working directory: artifacts/audio_stage</artifact>
       <artifact>Speaker sample artifacts live under the configured speaker sample output directory inside the audio work directory.</artifact>
       <artifact>Voice clone artifacts live under the configured voice clone output directory inside the audio work directory.</artifact>
+      <artifact>Interjector artifacts live under the configured interjector output directory inside the audio work directory and include an `interjector_manifest.json` plus a merged overlap WAV.</artifact>
     </artifacts>
   </section>
 
@@ -187,7 +195,7 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="conf/config.yaml">Main runtime configuration for pipeline stages, provider selection, audio settings, ports, orchestrator budgets, loop guardrails, and logging.</file>
+      <file path="conf/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, ports, orchestrator budgets, loop guardrails, and logging.</file>
       <file path="benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa.</file>
       <file path="benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts.</file>
       <file path="pyproject.toml">Python version floor, dependencies, uv source/index policy, and pytest configuration.</file>
@@ -213,7 +221,7 @@
       <note>Use uv run for repo commands so execution stays inside the locked environment.</note>
       <note>Benchmark and QA CLIs are module entrypoints; main.py is a direct script entrypoint under Hydra.</note>
       <note>setup_and_run.py is the preferred convenience wrapper when the task involves third-party IndexTTS setup and full end-to-end stage execution.</note>
-      <note>setup_and_run.py now skips IndexTTS repo sync, nested uv sync, and model provisioning when the effective overrides disable audio.voice_clone.enabled.</note>
+      <note>setup_and_run.py now skips IndexTTS repo sync, nested uv sync, and model provisioning only when both audio.voice_clone.enabled=false and audio.interjector.enabled=false.</note>
       <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of stage-3.</note>
     </commandNotes>
   </section>

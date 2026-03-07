@@ -3,7 +3,6 @@ import pandas as pd
 from openai import OpenAI
 import json
 from difflib import SequenceMatcher
-import tiktoken
 import requests
 from transformers import AutoTokenizer
 from rich.console import Console
@@ -69,7 +68,7 @@ def n_tokens(messages: list[dict]) -> int:
     """
     Count tokens in messages.
     """
-    return sum([len(enc.encode(m["content"])) for m in messages])
+    return sum(len(tokenizer.encode(m["content"])) for m in messages)
 
 
 def qwen_tokenizer(messages: list[dict]) -> int:

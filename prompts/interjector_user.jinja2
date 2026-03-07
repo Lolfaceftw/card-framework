@@ -1,0 +1,10 @@
+Decide one overlap action for each eligible host turn below.
+
+Use `echo_agreement` when the next speaker would naturally agree while the host phrase is still being spoken.
+Use `backchannel` when a short response should land just after the anchor phrase.
+If neither is natural, return `should_interject: false`.
+
+Eligible turns:
+{{ eligible_turns_block }}
+
+Return JSON only. Do not include explanations. Keep every interjection to at most {{ max_interjection_words }} words.
