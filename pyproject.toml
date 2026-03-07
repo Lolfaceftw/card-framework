@@ -33,6 +33,9 @@ dependencies = [
     "nltk>=3.8.1",
     "ctc-forced-aligner",
     "deepmultilingualpunctuation",
+    "tiktoken",
+    "textual",
+    "unidecode"
 ]
 
 [[tool.uv.index]]

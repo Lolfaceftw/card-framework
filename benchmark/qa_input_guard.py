@@ -134,16 +134,26 @@ def evaluate_input_compatibility(
     summary_name_phrases = _name_phrases(summary_plain_text)
     source_name_phrases = _name_phrases(source_text)
     shared_name_phrases = summary_name_phrases & source_name_phrases
+    required_name_phrase_count = min(
+        min_shared_name_phrases,
+        len(summary_name_phrases),
+        len(source_name_phrases),
+    )
 
     denominator = max(len(summary_tokens), 1)
     overlap_ratio = len(shared) / float(denominator)
     distinctive_denominator = max(len(summary_distinctive), 1)
     distinctive_overlap_ratio = len(shared_distinctive) / float(distinctive_denominator)
+    strong_lexical_signal = overlap_ratio >= max(min_overlap_ratio * 4.0, 0.2) and len(
+        shared_distinctive
+    ) >= max(min_shared_distinctive_tokens * 2, 5)
+    name_phrase_pass = (
+        len(shared_name_phrases) >= required_name_phrase_count or strong_lexical_signal
+    )
     is_compatible = (
         overlap_ratio >= min_overlap_ratio and len(shared) >= min_shared_tokens
     ) and (
-        len(shared_distinctive) >= min_shared_distinctive_tokens
-        and len(shared_name_phrases) >= min_shared_name_phrases
+        len(shared_distinctive) >= min_shared_distinctive_tokens and name_phrase_pass
     )
 
     if is_compatible:

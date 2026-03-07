@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 from datetime import datetime, timezone
 import json
 import os
@@ -11,14 +12,15 @@ from pathlib import Path
 import socket
 import sys
 import threading
-from typing import Any
+from typing import Any, Literal, cast
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import uvicorn
 
+from agents.corrector import LLMCorrectorAgent
 from agents.client import AgentClient
-from agents.dtos import GroundTruthCreatorTaskRequest, QAEvaluatorTaskRequest
+from agents.dtos import GroundTruthCreatorTaskRequest
 from agents.ground_truth_creator import GroundTruthCreatorExecutor
 from agents.health import AgentHealthChecker
 from agents.qa_evaluator import QAEvaluatorExecutor
@@ -36,22 +38,28 @@ from benchmark.matrix import (
 from benchmark.qa_input_guard import evaluate_input_compatibility
 from benchmark.qa_contracts import (
     EvaluatorAnswerRecord,
+    EvaluatorScore,
     GroundTruthSet,
     QABenchmarkReport,
     build_score,
     validate_answer_coverage,
 )
+from benchmark.qa_evaluator_runner import evaluate_questions_with_fresh_contexts
 from benchmark.qa_settings import (
+    CorrectorRuntimeConfig,
+    EvaluatorRuntimeConfig,
     QAConfigError,
     as_positive_float,
+    as_positive_int,
+    resolve_corrector_runtime_config,
+    resolve_evaluator_runtime_config,
     resolve_input_guard_config,
     resolve_workflow_timeouts,
 )
 from benchmark.types import ProviderProfile
 from events import event_bus
-from llm_provider import LLMProvider
+from llm_provider import EmbeddingProvider, LLMProvider
 from logger_utils import configure_logger, logger
-from main import _build_a2a_app
 from providers.logging_provider import LoggingLLMProvider
 
 
@@ -126,6 +134,268 @@ def _commands_executed() -> list[str]:
     return [" ".join(["python", *sys.argv])]
 
 
+def _supports_ansi_colors() -> bool:
+    """Return whether ANSI terminal colors should be used."""
+    if os.getenv("NO_COLOR", "").strip():
+        return False
+    if os.getenv("FORCE_COLOR", "").strip():
+        return True
+    if not sys.stdout.isatty():
+        return False
+    if os.getenv("TERM", "").lower() == "dumb":
+        return False
+    if os.name != "nt":
+        return True
+    return bool(
+        os.getenv("WT_SESSION")
+        or os.getenv("ANSICON")
+        or os.getenv("ConEmuANSI", "").upper() == "ON"
+        or os.getenv("TERM_PROGRAM", "").lower() == "vscode"
+    )
+
+
+def _style_text(
+    text: str,
+    *,
+    color_code: str = "",
+    bold: bool = False,
+    use_color: bool,
+) -> str:
+    """Apply ANSI style when colors are enabled."""
+    if not use_color:
+        return text
+    parts: list[str] = []
+    if bold:
+        parts.append("\033[1m")
+    if color_code:
+        parts.append(color_code)
+    return "".join(parts) + text + "\033[0m"
+
+
+def _score_color(score_out_of_100: int) -> str:
+    """Return ANSI color code representing score quality."""
+    if score_out_of_100 >= 70:
+        return "\033[32m"
+    if score_out_of_100 >= 40:
+        return "\033[33m"
+    return "\033[31m"
+
+
+def _tool_status_color(status: str) -> str:
+    """Return ANSI color code for one tool status label."""
+    normalized = status.strip().lower()
+    if normalized == "accepted":
+        return "\033[32m"
+    if any(
+        token in normalized
+        for token in ("error", "failed", "invalid", "missing", "retry_exceeded")
+    ):
+        return "\033[31m"
+    return "\033[36m"
+
+
+def _format_terminal_success_summary(
+    *,
+    run_id: str,
+    score: EvaluatorScore,
+    answers: list[EvaluatorAnswerRecord],
+    report_path: Path,
+    trace_path: Path,
+    questions_path: Path,
+    verification_path: Path,
+    use_color: bool,
+) -> str:
+    """Build a human-readable QA benchmark success summary for terminal output."""
+    tool_status_counts = Counter(answer.tool_status for answer in answers)
+    sorted_statuses = sorted(
+        tool_status_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    accepted_count = tool_status_counts.get("accepted", 0)
+    failure_count = sum(
+        count for status, count in tool_status_counts.items() if status != "accepted"
+    )
+
+    lines: list[str] = [
+        "",
+        _style_text(
+            "QA Evaluation Completed",
+            color_code="\033[36m",
+            bold=True,
+            use_color=use_color,
+        ),
+        _style_text("=" * 28, color_code="\033[36m", use_color=use_color),
+        f"Run ID: {run_id}",
+        (
+            "Score: "
+            + _style_text(
+                f"{score.score_out_of_100}/100",
+                color_code=_score_color(score.score_out_of_100),
+                bold=True,
+                use_color=use_color,
+            )
+        ),
+        f"Factualness: {score.factualness_correct}/50",
+        f"Naturalness: {score.naturalness_correct}/50",
+        f"Grounding: {score.summary_grounding_pass_count}/{score.total_questions} ({score.summary_grounding_pass_rate * 100.0:.1f}%)",
+        f"Tool-accepted answers: {accepted_count}/{score.total_questions}",
+        f"Non-accepted answers: {failure_count}",
+        "",
+        _style_text(
+            "Tool Status Breakdown",
+            color_code="\033[36m",
+            bold=True,
+            use_color=use_color,
+        ),
+    ]
+    for status, count in sorted_statuses:
+        lines.append(
+            f"  - {_style_text(status, color_code=_tool_status_color(status), use_color=use_color)}: {count}"
+        )
+
+    lines.extend(
+        [
+            "",
+            _style_text(
+                "Artifacts", color_code="\033[36m", bold=True, use_color=use_color
+            ),
+            f"  - Report: {report_path}",
+            f"  - Trace: {trace_path}",
+            f"  - Questions: {questions_path}",
+            f"  - Verification: {verification_path}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_terminal_failure_summary(*, error: str, use_color: bool) -> str:
+    """Build a human-readable QA benchmark failure summary for terminal output."""
+    return "\n".join(
+        [
+            "",
+            _style_text(
+                "QA Evaluation Failed",
+                color_code="\033[31m",
+                bold=True,
+                use_color=use_color,
+            ),
+            _style_text("=" * 20, color_code="\033[31m", use_color=use_color),
+            f"Reason: {error}",
+            "",
+        ]
+    )
+
+
+OutputFormat = Literal["auto", "human", "json", "both"]
+ColorMode = Literal["auto", "always", "never"]
+
+
+def _resolve_output_format(
+    output_format: OutputFormat,
+) -> Literal["human", "json", "both"]:
+    """Resolve output format when ``auto`` is requested."""
+    if output_format != "auto":
+        return output_format
+    return "human" if sys.stdout.isatty() else "json"
+
+
+def _resolve_use_color(color_mode: ColorMode) -> bool:
+    """Resolve whether colored output should be enabled."""
+    if color_mode == "always":
+        return True
+    if color_mode == "never":
+        return False
+    return _supports_ansi_colors()
+
+
+def _build_success_stdout_payload(
+    *,
+    run_id: str,
+    score: EvaluatorScore,
+    report_path: Path,
+    verification_path: Path,
+) -> dict[str, Any]:
+    """Build backward-compatible machine-readable success stdout payload."""
+    return {
+        "run_id": run_id,
+        "score_out_of_100": score.score_out_of_100,
+        "factualness_correct": score.factualness_correct,
+        "naturalness_correct": score.naturalness_correct,
+        "summary_grounding_pass_count": score.summary_grounding_pass_count,
+        "summary_grounding_pass_rate": score.summary_grounding_pass_rate,
+        "report_path": str(report_path),
+        "verification_path": str(verification_path),
+    }
+
+
+def _emit_success_output(
+    *,
+    output_format: OutputFormat,
+    color_mode: ColorMode,
+    run_id: str,
+    score: EvaluatorScore,
+    answers: list[EvaluatorAnswerRecord],
+    report_path: Path,
+    trace_path: Path,
+    questions_path: Path,
+    verification_path: Path,
+) -> None:
+    """Emit success output in human/json/both formats."""
+    resolved_format = _resolve_output_format(output_format)
+    use_color = _resolve_use_color(color_mode)
+    human_summary = _format_terminal_success_summary(
+        run_id=run_id,
+        score=score,
+        answers=answers,
+        report_path=report_path,
+        trace_path=trace_path,
+        questions_path=questions_path,
+        verification_path=verification_path,
+        use_color=use_color,
+    )
+    json_payload = json.dumps(
+        _build_success_stdout_payload(
+            run_id=run_id,
+            score=score,
+            report_path=report_path,
+            verification_path=verification_path,
+        ),
+        indent=2,
+    )
+
+    if resolved_format == "human":
+        print(human_summary)
+        return
+    if resolved_format == "json":
+        print(json_payload)
+        return
+    print(human_summary)
+    print(json_payload)
+
+
+def _emit_failure_output(
+    *,
+    output_format: OutputFormat,
+    color_mode: ColorMode,
+    error: str,
+) -> None:
+    """Emit failure output in human/json/both formats."""
+    resolved_format = _resolve_output_format(output_format)
+    use_color = _resolve_use_color(color_mode)
+    human_summary = _format_terminal_failure_summary(error=error, use_color=use_color)
+    json_payload = json.dumps({"status": "failed", "error": error}, indent=2)
+
+    if resolved_format == "human":
+        print(human_summary)
+        return
+    if resolved_format == "json":
+        print(json_payload)
+        return
+    print(human_summary)
+    print(json_payload)
+
+
 def _load_base_config(config_path: Path) -> DictConfig:
     """Load base application config for provider and logging settings."""
     if not config_path.exists():
@@ -195,6 +465,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         default="artifacts/qa_benchmark",
         help="Output root for QA benchmark artifacts",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["auto", "human", "json", "both"],
+        default="auto",
+        help="Terminal output format. 'auto' uses human on TTY and json otherwise.",
+    )
+    parser.add_argument(
+        "--color",
+        choices=["auto", "always", "never"],
+        default="auto",
+        help="Color mode for human terminal output.",
     )
     return parser
 
@@ -268,6 +550,44 @@ def _instantiate_llm(
     return llm
 
 
+def _instantiate_embedding_provider(base_cfg: DictConfig) -> EmbeddingProvider | None:
+    """Instantiate configured embedding provider unless no-op provider is selected."""
+    embedding_cfg = base_cfg.get("embedding")
+    if embedding_cfg is None:
+        return None
+    embedding_provider = hydra.utils.instantiate(embedding_cfg, _convert_="all")
+    if not isinstance(embedding_provider, EmbeddingProvider):
+        raise QABenchmarkRuntimeError(
+            "Configured embedding provider does not implement EmbeddingProvider."
+        )
+    if type(embedding_provider).__name__ == "NoOpEmbeddingProvider":
+        return None
+    return embedding_provider
+
+
+def _resolve_evaluator_embedding_provider(
+    *,
+    base_cfg: DictConfig,
+    evaluator_runtime_config: EvaluatorRuntimeConfig,
+) -> EmbeddingProvider | None:
+    """Resolve optional evaluator embedding provider for semantic quote modes."""
+    quote_mode = evaluator_runtime_config.quote_relevance.mode
+    if quote_mode not in {"semantic_similarity", "hybrid"}:
+        return None
+    embedding_provider = _instantiate_embedding_provider(base_cfg)
+    if embedding_provider is not None:
+        return embedding_provider
+    if quote_mode == "semantic_similarity":
+        raise QABenchmarkRuntimeError(
+            "qa.evaluator.quote_relevance.mode=semantic_similarity requires a "
+            "non-noop embedding provider in base config."
+        )
+    logger.warning(
+        "[QABenchmark] hybrid quote relevance mode is configured without a non-noop embedding provider; falling back to lexical checks when semantic fallback is needed."
+    )
+    return None
+
+
 def _read_summary_xml(path: Path) -> str:
     """Read candidate summary XML from disk."""
     if not path.exists():
@@ -320,18 +640,44 @@ async def _run_qa_workflow(
     evaluator_llm: LLMProvider,
     summary_xml: str,
     source_text: str,
-    evaluator_max_tool_turns: int,
-    evaluator_max_attempts_per_question: int,
+    evaluator_runtime_config: EvaluatorRuntimeConfig,
+    evaluator_embedding_provider: EmbeddingProvider | None,
     creator_max_generation_attempts: int,
+    creator_request_retries: int,
+    evaluator_request_retries: int,
     creator_request_timeout_seconds: float,
     evaluator_request_timeout_seconds: float,
     server_stop_timeout_seconds: float,
+    corrector_runtime_config: CorrectorRuntimeConfig | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run creator and evaluator A2A tasks and return raw payloads."""
+    # Lazy import keeps module importable in isolated unit tests without full app deps.
+    from main import _build_a2a_app
+
     servers: list[ManagedServer] = []
     client = AgentClient(event_bus=event_bus)
 
+    resolved_corrector_runtime_config = (
+        corrector_runtime_config
+        if corrector_runtime_config is not None
+        else CorrectorRuntimeConfig(enabled=False, max_tokens=700, max_examples=2)
+    )
     creator_port, evaluator_port = _reserve_ports(2)
+    creator_corrector_agent: LLMCorrectorAgent | None = None
+    evaluator_corrector_agent: LLMCorrectorAgent | None = None
+    if resolved_corrector_runtime_config.enabled:
+        creator_corrector_agent = LLMCorrectorAgent(
+            llm=creator_llm,
+            event_bus=event_bus,
+            max_tokens=resolved_corrector_runtime_config.max_tokens,
+            max_examples=resolved_corrector_runtime_config.max_examples,
+        )
+        evaluator_corrector_agent = LLMCorrectorAgent(
+            llm=evaluator_llm,
+            event_bus=event_bus,
+            max_tokens=resolved_corrector_runtime_config.max_tokens,
+            max_examples=resolved_corrector_runtime_config.max_examples,
+        )
     try:
         creator_app = _build_a2a_app(
             name="GroundTruthCreator",
@@ -341,6 +687,7 @@ async def _run_qa_workflow(
                 llm=creator_llm,
                 max_generation_attempts=creator_max_generation_attempts,
                 event_bus=event_bus,
+                corrector_agent=creator_corrector_agent,
             ),
         )
         servers.append(
@@ -353,9 +700,10 @@ async def _run_qa_workflow(
             port=evaluator_port,
             executor=QAEvaluatorExecutor(
                 llm=evaluator_llm,
-                max_tool_turns=evaluator_max_tool_turns,
-                max_attempts_per_question=evaluator_max_attempts_per_question,
+                evaluator_runtime_config=evaluator_runtime_config,
                 event_bus=event_bus,
+                embedding_provider=evaluator_embedding_provider,
+                corrector_agent=evaluator_corrector_agent,
             ),
         )
         servers.append(
@@ -374,44 +722,62 @@ async def _run_qa_workflow(
 
         creator_task = GroundTruthCreatorTaskRequest(source_text=source_text)
         logger.info(
-            "[QABenchmark] Starting GroundTruthCreator request with timeout=%.1fs",
+            "[QABenchmark] Starting GroundTruthCreator request with timeout=%.1fs retries=%s",
             creator_request_timeout_seconds,
+            creator_request_retries,
         )
-        creator_response_raw = await client.send_task(
-            creator_port,
-            creator_task,
-            timeout=creator_request_timeout_seconds,
-            metadata={"component": "qa_benchmark", "stage": "creator"},
-        )
-        try:
-            creator_payload = json.loads(creator_response_raw)
-        except json.JSONDecodeError as exc:
+        creator_payload: dict[str, Any] | None = None
+        last_creator_error: Exception | None = None
+        for attempt in range(1, creator_request_retries + 1):
+            try:
+                creator_response_raw = await client.send_task(
+                    creator_port,
+                    creator_task,
+                    timeout=creator_request_timeout_seconds,
+                    metadata={"component": "qa_benchmark", "stage": "creator"},
+                )
+                creator_payload_raw = json.loads(creator_response_raw)
+                if not isinstance(creator_payload_raw, dict):
+                    raise QABenchmarkRuntimeError(
+                        "GroundTruthCreator returned non-object JSON payload."
+                    )
+                creator_payload = creator_payload_raw
+                break
+            except Exception as exc:
+                last_creator_error = exc
+                if attempt >= creator_request_retries:
+                    break
+                logger.warning(
+                    "[QABenchmark] GroundTruthCreator attempt %s/%s failed: %s. Retrying.",
+                    attempt,
+                    creator_request_retries,
+                    exc,
+                )
+                await asyncio.sleep(float(min(5, attempt)))
+        if creator_payload is None:
             raise QABenchmarkRuntimeError(
-                "GroundTruthCreator returned invalid JSON payload."
-            ) from exc
+                "GroundTruthCreator request failed after "
+                f"{creator_request_retries} attempts: {last_creator_error}"
+            ) from last_creator_error
 
         question_set = GroundTruthSet.model_validate(creator_payload)
-        evaluator_task = QAEvaluatorTaskRequest(
+        logger.info(
+            "[QABenchmark] Starting per-question evaluator workflow questions=%s concurrency=%s timeout_per_question=%.1fs retries=%s",
+            len(question_set.questions),
+            evaluator_runtime_config.per_question_concurrency,
+            evaluator_request_timeout_seconds,
+            evaluator_request_retries,
+        )
+        evaluator_payload = await evaluate_questions_with_fresh_contexts(
+            client=client,
+            evaluator_port=evaluator_port,
             summary_xml=summary_xml,
             source_text=source_text,
-            questions=[question.model_dump() for question in question_set.questions],
+            question_set=question_set,
+            evaluator_request_timeout_seconds=evaluator_request_timeout_seconds,
+            per_question_concurrency=evaluator_runtime_config.per_question_concurrency,
+            evaluator_request_retries=evaluator_request_retries,
         )
-        logger.info(
-            "[QABenchmark] Starting Evaluator request with timeout=%.1fs",
-            evaluator_request_timeout_seconds,
-        )
-        evaluator_response_raw = await client.send_task(
-            evaluator_port,
-            evaluator_task,
-            timeout=evaluator_request_timeout_seconds,
-            metadata={"component": "qa_benchmark", "stage": "evaluator"},
-        )
-        try:
-            evaluator_payload = json.loads(evaluator_response_raw)
-        except json.JSONDecodeError as exc:
-            raise QABenchmarkRuntimeError(
-                "Evaluator returned invalid JSON payload."
-            ) from exc
 
         return creator_payload, evaluator_payload
     finally:
@@ -519,14 +885,45 @@ def execute_command(args: argparse.Namespace) -> int:
         profile=evaluator_profile, base_cfg=base_cfg, qa_cfg=qa_cfg
     )
 
-    evaluator_max_tool_turns = int(
-        qa_cfg.get("qa", {}).get("evaluator", {}).get("max_tool_turns", 320)
+    evaluator_runtime_config = resolve_evaluator_runtime_config(qa_cfg)
+    corrector_runtime_config = resolve_corrector_runtime_config(qa_cfg)
+    evaluator_embedding_provider = _resolve_evaluator_embedding_provider(
+        base_cfg=base_cfg,
+        evaluator_runtime_config=evaluator_runtime_config,
     )
-    evaluator_max_attempts_per_question = int(
-        qa_cfg.get("qa", {}).get("evaluator", {}).get("max_attempts_per_question", 3)
+    logger.info(
+        "[QABenchmark] Evaluator runtime config max_tool_turns=%s max_attempts=%s chat_max_tokens=%s no_tool_call_patience=%s max_tool_calls_per_turn=%s per_question_concurrency=%s quote_relevance_mode=%s semantic_threshold=%s auto_repair=%s repair_min_score=%.3f min_candidate_chars=%s embedding_provider_enabled=%s",
+        evaluator_runtime_config.max_tool_turns,
+        evaluator_runtime_config.max_attempts_per_question,
+        evaluator_runtime_config.chat_max_tokens,
+        evaluator_runtime_config.no_tool_call_patience,
+        evaluator_runtime_config.max_tool_calls_per_turn,
+        evaluator_runtime_config.per_question_concurrency,
+        evaluator_runtime_config.quote_relevance.mode,
+        evaluator_runtime_config.quote_relevance.semantic_threshold,
+        evaluator_runtime_config.quote_relevance.auto_repair,
+        evaluator_runtime_config.quote_relevance.repair_min_score,
+        evaluator_runtime_config.quote_relevance.min_candidate_chars,
+        evaluator_embedding_provider is not None,
+    )
+    logger.info(
+        "[QABenchmark] Corrector runtime config enabled=%s max_tokens=%s max_examples=%s",
+        corrector_runtime_config.enabled,
+        corrector_runtime_config.max_tokens,
+        corrector_runtime_config.max_examples,
     )
     creator_max_generation_attempts = int(
         qa_cfg.get("qa", {}).get("creator", {}).get("max_generation_attempts", 3)
+    )
+    creator_request_retries = as_positive_int(
+        raw_value=qa_cfg.get("qa", {}).get("creator", {}).get("request_retries"),
+        field_name="qa.creator.request_retries",
+        default_value=3,
+    )
+    evaluator_request_retries = as_positive_int(
+        raw_value=qa_cfg.get("qa", {}).get("evaluator", {}).get("request_retries"),
+        field_name="qa.evaluator.request_retries",
+        default_value=3,
     )
     (
         creator_request_timeout_seconds,
@@ -540,14 +937,15 @@ def execute_command(args: argparse.Namespace) -> int:
             evaluator_llm=evaluator_llm,
             summary_xml=summary_xml,
             source_text=source_text,
-            evaluator_max_tool_turns=max(100, evaluator_max_tool_turns),
-            evaluator_max_attempts_per_question=max(
-                1, evaluator_max_attempts_per_question
-            ),
+            evaluator_runtime_config=evaluator_runtime_config,
+            evaluator_embedding_provider=evaluator_embedding_provider,
             creator_max_generation_attempts=max(1, creator_max_generation_attempts),
+            creator_request_retries=creator_request_retries,
+            evaluator_request_retries=evaluator_request_retries,
             creator_request_timeout_seconds=creator_request_timeout_seconds,
             evaluator_request_timeout_seconds=evaluator_request_timeout_seconds,
             server_stop_timeout_seconds=server_stop_timeout_seconds,
+            corrector_runtime_config=corrector_runtime_config,
         )
     )
 
@@ -610,20 +1008,16 @@ def execute_command(args: argparse.Namespace) -> int:
     verification_path = output_root / "verification.json"
     write_json_with_hash(verification_path, verification_payload)
 
-    print(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "score_out_of_100": score.score_out_of_100,
-                "factualness_correct": score.factualness_correct,
-                "naturalness_correct": score.naturalness_correct,
-                "summary_grounding_pass_count": score.summary_grounding_pass_count,
-                "summary_grounding_pass_rate": score.summary_grounding_pass_rate,
-                "report_path": str(report_path),
-                "verification_path": str(verification_path),
-            },
-            indent=2,
-        )
+    _emit_success_output(
+        output_format=cast(OutputFormat, args.output_format),
+        color_mode=cast(ColorMode, args.color),
+        run_id=run_id,
+        score=score,
+        answers=answers,
+        report_path=report_path,
+        trace_path=trace_path,
+        questions_path=questions_path,
+        verification_path=verification_path,
     )
     return 0
 
@@ -635,7 +1029,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return execute_command(args)
     except (QABenchmarkRuntimeError, MatrixConfigError, QAConfigError) as exc:
-        print(json.dumps({"status": "failed", "error": str(exc)}, indent=2))
+        _emit_failure_output(
+            output_format=cast(OutputFormat, args.output_format),
+            color_mode=cast(ColorMode, args.color),
+            error=str(exc),
+        )
         return 1
 
 

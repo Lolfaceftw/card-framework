@@ -33,7 +33,9 @@ if "openai" not in sys.modules:
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROVIDER_PATH = _ROOT / "providers" / "vllm_provider.py"
-_SPEC = importlib.util.spec_from_file_location("vllm_provider_for_tests", _PROVIDER_PATH)
+_SPEC = importlib.util.spec_from_file_location(
+    "vllm_provider_for_tests", _PROVIDER_PATH
+)
 if _SPEC is None or _SPEC.loader is None:
     raise RuntimeError("Unable to load providers/vllm_provider.py for tests.")
 vllm_provider_module = importlib.util.module_from_spec(_SPEC)
@@ -63,6 +65,30 @@ class _FakeChunk:
         self.choices = [_FakeChoice(delta)]
 
 
+class _FakeToolCallFunctionDelta:
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        arguments: str | None = None,
+    ) -> None:
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeToolCallDelta:
+    def __init__(
+        self,
+        *,
+        index: int,
+        id: str | None = None,
+        function: _FakeToolCallFunctionDelta | None = None,
+    ) -> None:
+        self.index = index
+        self.id = id
+        self.function = function
+
+
 class _FakeCompletions:
     def __init__(self, chunks: list[_FakeChunk]) -> None:
         self._chunks = chunks
@@ -84,6 +110,7 @@ def _build_provider(
     *,
     chunks: list[_FakeChunk],
     enable_thinking: bool = True,
+    fallback_to_reasoning_content: bool = True,
 ) -> tuple[vllm_provider_module.VLLMProvider, _FakeCompletions]:
     monkeypatch.setattr(vllm_provider_module, "OpenAI", _FakeOpenAI)
     monkeypatch.setattr(
@@ -96,9 +123,12 @@ def _build_provider(
         base_url="http://localhost:8000/v1",
         api_key="EMPTY",
         enable_thinking=enable_thinking,
+        fallback_to_reasoning_content=fallback_to_reasoning_content,
     )
     provider._client.completions = _FakeCompletions(chunks)
-    provider._client.chat = types.SimpleNamespace(completions=provider._client.completions)
+    provider._client.chat = types.SimpleNamespace(
+        completions=provider._client.completions
+    )
     return provider, provider._client.completions
 
 
@@ -154,3 +184,114 @@ def test_chat_can_disable_thinking_mode(monkeypatch) -> None:
 
     assert completions.last_kwargs is not None
     assert "extra_body" not in completions.last_kwargs
+
+
+def test_generate_falls_back_to_reasoning_when_content_empty(monkeypatch) -> None:
+    provider, _completions = _build_provider(
+        monkeypatch,
+        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"ok":true}'))],
+    )
+
+    result = provider.generate(
+        system_prompt="sys",
+        user_prompt="user",
+    )
+
+    assert result == '{"ok":true}'
+
+
+def test_chat_falls_back_to_reasoning_when_content_empty(monkeypatch) -> None:
+    provider, _completions = _build_provider(
+        monkeypatch,
+        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"plan":"tool"}'))],
+    )
+
+    message = provider.chat(messages=[{"role": "system", "content": "Summarizer"}])
+    dumped = message.model_dump()
+
+    assert dumped["content"] == '{"plan":"tool"}'
+    assert dumped["reasoning_content"] == '{"plan":"tool"}'
+
+
+def test_generate_can_disable_reasoning_fallback(monkeypatch) -> None:
+    provider, _completions = _build_provider(
+        monkeypatch,
+        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"ok":true}'))],
+        fallback_to_reasoning_content=False,
+    )
+
+    result = provider.generate(
+        system_prompt="sys",
+        user_prompt="user",
+    )
+
+    assert result == ""
+
+
+def test_generate_does_not_fallback_for_unstructured_reasoning(monkeypatch) -> None:
+    provider, _completions = _build_provider(
+        monkeypatch,
+        chunks=[_FakeChunk(_FakeDelta(reasoning_content="step-by-step analysis"))],
+    )
+
+    result = provider.generate(
+        system_prompt="sys",
+        user_prompt="user",
+    )
+
+    assert result == ""
+
+
+def test_chat_can_disable_reasoning_fallback(monkeypatch) -> None:
+    provider, _completions = _build_provider(
+        monkeypatch,
+        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"plan":"tool"}'))],
+        fallback_to_reasoning_content=False,
+    )
+
+    message = provider.chat(messages=[{"role": "system", "content": "Summarizer"}])
+    dumped = message.model_dump()
+
+    assert dumped["content"] == ""
+    assert dumped["reasoning_content"] == '{"plan":"tool"}'
+
+
+def test_chat_does_not_fallback_when_tool_calls_present(monkeypatch) -> None:
+    provider, _completions = _build_provider(
+        monkeypatch,
+        chunks=[
+            _FakeChunk(_FakeDelta(reasoning_content='{"plan":"call tool"}')),
+            _FakeChunk(
+                _FakeDelta(
+                    tool_calls=[
+                        _FakeToolCallDelta(
+                            index=0,
+                            id="call_1",
+                            function=_FakeToolCallFunctionDelta(name="submit_answer"),
+                        )
+                    ]
+                )
+            ),
+            _FakeChunk(
+                _FakeDelta(
+                    tool_calls=[
+                        _FakeToolCallDelta(
+                            index=0,
+                            function=_FakeToolCallFunctionDelta(
+                                arguments='{"question_id":"Q001"}'
+                            ),
+                        )
+                    ]
+                )
+            ),
+        ],
+    )
+
+    message = provider.chat(messages=[{"role": "system", "content": "Evaluator"}])
+    dumped = message.model_dump()
+
+    assert dumped["content"] == ""
+    assert dumped["reasoning_content"] == '{"plan":"call tool"}'
+    assert dumped["tool_calls"][0]["id"] == "call_1"
+    assert dumped["tool_calls"][0]["function"]["name"] == "submit_answer"
+    assert dumped["tool_calls"][0]["function"]["arguments"] == '{"question_id":"Q001"}'

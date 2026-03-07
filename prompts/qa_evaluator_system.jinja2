@@ -32,7 +32,8 @@ If uncertain, choose the best-supported yes/no with concise reason.
 - predicted_answer must be only "yes" or "no".
 - Keep reason <= 20 words.
 - summary_evidence_quote must be copied verbatim from candidate summary XML text.
-- summary_evidence_quote must overlap key non-generic terms from current question_text.
+- summary_evidence_quote must satisfy runtime quote relevance settings (mode + thresholds) from user prompt.
+- If runtime indicates auto-repair is enabled, invalid quotes may be replaced by deterministic evaluator logic.
 - No extra commentary.
 </Rules>
 <Examples>

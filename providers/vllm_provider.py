@@ -8,6 +8,7 @@ behind the LLMProvider strategy interface.
 from __future__ import annotations
 
 from collections.abc import Sequence
+import re
 from typing import Any
 
 import requests
@@ -26,6 +27,7 @@ from llm_provider import (
     normalize_messages,
     normalize_tools,
 )
+from logger_utils import logger
 
 
 class VLLMProvider(LLMProvider):
@@ -36,6 +38,8 @@ class VLLMProvider(LLMProvider):
         base_url: The base URL of the API server (for example ``http://host:8000/v1``).
         api_key: API key (use ``"EMPTY"`` for keyless vLLM servers).
         enable_thinking: Whether to request reasoning/thinking chunks from vLLM.
+        fallback_to_reasoning_content: Use ``reasoning_content`` when final content is empty.
+        fallback_requires_structured_reasoning: Only fallback when reasoning looks structured.
         thinking_extra_body: Optional OpenAI ``extra_body`` payload for reasoning mode.
         request_timeout_seconds: Request timeout applied to model discovery and chat calls.
         response_callback: Optional callback sink for streamed token updates.
@@ -46,6 +50,8 @@ class VLLMProvider(LLMProvider):
         base_url: str,
         api_key: str = "EMPTY",
         enable_thinking: bool = True,
+        fallback_to_reasoning_content: bool = True,
+        fallback_requires_structured_reasoning: bool = True,
         thinking_extra_body: dict[str, Any] | None = None,
         request_timeout_seconds: float = 30.0,
         response_callback: LLMResponseCallback | None = None,
@@ -53,6 +59,11 @@ class VLLMProvider(LLMProvider):
         self.base_url = base_url
         self.api_key = api_key
         self.enable_thinking = enable_thinking
+        self.fallback_to_reasoning_content = bool(fallback_to_reasoning_content)
+        self.fallback_requires_structured_reasoning = bool(
+            fallback_requires_structured_reasoning
+        )
+        self._did_log_reasoning_fallback_warning = False
         self.request_timeout_seconds = max(1.0, float(request_timeout_seconds))
         self.thinking_extra_body = thinking_extra_body or {
             "chat_template_kwargs": {"enable_thinking": True}
@@ -92,6 +103,59 @@ class VLLMProvider(LLMProvider):
             create_kwargs["extra_body"] = self.thinking_extra_body
         return create_kwargs
 
+    def _resolve_streamed_content(
+        self,
+        *,
+        content: str,
+        reasoning: str,
+        operation: str,
+    ) -> str:
+        """
+        Resolve final streamed text, with optional reasoning fallback.
+
+        Some vLLM reasoning models emit only ``reasoning_content`` when thinking is
+        enabled. Falling back prevents empty responses that can trigger retry loops.
+        """
+        normalized_content = content.strip()
+        if normalized_content:
+            return normalized_content
+        if not (self.enable_thinking and self.fallback_to_reasoning_content):
+            return ""
+
+        fallback_content = reasoning.strip()
+        if not fallback_content:
+            return ""
+        if (
+            self.fallback_requires_structured_reasoning
+            and not self._looks_like_structured_output(fallback_content)
+        ):
+            return ""
+
+        if not self._did_log_reasoning_fallback_warning:
+            self._did_log_reasoning_fallback_warning = True
+            logger.warning(
+                "[VLLMProvider] Empty content in %s; falling back to reasoning_content (chars=%s).",
+                operation,
+                len(fallback_content),
+            )
+        return fallback_content
+
+    @staticmethod
+    def _looks_like_structured_output(candidate: str) -> bool:
+        """Return whether a text payload looks like JSON/XML/fenced structured data."""
+        text = candidate.strip()
+        if not text:
+            return False
+        if "```" in text:
+            return True
+        if "{" in text and "}" in text:
+            return True
+        if "[" in text and "]" in text:
+            return True
+        if re.search(r"</?[A-Za-z][^>]*>", text):
+            return True
+        return False
+
     def generate(
         self,
         system_prompt: str,
@@ -116,6 +180,7 @@ class VLLMProvider(LLMProvider):
         response = self._client.chat.completions.create(**create_kwargs)
 
         full_content = ""
+        full_thought = ""
         self._response_callback.on_start("Agent")
         try:
             for chunk in response:
@@ -125,6 +190,7 @@ class VLLMProvider(LLMProvider):
 
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                     self._response_callback.on_thought_token(delta.reasoning_content)
+                    full_thought += delta.reasoning_content
 
                 if hasattr(delta, "content") and delta.content:
                     self._response_callback.on_content_token(delta.content)
@@ -132,7 +198,11 @@ class VLLMProvider(LLMProvider):
         finally:
             self._response_callback.on_complete()
 
-        return full_content.strip()
+        return self._resolve_streamed_content(
+            content=full_content,
+            reasoning=full_thought,
+            operation="generate",
+        )
 
     def chat(
         self,
@@ -214,9 +284,16 @@ class VLLMProvider(LLMProvider):
             )
             for index, tc in enumerate(tool_calls_data)
         ]
+        resolved_content = full_content
+        if not final_tool_calls:
+            resolved_content = self._resolve_streamed_content(
+                content=full_content,
+                reasoning=full_thought,
+                operation="chat",
+            )
 
         return AssistantMessage(
-            content=full_content,
+            content=resolved_content,
             tool_calls=final_tool_calls if final_tool_calls else None,
-            reasoning_content=full_thought if full_thought else None,
+            reasoning_content=full_thought.strip() if full_thought.strip() else None,
         )

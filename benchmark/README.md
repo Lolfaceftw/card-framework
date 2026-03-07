@@ -38,3 +38,14 @@ Supported sources:
 - `local`
 - `qmsum`
 - `ami`
+
+## MRCR
+
+```bash
+uv run python -m benchmark.mrcr
+```
+
+`benchmark/mrcr.py` resolves the `vllm_default` provider from
+`benchmark/provider_profiles.yaml`, then applies endpoint overrides from
+`benchmark/qa_config.yaml`. You can override connection settings with
+`VLLM_BASE_URL`, `VLLM_API_KEY`, and `VLLM_TIMEOUT_SECONDS`.

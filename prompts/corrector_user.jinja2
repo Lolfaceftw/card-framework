@@ -1,0 +1,19 @@
+<Target agent>
+{{ target_agent }}
+</Target agent>
+<Failure metadata>
+- failure_type: {{ failure_type }}
+- attempt: {{ attempt }}/{{ max_attempts }}
+</Failure metadata>
+<Failure context>
+{{ failure_context }}
+</Failure context>
+<Latest output>
+{{ latest_output }}
+</Latest output>
+<Expected contract>
+{{ expected_contract }}
+</Expected contract>
+<Task>
+Produce correction_instruction and few_shot_examples so the next retry fixes this exact failure mode.
+</Task>

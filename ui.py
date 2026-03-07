@@ -62,12 +62,15 @@ class ConsoleManager:
             {
                 "system": "dim italic white",
                 "status": "yellow",
+                "status_spawn": "bold green",
+                "status_close": "bold cyan",
                 "error": "bold red",
                 "agent_name": "bold blue",
                 "thought": "grey46",
                 "Retrieval": "cyan",
                 "Summarizer": "green",
                 "Critic": "magenta",
+                "Corrector": "yellow",
                 "tool_name": "bold yellow",
                 "tool_args": "dim cyan",
                 "tool_result": "dim green",
@@ -106,12 +109,18 @@ class ConsoleManager:
         """Prints a status update; supports in-place inline updates."""
         del kwargs
         rendered = f"Status: {message}"
+        status_style = "status"
+        normalized_message = message.strip().upper()
+        if normalized_message.startswith("AGENT SPAWN"):
+            status_style = "status_spawn"
+        elif normalized_message.startswith("AGENT CLOSE"):
+            status_style = "status_close"
         if inline:
             trailing_padding = ""
             if len(rendered) < self._last_inline_status_len:
                 trailing_padding = " " * (self._last_inline_status_len - len(rendered))
             self.console.print(
-                f"[status]{rendered}{trailing_padding}[/status]",
+                f"[{status_style}]{rendered}{trailing_padding}[/{status_style}]",
                 end="\r",
                 highlight=False,
                 soft_wrap=False,
@@ -124,7 +133,7 @@ class ConsoleManager:
             return
 
         self._clear_inline_status()
-        self.console.print(f"[status]{rendered}[/status]")
+        self.console.print(f"[{status_style}]{rendered}[/{status_style}]")
 
     def print_error(self, message: str):
         """Prints an error message."""
@@ -160,7 +169,7 @@ class ConsoleManager:
         # Pick color based on agent name, default to white
         border_style = (
             agent_name
-            if agent_name in ["Retrieval", "Summarizer", "Critic"]
+            if agent_name in ["Retrieval", "Summarizer", "Critic", "Corrector"]
             else "white"
         )
 
@@ -189,7 +198,7 @@ class ConsoleManager:
         self._clear_inline_status()
         border_style = (
             agent_name
-            if agent_name in ["Retrieval", "Summarizer", "Critic"]
+            if agent_name in ["Retrieval", "Summarizer", "Critic", "Corrector"]
             else "white"
         )
 
