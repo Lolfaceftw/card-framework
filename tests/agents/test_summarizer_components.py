@@ -42,6 +42,40 @@ class FakeToolRegistry:
         return [{"type": "function", "function": {"name": "noop"}}]
 
 
+class FakeFailingMutationRegistry:
+    """Registry stub that reports malformed mutation arguments as tool errors."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def dispatch(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        self.calls.append((name, dict(arguments)))
+        if name == "add_speaker_message":
+            return {
+                "error": "Argument 'speaker_id' is required.",
+                "error_code": "missing_speaker_id_argument",
+            }
+        if name == "estimate_duration":
+            return {
+                "total_estimated_seconds": 60.0,
+                "budget": {
+                    "in_budget": True,
+                    "min_seconds": 50.0,
+                    "max_seconds": 70.0,
+                },
+            }
+        if name == "count_words":
+            return {"total_word_count": 12}
+        if name == "save_draft":
+            return {"total_messages": 1}
+        return {"status": "ok"}
+
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        return [{"type": "function", "function": {"name": "noop"}}]
+
+
 def test_loop_controller_builds_context_and_invokes_run_loop() -> None:
     event_bus = create_event_bus()
     captured: dict[str, Any] = {}
@@ -209,3 +243,43 @@ def test_tool_dispatcher_enters_bounded_review_mode_after_auto_save() -> None:
     assert context_data["chat_max_tokens"] == 256
     assert messages[-1]["role"] == "user"
     assert str(messages[-1]["content"]).startswith("[DRAFT_REVIEW]")
+
+
+def test_tool_dispatcher_records_mutation_error_without_auto_tools() -> None:
+    dispatcher = SummarizerToolDispatcher(
+        agent_name="Summarizer",
+        event_bus=create_event_bus(),
+    )
+    registry = FakeFailingMutationRegistry()
+    context_data: dict[str, Any] = {
+        "tool_registry": registry,
+        "target_seconds": 60,
+        "duration_tolerance_ratio": 0.05,
+        "draft_ready_for_review": False,
+    }
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]
+
+    asyncio.run(
+        dispatcher.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "add_speaker_message",
+                    "arguments": {},
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+
+    assert registry.calls == [("add_speaker_message", {})]
+    tool_messages = [
+        message
+        for message in messages
+        if message.get("role") == "tool" and message.get("tool_call_id") == "call_1"
+    ]
+    assert len(tool_messages) == 1
+    payload = json.loads(str(tool_messages[0]["content"]))
+    assert payload["error_code"] == "missing_speaker_id_argument"
+    assert context_data["draft_ready_for_review"] is False

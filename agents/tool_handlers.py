@@ -61,6 +61,33 @@ class ToolRegistry:
         return await handler.execute(arguments)
 
 
+def _require_non_empty_string_argument(
+    arguments: dict[str, Any],
+    argument_name: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Return one normalized string argument or a structured validation error."""
+    raw_value = arguments.get(argument_name)
+    if raw_value is None:
+        return None, {
+            "error": f"Argument '{argument_name}' is required.",
+            "error_code": f"missing_{argument_name}_argument",
+        }
+    if not isinstance(raw_value, str):
+        return None, {
+            "error": f"Argument '{argument_name}' must be a string.",
+            "error_code": f"invalid_{argument_name}_argument",
+            argument_name: raw_value,
+        }
+
+    normalized_value = raw_value.strip()
+    if not normalized_value:
+        return None, {
+            "error": f"Argument '{argument_name}' must be a non-empty string.",
+            "error_code": f"empty_{argument_name}_argument",
+        }
+    return normalized_value, None
+
+
 class BudgetContext:
     """Compute duration-budget statistics from the current registry state."""
 
@@ -182,9 +209,24 @@ class AddSpeakerMessageHandler(ToolHandler):
         }
 
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        speaker_id = str(arguments["speaker_id"])
-        content = str(arguments["content"])
-        emo_preset = str(arguments["emo_preset"])
+        speaker_id, speaker_error = _require_non_empty_string_argument(
+            arguments, "speaker_id"
+        )
+        if speaker_error is not None:
+            return speaker_error
+
+        content, content_error = _require_non_empty_string_argument(
+            arguments, "content"
+        )
+        if content_error is not None:
+            return content_error
+
+        emo_preset, emo_preset_error = _require_non_empty_string_argument(
+            arguments, "emo_preset"
+        )
+        if emo_preset_error is not None:
+            return emo_preset_error
+
         turn_id = uuid.uuid4().hex
         if self._live_draft_session is not None:
             self._live_draft_session.render_turn(
@@ -487,7 +529,10 @@ class QueryTranscriptHandler(ToolHandler):
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         from agents.dtos import RetrieveTaskRequest
 
-        query = str(arguments["query"])
+        query, query_error = _require_non_empty_string_argument(arguments, "query")
+        if query_error is not None:
+            return query_error
+
         top_k = arguments.get("top_k", 5)
         retrieve_task = RetrieveTaskRequest(action="retrieve", query=query, top_k=top_k)
         raw_response = await self._agent_client.send_task(

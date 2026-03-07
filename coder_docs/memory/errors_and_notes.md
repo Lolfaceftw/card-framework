@@ -1,5 +1,9 @@
 # Errors And Notes
 
+### 2026-03-07T22:40:46+08:00 - Summarizer Tool Handlers Must Reject Empty Required Args Without Crashing
+- Problem: A stage-2 live-drafting run hit `add_speaker_message {}` from the summarizer, and `AddSpeakerMessageHandler.execute()` indexed `arguments["speaker_id"]` directly. That raised `KeyError('speaker_id')`, crashed the A2A worker, and aborted the whole pipeline instead of returning a normal tool error the loop could recover from.
+- Solution: Validate required string arguments in the summarizer tool handlers before use, return structured `missing_*` or `empty_*` tool errors for malformed calls, and keep regression tests around empty `add_speaker_message` and `query_transcript` payloads plus dispatcher behavior so bad tool args stay inside the tool loop.
+
 ### 2026-03-07T21:36:42+08:00 - Stage-4 Planner Output Must Stay Sparse And Survive Truncated JSON
 - Problem: The interjector prompt asked for one decision object per eligible host turn, including explicit false entries. On longer summaries that bloated the planner response enough for the model to stop mid-JSON, after which stage-4 parsed nothing and silently fell back to all-false decisions with `artifact_count=0`.
 - Solution: Make the planner return only positive interjection decisions, keep missing turns implicitly false, and salvage any fully formed decision objects from a truncated `decisions` array so stage-4 can still render usable overlaps when the model response stops early.
