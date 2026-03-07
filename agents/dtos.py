@@ -104,6 +104,36 @@ class QAEvaluatorTaskResponse(BaseModel):
     answers: list[dict[str, Any]]
 
 
+CorrectorTargetAgent = Literal["GroundTruthCreator", "Evaluator"]
+
+
+class CorrectorFewShotExample(BaseModel):
+    """One bad-to-good correction example produced by Corrector."""
+
+    bad_example: str
+    corrected_example: str
+    rationale: str
+
+
+class CorrectorTaskRequest(BaseModel):
+    """Request payload for corrective guidance generation."""
+
+    target_agent: CorrectorTargetAgent
+    failure_type: str
+    failure_context: str
+    latest_output: str = ""
+    attempt: int = 1
+    max_attempts: int = 1
+    expected_contract: str = ""
+
+
+class CorrectorTaskResponse(BaseModel):
+    """Response payload containing correction instruction and examples."""
+
+    correction_instruction: str
+    few_shot_examples: list[CorrectorFewShotExample] = Field(default_factory=list)
+
+
 # Common LLM DTOs
 class Function(BaseModel):
     name: str

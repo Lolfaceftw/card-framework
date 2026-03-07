@@ -10,7 +10,8 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 
 from agents.base import BaseA2AExecutor
-from agents.dtos import GroundTruthCreatorTaskRequest
+from agents.corrector import CorrectionAdvisor, render_correction_guidance
+from agents.dtos import CorrectorTaskRequest, GroundTruthCreatorTaskRequest
 from benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
 from events import EventBus, get_event_bus
 from llm_provider import LLMProvider
@@ -28,12 +29,14 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
         llm: LLMProvider,
         max_generation_attempts: int = 3,
         event_bus: EventBus | None = None,
+        corrector_agent: CorrectionAdvisor | None = None,
     ) -> None:
         """Initialize generator executor and injected collaborators."""
         super().__init__("GroundTruthCreator")
         self.llm = llm
         self.max_generation_attempts = max(1, int(max_generation_attempts))
         self.event_bus = event_bus if event_bus is not None else get_event_bus()
+        self.corrector_agent = corrector_agent
 
     @staticmethod
     def _extract_json_payload(raw_text: str) -> dict[str, Any] | None:
@@ -118,6 +121,7 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
         dimension: str,
         expected_ids: list[str],
         avoid_question_texts: list[str] | None = None,
+        correction_guidance: str | None = None,
     ) -> str:
         """Build strict per-batch prompt to reduce truncation and schema drift."""
         avoid_lines = ""
@@ -129,6 +133,9 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
                 f"{quoted}\n"
                 "</Avoid intents>\n"
             )
+        correction_lines = ""
+        if correction_guidance:
+            correction_lines = f"{correction_guidance}\n"
         return (
             "<Objective>\n"
             f"Generate exactly {len(expected_ids)} {dimension} questions.\n"
@@ -137,6 +144,7 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
             "Use only source transcript evidence. No prose outside JSON.\n"
             "</Context>\n"
             f"{avoid_lines}"
+            f"{correction_lines}"
             "<Inputs>\n"
             f"Dimension: {dimension}\n"
             f"Required question_ids in exact order: {', '.join(expected_ids)}\n"
@@ -164,6 +172,75 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
             "- Include at least one source_evidence_id per question.\n"
             "</Rules>"
         )
+
+    @staticmethod
+    def _build_expected_contract(*, dimension: str, expected_ids: list[str]) -> str:
+        """Return explicit output contract for current generation batch."""
+        return (
+            "Return a single JSON object with key `questions`.\n"
+            f"Each question must use dimension={dimension}.\n"
+            f"Required IDs in order: {', '.join(expected_ids)}.\n"
+            "Each item must contain question_id, dimension, question_text, "
+            "expected_answer(yes/no), source_evidence_ids, and speaker_ids."
+        )
+
+    def _request_correction_guidance(
+        self,
+        *,
+        dimension: str,
+        expected_ids: list[str],
+        failure_type: str,
+        attempt: int,
+        failure_context: str,
+        latest_output: str,
+    ) -> str:
+        """Request correction guidance for one failed generation attempt."""
+        if self.corrector_agent is None:
+            return ""
+
+        request = CorrectorTaskRequest(
+            target_agent="GroundTruthCreator",
+            failure_type=failure_type,
+            failure_context=failure_context,
+            latest_output=latest_output,
+            attempt=attempt,
+            max_attempts=self.max_generation_attempts,
+            expected_contract=self._build_expected_contract(
+                dimension=dimension,
+                expected_ids=expected_ids,
+            ),
+        )
+        try:
+            guidance = self.corrector_agent.build_retry_guidance(request)
+        except Exception as exc:
+            logger.warning(
+                "[GroundTruthCreator] Corrector failed dimension=%s batch=%s-%s attempt=%s/%s: %s",
+                dimension,
+                expected_ids[0],
+                expected_ids[-1],
+                attempt,
+                self.max_generation_attempts,
+                exc,
+            )
+            return ""
+
+        rendered = render_correction_guidance(guidance, max_examples=2)
+        if rendered:
+            logger.info(
+                "[GroundTruthCreator] Applied Corrector guidance dimension=%s batch=%s-%s attempt=%s/%s",
+                dimension,
+                expected_ids[0],
+                expected_ids[-1],
+                attempt,
+                self.max_generation_attempts,
+            )
+            self.event_bus.publish(
+                "agent_message",
+                agent_name="Corrector",
+                message=rendered,
+                markdown=False,
+            )
+        return rendered
 
     def _validate_batch_payload(
         self,
@@ -244,12 +321,14 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
         avoid_question_texts: list[str] = (
             list(disallowed_question_texts) if disallowed_question_texts else []
         )
+        correction_guidance = ""
         for attempt in range(1, self.max_generation_attempts + 1):
             user_prompt = self._build_batch_user_prompt(
                 source_text=source_text,
                 dimension=dimension,
                 expected_ids=expected_ids,
                 avoid_question_texts=avoid_question_texts,
+                correction_guidance=correction_guidance,
             )
             raw_response = self.llm.generate(
                 system_prompt=system_prompt,
@@ -267,6 +346,21 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
                     self.max_generation_attempts,
                     raw_response[:500].replace("\n", "\\n"),
                 )
+                if attempt < self.max_generation_attempts:
+                    correction_guidance = self._request_correction_guidance(
+                        dimension=dimension,
+                        expected_ids=expected_ids,
+                        failure_type="json_parse_failed",
+                        attempt=attempt,
+                        failure_context=(
+                            "GroundTruthCreator failed to parse model output as JSON.\n"
+                            f"dimension={dimension}\n"
+                            f"expected_ids={', '.join(expected_ids)}\n"
+                            f"attempt={attempt}/{self.max_generation_attempts}\n"
+                            f"batch_prompt=\n{user_prompt}\n"
+                        ),
+                        latest_output=raw_response,
+                    )
                 continue
 
             batch = self._validate_batch_payload(
@@ -283,6 +377,21 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
                     attempt,
                     self.max_generation_attempts,
                 )
+                if attempt < self.max_generation_attempts:
+                    correction_guidance = self._request_correction_guidance(
+                        dimension=dimension,
+                        expected_ids=expected_ids,
+                        failure_type="schema_validation_failed",
+                        attempt=attempt,
+                        failure_context=(
+                            "GroundTruthCreator JSON payload failed schema validation.\n"
+                            f"dimension={dimension}\n"
+                            f"expected_ids={', '.join(expected_ids)}\n"
+                            f"attempt={attempt}/{self.max_generation_attempts}\n"
+                            f"batch_prompt=\n{user_prompt}\n"
+                        ),
+                        latest_output=raw_response,
+                    )
                 continue
             intent_to_question_text = {
                 self._intent_key(question.question_text): question.question_text
@@ -309,6 +418,22 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
                     self.max_generation_attempts,
                     len(overlap_intents),
                 )
+                if attempt < self.max_generation_attempts:
+                    correction_guidance = self._request_correction_guidance(
+                        dimension=dimension,
+                        expected_ids=expected_ids,
+                        failure_type="duplicate_intent_failed",
+                        attempt=attempt,
+                        failure_context=(
+                            "GroundTruthCreator produced duplicate question intent overlap.\n"
+                            f"dimension={dimension}\n"
+                            f"expected_ids={', '.join(expected_ids)}\n"
+                            f"attempt={attempt}/{self.max_generation_attempts}\n"
+                            f"duplicate_intents={', '.join(overlap_intents)}\n"
+                            f"batch_prompt=\n{user_prompt}\n"
+                        ),
+                        latest_output=raw_response,
+                    )
                 continue
             return batch
 
@@ -323,14 +448,6 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
         """Generate questions and return validated JSON payload to caller."""
         del context
         request = GroundTruthCreatorTaskRequest.model_validate(task_data)
-        if (
-            int(request.factual_question_count) != 50
-            or int(request.naturalness_question_count) != 50
-        ):
-            raise ValueError(
-                "GroundTruthCreator currently requires factual_question_count=50 and "
-                "naturalness_question_count=50."
-            )
 
         source_text = request.source_text.strip()
         if not source_text:

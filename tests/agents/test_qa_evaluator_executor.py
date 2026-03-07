@@ -6,7 +6,7 @@ import asyncio
 import json
 import sys
 import types
-from typing import Any
+from typing import Any, Literal
 
 # Provide minimal `numpy` module stub for llm_provider typing imports.
 if "numpy" not in sys.modules:
@@ -86,7 +86,14 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.server.events"] = events_module
     sys.modules["a2a.utils"] = utils_module
 
-from benchmark.qa_contracts import GroundTruthSet
+from benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
+from benchmark.qa_settings import EvaluatorRuntimeConfig, QuoteRelevanceConfig
+from events import EventBus
+from agents.dtos import (
+    CorrectorFewShotExample,
+    CorrectorTaskRequest,
+    CorrectorTaskResponse,
+)
 from agents.qa_evaluator import QAEvaluatorExecutor
 from prompt_manager import PromptManager
 
@@ -153,6 +160,30 @@ class _FakeEventQueue:
         self.events.append(event)
 
 
+class _FakeCorrector:
+    """Deterministic corrector stub that records retry failure payloads."""
+
+    def __init__(self) -> None:
+        self.requests: list[CorrectorTaskRequest] = []
+
+    def build_retry_guidance(
+        self, request: CorrectorTaskRequest
+    ) -> CorrectorTaskResponse:
+        self.requests.append(request)
+        return CorrectorTaskResponse(
+            correction_instruction=(
+                "Use the exact current question_id and include a verbatim relevant summary quote."
+            ),
+            few_shot_examples=[
+                CorrectorFewShotExample(
+                    bad_example='submit_answer({"question_id":"Q099","predicted_answer":"yes","summary_evidence_quote":"..."})',
+                    corrected_example='submit_answer({"question_id":"Q001","predicted_answer":"yes","summary_evidence_quote":"exact summary quote"})',
+                    rationale="Current turn id must match and quote must be grounded.",
+                )
+            ],
+        )
+
+
 def _build_questions() -> list[dict[str, Any]]:
     questions: list[dict[str, Any]] = []
     for index in range(1, 51):
@@ -181,6 +212,43 @@ def _build_questions() -> list[dict[str, Any]]:
     return questions
 
 
+def _runtime_config(
+    *,
+    max_tool_turns: int = 10,
+    max_attempts_per_question: int = 3,
+    chat_max_tokens: int = 160,
+    no_tool_call_patience: int = 3,
+    max_tool_calls_per_turn: int = 1,
+    per_question_concurrency: int = 1,
+    quote_mode: Literal[
+        "lexical_overlap", "semantic_similarity", "hybrid", "off"
+    ] = "lexical_overlap",
+    semantic_threshold: float | None = None,
+    auto_repair: bool = True,
+    repair_min_score: float = 0.25,
+    min_candidate_chars: int = 6,
+) -> EvaluatorRuntimeConfig:
+    """Build evaluator runtime config fixture for deterministic unit tests."""
+    return EvaluatorRuntimeConfig(
+        max_tool_turns=max_tool_turns,
+        max_attempts_per_question=max_attempts_per_question,
+        chat_max_tokens=chat_max_tokens,
+        no_tool_call_patience=no_tool_call_patience,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+        per_question_concurrency=per_question_concurrency,
+        quote_relevance=QuoteRelevanceConfig(
+            mode=quote_mode,
+            min_shared_tokens=1,
+            min_distinctive_shared_tokens=1,
+            min_token_length=3,
+            semantic_threshold=semantic_threshold,
+            auto_repair=auto_repair,
+            repair_min_score=repair_min_score,
+            min_candidate_chars=min_candidate_chars,
+        ),
+    )
+
+
 def setup_function(function: object) -> None:
     """Reset prompt environment for test isolation."""
     del function
@@ -193,18 +261,38 @@ def test_runtime_context_enforces_one_tool_call_per_turn() -> None:
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>Candidate summary</SPEAKER_00>",
-        max_attempts_per_question=3,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=3),
     )
     assert context_data["max_tool_calls_per_turn"] == 1
 
 
+def test_constructor_accepts_legacy_positional_event_bus_argument() -> None:
+    """Allow legacy positional EventBus argument without mis-parsing runtime config."""
+    legacy_bus = EventBus()
+    executor = QAEvaluatorExecutor(
+        _FakeLLM([]),
+        12,
+        4,
+        legacy_bus,  # type: ignore[arg-type]
+    )
+
+    assert executor.event_bus is legacy_bus
+    assert executor.runtime_config.max_tool_turns == 12
+    assert executor.runtime_config.max_attempts_per_question == 4
+
+
 def test_process_tool_calls_retries_invalid_question_id_without_advancing() -> None:
-    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=1)
+    fake_corrector = _FakeCorrector()
+    executor = QAEvaluatorExecutor(
+        llm=_FakeLLM([]),
+        max_tool_turns=1,
+        corrector_agent=fake_corrector,
+    )
     question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>Candidate summary</SPEAKER_00>",
-        max_attempts_per_question=3,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=3),
     )
     messages: list[dict[str, Any]] = []
 
@@ -232,6 +320,94 @@ def test_process_tool_calls_retries_invalid_question_id_without_advancing() -> N
     assert len(answers) == 0
     assert context_data["current_question_index"] == 0
     assert context_data["question_attempts"]["Q001"] == 1
+    assert len(fake_corrector.requests) == 1
+    assert fake_corrector.requests[0].target_agent == "Evaluator"
+    assert "invalid_question_id" in fake_corrector.requests[0].failure_type
+    retry_prompts = [item for item in messages if item.get("role") == "user"]
+    assert retry_prompts
+    assert "<Corrector guidance>" in str(retry_prompts[-1]["content"])
+
+
+def test_process_tool_calls_dedupes_corrector_for_same_failure_signature() -> None:
+    """Call Corrector once for repeated retries with same question and status."""
+    fake_corrector = _FakeCorrector()
+    executor = QAEvaluatorExecutor(
+        llm=_FakeLLM([]),
+        max_tool_turns=1,
+        corrector_agent=fake_corrector,
+    )
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>Candidate summary</SPEAKER_00>",
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=3),
+    )
+    messages: list[dict[str, Any]] = []
+
+    for _ in range(2):
+        should_break, final_result = asyncio.run(
+            executor.process_tool_calls(
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "name": "submit_answer",
+                        "arguments": {
+                            "question_id": "Q999",
+                            "predicted_answer": "yes",
+                            "summary_evidence_quote": "Candidate summary",
+                        },
+                    }
+                ],
+                messages=messages,
+                context_data=context_data,
+            )
+        )
+        assert should_break is False
+        assert final_result is None
+
+    assert len(fake_corrector.requests) == 1
+
+
+def test_corrector_receives_original_submitted_quote_after_repair_failure() -> None:
+    """Preserve original quote in Corrector context even when evaluator clears it."""
+    fake_corrector = _FakeCorrector()
+    executor = QAEvaluatorExecutor(
+        llm=_FakeLLM([]),
+        max_tool_turns=1,
+        corrector_agent=fake_corrector,
+    )
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>Only unrelated sentence.</SPEAKER_00>",
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=2),
+    )
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "yes",
+                        "summary_evidence_quote": "Hallucinated quote text",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+
+    assert should_break is False
+    assert final_result is None
+    assert len(fake_corrector.requests) == 1
+    request = fake_corrector.requests[0]
+    assert "Hallucinated quote text" in request.failure_context
+    assert "Hallucinated quote text" in request.latest_output
 
 
 def test_process_tool_calls_marks_incorrect_after_max_retry_exceeded() -> None:
@@ -240,7 +416,7 @@ def test_process_tool_calls_marks_incorrect_after_max_retry_exceeded() -> None:
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>Candidate summary</SPEAKER_00>",
-        max_attempts_per_question=2,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=2),
     )
     messages: list[dict[str, Any]] = []
 
@@ -279,7 +455,7 @@ def test_process_tool_calls_requires_summary_quote_grounding() -> None:
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>Only this sentence is present.</SPEAKER_00>",
-        max_attempts_per_question=1,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
     )
     messages: list[dict[str, Any]] = []
 
@@ -316,7 +492,7 @@ def test_process_tool_calls_rejects_irrelevant_summary_quote() -> None:
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>Unrelated quote about psychology.</SPEAKER_00>",
-        max_attempts_per_question=1,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
     )
     messages: list[dict[str, Any]] = []
 
@@ -342,7 +518,7 @@ def test_process_tool_calls_rejects_irrelevant_summary_quote() -> None:
     assert len(context_data["answers"]) == 1
     assert (
         context_data["answers"][0].tool_status
-        == "irrelevant_summary_evidence_max_retry_exceeded"
+        == "missing_summary_evidence_max_retry_exceeded"
     )
 
 
@@ -352,7 +528,7 @@ def test_process_tool_calls_rejects_generic_overlap_quote() -> None:
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>Welcome to the podcast intro.</SPEAKER_00>",
-        max_attempts_per_question=1,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
     )
     first_question = question_set.questions[0]
     first_question.question_text = "Does the podcast mention market efficiency?"
@@ -380,7 +556,7 @@ def test_process_tool_calls_rejects_generic_overlap_quote() -> None:
     assert len(context_data["answers"]) == 1
     assert (
         context_data["answers"][0].tool_status
-        == "irrelevant_summary_evidence_max_retry_exceeded"
+        == "missing_summary_evidence_max_retry_exceeded"
     )
 
 
@@ -432,13 +608,30 @@ def test_handle_task_stops_after_no_tool_call_patience() -> None:
     assert len(payload["answers"]) == 100
 
 
+def test_runtime_context_uses_configured_chat_and_patience() -> None:
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    runtime_config = _runtime_config(
+        chat_max_tokens=123,
+        no_tool_call_patience=5,
+        max_tool_calls_per_turn=2,
+    )
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>Candidate summary</SPEAKER_00>",
+        evaluator_runtime_config=runtime_config,
+    )
+    assert context_data["chat_max_tokens"] == 123
+    assert context_data["no_tool_call_patience"] == 5
+    assert context_data["max_tool_calls_per_turn"] == 2
+
+
 def test_process_tool_calls_accepts_when_quote_matches_summary() -> None:
     executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
     question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>Fact sentence in candidate summary.</SPEAKER_00>",
-        max_attempts_per_question=2,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=2),
     )
     messages: list[dict[str, Any]] = []
 
@@ -468,17 +661,289 @@ def test_process_tool_calls_accepts_when_quote_matches_summary() -> None:
     assert context_data["answers"][0].confidence == 0.8
 
 
+def test_process_tool_calls_autocorrects_question_id_for_single_question() -> None:
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    single_question = GroundTruthQuestion.model_validate(
+        {
+            "question_id": "Q001",
+            "dimension": "factualness",
+            "question_text": "Fact question 1?",
+            "expected_answer": "yes",
+            "source_evidence_ids": ["E0001"],
+            "speaker_ids": ["SPEAKER_00"],
+        }
+    )
+    question_set = GroundTruthSet.model_construct(questions=[single_question])
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>Fact sentence in candidate summary.</SPEAKER_00>",
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
+    )
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "WRONG_ID",
+                        "predicted_answer": "yes",
+                        "summary_evidence_quote": "Fact sentence in candidate summary",
+                        "confidence": 0.8,
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+    assert should_break is True
+    assert final_result is not None
+    assert len(context_data["answers"]) == 1
+    assert context_data["answers"][0].tool_status == "accepted"
+
+
+def test_process_tool_calls_auto_repairs_irrelevant_quote_when_enabled() -> None:
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml=(
+            "<SPEAKER_00>Welcome to the Rational Reminder podcast intro.</SPEAKER_00>\n"
+            "<SPEAKER_01>The summary discusses financial planning decisions.</SPEAKER_01>"
+        ),
+        evaluator_runtime_config=_runtime_config(
+            max_attempts_per_question=1,
+            quote_mode="hybrid",
+            auto_repair=True,
+            repair_min_score=0.2,
+        ),
+    )
+    question_set.questions[
+        0
+    ].question_text = "Does the summary mention financial planning?"
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "yes",
+                        "summary_evidence_quote": "Welcome to the Rational Reminder podcast intro.",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+
+    assert should_break is False
+    assert final_result is None
+    assert len(context_data["answers"]) == 1
+    assert context_data["answers"][0].tool_status == "accepted"
+    assert context_data["answers"][0].summary_grounding_pass is True
+    assert (
+        "financial planning"
+        in context_data["answers"][0].summary_evidence_quote.lower()
+    )
+
+
+def test_process_tool_calls_rejects_irrelevant_quote_when_auto_repair_disabled() -> (
+    None
+):
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml=(
+            "<SPEAKER_00>Welcome to the Rational Reminder podcast intro.</SPEAKER_00>\n"
+            "<SPEAKER_01>The summary discusses financial planning decisions.</SPEAKER_01>"
+        ),
+        evaluator_runtime_config=_runtime_config(
+            max_attempts_per_question=1,
+            quote_mode="lexical_overlap",
+            auto_repair=False,
+        ),
+    )
+    question_set.questions[
+        0
+    ].question_text = "Does the summary mention financial planning?"
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "yes",
+                        "summary_evidence_quote": "Welcome to the Rational Reminder podcast intro.",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+
+    assert should_break is False
+    assert final_result is None
+    assert len(context_data["answers"]) == 1
+    assert (
+        context_data["answers"][0].tool_status
+        == "irrelevant_summary_evidence_max_retry_exceeded"
+    )
+
+
+def test_process_tool_calls_auto_repairs_short_quote_candidate() -> None:
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml=(
+            "<SPEAKER_00>Intro sentence.</SPEAKER_00>\n"
+            "<SPEAKER_01>Tax cuts.</SPEAKER_01>"
+        ),
+        evaluator_runtime_config=_runtime_config(
+            max_attempts_per_question=1,
+            quote_mode="hybrid",
+            auto_repair=True,
+            min_candidate_chars=4,
+            repair_min_score=0.2,
+        ),
+    )
+    question_set.questions[0].question_text = "Does the summary mention tax cuts?"
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "yes",
+                        "summary_evidence_quote": "Intro sentence.",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+
+    assert should_break is False
+    assert final_result is None
+    assert len(context_data["answers"]) == 1
+    assert context_data["answers"][0].tool_status == "accepted"
+    assert "tax cuts" in context_data["answers"][0].summary_evidence_quote.lower()
+
+
+def test_process_tool_calls_accepts_quote_when_relevance_mode_off() -> None:
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>Unrelated quote about psychology.</SPEAKER_00>",
+        evaluator_runtime_config=_runtime_config(
+            max_attempts_per_question=1,
+            quote_mode="off",
+        ),
+    )
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "yes",
+                        "summary_evidence_quote": "Unrelated quote about psychology",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+    assert should_break is False
+    assert final_result is None
+    assert len(context_data["answers"]) == 1
+    assert context_data["answers"][0].tool_status == "accepted"
+    assert context_data["answers"][0].summary_grounding_pass is True
+
+
+def test_process_tool_calls_rejects_quote_with_semantic_mode_and_high_threshold() -> (
+    None
+):
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>The summary says market momentum appeared briefly.</SPEAKER_00>",
+        evaluator_runtime_config=_runtime_config(
+            max_attempts_per_question=1,
+            quote_mode="semantic_similarity",
+            semantic_threshold=0.95,
+        ),
+    )
+    question_set.questions[
+        0
+    ].question_text = "Does the summary discuss dividend taxation?"
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "yes",
+                        "summary_evidence_quote": (
+                            "The summary says market momentum appeared briefly"
+                        ),
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+    assert should_break is False
+    assert final_result is None
+    assert len(context_data["answers"]) == 1
+    assert (
+        context_data["answers"][0].tool_status
+        == "missing_summary_evidence_max_retry_exceeded"
+    )
+
+
 def test_process_tool_calls_accepts_specific_overlap_quote() -> None:
     executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
     question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="<SPEAKER_00>The Magellan fund outperformed peers over 10 years.</SPEAKER_00>",
-        max_attempts_per_question=1,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
     )
-    question_set.questions[0].question_text = (
-        "Does the summary mention the Magellan fund performance?"
-    )
+    question_set.questions[
+        0
+    ].question_text = "Does the summary mention the Magellan fund performance?"
     messages: list[dict[str, Any]] = []
 
     should_break, final_result = asyncio.run(
@@ -512,11 +977,11 @@ def test_process_tool_calls_accepts_speaker_token_overlap_quote() -> None:
     context_data = QAEvaluatorExecutor._build_runtime_context(
         question_set=question_set,
         summary_xml="SPEAKER_02 The witness statement is confirmed.",
-        max_attempts_per_question=1,
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
     )
-    question_set.questions[0].question_text = (
-        "Does SPEAKER_02 provide a witness statement?"
-    )
+    question_set.questions[
+        0
+    ].question_text = "Does SPEAKER_02 provide a witness statement?"
     messages: list[dict[str, Any]] = []
 
     should_break, final_result = asyncio.run(
@@ -542,6 +1007,76 @@ def test_process_tool_calls_accepts_speaker_token_overlap_quote() -> None:
     assert final_result is None
     assert len(context_data["answers"]) == 1
     assert context_data["answers"][0].tool_status == "accepted"
+
+
+def test_process_tool_calls_accepts_no_answer_without_quote() -> None:
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>Candidate summary exists.</SPEAKER_00>",
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
+    )
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "no",
+                        "summary_evidence_quote": "",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+    assert should_break is False
+    assert final_result is None
+    assert len(context_data["answers"]) == 1
+    assert context_data["answers"][0].tool_status == "accepted"
+    assert context_data["answers"][0].predicted_answer == "no"
+    assert context_data["answers"][0].summary_grounding_pass is False
+
+
+def test_process_tool_calls_normalizes_binary_answer_variants() -> None:
+    executor = QAEvaluatorExecutor(llm=_FakeLLM([]), max_tool_turns=10)
+    question_set = GroundTruthSet.model_validate({"questions": _build_questions()})
+    context_data = QAEvaluatorExecutor._build_runtime_context(
+        question_set=question_set,
+        summary_xml="<SPEAKER_00>Candidate summary exists.</SPEAKER_00>",
+        evaluator_runtime_config=_runtime_config(max_attempts_per_question=1),
+    )
+    question_set.questions[0].question_text = "Candidate summary exists."
+    messages: list[dict[str, Any]] = []
+
+    should_break, final_result = asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "submit_answer",
+                    "arguments": {
+                        "question_id": "Q001",
+                        "predicted_answer": "TRUE",
+                        "summary_evidence_quote": "Candidate summary exists.",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+    assert should_break is False
+    assert final_result is None
+    assert len(context_data["answers"]) == 1
+    assert context_data["answers"][0].tool_status == "accepted"
+    assert context_data["answers"][0].predicted_answer == "yes"
 
 
 def test_handle_task_does_not_leak_expected_answer_to_prompt() -> None:

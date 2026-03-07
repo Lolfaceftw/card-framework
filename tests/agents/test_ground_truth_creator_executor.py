@@ -89,6 +89,11 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.utils"] = utils_module
 
 from agents.ground_truth_creator import GroundTruthCreatorExecutor
+from agents.dtos import (
+    CorrectorFewShotExample,
+    CorrectorTaskRequest,
+    CorrectorTaskResponse,
+)
 from prompt_manager import PromptManager
 
 
@@ -129,6 +134,28 @@ class _FakeEventQueue:
 
     async def enqueue_event(self, event: object) -> None:
         self.events.append(event)
+
+
+class _FakeCorrector:
+    """Deterministic corrector stub that records incoming failure context."""
+
+    def __init__(self) -> None:
+        self.requests: list[CorrectorTaskRequest] = []
+
+    def build_retry_guidance(
+        self, request: CorrectorTaskRequest
+    ) -> CorrectorTaskResponse:
+        self.requests.append(request)
+        return CorrectorTaskResponse(
+            correction_instruction="Return JSON only and follow exact question IDs.",
+            few_shot_examples=[
+                CorrectorFewShotExample(
+                    bad_example="Here are the questions: [...]",
+                    corrected_example='{"questions":[{"question_id":"Q001","dimension":"factualness","question_text":"...","expected_answer":"yes","source_evidence_ids":["E0001"],"speaker_ids":["SPEAKER_00"]}]}',
+                    rationale="No prose wrapper and strict schema fields.",
+                )
+            ],
+        )
 
 
 def _build_batch_payload(count: int, *, start_index: int = 1) -> str:
@@ -205,6 +232,38 @@ def test_ground_truth_creator_retries_until_valid_payload() -> None:
     assert len(payload["questions"]) == 100
 
 
+def test_generate_batch_applies_corrector_guidance_on_retry() -> None:
+    """Inject corrector instructions into next attempt when first attempt fails."""
+    fake_llm = _FakeLLM(
+        responses=[
+            "not-json",
+            _build_batch_payload(25, start_index=1),
+        ]
+    )
+    fake_corrector = _FakeCorrector()
+    executor = GroundTruthCreatorExecutor(
+        llm=fake_llm,
+        max_generation_attempts=2,
+        corrector_agent=fake_corrector,
+    )
+
+    batch = executor._generate_batch(
+        system_prompt="system",
+        source_text="[E0001] [SPEAKER_00] Source line",
+        dimension="factualness",
+        expected_ids=[f"Q{index:03d}" for index in range(1, 26)],
+    )
+
+    assert len(batch) == 25
+    assert len(fake_corrector.requests) == 1
+    assert "batch_prompt=" in fake_corrector.requests[0].failure_context
+    assert "<Corrector guidance>" in fake_llm.calls[1]["user_prompt"]
+    assert (
+        "Return JSON only and follow exact question IDs."
+        in fake_llm.calls[1]["user_prompt"]
+    )
+
+
 def test_ground_truth_creator_does_not_use_candidate_summary_field() -> None:
     secret = "<SPEAKER_99>SECRET_CANDIDATE</SPEAKER_99>"
     fake_llm = _FakeLLM(
@@ -245,13 +304,21 @@ def test_validate_batch_payload_truncates_overproduced_questions() -> None:
     assert len(batch) == 25
 
 
-def test_ground_truth_creator_rejects_non_default_question_split() -> None:
+def test_ground_truth_creator_rejects_non_contract_question_split() -> None:
     executor = GroundTruthCreatorExecutor(
-        llm=_FakeLLM([_build_batch_payload(25)]),
+        llm=_FakeLLM(
+            [
+                _build_batch_payload(25, start_index=1),
+                _build_batch_payload(25, start_index=26),
+                _build_batch_payload(25, start_index=51),
+                _build_batch_payload(25, start_index=76),
+                _build_batch_payload(25, start_index=101),
+            ]
+        ),
         max_generation_attempts=1,
     )
     queue = _FakeEventQueue()
-    with pytest.raises(ValueError, match="requires factual_question_count=50"):
+    with pytest.raises(ValueError, match="exactly 50 factualness questions"):
         asyncio.run(
             executor.handle_task(
                 {
@@ -280,8 +347,7 @@ def test_generate_batch_retries_when_batch_overlaps_global_intents() -> None:
         dimension="factualness",
         expected_ids=[f"Q{index:03d}" for index in range(1, 26)],
         disallowed_intents={
-            executor._intent_key(f"duplicate intent {index}?")
-            for index in range(1, 26)
+            executor._intent_key(f"duplicate intent {index}?") for index in range(1, 26)
         },
     )
 

@@ -21,5 +21,12 @@ The current question_id is always in the latest `Turn instruction` message.
 Never answer a previous or future question_id.
 Return no plain text outside tool calls.
 Each tool call must include `summary_evidence_quote` copied exactly from candidate summary XML.
-The quote must overlap key non-generic terms from current `question_text`.
+Quote relevance mode: `{{ quote_relevance_mode }}`.
+Minimum shared tokens (lexical mode): `{{ quote_relevance_min_shared_tokens }}`.
+Minimum distinctive shared tokens (lexical mode): `{{ quote_relevance_min_distinctive_shared_tokens }}`.
+Semantic threshold (semantic mode): `{{ quote_relevance_semantic_threshold }}`.
+Auto repair invalid quotes: `{{ quote_relevance_auto_repair }}`.
+Auto repair minimum score: `{{ quote_relevance_repair_min_score }}`.
+Auto repair minimum candidate chars: `{{ quote_relevance_min_candidate_chars }}`.
+If mode is `off`, relevance overlap checks are disabled, but quote grounding is still required.
 </Output contract>
