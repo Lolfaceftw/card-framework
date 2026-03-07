@@ -120,8 +120,8 @@ def _build_stage_orchestrator(
         orchestrator=fake_orchestrator,  # type: ignore[arg-type]
         stage_plan=stage_plan,
         project_root=project_root,
-        min_words=10,
-        max_words=30,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
         max_iterations=3,
         voice_clone_orchestrator=fake_voice_clone_orchestrator,  # type: ignore[arg-type]
         interjector_orchestrator=fake_interjector_orchestrator,  # type: ignore[arg-type]
@@ -278,8 +278,8 @@ def test_run_stage_two_voice_clone_hides_first_run_eta_and_persists_learning(
         orchestrator=fake_orchestrator,  # type: ignore[arg-type]
         stage_plan=PipelineStagePlan(start_stage="stage-2"),
         project_root=tmp_path,
-        min_words=10,
-        max_words=30,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
         max_iterations=3,
         voice_clone_orchestrator=fake_voice_clone,  # type: ignore[arg-type]
         eta_strategy=LinearStageEtaStrategy(
@@ -382,8 +382,8 @@ def test_run_stage_two_prepares_deferred_speaker_samples_for_voice_clone(
         orchestrator=stage_orchestrator.orchestrator,
         stage_plan=stage_orchestrator.stage_plan,
         project_root=stage_orchestrator.project_root,
-        min_words=stage_orchestrator.min_words,
-        max_words=stage_orchestrator.max_words,
+        target_seconds=stage_orchestrator.target_seconds,
+        duration_tolerance_ratio=stage_orchestrator.duration_tolerance_ratio,
         max_iterations=stage_orchestrator.max_iterations,
         voice_clone_orchestrator=stage_orchestrator.voice_clone_orchestrator,
         speaker_sample_preparer=_prepare_speaker_samples,

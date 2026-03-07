@@ -54,6 +54,8 @@ class _StubIndexTTS2:
         output_path: str,
         verbose: bool,
         max_text_tokens_per_segment: int,
+        use_emo_text: bool,
+        emo_text: str | None,
     ) -> str:
         self.infer_calls.append(
             {
@@ -62,6 +64,8 @@ class _StubIndexTTS2:
                 "output_path": output_path,
                 "verbose": verbose,
                 "max_text_tokens_per_segment": max_text_tokens_per_segment,
+                "use_emo_text": use_emo_text,
+                "emo_text": emo_text,
             }
         )
         Path(output_path).write_bytes(b"wav")
@@ -138,6 +142,8 @@ def test_indextts_gateway_invokes_model_with_expected_arguments(
         "output_path": str(output_a),
         "verbose": True,
         "max_text_tokens_per_segment": 99,
+        "use_emo_text": False,
+        "emo_text": None,
     }
     assert _StubIndexTTS2.infer_calls[1] == {
         "spk_audio_prompt": str(reference_audio),
@@ -145,6 +151,8 @@ def test_indextts_gateway_invokes_model_with_expected_arguments(
         "output_path": str(output_b),
         "verbose": True,
         "max_text_tokens_per_segment": 99,
+        "use_emo_text": False,
+        "emo_text": None,
     }
     assert output_a.exists()
     assert output_b.exists()

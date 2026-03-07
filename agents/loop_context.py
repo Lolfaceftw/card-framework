@@ -7,7 +7,7 @@ import re
 from typing import ClassVar, Literal
 
 IssueBucket = Literal[
-    "word_count",
+    "duration",
     "truncation",
     "coherence",
     "naturalness",
@@ -27,9 +27,20 @@ def build_loop_context_prompt_block(
         return ""
     if len(text) <= char_cap:
         return text
-    omitted = len(text) - char_cap
-    truncated = text[:char_cap].rstrip()
-    return f"{truncated}\n[truncated {omitted} trailing characters]"
+    available = char_cap
+    suffix = ""
+    while True:
+        truncated = text[:available].rstrip()
+        omitted = max(len(text) - len(truncated), 0)
+        candidate_suffix = f"\n[truncated {omitted} trailing characters]"
+        candidate_available = max(char_cap - len(candidate_suffix), 0)
+        if candidate_available == available:
+            suffix = candidate_suffix
+            break
+        available = candidate_available
+    if available <= 0:
+        return suffix[:char_cap]
+    return f"{truncated}{suffix}"
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,17 +83,17 @@ class SummarizerLoopMemory:
     compact loop context text suitable for prompt injection.
     """
 
-    min_words: int
-    max_words: int
+    target_seconds: int
+    duration_tolerance_ratio: float = 0.05
     prompt_char_limit: int = 1024
     max_unresolved_issues: int = 5
-    stagnation_word_delta_threshold: int = 4
+    stagnation_seconds_delta_threshold: float = 4.0
     early_stop_stagnation_threshold: int = 3
     _unresolved: dict[str, UnresolvedIssueState] = field(default_factory=dict, init=False)
     _previous_unresolved_signatures: frozenset[str] = field(
         default_factory=frozenset, init=False
     )
-    _last_word_count: int | None = field(default=None, init=False)
+    _last_estimated_seconds: float | None = field(default=None, init=False)
     _stagnation_streak: int = field(default=0, init=False)
     _last_strategy_shift_hint: str = field(default="", init=False)
 
@@ -106,7 +117,7 @@ class SummarizerLoopMemory:
     )
 
     def extract_issue_signatures(
-        self, feedback: str, word_count: int | None = None
+        self, feedback: str, estimated_seconds: float | None = None
     ) -> list[LoopIssue]:
         """Extract deterministic, deduplicated issue signatures from critic feedback."""
         issues: list[LoopIssue] = []
@@ -124,10 +135,10 @@ class SummarizerLoopMemory:
                     )
                 )
 
-        if word_count is not None:
-            wc_issue = self._word_count_issue(word_count)
-            if wc_issue is not None:
-                issues.append(wc_issue)
+        if estimated_seconds is not None:
+            duration_issue = self._duration_issue(estimated_seconds)
+            if duration_issue is not None:
+                issues.append(duration_issue)
 
         deduped: dict[str, LoopIssue] = {}
         for issue in issues:
@@ -140,11 +151,14 @@ class SummarizerLoopMemory:
         iteration: int,
         critic_status: str,
         feedback: str,
-        word_count: int | None,
+        estimated_seconds: float | None,
     ) -> LoopMemoryUpdate:
         """Update unresolved memory state from one critic result."""
         del critic_status  # status is currently informational; unresolved issues drive memory.
-        current_issues = self.extract_issue_signatures(feedback=feedback, word_count=word_count)
+        current_issues = self.extract_issue_signatures(
+            feedback=feedback,
+            estimated_seconds=estimated_seconds,
+        )
         current_map = {issue.signature: issue for issue in current_issues}
         current_signatures = frozenset(current_map.keys())
 
@@ -154,16 +168,16 @@ class SummarizerLoopMemory:
             if signature in self._previous_unresolved_signatures
         )
 
-        previous_word_count = self._last_word_count
-        word_delta = (
-            abs(word_count - previous_word_count)
-            if word_count is not None and previous_word_count is not None
-            else self.stagnation_word_delta_threshold + 1
+        previous_estimated_seconds = self._last_estimated_seconds
+        duration_delta = (
+            abs(estimated_seconds - previous_estimated_seconds)
+            if estimated_seconds is not None and previous_estimated_seconds is not None
+            else self.stagnation_seconds_delta_threshold + 1.0
         )
         stagnation_detected = bool(
             current_signatures
             and current_signatures == self._previous_unresolved_signatures
-            and word_delta <= self.stagnation_word_delta_threshold
+            and duration_delta <= self.stagnation_seconds_delta_threshold
         )
 
         if stagnation_detected:
@@ -192,7 +206,7 @@ class SummarizerLoopMemory:
 
         self._unresolved = next_unresolved
         self._previous_unresolved_signatures = current_signatures
-        self._last_word_count = word_count
+        self._last_estimated_seconds = estimated_seconds
 
         strategy_shift_hint = ""
         if stagnation_detected:
@@ -261,8 +275,13 @@ class SummarizerLoopMemory:
 
     def _bucket_for_text(self, text: str) -> IssueBucket:
         """Map feedback text to a deterministic issue bucket."""
-        if "word count" in text or "too short" in text or "too long" in text:
-            return "word_count"
+        if (
+            "duration" in text
+            or "seconds" in text
+            or "too short" in text
+            or "too long" in text
+        ):
+            return "duration"
         for bucket, keywords in self._BUCKET_KEYWORDS:
             if any(keyword in text for keyword in keywords):
                 return bucket
@@ -282,22 +301,26 @@ class SummarizerLoopMemory:
         signature_tokens = tokens[:8] if tokens else ["unspecified"]
         return f"{bucket}:{'_'.join(signature_tokens)}"
 
-    def _word_count_issue(self, word_count: int) -> LoopIssue | None:
-        """Return deterministic word-count issue when current draft is out of bounds."""
-        if word_count < self.min_words:
+    def _duration_issue(self, estimated_seconds: float) -> LoopIssue | None:
+        """Return deterministic duration issue when current draft is out of bounds."""
+        tolerance_seconds = self.target_seconds * self.duration_tolerance_ratio
+        min_seconds = self.target_seconds - tolerance_seconds
+        max_seconds = self.target_seconds + tolerance_seconds
+        rounded_seconds = round(estimated_seconds, 2)
+        if estimated_seconds < min_seconds:
             return LoopIssue(
-                signature=f"word_count:below_min_{self.min_words}",
-                bucket="word_count",
+                signature=f"duration:below_min_{round(min_seconds, 2)}",
+                bucket="duration",
                 description=(
-                    f"word count {word_count} below minimum {self.min_words}; expand coverage"
+                    f"estimated duration {rounded_seconds}s below minimum {round(min_seconds, 2)}s; expand coverage"
                 ),
             )
-        if word_count > self.max_words:
+        if estimated_seconds > max_seconds:
             return LoopIssue(
-                signature=f"word_count:above_max_{self.max_words}",
-                bucket="word_count",
+                signature=f"duration:above_max_{round(max_seconds, 2)}",
+                bucket="duration",
                 description=(
-                    f"word count {word_count} above maximum {self.max_words}; compress content"
+                    f"estimated duration {rounded_seconds}s above maximum {round(max_seconds, 2)}s; compress content"
                 ),
             )
         return None

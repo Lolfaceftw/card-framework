@@ -6,7 +6,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import re
 import threading
 import time
 
@@ -30,6 +29,7 @@ from audio_pipeline.voice_clone_orchestrator import (
 from events import event_bus
 from orchestrator import Orchestrator
 from pipeline_plan import PipelineStagePlan
+from summary_xml import count_summary_turns
 from summary_output import write_summary_xml_to_workspace
 from orchestration.transcript import Transcript, TranscriptLike, coerce_transcript
 
@@ -41,8 +41,8 @@ class StageOrchestrator:
     orchestrator: Orchestrator
     stage_plan: PipelineStagePlan
     project_root: Path
-    min_words: int
-    max_words: int
+    target_seconds: int
+    duration_tolerance_ratio: float
     max_iterations: int
     voice_clone_orchestrator: VoiceCloneOrchestrator | None = None
     interjector_orchestrator: InterjectorOrchestrator | None = None
@@ -166,8 +166,8 @@ class StageOrchestrator:
     async def _run_full_loop(self, *, full_text: str, transcript: Transcript) -> None:
         """Run the full summarizer-critic loop until convergence or max iterations."""
         result = await self.orchestrator.run_loop(
-            min_words=self.min_words,
-            max_words=self.max_words,
+            target_seconds=self.target_seconds,
+            duration_tolerance_ratio=self.duration_tolerance_ratio,
             max_iterations=self.max_iterations,
             full_transcript_text=full_text,
         )
@@ -223,7 +223,7 @@ class StageOrchestrator:
         manifest_path = Path(manifest_path_value)
         if not manifest_path.is_absolute():
             manifest_path = (self.project_root / manifest_path).resolve()
-        expected_turn_count = _count_summary_turns(summary_xml)
+        expected_turn_count = count_summary_turns(summary_xml)
         eta_tracker: DynamicEtaTracker | None = None
         if (
             expected_turn_count > 0
@@ -406,14 +406,3 @@ class StageOrchestrator:
             ),
         )
         return result
-
-
-def _count_summary_turns(summary_xml: str) -> int:
-    """Return number of speaker-tagged turns in summary XML."""
-    return len(
-        re.findall(
-            r"<([A-Za-z0-9_.-]+)>.*?</\1>",
-            summary_xml,
-            flags=re.DOTALL,
-        )
-    )

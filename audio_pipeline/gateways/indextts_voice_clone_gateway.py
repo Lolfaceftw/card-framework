@@ -56,6 +56,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        emo_text: str | None = None,
         progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
@@ -86,12 +87,14 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
                 reference_audio_path=reference_audio_path,
                 text=text.strip(),
                 output_audio_path=output_audio_path,
+                emo_text=emo_text,
             )
         elif backend == "subprocess":
             rendered_path = self._synthesize_subprocess(
                 reference_audio_path=reference_audio_path,
                 text=text.strip(),
                 output_audio_path=output_audio_path,
+                emo_text=emo_text,
             )
         else:
             raise NonRetryableAudioStageError(
@@ -115,6 +118,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        emo_text: str | None,
     ) -> Path:
         """Run synthesis by importing IndexTTS2 in current Python process."""
         tts_model = self._get_or_init_model()
@@ -126,6 +130,8 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
                 output_path=str(output_audio_path),
                 verbose=self.verbose,
                 max_text_tokens_per_segment=self.max_text_tokens_per_segment,
+                use_emo_text=bool(emo_text),
+                emo_text=emo_text,
             )
             del result  # output is persisted to output_audio_path.
         except Exception as exc:
@@ -146,6 +152,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        emo_text: str | None,
     ) -> Path:
         """Run synthesis via ``uv run --project`` in a dedicated IndexTTS env."""
         output_audio_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +198,14 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             "--max-text-tokens-per-segment",
             str(self.max_text_tokens_per_segment),
         ]
+        if emo_text:
+            command.extend(
+                [
+                    "--use-emo-text",
+                    "--emo-text",
+                    emo_text,
+                ]
+            )
         if self.use_fp16:
             command.append("--use-fp16")
         if self.use_cuda_kernel:

@@ -1,134 +1,128 @@
-"""
-Tool Handler Abstraction
-========================
-Command pattern for tool dispatch. Each tool is a self-contained handler
-implementing a common interface, making it trivial to register new tools
-without modifying the agent loop.
+"""Tool handler registry and duration-aware summarizer tools."""
 
-All handlers use async execute() so tools that need I/O (e.g. querying
-the retrieval agent) work seamlessly alongside synchronous ones.
-"""
+from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from typing import Any
 
 from agents.client import AgentTaskClient, get_default_agent_client
 from agents.message_registry import MessageRegistry
+from audio_pipeline.calibration import VoiceCloneCalibration
+from summary_xml import DEFAULT_EMO_PRESET, SummaryTurn, serialize_summary_turns
 
 
 class ToolHandler(ABC):
-    """Abstract base for all tool handlers (Command pattern)."""
+    """Define the interface used by all summarizer tool handlers."""
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Tool name as the LLM sees it."""
-        ...
+        """Return the tool name exposed to the LLM."""
 
     @property
     @abstractmethod
-    def schema(self) -> dict:
-        """OpenAI-compatible function tool definition."""
-        ...
+    def schema(self) -> dict[str, Any]:
+        """Return an OpenAI-compatible function schema."""
 
     @abstractmethod
-    async def execute(self, arguments: dict) -> dict:
-        """Execute the tool and return JSON-serialisable result."""
-        ...
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Execute the tool and return a JSON-serializable payload."""
 
 
 class ToolRegistry:
-    """
-    Registry that holds tool handlers and dispatches by name.
-    Follows the Registry + Strategy patterns for open/closed extensibility.
-    """
+    """Register and dispatch summarizer tool handlers by name."""
 
     def __init__(self) -> None:
         self._handlers: dict[str, ToolHandler] = {}
 
     def register(self, handler: ToolHandler) -> None:
+        """Register one handler instance."""
         self._handlers[handler.name] = handler
 
     def get(self, name: str) -> ToolHandler | None:
+        """Return one handler by name when registered."""
         return self._handlers.get(name)
 
-    def get_tool_schemas(self) -> list[dict]:
-        """Return all tool schemas in the format expected by the LLM API."""
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        """Return all registered schemas in LLM API format."""
         return [
-            {"type": "function", "function": h.schema} for h in self._handlers.values()
+            {"type": "function", "function": handler.schema}
+            for handler in self._handlers.values()
         ]
 
-    async def dispatch(self, name: str, arguments: dict) -> dict | None:
-        """Dispatch a tool call by name. Returns None if tool not found."""
+    async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        """Dispatch one tool call by name."""
         handler = self._handlers.get(name)
         if handler is None:
             return None
         return await handler.execute(arguments)
 
 
-# ── Budget Context (Strategy pattern) ─────────────────────────────────────
-
-
 class BudgetContext:
-    """
-    Computes budget statistics from the current registry state.
-    Injected into tool handlers so every response includes actionable
-    guidance for the LLM (deltas, avg words/line, estimated lines to change).
-    """
+    """Compute duration-budget statistics from the current registry state."""
 
-    def __init__(self, registry: MessageRegistry, min_words: int, max_words: int):
+    def __init__(
+        self,
+        registry: MessageRegistry,
+        calibration: VoiceCloneCalibration,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
+    ) -> None:
         self._registry = registry
-        self.min_words = min_words
-        self.max_words = max_words
+        self._calibration = calibration
+        self.target_seconds = target_seconds
+        self.duration_tolerance_ratio = duration_tolerance_ratio
 
-    def compute_stats(self) -> dict:
-        """Return budget stats based on current registry contents."""
+    def compute_stats(self) -> dict[str, Any]:
+        """Return duration-budget guidance derived from the current registry."""
         counts = self._registry.get_counts()
-        total = counts["total_word_count"]
+        duration = self._registry.get_duration_breakdown(self._calibration)
+        total_seconds = float(duration["total_estimated_seconds"])
         num_lines = len(self._registry)
-        avg_words_per_line = round(total / num_lines, 1) if num_lines > 0 else 0
-
-        delta_lower = total - self.min_words  # positive = above lower bound
-        delta_upper = total - self.max_words  # negative = below upper bound
-
-        # Estimate lines to add/remove to reach target midpoint
-        target_mid = (self.min_words + self.max_words) // 2
-        delta_mid = total - target_mid
-
-        if avg_words_per_line > 0:
-            est_lines_to_change = round(abs(delta_mid) / avg_words_per_line, 1)
+        avg_seconds_per_line = round(total_seconds / num_lines, 3) if num_lines > 0 else 0.0
+        tolerance_seconds = round(
+            self.target_seconds * self.duration_tolerance_ratio,
+            3,
+        )
+        min_seconds = round(self.target_seconds - tolerance_seconds, 3)
+        max_seconds = round(self.target_seconds + tolerance_seconds, 3)
+        delta_target_seconds = round(total_seconds - self.target_seconds, 3)
+        if avg_seconds_per_line > 0:
+            estimated_lines_to_change = round(
+                abs(delta_target_seconds) / avg_seconds_per_line,
+                1,
+            )
         else:
-            est_lines_to_change = 0
-
-        if delta_mid > 0:
-            action = "remove"
-        elif delta_mid < 0:
-            action = "add"
+            estimated_lines_to_change = 0.0
+        if total_seconds > max_seconds:
+            recommended_action = "remove"
+        elif total_seconds < min_seconds:
+            recommended_action = "add"
         else:
-            action = "none"
-
-        in_budget = self.min_words <= total <= self.max_words
-
+            recommended_action = "none"
         return {
             "budget": {
-                "min_words": self.min_words,
-                "max_words": self.max_words,
-                "total_words": total,
-                "delta_to_lower_bound": delta_lower,
-                "delta_to_upper_bound": delta_upper,
-                "in_budget": in_budget,
-                "avg_words_per_line": avg_words_per_line,
-                "estimated_lines_to_change": est_lines_to_change,
-                "recommended_action": action,
+                "target_seconds": self.target_seconds,
+                "duration_tolerance_ratio": self.duration_tolerance_ratio,
+                "tolerance_seconds": tolerance_seconds,
+                "min_seconds": min_seconds,
+                "max_seconds": max_seconds,
+                "total_estimated_seconds": round(total_seconds, 3),
+                "total_words": counts["total_word_count"],
+                "delta_to_lower_bound": round(total_seconds - min_seconds, 3),
+                "delta_to_upper_bound": round(total_seconds - max_seconds, 3),
+                "delta_to_target_seconds": delta_target_seconds,
+                "in_budget": min_seconds <= total_seconds <= max_seconds,
+                "avg_seconds_per_line": avg_seconds_per_line,
+                "estimated_lines_to_change": estimated_lines_to_change,
+                "recommended_action": recommended_action,
             }
         }
 
 
-# ── Concrete Tool Handlers ────────────────────────────────────────────────
-
-
 class AddSpeakerMessageHandler(ToolHandler):
-    """Appends a single speaker message to the registry."""
+    """Append one speaker message to the registry."""
 
     def __init__(self, registry: MessageRegistry, budget: BudgetContext) -> None:
         self._registry = registry
@@ -139,37 +133,82 @@ class AddSpeakerMessageHandler(ToolHandler):
         return "add_speaker_message"
 
     @property
-    def schema(self) -> dict:
+    def schema(self) -> dict[str, Any]:
         return {
             "name": "add_speaker_message",
             "description": (
-                "Adds a single speaker message to the summary. "
-                "Call this once per speaker turn as you build the summary incrementally. "
-                "After this call, count_words will be automatically invoked."
+                "Adds a single speaker message to the summary. Call this once per "
+                "speaker turn as you build the summary incrementally. After this call, "
+                "estimate_duration and count_words will be automatically invoked."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "speaker_id": {
                         "type": "string",
-                        "description": "The speaker ID (e.g. SPEAKER_00).",
+                        "description": "The speaker ID (for example SPEAKER_00).",
                     },
                     "content": {
                         "type": "string",
-                        "description": "The summarised content for this speaker turn.",
+                        "description": "The summarized content for this speaker turn.",
+                    },
+                    "emo_preset": {
+                        "type": "string",
+                        "description": "Preset emotion/style label for this speaker turn.",
                     },
                 },
-                "required": ["speaker_id", "content"],
+                "required": ["speaker_id", "content", "emo_preset"],
             },
         }
 
-    async def execute(self, arguments: dict) -> dict:
-        result = self._registry.add(arguments["speaker_id"], arguments["content"])
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = self._registry.add(
+            str(arguments["speaker_id"]),
+            str(arguments["content"]),
+            str(arguments["emo_preset"]),
+        )
         return {**result, **self._budget.compute_stats()}
 
 
+class EstimateDurationHandler(ToolHandler):
+    """Return the calibrated duration estimate breakdown."""
+
+    def __init__(
+        self,
+        registry: MessageRegistry,
+        budget: BudgetContext,
+        calibration: VoiceCloneCalibration,
+    ) -> None:
+        self._registry = registry
+        self._budget = budget
+        self._calibration = calibration
+
+    @property
+    def name(self) -> str:
+        return "estimate_duration"
+
+    @property
+    def schema(self) -> dict[str, Any]:
+        return {
+            "name": "estimate_duration",
+            "description": (
+                "Returns the current estimated spoken-duration breakdown using "
+                "calibrated per-speaker WPM and the chosen emo preset for each line."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        }
+
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        del arguments
+        duration = self._registry.get_duration_breakdown(self._calibration)
+        return {**duration, **self._budget.compute_stats()}
+
+
 class CountWordsHandler(ToolHandler):
-    """Returns full word-count breakdown from the registry."""
+    """Return the word-count breakdown while keeping duration budget stats attached."""
 
     def __init__(self, registry: MessageRegistry, budget: BudgetContext) -> None:
         self._registry = registry
@@ -180,13 +219,12 @@ class CountWordsHandler(ToolHandler):
         return "count_words"
 
     @property
-    def schema(self) -> dict:
+    def schema(self) -> dict[str, Any]:
         return {
             "name": "count_words",
             "description": (
-                "Returns the current word-count breakdown: total count, "
-                "per-message counts with line numbers, and per-speaker totals. "
-                "No arguments needed — reads from the message registry."
+                "Returns the current word-count breakdown: total count, per-message "
+                "counts with line numbers, and per-speaker totals. No arguments needed."
             ),
             "parameters": {
                 "type": "object",
@@ -194,13 +232,14 @@ class CountWordsHandler(ToolHandler):
             },
         }
 
-    async def execute(self, arguments: dict) -> dict:
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        del arguments
         counts = self._registry.get_counts()
         return {**counts, **self._budget.compute_stats()}
 
 
 class EditMessageHandler(ToolHandler):
-    """Replaces the content of a specific message by line number."""
+    """Replace the content or preset of an existing message."""
 
     def __init__(self, registry: MessageRegistry, budget: BudgetContext) -> None:
         self._registry = registry
@@ -211,12 +250,12 @@ class EditMessageHandler(ToolHandler):
         return "edit_message"
 
     @property
-    def schema(self) -> dict:
+    def schema(self) -> dict[str, Any]:
         return {
             "name": "edit_message",
             "description": (
-                "Replaces the content of a message at a given line number. "
-                "Use this to trim or expand a specific speaker turn to stay within budget."
+                "Replaces the content of a message at a given line number. Use this to "
+                "trim, expand, or retone a specific speaker turn to stay within budget."
             ),
             "parameters": {
                 "type": "object",
@@ -229,12 +268,19 @@ class EditMessageHandler(ToolHandler):
                         "type": "string",
                         "description": "The replacement content.",
                     },
+                    "emo_preset": {
+                        "type": "string",
+                        "description": (
+                            "Optional replacement emo preset for this line. If omitted, "
+                            "the existing preset is preserved."
+                        ),
+                    },
                 },
                 "required": ["line", "new_content"],
             },
         }
 
-    async def execute(self, arguments: dict) -> dict:
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         raw_line = arguments.get("line")
         try:
             line = int(raw_line)
@@ -252,15 +298,22 @@ class EditMessageHandler(ToolHandler):
                 "error_code": "invalid_new_content_argument",
                 "line": line,
             }
+        emo_preset = arguments.get("emo_preset")
+        if emo_preset is not None and not isinstance(emo_preset, str):
+            return {
+                "error": "Argument 'emo_preset' must be a string when provided.",
+                "error_code": "invalid_emo_preset_argument",
+                "line": line,
+            }
 
-        result = self._registry.edit(line, new_content)
+        result = self._registry.edit(line, new_content, emo_preset=emo_preset)
         if "error" not in result:
             result.update(self._budget.compute_stats())
         return result
 
 
 class RemoveMessageHandler(ToolHandler):
-    """Removes a message by line number."""
+    """Remove one message by line number."""
 
     def __init__(self, registry: MessageRegistry, budget: BudgetContext) -> None:
         self._registry = registry
@@ -271,12 +324,12 @@ class RemoveMessageHandler(ToolHandler):
         return "remove_message"
 
     @property
-    def schema(self) -> dict:
+    def schema(self) -> dict[str, Any]:
         return {
             "name": "remove_message",
             "description": (
-                "Removes the message at a given line number. "
-                "Remaining messages are re-indexed. Use to drop turns when over budget."
+                "Removes the message at a given line number. Remaining messages are "
+                "re-indexed. Use this to drop turns when over budget."
             ),
             "parameters": {
                 "type": "object",
@@ -290,7 +343,7 @@ class RemoveMessageHandler(ToolHandler):
             },
         }
 
-    async def execute(self, arguments: dict) -> dict:
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         raw_line = arguments.get("line")
         try:
             line = int(raw_line)
@@ -308,7 +361,7 @@ class RemoveMessageHandler(ToolHandler):
 
 
 class QueryTranscriptHandler(ToolHandler):
-    """Queries the Info Retrieval agent for transcript segments matching a semantic query."""
+    """Query the retrieval agent for transcript segments."""
 
     def __init__(
         self,
@@ -325,13 +378,13 @@ class QueryTranscriptHandler(ToolHandler):
         return "query_transcript"
 
     @property
-    def schema(self) -> dict:
+    def schema(self) -> dict[str, Any]:
         return {
             "name": "query_transcript",
             "description": (
-                "Searches the original transcript for segments matching your query. "
-                "Use this when you need to recall what a speaker said about a specific topic, "
-                "verify facts, or find additional details to include in your summary."
+                "Searches the original transcript for segments matching your query. Use "
+                "this when you need to recall what a speaker said about a specific "
+                "topic, verify facts, or find additional details to include."
             ),
             "parameters": {
                 "type": "object",
@@ -339,8 +392,7 @@ class QueryTranscriptHandler(ToolHandler):
                     "query": {
                         "type": "string",
                         "description": (
-                            "A natural-language query describing what you want to find "
-                            "(e.g. 'what did they say about server architecture')."
+                            "A natural-language query describing what you want to find."
                         ),
                     },
                     "top_k": {
@@ -352,10 +404,10 @@ class QueryTranscriptHandler(ToolHandler):
             },
         }
 
-    async def execute(self, arguments: dict) -> dict:
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         from agents.dtos import RetrieveTaskRequest
 
-        query = arguments["query"]
+        query = str(arguments["query"])
         top_k = arguments.get("top_k", 5)
         retrieve_task = RetrieveTaskRequest(action="retrieve", query=query, top_k=top_k)
         raw_response = await self._agent_client.send_task(
@@ -371,7 +423,7 @@ class QueryTranscriptHandler(ToolHandler):
 
 
 class SaveDraftHandler(ToolHandler):
-    """Snapshots the current registry state as a saved draft."""
+    """Snapshot the current registry state as a saved draft."""
 
     def __init__(self, registry: MessageRegistry) -> None:
         self._registry = registry
@@ -381,13 +433,13 @@ class SaveDraftHandler(ToolHandler):
         return "save_draft"
 
     @property
-    def schema(self) -> dict:
+    def schema(self) -> dict[str, Any]:
         return {
             "name": "save_draft",
             "description": (
-                "Saves the current draft from the message registry. "
-                "Called automatically when budget is met. "
-                "Returns the full draft with line numbers for reference."
+                "Saves the current draft from the message registry. Called "
+                "automatically when budget is met. Returns the full draft with line "
+                "numbers for reference."
             ),
             "parameters": {
                 "type": "object",
@@ -395,7 +447,8 @@ class SaveDraftHandler(ToolHandler):
             },
         }
 
-    async def execute(self, arguments: dict) -> dict:
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        del arguments
         snapshot = self._registry.snapshot()
         return {
             "status": "draft_saved",
@@ -406,7 +459,7 @@ class SaveDraftHandler(ToolHandler):
 
 
 class FinalizeDraftHandler(ToolHandler):
-    """Signals that the LLM is satisfied with the draft and ready for the critic."""
+    """Signal that the draft is ready for critic evaluation."""
 
     def __init__(self, registry: MessageRegistry) -> None:
         self._registry = registry
@@ -416,14 +469,13 @@ class FinalizeDraftHandler(ToolHandler):
         return "finalize_draft"
 
     @property
-    def schema(self) -> dict:
+    def schema(self) -> dict[str, Any]:
         return {
             "name": "finalize_draft",
             "description": (
-                "Call this ONLY when you have reviewed your draft, confirmed it meets "
-                "the word budget, reads naturally, and covers the transcript comprehensively. "
-                "This submits the draft to the Critic for evaluation. "
-                "Do NOT call this until you are fully satisfied with the draft."
+                "Call this only when you have reviewed your draft, confirmed it meets "
+                "the duration target, reads naturally, and covers the transcript "
+                "comprehensively."
             ),
             "parameters": {
                 "type": "object",
@@ -431,7 +483,8 @@ class FinalizeDraftHandler(ToolHandler):
             },
         }
 
-    async def execute(self, arguments: dict) -> dict:
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        del arguments
         counts = self._registry.get_counts()
         snapshot = self._registry.snapshot()
         return {
@@ -443,26 +496,39 @@ class FinalizeDraftHandler(ToolHandler):
         }
 
 
-def _snapshot_to_xml(snapshot: list[dict]) -> str:
-    """Serialize a registry snapshot into speaker-tagged XML."""
-    return "\n".join(
-        f"<{message['speaker_id']}>{message['content']}</{message['speaker_id']}>"
-        for message in snapshot
+def _snapshot_to_xml(snapshot: list[dict[str, Any]]) -> str:
+    """Serialize one registry snapshot into speaker-tagged XML."""
+    return serialize_summary_turns(
+        [
+            SummaryTurn(
+                speaker=str(message["speaker_id"]),
+                text=str(message["content"]),
+                emo_preset=str(message.get("emo_preset", DEFAULT_EMO_PRESET)),
+            )
+            for message in snapshot
+        ]
     )
 
 
 def build_summarizer_tools(
     registry: MessageRegistry,
     retrieval_port: int,
-    min_words: int,
-    max_words: int,
+    calibration: VoiceCloneCalibration,
+    target_seconds: int,
+    duration_tolerance_ratio: float,
     is_embedding_enabled: bool = True,
     agent_client: AgentTaskClient | None = None,
 ) -> ToolRegistry:
-    """Factory: wires up all summariser tool handlers against *registry*."""
-    budget = BudgetContext(registry, min_words, max_words)
+    """Build the full summarizer tool registry."""
+    budget = BudgetContext(
+        registry,
+        calibration,
+        target_seconds,
+        duration_tolerance_ratio,
+    )
     tool_registry = ToolRegistry()
     tool_registry.register(AddSpeakerMessageHandler(registry, budget))
+    tool_registry.register(EstimateDurationHandler(registry, budget, calibration))
     tool_registry.register(CountWordsHandler(registry, budget))
     tool_registry.register(EditMessageHandler(registry, budget))
     tool_registry.register(RemoveMessageHandler(registry, budget))
@@ -478,14 +544,21 @@ def build_summarizer_tools(
 def build_revise_tools(
     registry: MessageRegistry,
     retrieval_port: int,
-    min_words: int,
-    max_words: int,
+    calibration: VoiceCloneCalibration,
+    target_seconds: int,
+    duration_tolerance_ratio: float,
     is_embedding_enabled: bool = True,
     agent_client: AgentTaskClient | None = None,
 ) -> ToolRegistry:
-    """Factory: revise-mode tools — edit/remove only, no add_speaker_message."""
-    budget = BudgetContext(registry, min_words, max_words)
+    """Build revise-mode tools without add_speaker_message."""
+    budget = BudgetContext(
+        registry,
+        calibration,
+        target_seconds,
+        duration_tolerance_ratio,
+    )
     tool_registry = ToolRegistry()
+    tool_registry.register(EstimateDurationHandler(registry, budget, calibration))
     tool_registry.register(CountWordsHandler(registry, budget))
     tool_registry.register(EditMessageHandler(registry, budget))
     tool_registry.register(RemoveMessageHandler(registry, budget))
@@ -496,4 +569,3 @@ def build_revise_tools(
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))
     return tool_registry
-

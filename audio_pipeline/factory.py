@@ -196,10 +196,7 @@ def build_voice_clone_orchestrator(
         str(voice_clone_cfg.get("output_dir_name", "voice_clone")),
         base_dir=work_dir,
     )
-    provider = _build_voice_clone_provider(
-        voice_clone_cfg=voice_clone_cfg,
-        project_root=project_root,
-    )
+    provider = build_voice_clone_provider(audio_cfg, project_root=project_root)
     return VoiceCloneOrchestrator(
         provider=provider,
         output_dir=output_dir,
@@ -210,6 +207,11 @@ def build_voice_clone_orchestrator(
             voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav")
         ),
         merge_timeout_seconds=int(voice_clone_cfg.get("merge_timeout_seconds", 300)),
+        emo_preset_catalog={
+            str(name).strip(): str(emo_text).strip()
+            for name, emo_text in _as_mapping(voice_clone_cfg.get("emo_presets", {})).items()
+            if str(name).strip() and str(emo_text).strip()
+        },
     )
 
 
@@ -242,7 +244,6 @@ def build_interjector_orchestrator(
     if not output_dir_name.strip():
         raise ValueError("audio.interjector.output_dir_name must be non-empty.")
     output_dir = resolve_path(output_dir_name, base_dir=work_dir)
-    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
     max_interjection_words = int(interjector_cfg.get("max_interjection_words", 5))
     return InterjectorOrchestrator(
         planner=LLMInterjectionPlanner(
@@ -250,10 +251,7 @@ def build_interjector_orchestrator(
             max_tokens=int(interjector_cfg.get("analysis_max_tokens", 900)),
             max_interjection_words=max_interjection_words,
         ),
-        provider=_build_voice_clone_provider(
-            voice_clone_cfg=voice_clone_cfg,
-            project_root=project_root,
-        ),
+        provider=build_voice_clone_provider(audio_cfg, project_root=project_root),
         output_dir=output_dir,
         manifest_filename=str(
             interjector_cfg.get("manifest_filename", "interjector_manifest.json")
@@ -481,12 +479,13 @@ def _validate_eta_dynamic_config(
         raise ValueError("audio.eta.dynamic.headroom_seconds must be >= 0.")
 
 
-def _build_voice_clone_provider(
+def build_voice_clone_provider(
+    audio_cfg: Mapping[str, Any],
     *,
-    voice_clone_cfg: Mapping[str, Any],
     project_root: Path,
 ) -> VoiceCloneProvider:
     """Factory method for voice-cloning strategy providers."""
+    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
     provider = str(voice_clone_cfg.get("provider", "indextts")).strip().lower()
     if provider == "indextts":
         execution_backend = str(

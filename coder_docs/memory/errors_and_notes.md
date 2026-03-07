@@ -5,6 +5,10 @@ Use this file as the repository memory for problems worth avoiding in future ses
 Add new entries at the top so the newest lessons are visible first.
 Record each entry with both the date and time, preferably in ISO 8601 format with timezone information.
 
+### 2026-03-07T16:45:00+08:00 - Duration Migration Must Update Tool Telemetry And Prompt Caps Together
+- Problem: Converting the summarizer and critic loop from word budgets to duration budgets changed the tool contracts, but old tests and helper assumptions still expected `min_words` and `max_words`, and the loop-context truncation helper exceeded its own cap once the new duration issue text got longer.
+- Solution: Migrate test fixtures and prompt/tool expectations to `target_seconds`, `duration_tolerance_ratio`, `estimate_duration`, and `emo_preset`, and enforce the loop-context character cap after appending the truncation marker so prompt-safe bounds remain real.
+
 ### 2026-03-07T16:02:08+08:00 - ETA Should Stay Silent Until The Repo Has Learned History
 - Problem: The pipeline was showing large bootstrap ETA values on a first-ever run and only flushing learned throughput to disk at coarse end-of-run boundaries, so a completed separation stage could still leave no saved ETA profile for later stages or interrupted runs.
 - Solution: Gate ETA display on persisted or learned per-stage history instead of bootstrap defaults, and save the ETA profile immediately after each completed audio, speaker-sample, and voice-clone learning update.

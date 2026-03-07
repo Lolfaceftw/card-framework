@@ -1,3 +1,5 @@
+"""Tool-dispatch helpers for the duration-aware summarizer loop."""
+
 from __future__ import annotations
 
 import hashlib
@@ -33,15 +35,17 @@ def build_mutation_fingerprint(name: str, arguments: dict[str, Any]) -> str:
         line = arguments.get("line", "unknown")
         content = str(arguments.get("new_content", ""))
         digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
-        return f"edit:{line}:{digest}"
+        emo_preset = str(arguments.get("emo_preset", ""))
+        return f"edit:{line}:{emo_preset}:{digest}"
     if name == "remove_message":
         line = arguments.get("line", "unknown")
         return f"remove:{line}"
     if name == "add_speaker_message":
         speaker_id = str(arguments.get("speaker_id", "UNKNOWN"))
         content = str(arguments.get("content", ""))
+        emo_preset = str(arguments.get("emo_preset", ""))
         digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
-        return f"add:{speaker_id}:{digest}"
+        return f"add:{speaker_id}:{emo_preset}:{digest}"
     return name
 
 
@@ -55,39 +59,42 @@ def is_oscillating(fingerprints: list[str]) -> bool:
 
 def build_stall_guidance(
     *,
-    min_words: int,
-    max_words: int,
-    total_words: int | None,
+    target_seconds: int,
+    duration_tolerance_ratio: float,
+    total_seconds: float | None,
     stagnation_turns: int,
 ) -> str:
     """Build targeted guidance after repeated no-progress turns."""
+    tolerance_seconds = target_seconds * duration_tolerance_ratio
+    min_seconds = target_seconds - tolerance_seconds
+    max_seconds = target_seconds + tolerance_seconds
     base = (
         "You are repeating edits without meaningful progress "
         f"for {stagnation_turns} turns. "
     )
-    if total_words is None:
+    if total_seconds is None:
         return (
             base
-            + "Make one materially different edit and wait for count_words before the next tool call."
+            + "Make one materially different edit and wait for estimate_duration before the next tool call."
         )
 
-    if total_words > max_words:
+    if total_seconds > max_seconds:
         return (
             base
-            + f"Current total is {total_words}, above the {max_words} max. "
+            + f"Current estimate is {total_seconds:.2f}s, above the {max_seconds:.2f}s max. "
             + "Remove a line with remove_message(line) or materially shorten one line with "
             + "edit_message(line, shorter_content). Do not re-issue unchanged edits."
         )
-    if total_words < min_words:
+    if total_seconds < min_seconds:
         return (
             base
-            + f"Current total is {total_words}, below the {min_words} min. "
+            + f"Current estimate is {total_seconds:.2f}s, below the {min_seconds:.2f}s min. "
             + "Add a new line with add_speaker_message(...) or materially expand one line with "
             + "edit_message(line, expanded_content). Do not re-issue unchanged edits."
         )
     return (
         base
-        + f"Current total is {total_words}, within {min_words}-{max_words}. "
+        + f"Current estimate is {total_seconds:.2f}s, within {min_seconds:.2f}-{max_seconds:.2f}s. "
         + "If no substantive improvements remain, call finalize_draft(). "
         + "Otherwise make one materially different edit only."
     )
@@ -95,7 +102,7 @@ def build_stall_guidance(
 
 @dataclass(slots=True)
 class SummarizerToolDispatcher:
-    """Dispatch summarizer tool calls and append all tool results to chat history."""
+    """Dispatch summarizer tool calls and append tool results to chat history."""
 
     agent_name: str
     event_bus: EventBus
@@ -108,8 +115,8 @@ class SummarizerToolDispatcher:
     ) -> tuple[bool, dict | None]:
         """Execute summarizer tool calls for one assistant turn."""
         tool_registry = context_data["tool_registry"]
-        min_words = int(context_data["min_words"])
-        max_words = int(context_data["max_words"])
+        target_seconds = int(context_data["target_seconds"])
+        duration_tolerance_ratio = float(context_data["duration_tolerance_ratio"])
         finalized = False
         mutating_tools = {"add_speaker_message", "edit_message", "remove_message"}
         mutating_executed_this_turn = False
@@ -138,7 +145,7 @@ class SummarizerToolDispatcher:
         turn_mutation_attempted = False
         turn_progressed = False
         stagnation_reason: str | None = None
-        turn_total_wc: int | None = None
+        turn_total_seconds: float | None = None
         turn_signature: str | None = None
         staged_discovery_enabled = bool(
             context_data.get("enable_staged_discovery", False)
@@ -193,18 +200,11 @@ class SummarizerToolDispatcher:
                         "the draft or finalizing."
                     ),
                 }
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", "unknown"),
-                        "name": name,
-                        "content": json.dumps(skip_result),
-                    }
-                )
-                self.event_bus.publish(
-                    "tool_result",
-                    tool_name=f"{name} (skipped)",
-                    result=json.dumps(skip_result, indent=2),
+                self._append_tool_result(
+                    messages=messages,
+                    tool_call_id=tc.get("id", "unknown"),
+                    name=name,
+                    result=skip_result,
                 )
                 continue
 
@@ -220,18 +220,11 @@ class SummarizerToolDispatcher:
                             "staged discovery."
                         ),
                     }
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", "unknown"),
-                            "name": name,
-                            "content": json.dumps(skip_result),
-                        }
-                    )
-                    self.event_bus.publish(
-                        "tool_result",
-                        tool_name=f"{name} (skipped)",
-                        result=json.dumps(skip_result, indent=2),
+                    self._append_tool_result(
+                        messages=messages,
+                        tool_call_id=tc.get("id", "unknown"),
+                        name=name,
+                        result=skip_result,
                     )
                     continue
 
@@ -249,18 +242,11 @@ class SummarizerToolDispatcher:
                             "drafting or refinement."
                         ),
                     }
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", "unknown"),
-                            "name": name,
-                            "content": json.dumps(skip_result),
-                        }
-                    )
-                    self.event_bus.publish(
-                        "tool_result",
-                        tool_name=f"{name} (skipped)",
-                        result=json.dumps(skip_result, indent=2),
+                    self._append_tool_result(
+                        messages=messages,
+                        tool_call_id=tc.get("id", "unknown"),
+                        name=name,
+                        result=skip_result,
                     )
                     continue
 
@@ -276,18 +262,11 @@ class SummarizerToolDispatcher:
                             "new facet of the transcript."
                         ),
                     }
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", "unknown"),
-                            "name": name,
-                            "content": json.dumps(skip_result),
-                        }
-                    )
-                    self.event_bus.publish(
-                        "tool_result",
-                        tool_name=f"{name} (skipped)",
-                        result=json.dumps(skip_result, indent=2),
+                    self._append_tool_result(
+                        messages=messages,
+                        tool_call_id=tc.get("id", "unknown"),
+                        name=name,
+                        result=skip_result,
                     )
                     continue
 
@@ -297,21 +276,14 @@ class SummarizerToolDispatcher:
                     "reason": "single_mutating_call_per_turn",
                     "message": (
                         "Only one mutating tool call is executed per assistant turn. "
-                        "Issue the next mutation in a new turn after reading count_words."
+                        "Issue the next mutation in a new turn after reading estimate_duration."
                     ),
                 }
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", "unknown"),
-                        "name": name,
-                        "content": json.dumps(skip_result),
-                    }
-                )
-                self.event_bus.publish(
-                    "tool_result",
-                    tool_name=f"{name} (skipped)",
-                    result=json.dumps(skip_result, indent=2),
+                self._append_tool_result(
+                    messages=messages,
+                    tool_call_id=tc.get("id", "unknown"),
+                    name=name,
+                    result=skip_result,
                 )
                 continue
 
@@ -321,21 +293,16 @@ class SummarizerToolDispatcher:
                 turn_signature = build_tool_signature(name, args)
 
             result = await tool_registry.dispatch(name, args)
-
             if result is None:
                 result = {"error": f"Unknown tool: {name}", "error_code": "unknown_tool"}
 
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", "unknown"),
-                    "name": name,
-                    "content": json.dumps(result),
-                }
+            self._append_tool_result(
+                messages=messages,
+                tool_call_id=tc.get("id", "unknown"),
+                name=name,
+                result=result,
             )
-            self.event_bus.publish(
-                "tool_result", tool_name=name, result=json.dumps(result, indent=2)
-            )
+
             if staged_discovery_enabled and name == "query_transcript" and "error" not in result:
                 if normalized_query:
                     if normalized_query not in discovery_query_set:
@@ -354,8 +321,7 @@ class SummarizerToolDispatcher:
                             self.event_bus.publish(
                                 "status_message",
                                 message=(
-                                    "Staged discovery complete. "
-                                    "Draft mutations are now allowed."
+                                    "Staged discovery complete. Draft mutations are now allowed."
                                 ),
                             )
                         else:
@@ -375,50 +341,67 @@ class SummarizerToolDispatcher:
                 "remove_message",
             }
             if name in registry_mutation_tools and "error" not in result:
-                count_result = await tool_registry.dispatch("count_words", {})
-                auto_id = f"auto_count_{tc.get('id', 'unknown')}"
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": auto_id,
-                        "name": "count_words",
-                        "content": json.dumps(count_result),
+                duration_result = await tool_registry.dispatch("estimate_duration", {})
+                if duration_result is None:
+                    duration_result = {
+                        "total_estimated_seconds": 0.0,
+                        "budget": {"in_budget": False},
                     }
+                auto_duration_id = f"auto_duration_{tc.get('id', 'unknown')}"
+                self._append_tool_result(
+                    messages=messages,
+                    tool_call_id=auto_duration_id,
+                    name="estimate_duration",
+                    result=duration_result,
+                    event_name="estimate_duration (auto)",
+                    event_result=(
+                        f"Total: {float(duration_result.get('total_estimated_seconds', 0.0)):.3f}s"
+                    ),
                 )
-                total_wc = int(count_result["total_word_count"])
-                turn_total_wc = total_wc
-                context_data["last_total_word_count"] = total_wc
-                self.event_bus.publish(
-                    "tool_result",
-                    tool_name="count_words (auto)",
-                    result=f"Total: {total_wc} words",
+                turn_total_seconds = float(duration_result.get("total_estimated_seconds", 0.0))
+                context_data["last_total_estimated_seconds"] = turn_total_seconds
+
+                count_result = await tool_registry.dispatch("count_words", {})
+                if count_result is None:
+                    count_result = {"total_word_count": 0}
+                auto_count_id = f"auto_count_{tc.get('id', 'unknown')}"
+                self._append_tool_result(
+                    messages=messages,
+                    tool_call_id=auto_count_id,
+                    name="count_words",
+                    result=count_result,
+                    event_name="count_words (auto)",
+                    event_result=f"Total: {int(count_result.get('total_word_count', 0))} words",
+                )
+                context_data["last_total_word_count"] = int(
+                    count_result.get("total_word_count", 0)
                 )
 
-                if min_words <= total_wc <= max_words:
+                budget = duration_result.get("budget", {})
+                if bool(budget.get("in_budget", False)):
                     self.event_bus.publish(
                         "status_message",
                         message=(
-                            f"Budget in range: {total_wc} words "
-                            f"(target {min_words}-{max_words}) - "
+                            f"Duration in range: {turn_total_seconds:.2f}s "
+                            f"(target {float(budget.get('min_seconds', 0.0)):.2f}-"
+                            f"{float(budget.get('max_seconds', 0.0)):.2f}s) - "
                             "waiting for LLM to call finalize_draft"
                         ),
                     )
 
                     save_result = await tool_registry.dispatch("save_draft", {})
-                    save_id = f"auto_save_{tc.get('id', 'unknown')}"
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": save_id,
-                            "name": "save_draft",
-                            "content": json.dumps(save_result),
-                        }
-                    )
-                    self.event_bus.publish(
-                        "tool_result",
-                        tool_name="save_draft (auto)",
-                        result=f"Saved {save_result.get('total_messages', 0)} messages",
-                    )
+                    if save_result is not None:
+                        save_id = f"auto_save_{tc.get('id', 'unknown')}"
+                        self._append_tool_result(
+                            messages=messages,
+                            tool_call_id=save_id,
+                            name="save_draft",
+                            result=save_result,
+                            event_name="save_draft (auto)",
+                            event_result=(
+                                f"Saved {int(save_result.get('total_messages', 0))} messages"
+                            ),
+                        )
 
             if name in registry_mutation_tools:
                 if "error" in result:
@@ -481,13 +464,15 @@ class SummarizerToolDispatcher:
             if enable_stall_guidance and stagnation_turns >= stall_threshold:
                 last_guidance_turn = int(context_data.get("last_stall_guidance_turn", -10_000))
                 if (loop_turn_index - last_guidance_turn) >= (guidance_cooldown_turns + 1):
-                    if turn_total_wc is None:
-                        last_total = context_data.get("last_total_word_count")
-                        turn_total_wc = int(last_total) if isinstance(last_total, int) else None
+                    if turn_total_seconds is None:
+                        last_total = context_data.get("last_total_estimated_seconds")
+                        turn_total_seconds = (
+                            float(last_total) if isinstance(last_total, (int, float)) else None
+                        )
                     guidance = build_stall_guidance(
-                        min_words=min_words,
-                        max_words=max_words,
-                        total_words=turn_total_wc,
+                        target_seconds=target_seconds,
+                        duration_tolerance_ratio=duration_tolerance_ratio,
+                        total_seconds=turn_total_seconds,
                         stagnation_turns=stagnation_turns,
                     )
                     messages.append(
@@ -512,3 +497,28 @@ class SummarizerToolDispatcher:
         if finalized:
             return True, None
         return False, None
+
+    def _append_tool_result(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tool_call_id: str,
+        name: str,
+        result: dict[str, Any],
+        event_name: str | None = None,
+        event_result: str | None = None,
+    ) -> None:
+        """Append a tool result to the message log and event bus."""
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": name,
+                "content": json.dumps(result),
+            }
+        )
+        self.event_bus.publish(
+            "tool_result",
+            tool_name=event_name or name,
+            result=event_result or json.dumps(result, indent=2),
+        )

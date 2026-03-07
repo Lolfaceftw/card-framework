@@ -20,9 +20,10 @@ class _StubVoiceCloneProvider:
         reference_audio_path: Path,
         text: str,
         output_audio_path: Path,
+        emo_text: str | None = None,
         progress_callback=None,
     ) -> Path:
-        del text, progress_callback
+        del text, emo_text, progress_callback
         self.reference_calls.append(reference_audio_path)
         output_audio_path.parent.mkdir(parents=True, exist_ok=True)
         output_audio_path.write_bytes(b"wav")
@@ -75,6 +76,7 @@ def test_voice_clone_orchestrator_generates_turn_artifacts(tmp_path: Path) -> No
     assert updates[-1] == (2, 2)
     payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert payload["artifact_count"] == 2
+    assert payload["artifacts"][0]["emo_preset"] == "neutral"
 
 
 def test_voice_clone_orchestrator_raises_when_speaker_sample_missing(tmp_path: Path) -> None:

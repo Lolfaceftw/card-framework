@@ -32,15 +32,15 @@ class SummarizerLoopController:
         self,
         *,
         tool_registry: SummarizerToolRegistry,
-        min_words: int,
-        max_words: int,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
         loop_guardrails: dict[str, Any],
     ) -> dict[str, Any]:
         """Build per-run loop state consumed by BaseA2AExecutor and tool dispatch."""
         return {
             "tool_registry": tool_registry,
-            "min_words": min_words,
-            "max_words": max_words,
+            "target_seconds": target_seconds,
+            "duration_tolerance_ratio": duration_tolerance_ratio,
             "max_tool_calls_per_turn": 1,
             "signature_dedupe_window_turns": 1,
             "replay_dedupe_tools": {
@@ -67,6 +67,7 @@ class SummarizerLoopController:
             "loop_turn_index": 0,
             "last_mutation_signature": None,
             "last_total_word_count": None,
+            "last_total_estimated_seconds": None,
             "recent_line_edit_fingerprints": [],
             "loop_guardrail_provider": loop_guardrails["provider_name"],
             "loop_guardrail_model": loop_guardrails["model_id"],
@@ -86,15 +87,15 @@ class SummarizerLoopController:
         *,
         messages: list[dict[str, Any]],
         tool_registry: SummarizerToolRegistry,
-        min_words: int,
-        max_words: int,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
         loop_guardrails: dict[str, Any],
     ) -> dict[str, Any]:
         """Run the summarizer loop and return final loop context data."""
         context_data = self.build_context_data(
             tool_registry=tool_registry,
-            min_words=min_words,
-            max_words=max_words,
+            target_seconds=target_seconds,
+            duration_tolerance_ratio=duration_tolerance_ratio,
             loop_guardrails=loop_guardrails,
         )
         if context_data["enable_staged_discovery"]:

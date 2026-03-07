@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import sys
 import types
 from typing import Any
@@ -81,6 +82,7 @@ if "a2a.server.agent_execution" not in sys.modules:
 
 from agents.critic import CriticExecutor
 from agents.utils import count_words
+from audio_pipeline.calibration import VoiceCloneCalibration
 from prompt_manager import PromptManager
 
 
@@ -125,9 +127,26 @@ class _FakeAgentClient:
         return json.dumps({"segments": [], "total_words": 0})
 
 
+def _build_calibration() -> VoiceCloneCalibration:
+    """Return a minimal calibration object for deterministic duration tests."""
+    return VoiceCloneCalibration(
+        artifact_path=Path("artifact.json"),
+        generated_at_utc="2026-03-07T00:00:00+00:00",
+        speaker_samples_manifest_path=Path("."),
+        preset_emo_texts={"neutral": "Speak in a calm, neutral tone."},
+        calibration_phrases=("Hello, world.",),
+        speaker_preset_wpm={"SPEAKER_00": {"neutral": 120.0}},
+        preset_default_wpm={"neutral": 120.0},
+    )
+
+
 def test_run_deterministic_checks_uses_canonical_task_draft() -> None:
     """Ignore LLM-provided draft payload and evaluate the server-side finalized draft."""
-    executor = CriticExecutor(llm=_FakeLLM(), is_embedding_enabled=False)
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
     canonical_draft = "<SPEAKER_00>Short finalized draft.</SPEAKER_00>"
     oversized_payload = f"{canonical_draft}\n\n--- FULL TRANSCRIPT ---\n" + (
         "word " * 1000
@@ -143,7 +162,11 @@ def test_run_deterministic_checks_uses_canonical_task_draft() -> None:
                 }
             ],
             messages=[],
-            context_data={"draft": canonical_draft, "min_words": 1, "max_words": 10},
+            context_data={
+                "draft": canonical_draft,
+                "target_seconds": 2,
+                "duration_tolerance_ratio": 0.6,
+            },
         )
     )
 
@@ -162,7 +185,11 @@ def test_run_deterministic_checks_uses_canonical_task_draft() -> None:
                 }
             ],
             messages=messages,
-            context_data={"draft": canonical_draft, "min_words": 1, "max_words": 10},
+            context_data={
+                "draft": canonical_draft,
+                "target_seconds": 2,
+                "duration_tolerance_ratio": 0.6,
+            },
         )
     )
     tool_msg = next(m for m in messages if m.get("name") == "run_deterministic_checks")
@@ -174,7 +201,11 @@ def test_run_deterministic_checks_uses_canonical_task_draft() -> None:
 
 def test_submit_verdict_returns_final_result() -> None:
     """Return a final verdict payload when submit_verdict is called."""
-    executor = CriticExecutor(llm=_FakeLLM(), is_embedding_enabled=False)
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
     should_break, final_verdict = asyncio.run(
         executor.process_tool_calls(
             tool_calls=[
@@ -184,6 +215,7 @@ def test_submit_verdict_returns_final_result() -> None:
                     "arguments": {
                         "status": "pass",
                         "actual_word_count": 5,
+                        "estimated_seconds": 2.5,
                         "feedback": "ok",
                     },
                 }
@@ -191,14 +223,19 @@ def test_submit_verdict_returns_final_result() -> None:
             messages=[],
             context_data={
                 "draft": "<SPEAKER_00>Text.</SPEAKER_00>",
-                "min_words": 1,
-                "max_words": 10,
+                "target_seconds": 2,
+                "duration_tolerance_ratio": 0.6,
             },
         )
     )
 
     assert should_break is True
-    assert final_verdict == {"status": "pass", "word_count": 5, "feedback": "ok"}
+    assert final_verdict == {
+        "status": "pass",
+        "word_count": 5,
+        "estimated_seconds": 2.5,
+        "feedback": "ok",
+    }
 
 
 def test_verify_against_transcript_uses_injected_agent_client() -> None:
@@ -206,6 +243,7 @@ def test_verify_against_transcript_uses_injected_agent_client() -> None:
     fake_client = _FakeAgentClient()
     executor = CriticExecutor(
         llm=_FakeLLM(),
+        calibration=_build_calibration(),
         is_embedding_enabled=True,
         retrieval_port=9123,
         agent_client=fake_client,
@@ -223,8 +261,8 @@ def test_verify_against_transcript_uses_injected_agent_client() -> None:
             messages=[],
             context_data={
                 "draft": "<SPEAKER_00>Text.</SPEAKER_00>",
-                "min_words": 1,
-                "max_words": 10,
+                "target_seconds": 2,
+                "duration_tolerance_ratio": 0.6,
             },
         )
     )

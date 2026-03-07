@@ -16,6 +16,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-audio-path", required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-text-tokens-per-segment", type=int, default=120)
+    parser.add_argument("--use-emo-text", action="store_true")
+    parser.add_argument("--emo-text")
     parser.add_argument("--use-fp16", action="store_true")
     parser.add_argument("--use-cuda-kernel", action="store_true")
     parser.add_argument("--use-deepspeed", action="store_true")
@@ -49,6 +51,8 @@ def main() -> int:
         output_path=str(output_path),
         verbose=args.verbose,
         max_text_tokens_per_segment=args.max_text_tokens_per_segment,
+        use_emo_text=args.use_emo_text,
+        emo_text=args.emo_text,
     )
     if not output_path.exists():
         raise RuntimeError(
