@@ -173,6 +173,35 @@ def test_run_stage_two_indexes_when_retrieval_enabled(tmp_path: Path) -> None:
     assert fake_orchestrator.loop_kwargs["full_transcript_text"] == ""
 
 
+def test_run_stage_two_passes_scoped_loop_memory_context(tmp_path: Path) -> None:
+    """Forward a transcript-scoped loop-memory artifact path into the loop call."""
+    fake_orchestrator = _FakeOrchestrator()
+    artifact_path = tmp_path / "loop_memory.json"
+    stage_orchestrator = StageOrchestrator(
+        orchestrator=fake_orchestrator,  # type: ignore[arg-type]
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
+        max_iterations=3,
+        loop_memory_artifact_path=artifact_path,
+    )
+
+    asyncio.run(
+        stage_orchestrator.run(
+            transcript={"segments": [{"speaker": "SPEAKER_00", "text": "hello"}]},
+            retrieval_enabled=False,
+        )
+    )
+
+    assert fake_orchestrator.loop_kwargs is not None
+    assert fake_orchestrator.loop_kwargs["loop_memory_artifact_path"] == artifact_path
+    loop_memory_context = fake_orchestrator.loop_kwargs["loop_memory_context"]
+    assert loop_memory_context["target_seconds"] == "60"
+    assert loop_memory_context["duration_tolerance_ratio"] == "0.050000"
+    assert loop_memory_context["transcript_sha256"]
+
+
 def test_run_stage_three_reads_existing_summary_and_triggers_voice_clone(
     tmp_path: Path,
 ) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from agents.loop_context import SummarizerLoopMemory
 
 
@@ -131,3 +133,81 @@ def test_stagnation_strategy_shift_and_early_stop_thresholds() -> None:
     assert third.early_stop_recommended is False
     assert fourth.stagnation_detected is True
     assert fourth.early_stop_recommended is True
+
+
+def test_repeated_remedy_detection_tracks_previously_attempted_fix_patterns() -> None:
+    """Detect when critic guidance cycles back to a prior failed remedy pattern."""
+    memory = SummarizerLoopMemory(target_seconds=74)
+
+    first = memory.update_from_critic(
+        iteration=1,
+        critic_status="fail",
+        feedback="[] Expand missing middle section coverage.",
+        estimated_seconds=60,
+    )
+    second = memory.update_from_critic(
+        iteration=2,
+        critic_status="fail",
+        feedback="[] Tighten chronology transitions.",
+        estimated_seconds=61,
+    )
+    third = memory.update_from_critic(
+        iteration=3,
+        critic_status="fail",
+        feedback="[] Include missing middle section coverage.",
+        estimated_seconds=62,
+    )
+
+    assert first.repeated_remedy_detected is False
+    assert second.repeated_remedy_detected is False
+    assert third.repeated_remedy_detected is True
+    assert third.repeated_remedy_signatures
+
+    compact = memory.to_compact_prompt_block().lower()
+    assert "repeated remedy alert" in compact
+    assert "already failed to converge" in compact
+
+
+def test_loop_memory_artifact_roundtrip_preserves_repeated_remedy_history(
+    tmp_path: Path,
+) -> None:
+    """Persist repeated-remedy memory so later runs can reload the warning state."""
+    artifact_path = tmp_path / "loop_memory.json"
+    context = {
+        "transcript_sha256": "abc123",
+        "target_seconds": "74",
+        "duration_tolerance_ratio": "0.050000",
+    }
+    memory = SummarizerLoopMemory(target_seconds=74)
+    memory.update_from_critic(
+        iteration=1,
+        critic_status="fail",
+        feedback="[] Expand missing middle section coverage.",
+        estimated_seconds=60,
+    )
+    memory.update_from_critic(
+        iteration=2,
+        critic_status="fail",
+        feedback="[] Include missing middle section coverage.",
+        estimated_seconds=61,
+    )
+
+    memory.save_artifact(artifact_path, context=context)
+
+    restored = SummarizerLoopMemory(target_seconds=74)
+    assert restored.load_artifact(artifact_path, context=context) is True
+    compact = restored.to_compact_prompt_block().lower()
+    assert "repeated remedy alert" in compact
+    assert "attempts=2" in compact
+
+    mismatched = SummarizerLoopMemory(target_seconds=74)
+    assert (
+        mismatched.load_artifact(
+            artifact_path,
+            context={
+                **context,
+                "transcript_sha256": "different",
+            },
+        )
+        is False
+    )

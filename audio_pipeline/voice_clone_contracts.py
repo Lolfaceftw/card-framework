@@ -89,3 +89,12 @@ class VoiceCloneProvider(Protocol):
         Returns:
             Path to synthesized audio output.
         """
+
+    def close(self) -> None:
+        """
+        Release provider-held runtime resources.
+
+        Implementations may keep heavy model state warm between synthesis calls.
+        This hook exists for explicit module offload paths that need to reclaim
+        those resources deterministically.
+        """

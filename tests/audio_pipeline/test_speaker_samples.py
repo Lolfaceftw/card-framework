@@ -260,6 +260,14 @@ def test_resolve_sample_source_audio_path_supports_modes_and_fallback(
     )
     assert resolved_vocals == vocals
 
+    fallback_vocals = resolve_sample_source_audio_path(
+        source_mode="vocals",
+        transcript_metadata={},
+        configured_audio_path=str(source),
+        base_dir=tmp_path,
+    )
+    assert fallback_vocals == source
+
     resolved_source = resolve_sample_source_audio_path(
         source_mode="source",
         transcript_metadata={"source_audio_path": str(source)},

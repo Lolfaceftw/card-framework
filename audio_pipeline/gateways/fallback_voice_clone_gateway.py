@@ -51,3 +51,6 @@ class PassthroughVoiceCloneGateway(VoiceCloneProvider):
             except Exception:
                 pass
         return output_audio_path
+
+    def close(self) -> None:
+        """Release passthrough gateway resources."""
