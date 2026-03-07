@@ -5,15 +5,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import signal
-import subprocess
 import sys
 from typing import Any
 
 from audio_pipeline.contracts import DiarizationTurn, SpeakerDiarizer
 from audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
+from audio_pipeline.gateways.diarization_common import (
+    normalize_speaker_labels,
+    parse_rttm_file,
+    prepare_diarization_audio,
+)
 from audio_pipeline.runtime import (
-    ensure_command_available,
     ensure_module_available,
     probe_audio_duration_ms,
 )
@@ -187,7 +190,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         try:
             raw_labels = rttm_to_labels(str(rttm_path))
         except Exception:
-            return self._normalize_speaker_labels(self._parse_rttm(rttm_path))
+            return normalize_speaker_labels(parse_rttm_file(rttm_path))
 
         turns: list[DiarizationTurn] = []
         for raw_label in raw_labels:
@@ -207,7 +210,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         turns.sort(key=lambda turn: turn.start_time_ms)
         if turns:
             return turns
-        return self._normalize_speaker_labels(self._parse_rttm(rttm_path))
+        return normalize_speaker_labels(parse_rttm_file(rttm_path))
 
     def _build_msdd_config(
         self,
@@ -254,35 +257,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
 
     def _prepare_diarization_audio(self, *, audio_path: Path, output_dir: Path) -> Path:
         """Normalize diarization input to mono 16kHz WAV via ffmpeg."""
-        ensure_command_available("ffmpeg")
-        normalized_path = output_dir / "diarization_input_mono.wav"
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(audio_path),
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-vn",
-            str(normalized_path),
-        ]
-        try:
-            subprocess.run(
-                command,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            raise NonRetryableAudioStageError(
-                "Failed to prepare mono diarization audio with ffmpeg. "
-                f"Command: {' '.join(command)}. "
-                f"Stderr: {(exc.stderr or '').strip()}"
-            ) from exc
-        return normalized_path
+        return prepare_diarization_audio(audio_path=audio_path, output_dir=output_dir)
 
     def _find_rttm(self, *, output_dir: Path, audio_path: Path) -> Path:
         """Resolve RTTM file produced by NeMo."""
@@ -299,47 +274,6 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         raise NonRetryableAudioStageError(
             f"NeMo diarization did not emit RTTM under '{output_dir}'."
         )
-
-    def _parse_rttm(self, rttm_path: Path) -> list[DiarizationTurn]:
-        """Parse RTTM into diarization turns."""
-        turns: list[DiarizationTurn] = []
-        for line in rttm_path.read_text(encoding="utf-8").splitlines():
-            parts = line.split()
-            if len(parts) < 8 or parts[0] != "SPEAKER":
-                continue
-            start_seconds = float(parts[3])
-            duration_seconds = float(parts[4])
-            end_seconds = start_seconds + duration_seconds
-            speaker = parts[7]
-            turns.append(
-                DiarizationTurn(
-                    speaker=speaker,
-                    start_time_ms=max(0, int(round(start_seconds * 1000))),
-                    end_time_ms=max(0, int(round(end_seconds * 1000))),
-                )
-            )
-        turns.sort(key=lambda turn: turn.start_time_ms)
-        return turns
-
-    def _normalize_speaker_labels(
-        self, turns: list[DiarizationTurn]
-    ) -> list[DiarizationTurn]:
-        """Normalize arbitrary speaker labels into SPEAKER_XX."""
-        mapping: dict[str, str] = {}
-        normalized: list[DiarizationTurn] = []
-        next_index = 0
-        for turn in turns:
-            if turn.speaker not in mapping:
-                mapping[turn.speaker] = f"SPEAKER_{next_index:02d}"
-                next_index += 1
-            normalized.append(
-                DiarizationTurn(
-                    speaker=mapping[turn.speaker],
-                    start_time_ms=turn.start_time_ms,
-                    end_time_ms=turn.end_time_ms,
-                )
-            )
-        return normalized
 
     def _probe_duration_ms(self, audio_path: Path) -> int:
         """Best-effort duration probe via ffprobe."""

@@ -17,7 +17,10 @@ from audio_pipeline.factory import (
     build_voice_clone_provider,
 )
 from audio_pipeline.runtime import probe_audio_duration_ms, resolve_device, resolve_path
-from audio_pipeline.speaker_samples import resolve_sample_source_audio_path
+from audio_pipeline.speaker_samples import (
+    SpeakerSampleGenerationResult,
+    resolve_sample_source_audio_path,
+)
 from orchestration.transcript import Transcript
 from summary_xml import DEFAULT_EMO_PRESET, SummaryTurn
 
@@ -158,6 +161,14 @@ class VoiceCloneCalibration:
         return round(sum(self.estimate_turn_seconds(turn) for turn in turns), 3)
 
 
+@dataclass(slots=True, frozen=True)
+class SpeakerSampleBootstrapResult:
+    """Bundle artifacts from a speaker-sample bootstrap audio inference pass."""
+
+    transcript_path: Path
+    generation_result: SpeakerSampleGenerationResult
+
+
 def resolve_calibration_artifact_path(
     *,
     project_root: Path,
@@ -296,6 +307,70 @@ def ensure_voice_clone_calibration(
         encoding="utf-8",
     )
     return calibration
+
+
+def bootstrap_speaker_samples_from_audio(
+    *,
+    project_root: Path,
+    audio_cfg: Mapping[str, Any],
+    audio_path: Path,
+    bootstrap_transcript_path: Path,
+    bootstrap_audio_work_dir: Path,
+    speaker_samples_output_dir: Path,
+) -> SpeakerSampleBootstrapResult:
+    """
+    Run audio inference from source audio before generating speaker samples.
+
+    Args:
+        project_root: Repository root used for relative-path resolution.
+        audio_cfg: Resolved ``audio`` config mapping.
+        audio_path: Source audio that should be reprocessed.
+        bootstrap_transcript_path: Output path for the inferred transcript JSON.
+        bootstrap_audio_work_dir: Working directory for separation/ASR/diarization.
+        speaker_samples_output_dir: Final directory for generated speaker samples.
+
+    Returns:
+        Bootstrap transcript location together with the generated speaker-sample
+        artifact bundle.
+    """
+    audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg)
+    audio_orchestrator.run(
+        input_audio_path=audio_path.resolve(),
+        output_transcript_path=bootstrap_transcript_path,
+        work_dir=bootstrap_audio_work_dir,
+        device=resolve_device(str(audio_cfg.get("device", "auto"))),
+        metadata_overrides={
+            "separator_model": str(
+                _as_mapping(audio_cfg.get("separation", {})).get("model", "htdemucs")
+            ),
+            "transcriber_model": str(
+                _as_mapping(audio_cfg.get("asr", {})).get("model", "large-v3")
+            ),
+            "diarizer_backend": str(
+                _as_mapping(audio_cfg.get("diarization", {})).get("provider", "nemo")
+            ),
+        },
+    )
+    transcript_payload = json.loads(
+        bootstrap_transcript_path.read_text(encoding="utf-8")
+    )
+    transcript = Transcript.from_mapping(transcript_payload)
+    generator = build_speaker_sample_generator(audio_cfg)
+    generation_result = generator.generate(
+        transcript_payload=transcript.to_payload(),
+        source_audio_path=resolve_sample_source_audio_path(
+            source_mode="vocals",
+            transcript_metadata=transcript.metadata,
+            configured_audio_path=str(audio_path),
+            base_dir=project_root,
+        ),
+        output_dir=speaker_samples_output_dir,
+        progress_callback=None,
+    )
+    return SpeakerSampleBootstrapResult(
+        transcript_path=bootstrap_transcript_path.resolve(),
+        generation_result=generation_result,
+    )
 
 
 def _calibration_matches_current_inputs(
@@ -451,30 +526,63 @@ def _generate_speaker_samples_from_audio(
         calibration_root / "generated_transcripts" / f"{run_id}.transcript.json"
     ).resolve()
     work_dir = (calibration_root / "bootstrap_audio_stage" / run_id).resolve()
-    audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg)
-    audio_orchestrator.run(
-        input_audio_path=audio_path.resolve(),
-        output_transcript_path=transcript_path,
-        work_dir=work_dir,
-        device=resolve_device(str(audio_cfg.get("device", "auto"))),
-        metadata_overrides={
-            "separator_model": str(
-                _as_mapping(audio_cfg.get("separation", {})).get("model", "htdemucs")
-            ),
-            "transcriber_model": str(
-                _as_mapping(audio_cfg.get("asr", {})).get("model", "large-v3")
-            ),
-            "diarizer_backend": str(
-                _as_mapping(audio_cfg.get("diarization", {})).get("provider", "nemo")
-            ),
-        },
-    )
-    return _generate_speaker_samples_from_transcript(
+    audio_work_dir = work_dir / "audio_stage"
+    output_dir = _resolve_speaker_samples_output_dir(
         project_root=project_root,
         audio_cfg=audio_cfg,
-        transcript_path=transcript_path,
-        audio_path=audio_path,
     )
+    bootstrap_result = bootstrap_speaker_samples_from_audio(
+        project_root=project_root,
+        audio_cfg=audio_cfg,
+        audio_path=audio_path,
+        bootstrap_transcript_path=transcript_path,
+        bootstrap_audio_work_dir=audio_work_dir,
+        speaker_samples_output_dir=output_dir,
+    )
+    transcript_payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+    transcript = Transcript.from_mapping(transcript_payload)
+    metadata = dict(transcript.metadata)
+    metadata.update(
+        {
+            "speaker_samples_manifest_path": str(
+                bootstrap_result.generation_result.manifest_path
+            ),
+            "speaker_samples_dir": str(bootstrap_result.generation_result.output_dir),
+            "speaker_sample_count": len(
+                bootstrap_result.generation_result.artifacts
+            ),
+            "speaker_samples_generated_at_utc": (
+                bootstrap_result.generation_result.generated_at_utc
+            ),
+        }
+    )
+    transcript_path.write_text(
+        json.dumps(
+            transcript.with_metadata(metadata).to_payload(),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return bootstrap_result.generation_result.manifest_path.resolve()
+
+
+def _resolve_speaker_samples_output_dir(
+    *,
+    project_root: Path,
+    audio_cfg: Mapping[str, Any],
+) -> Path:
+    """Resolve the configured speaker-sample output directory."""
+    work_dir = resolve_path(
+        str(audio_cfg.get("work_dir", "artifacts/audio_stage")),
+        base_dir=project_root,
+    )
+    speaker_samples_cfg = _as_mapping(audio_cfg.get("speaker_samples", {}))
+    output_dir_name = str(
+        speaker_samples_cfg.get("output_dir_name", "speaker_samples")
+    ).strip() or "speaker_samples"
+    return resolve_path(output_dir_name, base_dir=work_dir)
 
 
 def _find_latest_speaker_samples_manifest(project_root: Path) -> Path | None:

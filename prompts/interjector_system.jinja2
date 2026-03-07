@@ -17,12 +17,16 @@ Return JSON only with this schema:
 }
 
 Rules:
+- Only include turns that should actually interject. Omitted turns are treated as `should_interject: false`.
 - Be conservative. Prefer no interjection unless it sounds natural.
 - Only use the provided next speaker as `interjection_speaker`.
 - `host_turn_index` is 1-based.
 - Anchor token indices are 0-based and must refer to the provided host token list.
+- Keep anchors inside the provided preferred anchor token window. That window approximates the valid {{ min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of the host turn.
+- For `backchannel`, keep `anchor_end_token_index` inside the preferred window.
+- For `echo_agreement`, keep `anchor_start_token_index` inside the preferred window.
 - `backchannel` is for short acknowledgments like "right", "exactly", "yeah".
 - `echo_agreement` is for short simultaneous agreement grounded in the host phrase and may repeat a short host phrase exactly.
 - Do not add new facts or extend the discussion.
 - Keep `interjection_text` to at most {{ max_interjection_words }} words.
-- If `should_interject` is false, omit the other fields or leave them null.
+- Do not emit placeholder objects for turns that stay false.

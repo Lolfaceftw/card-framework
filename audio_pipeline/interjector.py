@@ -32,6 +32,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -162,6 +163,8 @@ class LLMInterjectionPlanner:
     llm: LLMProvider
     max_tokens: int = 900
     max_interjection_words: int = 5
+    min_host_progress_ratio: float = 0.35
+    max_host_progress_ratio: float = 0.90
 
     def plan(self, summary_turns: Sequence[VoiceCloneTurn]) -> list[InterjectionDecision]:
         """Return one validated decision per eligible host turn."""
@@ -174,11 +177,19 @@ class LLMInterjectionPlanner:
         system_prompt = PromptManager.get_prompt(
             "interjector_system",
             max_interjection_words=self.max_interjection_words,
+            min_host_progress_percent=round(self.min_host_progress_ratio * 100),
+            max_host_progress_percent=round(self.max_host_progress_ratio * 100),
         )
         user_prompt = PromptManager.get_prompt(
             "interjector_user",
-            eligible_turns_block=_render_eligible_turns_block(eligible_turns),
+            eligible_turns_block=_render_eligible_turns_block(
+                eligible_turns,
+                min_host_progress_ratio=self.min_host_progress_ratio,
+                max_host_progress_ratio=self.max_host_progress_ratio,
+            ),
             max_interjection_words=self.max_interjection_words,
+            min_host_progress_percent=round(self.min_host_progress_ratio * 100),
+            max_host_progress_percent=round(self.max_host_progress_ratio * 100),
         )
         try:
             raw_response = self.llm.generate(
@@ -196,6 +207,8 @@ class LLMInterjectionPlanner:
             payload.decisions,
             eligible_turns=eligible_turns,
             max_interjection_words=self.max_interjection_words,
+            min_host_progress_ratio=self.min_host_progress_ratio,
+            max_host_progress_ratio=self.max_host_progress_ratio,
         )
 
 
@@ -467,17 +480,41 @@ def _build_eligible_turns(summary_turns: Sequence[VoiceCloneTurn]) -> list[_Elig
     return eligible
 
 
-def _render_eligible_turns_block(eligible_turns: Sequence[_EligibleTurn]) -> str:
+def _render_eligible_turns_block(
+    eligible_turns: Sequence[_EligibleTurn],
+    *,
+    min_host_progress_ratio: float,
+    max_host_progress_ratio: float,
+) -> str:
     """Render prompt-friendly eligible turn descriptions for the LLM planner."""
     lines: list[str] = []
     for item in eligible_turns:
         host_tokens = _split_tokens(item.host_turn.text)
+        anchor_window = _compute_anchor_window_indices(
+            host_token_count=len(host_tokens),
+            min_host_progress_ratio=min_host_progress_ratio,
+            max_host_progress_ratio=max_host_progress_ratio,
+        )
+        anchor_window_text = (
+            (
+                "Preferred anchor token window "
+                f"(approx {round(min_host_progress_ratio * 100)}%-"
+                f"{round(max_host_progress_ratio * 100)}% through host turn): "
+                f"{anchor_window[0]}..{anchor_window[1]}. "
+                "For backchannel, keep `anchor_end_token_index` inside this window. "
+                "For echo_agreement, keep `anchor_start_token_index` inside this "
+                "window."
+            )
+            if anchor_window is not None
+            else "Preferred anchor token window: none. Return should_interject=false."
+        )
         lines.extend(
             [
                 f"Host turn index: {item.host_turn_index}",
                 f"Host speaker: {item.host_turn.speaker}",
                 f"Next speaker: {item.next_turn.speaker}",
                 f"Host token count: {len(host_tokens)}",
+                anchor_window_text,
                 (
                     "Host tokens (0-based whitespace split): "
                     f"{json.dumps(host_tokens, ensure_ascii=False)}"
@@ -511,7 +548,7 @@ def _parse_plan_payload(raw_response: str) -> InterjectionPlanPayload | None:
     try:
         return InterjectionPlanPayload.model_validate_json(candidate)
     except Exception:
-        return None
+        return _parse_partial_plan_payload(candidate)
 
 
 def _extract_json_candidate(raw_response: str) -> str | None:
@@ -531,11 +568,57 @@ def _extract_json_candidate(raw_response: str) -> str | None:
     return next((candidate for candidate in candidates if candidate.strip()), None)
 
 
+def _parse_partial_plan_payload(candidate: str) -> InterjectionPlanPayload | None:
+    """Recover complete decisions from a truncated planner payload when possible."""
+    decisions_array = _extract_decisions_array_text(candidate)
+    if decisions_array is None:
+        return None
+    decoder = json.JSONDecoder()
+    parsed_decisions: list[dict[str, Any]] = []
+    cursor = 0
+    while cursor < len(decisions_array):
+        while cursor < len(decisions_array) and decisions_array[cursor] in {
+            " ",
+            "\t",
+            "\r",
+            "\n",
+            ",",
+        }:
+            cursor += 1
+        if cursor >= len(decisions_array):
+            break
+        if decisions_array[cursor] == "]":
+            break
+        try:
+            parsed_value, next_cursor = decoder.raw_decode(decisions_array, cursor)
+        except json.JSONDecodeError:
+            break
+        if isinstance(parsed_value, dict):
+            parsed_decisions.append(parsed_value)
+        cursor = next_cursor
+    if not parsed_decisions:
+        return None
+    try:
+        return InterjectionPlanPayload.model_validate({"decisions": parsed_decisions})
+    except Exception:
+        return None
+
+
+def _extract_decisions_array_text(candidate: str) -> str | None:
+    """Return the raw decisions-array slice from complete or truncated JSON text."""
+    match = re.search(r'"decisions"\s*:\s*\[', candidate)
+    if match is None:
+        return None
+    return candidate[match.end() :]
+
+
 def _validate_llm_decisions(
     raw_decisions: Sequence[InterjectionDecision],
     *,
     eligible_turns: Sequence[_EligibleTurn],
     max_interjection_words: int,
+    min_host_progress_ratio: float = 0.35,
+    max_host_progress_ratio: float = 0.90,
 ) -> list[InterjectionDecision]:
     """Validate planner output against deterministic pipeline constraints."""
     eligible_by_index = {item.host_turn_index: item for item in eligible_turns}
@@ -553,6 +636,8 @@ def _validate_llm_decisions(
             continue
 
         host_tokens = _split_tokens(eligible.host_turn.text)
+        if not host_tokens:
+            continue
         start_index = raw_decision.anchor_start_token_index
         end_index = raw_decision.anchor_end_token_index
         if start_index is None or end_index is None:
@@ -561,6 +646,16 @@ def _validate_llm_decisions(
             continue
         style = raw_decision.interjection_style
         if style not in {"backchannel", "echo_agreement"}:
+            continue
+        anchor_progress_ratio = _estimate_anchor_progress_ratio(
+            host_token_count=len(host_tokens),
+            anchor_start_token_index=start_index,
+            anchor_end_token_index=end_index,
+            style=style,
+        )
+        if anchor_progress_ratio < min_host_progress_ratio:
+            continue
+        if anchor_progress_ratio > max_host_progress_ratio:
             continue
 
         anchor_text = " ".join(host_tokens[start_index : end_index + 1]).strip()
@@ -606,6 +701,40 @@ def _validate_llm_decisions(
         )
         for item in eligible_turns
     ]
+
+
+def _compute_anchor_window_indices(
+    *,
+    host_token_count: int,
+    min_host_progress_ratio: float,
+    max_host_progress_ratio: float,
+) -> tuple[int, int] | None:
+    """Approximate the valid host-token window for stage-4 anchors."""
+    if host_token_count <= 0:
+        return None
+    min_index = max(0, math.ceil(host_token_count * min_host_progress_ratio) - 1)
+    max_index = min(
+        host_token_count - 1,
+        math.floor(host_token_count * max_host_progress_ratio) - 1,
+    )
+    if max_index < min_index:
+        return None
+    return min_index, max_index
+
+
+def _estimate_anchor_progress_ratio(
+    *,
+    host_token_count: int,
+    anchor_start_token_index: int,
+    anchor_end_token_index: int,
+    style: InterjectionStyle,
+) -> float:
+    """Approximate anchor placement as a fraction of the host turn."""
+    if style == "echo_agreement":
+        anchor_token_position = anchor_start_token_index + 1
+    else:
+        anchor_token_position = anchor_end_token_index + 1
+    return anchor_token_position / float(host_token_count)
 
 
 def _texts_share_anchor_tokens(interjection_text: str, anchor_text: str) -> bool:

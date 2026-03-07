@@ -16,7 +16,9 @@ class FakeToolRegistry:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._line_count = 0
 
-    async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    async def dispatch(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
         self.calls.append((name, dict(arguments)))
         if name == "add_speaker_message":
             self._line_count += 1
@@ -97,6 +99,9 @@ def test_loop_controller_builds_context_and_invokes_run_loop() -> None:
     assert context_data["duration_tolerance_ratio"] == 0.05
     assert context_data["enable_staged_discovery"] is True
     assert context_data["required_discovery_queries"] == 2
+    assert context_data["draft_ready_for_review"] is False
+    assert context_data["break_on_no_tool_call_when_draft_ready"] is True
+    assert context_data["draft_review_chat_max_tokens"] == 256
 
 
 def test_tool_dispatcher_executes_only_first_mutating_call_per_turn() -> None:
@@ -164,3 +169,43 @@ def test_tool_dispatcher_executes_only_first_mutating_call_per_turn() -> None:
     skipped_payload = json.loads(str(skipped[0]["content"]))
     assert skipped_payload["status"] == "skipped"
     assert skipped_payload["reason"] == "single_mutating_call_per_turn"
+
+
+def test_tool_dispatcher_enters_bounded_review_mode_after_auto_save() -> None:
+    dispatcher = SummarizerToolDispatcher(
+        agent_name="Summarizer",
+        event_bus=create_event_bus(),
+    )
+    registry = FakeToolRegistry()
+    context_data: dict[str, Any] = {
+        "tool_registry": registry,
+        "target_seconds": 60,
+        "duration_tolerance_ratio": 0.05,
+        "default_chat_max_tokens": None,
+        "draft_review_chat_max_tokens": 256,
+        "draft_ready_for_review": False,
+    }
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]
+
+    asyncio.run(
+        dispatcher.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "add_speaker_message",
+                    "arguments": {
+                        "speaker_id": "SPEAKER_00",
+                        "content": "First line",
+                        "emo_preset": "neutral",
+                    },
+                }
+            ],
+            messages=messages,
+            context_data=context_data,
+        )
+    )
+
+    assert context_data["draft_ready_for_review"] is True
+    assert context_data["chat_max_tokens"] == 256
+    assert messages[-1]["role"] == "user"
+    assert str(messages[-1]["content"]).startswith("[DRAFT_REVIEW]")

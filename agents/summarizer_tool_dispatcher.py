@@ -10,6 +10,15 @@ from typing import Any
 from agents.tool_call_utils import build_tool_signature
 from events import EventBus
 
+_DEFAULT_DRAFT_REVIEW_CHAT_MAX_TOKENS = 256
+_DRAFT_REVIEW_PROMPT = (
+    "[DRAFT_REVIEW]\n"
+    "The draft is already within budget and has been auto-saved. Your next response "
+    "must contain exactly one tool call: call `finalize_draft()` if the draft is ready, "
+    "otherwise call one mutating tool to improve it. Do not narrate your review in "
+    "plain text."
+)
+
 
 def coerce_positive_int(raw_value: Any, *, default: int, minimum: int = 0) -> int:
     """Parse a positive integer with fallback for malformed runtime values."""
@@ -121,7 +130,9 @@ class SummarizerToolDispatcher:
         mutating_tools = {"add_speaker_message", "edit_message", "remove_message"}
         mutating_executed_this_turn = False
 
-        context_data["loop_turn_index"] = int(context_data.get("loop_turn_index", 0)) + 1
+        context_data["loop_turn_index"] = (
+            int(context_data.get("loop_turn_index", 0)) + 1
+        )
         loop_turn_index = int(context_data["loop_turn_index"])
 
         enable_stall_guidance = bool(context_data.get("enable_stall_guidance", False))
@@ -170,12 +181,21 @@ class SummarizerToolDispatcher:
         )
         raw_discovery_history = context_data.get("discovery_query_history", [])
         discovery_query_history = (
-            list(raw_discovery_history) if isinstance(raw_discovery_history, list) else []
+            list(raw_discovery_history)
+            if isinstance(raw_discovery_history, list)
+            else []
         )
         discovery_query_set = {
-            entry for entry in discovery_query_history if isinstance(entry, str) and entry
+            entry
+            for entry in discovery_query_history
+            if isinstance(entry, str) and entry
         }
         staged_blocked_tools = mutating_tools | {"finalize_draft"}
+        registry_mutation_tools = {
+            "add_speaker_message",
+            "edit_message",
+            "remove_message",
+        }
 
         for tc in tool_calls:
             name = tc["name"]
@@ -186,7 +206,9 @@ class SummarizerToolDispatcher:
                 and name in staged_blocked_tools
                 and discovery_queries_completed < required_discovery_queries
             ):
-                remaining_queries = required_discovery_queries - discovery_queries_completed
+                remaining_queries = (
+                    required_discovery_queries - discovery_queries_completed
+                )
                 skip_result = {
                     "status": "skipped",
                     "reason": "discovery_phase_incomplete",
@@ -294,7 +316,10 @@ class SummarizerToolDispatcher:
 
             result = await tool_registry.dispatch(name, args)
             if result is None:
-                result = {"error": f"Unknown tool: {name}", "error_code": "unknown_tool"}
+                result = {
+                    "error": f"Unknown tool: {name}",
+                    "error_code": "unknown_tool",
+                }
 
             self._append_tool_result(
                 messages=messages,
@@ -303,7 +328,11 @@ class SummarizerToolDispatcher:
                 result=result,
             )
 
-            if staged_discovery_enabled and name == "query_transcript" and "error" not in result:
+            if (
+                staged_discovery_enabled
+                and name == "query_transcript"
+                and "error" not in result
+            ):
                 if normalized_query:
                     if normalized_query not in discovery_query_set:
                         discovery_query_history.append(normalized_query)
@@ -335,11 +364,6 @@ class SummarizerToolDispatcher:
                                 ),
                             )
 
-            registry_mutation_tools = {
-                "add_speaker_message",
-                "edit_message",
-                "remove_message",
-            }
             if name in registry_mutation_tools and "error" not in result:
                 duration_result = await tool_registry.dispatch("estimate_duration", {})
                 if duration_result is None:
@@ -358,7 +382,9 @@ class SummarizerToolDispatcher:
                         f"Total: {float(duration_result.get('total_estimated_seconds', 0.0)):.3f}s"
                     ),
                 )
-                turn_total_seconds = float(duration_result.get("total_estimated_seconds", 0.0))
+                turn_total_seconds = float(
+                    duration_result.get("total_estimated_seconds", 0.0)
+                )
                 context_data["last_total_estimated_seconds"] = turn_total_seconds
 
                 count_result = await tool_registry.dispatch("count_words", {})
@@ -379,6 +405,13 @@ class SummarizerToolDispatcher:
 
                 budget = duration_result.get("budget", {})
                 if bool(budget.get("in_budget", False)):
+                    context_data["draft_ready_for_review"] = True
+                    review_chat_max_tokens = coerce_positive_int(
+                        context_data.get("draft_review_chat_max_tokens"),
+                        default=_DEFAULT_DRAFT_REVIEW_CHAT_MAX_TOKENS,
+                        minimum=32,
+                    )
+                    context_data["chat_max_tokens"] = review_chat_max_tokens
                     self.event_bus.publish(
                         "status_message",
                         message=(
@@ -402,6 +435,24 @@ class SummarizerToolDispatcher:
                                 f"Saved {int(save_result.get('total_messages', 0))} messages"
                             ),
                         )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": _DRAFT_REVIEW_PROMPT,
+                        }
+                    )
+                else:
+                    context_data["draft_ready_for_review"] = False
+                    default_chat_max_tokens = context_data.get(
+                        "default_chat_max_tokens"
+                    )
+                    if (
+                        isinstance(default_chat_max_tokens, int)
+                        and default_chat_max_tokens > 0
+                    ):
+                        context_data["chat_max_tokens"] = default_chat_max_tokens
+                    else:
+                        context_data["chat_max_tokens"] = None
 
             if name in registry_mutation_tools:
                 if "error" in result:
@@ -421,9 +472,14 @@ class SummarizerToolDispatcher:
 
                 if turn_signature:
                     last_signature = context_data.get("last_mutation_signature")
-                    if isinstance(last_signature, str) and last_signature == turn_signature:
+                    if (
+                        isinstance(last_signature, str)
+                        and last_signature == turn_signature
+                    ):
                         if not turn_progressed:
-                            stagnation_reason = stagnation_reason or "repeated_signature"
+                            stagnation_reason = (
+                                stagnation_reason or "repeated_signature"
+                            )
 
                 fingerprint = build_mutation_fingerprint(name, args)
                 recent_fingerprints.append(fingerprint)
@@ -462,12 +518,18 @@ class SummarizerToolDispatcher:
             context_data["stagnation_turns"] = stagnation_turns
 
             if enable_stall_guidance and stagnation_turns >= stall_threshold:
-                last_guidance_turn = int(context_data.get("last_stall_guidance_turn", -10_000))
-                if (loop_turn_index - last_guidance_turn) >= (guidance_cooldown_turns + 1):
+                last_guidance_turn = int(
+                    context_data.get("last_stall_guidance_turn", -10_000)
+                )
+                if (loop_turn_index - last_guidance_turn) >= (
+                    guidance_cooldown_turns + 1
+                ):
                     if turn_total_seconds is None:
                         last_total = context_data.get("last_total_estimated_seconds")
                         turn_total_seconds = (
-                            float(last_total) if isinstance(last_total, (int, float)) else None
+                            float(last_total)
+                            if isinstance(last_total, (int, float))
+                            else None
                         )
                     guidance = build_stall_guidance(
                         target_seconds=target_seconds,

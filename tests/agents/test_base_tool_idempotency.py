@@ -92,7 +92,9 @@ from audio_pipeline.calibration import VoiceCloneCalibration
 class FakeResponse:
     """Simple chat response DTO compatible with BaseA2AExecutor."""
 
-    def __init__(self, *, content: str = "", tool_calls: list[dict[str, Any]] | None = None):
+    def __init__(
+        self, *, content: str = "", tool_calls: list[dict[str, Any]] | None = None
+    ):
         self._content = content
         self._tool_calls = tool_calls
 
@@ -183,7 +185,9 @@ class FakeToolRegistry:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._line_count = 0
 
-    async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    async def dispatch(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
         self.calls.append((name, dict(arguments)))
         if name == "add_speaker_message":
             self._line_count += 1
@@ -223,7 +227,9 @@ class FakeEditToolRegistry:
         self._count_index = 0
         self._duration_index = 0
 
-    async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    async def dispatch(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
         if name == "edit_message":
             idx = min(self._edit_index, len(self._edit_results) - 1)
             self._edit_index += 1
@@ -331,9 +337,7 @@ def test_base_loop_sanitizes_python_literal_tool_arguments() -> None:
 def test_base_loop_sanitizes_malformed_tool_arguments_to_empty_object() -> None:
     llm = FakeLLM(
         responses=[
-            FakeResponse(
-                tool_calls=[_raw_tool_call("call_1", "count_words", "{")]
-            )
+            FakeResponse(tool_calls=[_raw_tool_call("call_1", "count_words", "{")])
         ]
     )
     executor = DummyExecutor(llm)
@@ -361,8 +365,12 @@ def test_base_loop_sanitizes_malformed_tool_arguments_to_empty_object() -> None:
 def test_base_loop_skips_duplicate_signature_across_turns() -> None:
     llm = FakeLLM(
         responses=[
-            FakeResponse(tool_calls=[_tool_call("call_1", "SPEAKER_00", "Hello world")]),
-            FakeResponse(tool_calls=[_tool_call("call_2", "SPEAKER_00", "Hello world")]),
+            FakeResponse(
+                tool_calls=[_tool_call("call_1", "SPEAKER_00", "Hello world")]
+            ),
+            FakeResponse(
+                tool_calls=[_tool_call("call_2", "SPEAKER_00", "Hello world")]
+            ),
         ]
     )
     executor = DummyExecutor(llm)
@@ -384,7 +392,9 @@ def test_base_loop_skips_duplicate_signature_across_turns() -> None:
     assert executor.executed_calls[0][0] == "call_1"
 
     skipped_tool_messages = [
-        m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") == "call_2"
+        m
+        for m in messages
+        if m.get("role") == "tool" and m.get("tool_call_id") == "call_2"
     ]
     assert len(skipped_tool_messages) == 1
     payload = json.loads(skipped_tool_messages[0]["content"])
@@ -446,7 +456,10 @@ def test_base_loop_allows_distinct_signatures() -> None:
     )
 
     assert len(executor.executed_calls) == 2
-    assert [call_id for call_id, _, _ in executor.executed_calls] == ["call_1", "call_2"]
+    assert [call_id for call_id, _, _ in executor.executed_calls] == [
+        "call_1",
+        "call_2",
+    ]
 
 
 def test_base_loop_enforces_max_tool_calls_per_turn() -> None:
@@ -479,7 +492,9 @@ def test_base_loop_enforces_max_tool_calls_per_turn() -> None:
     assert executor.executed_calls[0][0] == "call_1"
 
     skipped_tool_messages = [
-        m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") == "call_2"
+        m
+        for m in messages
+        if m.get("role") == "tool" and m.get("tool_call_id") == "call_2"
     ]
     assert len(skipped_tool_messages) == 1
     payload = json.loads(skipped_tool_messages[0]["content"])
@@ -499,7 +514,10 @@ def test_base_loop_forwards_tool_choice_and_chat_max_tokens() -> None:
             tools=[],
             max_turns=1,
             context_data={
-                "tool_choice": {"type": "function", "function": {"name": "count_words"}},
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "count_words"},
+                },
                 "chat_max_tokens": 77,
             },
         )
@@ -581,8 +599,12 @@ def test_base_loop_resets_no_tool_call_count_for_reused_context() -> None:
 def test_base_loop_does_not_id_dedupe_synthetic_fallback_ids() -> None:
     llm = FakeLLM(
         responses=[
-            FakeResponse(tool_calls=[_tool_call("xml_fallback_0", "SPEAKER_00", "Line one")]),
-            FakeResponse(tool_calls=[_tool_call("xml_fallback_0", "SPEAKER_01", "Line two")]),
+            FakeResponse(
+                tool_calls=[_tool_call("xml_fallback_0", "SPEAKER_00", "Line one")]
+            ),
+            FakeResponse(
+                tool_calls=[_tool_call("xml_fallback_0", "SPEAKER_01", "Line two")]
+            ),
         ]
     )
     executor = DummyExecutor(llm)
@@ -708,6 +730,60 @@ def test_summarizer_executes_only_first_mutating_call_per_turn() -> None:
     assert skipped_payload["reason"] == "single_mutating_call_per_turn"
 
 
+def test_summarizer_submits_current_draft_after_no_tool_review_response() -> None:
+    llm = FakeLLM(
+        responses=[
+            FakeResponse(tool_calls=[_tool_call("call_1", "SPEAKER_00", "First line")]),
+            FakeResponse(content="Looks good. Let me review it carefully."),
+            FakeResponse(
+                tool_calls=[_tool_call("call_2", "SPEAKER_01", "Second line")]
+            ),
+        ]
+    )
+    executor = SummarizerExecutor(
+        llm=llm,
+        calibration=_build_calibration(),
+        retrieval_port=12345,
+        max_tool_turns=3,
+        is_embedding_enabled=False,
+    )
+    fake_registry = FakeToolRegistry()
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]
+
+    asyncio.run(
+        executor.run_agent_loop(
+            messages=messages,
+            tools=[],
+            max_turns=3,
+            context_data={
+                "tool_registry": fake_registry,
+                "target_seconds": 60,
+                "duration_tolerance_ratio": 0.05,
+                "replay_dedupe_tools": {
+                    "add_speaker_message",
+                    "edit_message",
+                    "remove_message",
+                    "finalize_draft",
+                },
+                "draft_ready_for_review": False,
+                "break_on_no_tool_call_when_draft_ready": True,
+                "draft_review_chat_max_tokens": 256,
+                "default_chat_max_tokens": None,
+            },
+        )
+    )
+
+    assert len(llm.chat_kwargs_history) == 2
+    assert llm.chat_kwargs_history[1]["max_tokens"] == 256
+    called_tools = [name for name, _ in fake_registry.calls]
+    assert called_tools == [
+        "add_speaker_message",
+        "estimate_duration",
+        "count_words",
+        "save_draft",
+    ]
+
+
 def test_summarizer_injects_stall_guidance_after_repeated_noop_edits() -> None:
     executor = SummarizerExecutor(
         llm=FakeLLM([]),
@@ -760,7 +836,11 @@ def test_summarizer_injects_stall_guidance_after_repeated_noop_edits() -> None:
         "recent_line_edit_fingerprints": [],
     }
     messages: list[dict[str, Any]] = [{"role": "system", "content": "Summarizer"}]
-    tool_call = {"id": "call_1", "name": "edit_message", "arguments": {"line": 6, "new_content": "same"}}
+    tool_call = {
+        "id": "call_1",
+        "name": "edit_message",
+        "arguments": {"line": 6, "new_content": "same"},
+    }
 
     for _ in range(3):
         asyncio.run(executor.process_tool_calls([tool_call], messages, context_data))
@@ -832,7 +912,13 @@ def test_summarizer_resets_stagnation_after_meaningful_edit() -> None:
 
     asyncio.run(
         executor.process_tool_calls(
-            [{"id": "call_1", "name": "edit_message", "arguments": {"line": 3, "new_content": "same"}}],
+            [
+                {
+                    "id": "call_1",
+                    "name": "edit_message",
+                    "arguments": {"line": 3, "new_content": "same"},
+                }
+            ],
             messages,
             context_data,
         )
@@ -841,7 +927,13 @@ def test_summarizer_resets_stagnation_after_meaningful_edit() -> None:
 
     asyncio.run(
         executor.process_tool_calls(
-            [{"id": "call_2", "name": "edit_message", "arguments": {"line": 3, "new_content": "expanded"}}],
+            [
+                {
+                    "id": "call_2",
+                    "name": "edit_message",
+                    "arguments": {"line": 3, "new_content": "expanded"},
+                }
+            ],
             messages,
             context_data,
         )

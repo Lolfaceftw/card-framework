@@ -5,6 +5,7 @@ import pytest
 from audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
     build_interjector_orchestrator,
+    build_speaker_diarizer,
     build_speaker_sample_generator,
     build_voice_clone_orchestrator,
 )
@@ -22,7 +23,9 @@ from audio_pipeline.gateways.fallback_gateways import (
     SingleSpeakerDiarizer,
 )
 from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
+from audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
 from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
+from audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
 from llm_provider import LLMProvider
 
 
@@ -141,6 +144,71 @@ def test_factory_allows_explicit_single_speaker_fallback_opt_in() -> None:
 
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is True
+
+
+def test_factory_builds_pyannote_community1_diarizer() -> None:
+    diarizer = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "pyannote_community1",
+                "min_speakers": 2,
+                "max_speakers": 4,
+                "pyannote": {
+                    "pipeline_name": "pyannote/speaker-diarization-community-1",
+                    "auth_token_env": "HF_TOKEN",
+                    "use_exclusive_diarization": True,
+                },
+            }
+        }
+    )
+
+    assert isinstance(diarizer, PyannoteSpeakerDiarizer)
+    assert diarizer.pipeline_name == "pyannote/speaker-diarization-community-1"
+    assert diarizer.auth_token_env == "HF_TOKEN"
+    assert diarizer.use_exclusive_diarization is True
+    assert diarizer.min_speakers == 2
+    assert diarizer.max_speakers == 4
+
+
+def test_factory_builds_sortformer_diarizers() -> None:
+    offline = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo_sortformer_offline",
+                "sortformer_offline": {
+                    "model_name": "nvidia/diar_sortformer_4spk-v1",
+                    "batch_size": 2,
+                },
+            }
+        }
+    )
+    streaming = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo_sortformer_streaming",
+                "sortformer_streaming": {
+                    "model_name": "nvidia/diar_streaming_sortformer_4spk-v2",
+                    "batch_size": 1,
+                    "chunk_len": 124,
+                    "chunk_right_context": 1,
+                    "fifo_len": 124,
+                    "spkcache_update_period": 124,
+                    "spkcache_len": 188,
+                },
+            }
+        }
+    )
+
+    assert isinstance(offline, SortformerSpeakerDiarizer)
+    assert offline.streaming_mode is False
+    assert offline.batch_size == 2
+    assert isinstance(streaming, SortformerSpeakerDiarizer)
+    assert streaming.streaming_mode is True
+    assert streaming.chunk_len == 124
+    assert streaming.chunk_right_context == 1
+    assert streaming.fifo_len == 124
+    assert streaming.spkcache_update_period == 124
+    assert streaming.spkcache_len == 188
 
 
 def test_factory_raises_for_unknown_provider() -> None:

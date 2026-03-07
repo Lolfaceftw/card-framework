@@ -21,7 +21,9 @@ from audio_pipeline.gateways.fallback_gateways import (
 )
 from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
 from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
+from audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
 from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
+from audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
 from audio_pipeline.interjector import (
     InterjectorOrchestrator,
     LLMInterjectionPlanner,
@@ -54,7 +56,6 @@ def build_audio_to_script_orchestrator(
     """
     separation_cfg = _as_mapping(audio_cfg.get("separation", {}))
     asr_cfg = _as_mapping(audio_cfg.get("asr", {}))
-    diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
     retry_cfg = _as_mapping(audio_cfg.get("retry", {}))
     eta_cfg = _as_mapping(audio_cfg.get("eta", {}))
     dynamic_eta_cfg = _as_mapping(eta_cfg.get("dynamic", {}))
@@ -72,7 +73,7 @@ def build_audio_to_script_orchestrator(
         retry_cfg=retry_cfg,
     )
     transcriber = _build_transcriber(asr_cfg=asr_cfg)
-    diarizer = _build_diarizer(diarization_cfg=diarization_cfg)
+    diarizer = build_speaker_diarizer(audio_cfg)
     eta_strategy = _build_eta_strategy(eta_cfg=eta_cfg)
     return AudioToScriptOrchestrator(
         separator=separator,
@@ -169,6 +170,20 @@ def build_speaker_sample_generator(audio_cfg: Mapping[str, Any]) -> SpeakerSampl
     )
 
 
+def build_speaker_diarizer(audio_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
+    """
+    Build speaker diarizer from audio config mapping.
+
+    Args:
+        audio_cfg: ``audio`` config section.
+
+    Returns:
+        Wired ``SpeakerDiarizer`` instance.
+    """
+    diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
+    return _build_diarizer(diarization_cfg=diarization_cfg)
+
+
 def build_voice_clone_orchestrator(
     audio_cfg: Mapping[str, Any],
     *,
@@ -245,11 +260,19 @@ def build_interjector_orchestrator(
         raise ValueError("audio.interjector.output_dir_name must be non-empty.")
     output_dir = resolve_path(output_dir_name, base_dir=work_dir)
     max_interjection_words = int(interjector_cfg.get("max_interjection_words", 5))
+    min_host_progress_ratio = float(
+        interjector_cfg.get("min_host_progress_ratio", 0.35)
+    )
+    max_host_progress_ratio = float(
+        interjector_cfg.get("max_host_progress_ratio", 0.90)
+    )
     return InterjectorOrchestrator(
         planner=LLMInterjectionPlanner(
             llm=llm,
             max_tokens=int(interjector_cfg.get("analysis_max_tokens", 900)),
             max_interjection_words=max_interjection_words,
+            min_host_progress_ratio=min_host_progress_ratio,
+            max_host_progress_ratio=max_host_progress_ratio,
         ),
         provider=build_voice_clone_provider(audio_cfg, project_root=project_root),
         output_dir=output_dir,
@@ -272,12 +295,8 @@ def build_interjector_orchestrator(
         echo_alignment_offset_ms=int(
             interjector_cfg.get("echo_alignment_offset_ms", 20)
         ),
-        min_host_progress_ratio=float(
-            interjector_cfg.get("min_host_progress_ratio", 0.35)
-        ),
-        max_host_progress_ratio=float(
-            interjector_cfg.get("max_host_progress_ratio", 0.90)
-        ),
+        min_host_progress_ratio=min_host_progress_ratio,
+        max_host_progress_ratio=max_host_progress_ratio,
         min_available_overlap_ms=int(
             interjector_cfg.get("min_available_overlap_ms", 120)
         ),
@@ -353,6 +372,11 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
 def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
     """Factory method for diarization strategy."""
     provider = str(diarization_cfg.get("provider", "nemo")).strip().lower()
+    pyannote_cfg = _as_mapping(diarization_cfg.get("pyannote", {}))
+    sortformer_offline_cfg = _as_mapping(diarization_cfg.get("sortformer_offline", {}))
+    sortformer_streaming_cfg = _as_mapping(
+        diarization_cfg.get("sortformer_streaming", {})
+    )
     if provider == "nemo":
         return NemoSpeakerDiarizer(
             msdd_model=str(diarization_cfg.get("nemo_model", "diar_msdd_telephonic")),
@@ -367,6 +391,65 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
             allow_single_speaker_fallback=bool(
                 diarization_cfg.get("allow_single_speaker_fallback", False)
             ),
+        )
+    if provider in {"pyannote", "pyannote_community1"}:
+        return PyannoteSpeakerDiarizer(
+            pipeline_name=str(
+                pyannote_cfg.get(
+                    "pipeline_name",
+                    "pyannote/speaker-diarization-community-1",
+                )
+            ),
+            auth_token=(
+                str(pyannote_cfg.get("auth_token", "")).strip() or None
+            ),
+            auth_token_env=str(
+                pyannote_cfg.get("auth_token_env", "HUGGINGFACE_TOKEN")
+            ),
+            use_exclusive_diarization=bool(
+                pyannote_cfg.get("use_exclusive_diarization", True)
+            ),
+            min_speakers=_optional_int(diarization_cfg.get("min_speakers")),
+            max_speakers=_optional_int(diarization_cfg.get("max_speakers")),
+        )
+    if provider in {"nemo_sortformer_offline", "sortformer_offline"}:
+        return SortformerSpeakerDiarizer(
+            model_name=str(
+                sortformer_offline_cfg.get(
+                    "model_name",
+                    "nvidia/diar_sortformer_4spk-v1",
+                )
+            ),
+            checkpoint_path=(
+                str(sortformer_offline_cfg.get("checkpoint_path", "")).strip()
+                or None
+            ),
+            streaming_mode=False,
+            batch_size=int(sortformer_offline_cfg.get("batch_size", 1)),
+        )
+    if provider in {"nemo_sortformer_streaming", "sortformer_streaming"}:
+        return SortformerSpeakerDiarizer(
+            model_name=str(
+                sortformer_streaming_cfg.get(
+                    "model_name",
+                    "nvidia/diar_streaming_sortformer_4spk-v2",
+                )
+            ),
+            checkpoint_path=(
+                str(sortformer_streaming_cfg.get("checkpoint_path", "")).strip()
+                or None
+            ),
+            streaming_mode=True,
+            batch_size=int(sortformer_streaming_cfg.get("batch_size", 1)),
+            chunk_len=int(sortformer_streaming_cfg.get("chunk_len", 340)),
+            chunk_right_context=int(
+                sortformer_streaming_cfg.get("chunk_right_context", 40)
+            ),
+            fifo_len=int(sortformer_streaming_cfg.get("fifo_len", 40)),
+            spkcache_update_period=int(
+                sortformer_streaming_cfg.get("spkcache_update_period", 300)
+            ),
+            spkcache_len=int(sortformer_streaming_cfg.get("spkcache_len", 188)),
         )
     if provider in {"single_speaker", "none"}:
         return SingleSpeakerDiarizer(

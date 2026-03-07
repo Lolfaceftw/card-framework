@@ -12,10 +12,12 @@ from audio_pipeline.interjector import (
     AlignedToken,
     InterjectionDecision,
     InterjectorOrchestrator,
+    _parse_plan_payload,
     _SynthesizedOverlay,
     _align_turn_tokens,
     _build_eligible_turns,
     _load_voice_clone_manifest_bundle,
+    _render_eligible_turns_block,
     _validate_llm_decisions,
 )
 from audio_pipeline.voice_clone_contracts import VoiceCloneTurn
@@ -176,6 +178,134 @@ def test_validate_llm_decisions_coerces_echo_to_anchor_text() -> None:
     assert decisions[0].should_interject is True
     assert decisions[0].interjection_text == "matter a lot"
     assert decisions[0].anchor_text == "matter a lot"
+
+
+def test_validate_llm_decisions_rejects_anchor_before_progress_window() -> None:
+    summary_turns = [
+        VoiceCloneTurn(
+            speaker="A",
+            text="one two three four five six seven eight nine ten",
+        ),
+        VoiceCloneTurn(speaker="B", text="right"),
+    ]
+    eligible_turns = _build_eligible_turns(summary_turns)
+
+    decisions = _validate_llm_decisions(
+        [
+            InterjectionDecision(
+                host_turn_index=1,
+                should_interject=True,
+                interjection_style="backchannel",
+                interjection_speaker="B",
+                interjection_text="right",
+                anchor_start_token_index=0,
+                anchor_end_token_index=1,
+            )
+        ],
+        eligible_turns=eligible_turns,
+        max_interjection_words=5,
+        min_host_progress_ratio=0.35,
+        max_host_progress_ratio=0.90,
+    )
+
+    assert decisions == [
+        InterjectionDecision(host_turn_index=1, should_interject=False)
+    ]
+
+
+def test_render_eligible_turns_block_includes_preferred_anchor_window() -> None:
+    summary_turns = [
+        VoiceCloneTurn(
+            speaker="A",
+            text="one two three four five six seven eight nine ten",
+        ),
+        VoiceCloneTurn(speaker="B", text="right"),
+    ]
+    eligible_turns = _build_eligible_turns(summary_turns)
+
+    block = _render_eligible_turns_block(
+        eligible_turns,
+        min_host_progress_ratio=0.35,
+        max_host_progress_ratio=0.90,
+    )
+
+    assert "Preferred anchor token window" in block
+    assert "3..8" in block
+    assert "anchor_end_token_index" in block
+    assert "anchor_start_token_index" in block
+
+
+def test_parse_plan_payload_recovers_complete_decisions_from_truncated_json() -> None:
+    raw_response = """{
+  "decisions": [
+    {
+      "host_turn_index": 2,
+      "should_interject": true,
+      "interjection_style": "backchannel",
+      "interjection_speaker": "SPEAKER_02",
+      "interjection_text": "Right.",
+      "anchor_start_token_index": 13,
+      "anchor_end_token_index": 14,
+      "anchor_text": "systematic errors"
+    },
+    {
+      "host_turn_index": 4,
+      "should_interject": true,
+      "interjection_style": "echo_agreement",
+      "interjection_speaker": "SPEAKER_00",
+      "interjection_text": "Exactly.",
+      "anchor_start_token_index": 19,
+"""
+
+    payload = _parse_plan_payload(raw_response)
+
+    assert payload is not None
+    assert len(payload.decisions) == 1
+    assert payload.decisions[0].host_turn_index == 2
+    assert payload.decisions[0].interjection_text == "Right."
+
+
+def test_validate_llm_decisions_defaults_missing_turns_to_false() -> None:
+    summary_turns = [
+        VoiceCloneTurn(speaker="A", text="fees matter a lot"),
+        VoiceCloneTurn(speaker="B", text="right"),
+        VoiceCloneTurn(speaker="A", text="costs compound over time"),
+        VoiceCloneTurn(speaker="B", text="exactly"),
+    ]
+    eligible_turns = _build_eligible_turns(summary_turns)
+
+    decisions = _validate_llm_decisions(
+        [
+            InterjectionDecision(
+                host_turn_index=3,
+                should_interject=True,
+                interjection_style="echo_agreement",
+                interjection_speaker="B",
+                interjection_text="compound over time",
+                anchor_start_token_index=1,
+                anchor_end_token_index=3,
+            )
+        ],
+        eligible_turns=eligible_turns,
+        max_interjection_words=5,
+        min_host_progress_ratio=0.25,
+        max_host_progress_ratio=0.90,
+    )
+
+    assert decisions == [
+        InterjectionDecision(host_turn_index=1, should_interject=False),
+        InterjectionDecision(host_turn_index=2, should_interject=False),
+        InterjectionDecision(
+            host_turn_index=3,
+            should_interject=True,
+            interjection_style="echo_agreement",
+            interjection_speaker="B",
+            interjection_text="compound over time",
+            anchor_start_token_index=1,
+            anchor_end_token_index=3,
+            anchor_text="compound over time",
+        ),
+    ]
 
 
 def test_align_turn_tokens_falls_back_without_aligner(

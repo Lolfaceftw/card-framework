@@ -1,0 +1,218 @@
+{
+  "manifest_version": "1",
+  "created_at_utc": "2026-03-07T12:33:37.572399+00:00",
+  "source": "ami",
+  "subset": "test",
+  "audio_stream": "mix-headset",
+  "notes": "Audio downloaded from the public AMI corpus; RTTM/UEM/list files downloaded from BUTSpeechFIT/AMI-diarization-setup only_words.",
+  "samples": [
+    {
+      "sample_id": "IS1009a",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\IS1009a.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\IS1009a.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\IS1009a.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "IS1009b",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\IS1009b.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\IS1009b.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\IS1009b.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "IS1009c",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\IS1009c.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\IS1009c.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\IS1009c.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "IS1009d",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\IS1009d.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\IS1009d.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\IS1009d.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "ES2004a",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\ES2004a.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\ES2004a.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\ES2004a.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "ES2004b",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\ES2004b.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\ES2004b.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\ES2004b.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "ES2004c",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\ES2004c.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\ES2004c.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\ES2004c.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "ES2004d",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\ES2004d.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\ES2004d.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\ES2004d.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "TS3003a",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\TS3003a.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\TS3003a.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\TS3003a.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "TS3003b",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\TS3003b.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\TS3003b.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\TS3003b.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "TS3003c",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\TS3003c.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\TS3003c.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\TS3003c.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "TS3003d",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\TS3003d.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\TS3003d.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\TS3003d.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "EN2002a",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\EN2002a.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\EN2002a.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\EN2002a.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "EN2002b",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\EN2002b.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\EN2002b.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\EN2002b.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "EN2002c",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\EN2002c.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\EN2002c.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\EN2002c.uem",
+      "num_speakers": 3,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    },
+    {
+      "sample_id": "EN2002d",
+      "dataset": "ami",
+      "subset": "test",
+      "audio_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\audio\\test\\EN2002d.Mix-Headset.wav",
+      "rttm_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\rttm\\test\\EN2002d.rttm",
+      "uem_filepath": "C:\\Users\\chris\\llm_test\\artifacts\\diarization_datasets\\ami\\uem\\test\\EN2002d.uem",
+      "num_speakers": 4,
+      "metadata": {
+        "audio_stream": "mix-headset",
+        "reference_setup": "BUTSpeechFIT/AMI-diarization-setup only_words"
+      }
+    }
+  ]
+}

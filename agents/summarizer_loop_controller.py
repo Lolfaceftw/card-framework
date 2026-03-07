@@ -18,6 +18,8 @@ RunAgentLoopCallable = Callable[
     Awaitable[dict[str, Any] | None],
 ]
 
+_DRAFT_REVIEW_CHAT_MAX_TOKENS = 256
+
 
 @dataclass(slots=True)
 class SummarizerLoopController:
@@ -53,9 +55,7 @@ class SummarizerLoopController:
                 "enable_extended_text_tool_parser"
             ],
             "enable_stall_guidance": loop_guardrails["enable_stall_guidance"],
-            "enable_noop_edit_detection": loop_guardrails[
-                "enable_noop_edit_detection"
-            ],
+            "enable_noop_edit_detection": loop_guardrails["enable_noop_edit_detection"],
             "stall_guidance_threshold_turns": loop_guardrails[
                 "stall_guidance_threshold_turns"
             ],
@@ -69,6 +69,11 @@ class SummarizerLoopController:
             "last_total_word_count": None,
             "last_total_estimated_seconds": None,
             "recent_line_edit_fingerprints": [],
+            "chat_max_tokens": None,
+            "default_chat_max_tokens": None,
+            "draft_ready_for_review": False,
+            "break_on_no_tool_call_when_draft_ready": True,
+            "draft_review_chat_max_tokens": _DRAFT_REVIEW_CHAT_MAX_TOKENS,
             "loop_guardrail_provider": loop_guardrails["provider_name"],
             "loop_guardrail_model": loop_guardrails["model_id"],
             "enable_staged_discovery": self.is_embedding_enabled

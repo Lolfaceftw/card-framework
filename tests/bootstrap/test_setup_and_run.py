@@ -676,7 +676,7 @@ def test_stage_two_requires_audio_fallback_when_transcript_lacks_vocals_metadata
     )
 
 
-def test_stage_two_requires_audio_fallback_skips_when_vocals_metadata_exists(
+def test_stage_two_requires_audio_fallback_still_requires_audio_when_manifest_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -702,7 +702,7 @@ def test_stage_two_requires_audio_fallback_skips_when_vocals_metadata_exists(
             transcript_path=transcript_path,
             speaker_samples_enabled=True,
         )
-        is False
+        is True
     )
 
 
@@ -734,6 +734,33 @@ def test_stage_two_requires_audio_fallback_skips_when_manifest_exists(
             speaker_samples_enabled=True,
         )
         is False
+    )
+
+
+def test_resolve_transcript_source_audio_path_returns_existing_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    source_path = repo_root / "audio.wav"
+    source_path.write_bytes(b"wav")
+    transcript_path = repo_root / "transcript.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "segments": [],
+                "metadata": {"source_audio_path": "audio.wav"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    assert (
+        bootstrap.resolve_transcript_source_audio_path(transcript_path)
+        == source_path.resolve()
     )
 
 

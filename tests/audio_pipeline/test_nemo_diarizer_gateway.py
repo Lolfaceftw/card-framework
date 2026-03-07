@@ -21,7 +21,7 @@ def test_prepare_diarization_audio_normalizes_to_mono(monkeypatch, tmp_path: Pat
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(
-        "audio_pipeline.gateways.nemo_diarizer_gateway.ensure_command_available",
+        "audio_pipeline.gateways.diarization_common.ensure_command_available",
         lambda _: None,
     )
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -58,7 +58,7 @@ def test_prepare_diarization_audio_surfaces_ffmpeg_errors(
         )
 
     monkeypatch.setattr(
-        "audio_pipeline.gateways.nemo_diarizer_gateway.ensure_command_available",
+        "audio_pipeline.gateways.diarization_common.ensure_command_available",
         lambda _: None,
     )
     monkeypatch.setattr(subprocess, "run", _raise)
