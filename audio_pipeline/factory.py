@@ -22,6 +22,10 @@ from audio_pipeline.gateways.fallback_gateways import (
 from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
 from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
 from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
+from audio_pipeline.interjector import (
+    InterjectorOrchestrator,
+    LLMInterjectionPlanner,
+)
 from audio_pipeline.gateways.fallback_voice_clone_gateway import (
     PassthroughVoiceCloneGateway,
 )
@@ -33,6 +37,7 @@ from audio_pipeline.runtime import resolve_device, resolve_path
 from audio_pipeline.speaker_samples import SpeakerSampleGenerator
 from audio_pipeline.voice_clone_contracts import VoiceCloneProvider
 from audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
+from llm_provider import LLMProvider
 
 
 def build_audio_to_script_orchestrator(
@@ -205,6 +210,81 @@ def build_voice_clone_orchestrator(
             voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav")
         ),
         merge_timeout_seconds=int(voice_clone_cfg.get("merge_timeout_seconds", 300)),
+    )
+
+
+def build_interjector_orchestrator(
+    audio_cfg: Mapping[str, Any],
+    *,
+    llm: LLMProvider,
+    project_root: Path,
+) -> InterjectorOrchestrator | None:
+    """
+    Build Stage-4 interjector orchestrator from audio config mapping.
+
+    Args:
+        audio_cfg: ``audio`` config section.
+        llm: LLM provider used for interjection planning.
+        project_root: Repository root used for path resolution.
+
+    Returns:
+        Wired ``InterjectorOrchestrator`` when enabled, otherwise ``None``.
+    """
+    interjector_cfg = _as_mapping(audio_cfg.get("interjector", {}))
+    if not bool(interjector_cfg.get("enabled", False)):
+        return None
+
+    work_dir = resolve_path(
+        str(audio_cfg.get("work_dir", "artifacts/audio_stage")),
+        base_dir=project_root,
+    )
+    output_dir_name = str(interjector_cfg.get("output_dir_name", "interjector"))
+    if not output_dir_name.strip():
+        raise ValueError("audio.interjector.output_dir_name must be non-empty.")
+    output_dir = resolve_path(output_dir_name, base_dir=work_dir)
+    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
+    max_interjection_words = int(interjector_cfg.get("max_interjection_words", 5))
+    return InterjectorOrchestrator(
+        planner=LLMInterjectionPlanner(
+            llm=llm,
+            max_tokens=int(interjector_cfg.get("analysis_max_tokens", 900)),
+            max_interjection_words=max_interjection_words,
+        ),
+        provider=_build_voice_clone_provider(
+            voice_clone_cfg=voice_clone_cfg,
+            project_root=project_root,
+        ),
+        output_dir=output_dir,
+        manifest_filename=str(
+            interjector_cfg.get("manifest_filename", "interjector_manifest.json")
+        ),
+        merged_output_filename=str(
+            interjector_cfg.get(
+                "merged_output_filename",
+                "voice_cloned_interjected.wav",
+            )
+        ),
+        max_interjection_words=max_interjection_words,
+        max_interjections_per_host_turn=int(
+            interjector_cfg.get("max_interjections_per_host_turn", 1)
+        ),
+        backchannel_reaction_latency_ms=int(
+            interjector_cfg.get("backchannel_reaction_latency_ms", 120)
+        ),
+        echo_alignment_offset_ms=int(
+            interjector_cfg.get("echo_alignment_offset_ms", 20)
+        ),
+        min_host_progress_ratio=float(
+            interjector_cfg.get("min_host_progress_ratio", 0.35)
+        ),
+        max_host_progress_ratio=float(
+            interjector_cfg.get("max_host_progress_ratio", 0.90)
+        ),
+        min_available_overlap_ms=int(
+            interjector_cfg.get("min_available_overlap_ms", 120)
+        ),
+        turn_end_guard_ms=int(interjector_cfg.get("turn_end_guard_ms", 180)),
+        mix_timeout_seconds=int(interjector_cfg.get("mix_timeout_seconds", 300)),
     )
 
 

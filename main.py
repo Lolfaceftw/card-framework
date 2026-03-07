@@ -26,16 +26,19 @@ from agents.summarizer import SummarizerExecutor
 from agents.utils import load_transcript
 from audio_pipeline import (
     build_audio_to_script_orchestrator,
+    build_interjector_orchestrator,
     build_speaker_sample_generator,
     build_voice_clone_orchestrator,
 )
 from audio_pipeline.contracts import TranscriptPayload
 from audio_pipeline.eta import (
     DynamicEtaTracker,
+    EtaProfilePersistence,
     StageEtaStrategy,
     StageProgressCallback,
     StageProgressUpdate,
     UnitStageEtaLearner,
+    UnitStageEtaHistory,
     UnitStageEtaStrategy,
     format_eta_seconds,
 )
@@ -190,6 +193,22 @@ def _should_defer_speaker_samples(audio_cfg_dict: dict[str, Any]) -> bool:
     )
 
 
+def _save_eta_profile_if_supported(
+    *,
+    eta_strategy: StageEtaStrategy | None,
+    profile_path: Path | None,
+    profile_context: dict[str, str] | None,
+    failure_message: str,
+) -> None:
+    """Persist learned ETA state when the strategy supports profile storage."""
+    if profile_path is None or not isinstance(eta_strategy, EtaProfilePersistence):
+        return
+    try:
+        eta_strategy.save_profile(profile_path, context=profile_context or {})
+    except Exception:
+        event_bus.publish("system_message", failure_message)
+
+
 def _build_speaker_sample_preparer(
     *,
     stage_start: str,
@@ -197,6 +216,8 @@ def _build_speaker_sample_preparer(
     project_root: Path,
     transcript_path: str,
     eta_strategy: StageEtaStrategy | None = None,
+    eta_profile_path: Path | None = None,
+    eta_profile_context: dict[str, str] | None = None,
     eta_update_interval_seconds: float = 10.0,
     eta_progress_smoothing: float = 0.25,
     eta_overrun_factor: float = 1.15,
@@ -212,6 +233,8 @@ def _build_speaker_sample_preparer(
             transcript_path=transcript_path,
             transcript=transcript,
             eta_strategy=eta_strategy,
+            eta_profile_path=eta_profile_path,
+            eta_profile_context=eta_profile_context,
             eta_update_interval_seconds=eta_update_interval_seconds,
             eta_progress_smoothing=eta_progress_smoothing,
             eta_overrun_factor=eta_overrun_factor,
@@ -229,6 +252,8 @@ def _run_post_transcript_speaker_sample_step(
     transcript_path: str,
     transcript: Transcript,
     eta_strategy: StageEtaStrategy | None = None,
+    eta_profile_path: Path | None = None,
+    eta_profile_context: dict[str, str] | None = None,
     eta_update_interval_seconds: float = 10.0,
     eta_progress_smoothing: float = 0.25,
     eta_overrun_factor: float = 1.15,
@@ -283,6 +308,10 @@ def _run_post_transcript_speaker_sample_step(
     if (
         expected_sample_count > 0
         and isinstance(eta_strategy, UnitStageEtaStrategy)
+        and (
+            not isinstance(eta_strategy, UnitStageEtaHistory)
+            or eta_strategy.has_unit_stage_history(stage="speaker_samples")
+        )
     ):
         estimated_total_seconds = eta_strategy.estimate_unit_stage_total_seconds(
             stage="speaker_samples",
@@ -383,6 +412,12 @@ def _run_post_transcript_speaker_sample_step(
                 stage="speaker_samples",
                 total_units=len(sample_result.artifacts),
                 elapsed_seconds=elapsed_seconds,
+            )
+            _save_eta_profile_if_supported(
+                eta_strategy=eta_strategy,
+                profile_path=eta_profile_path,
+                profile_context=eta_profile_context,
+                failure_message="Speaker sample stage: ETA profile save failed.",
             )
         except Exception:
             event_bus.publish(
@@ -521,26 +556,40 @@ def main(cfg: DictConfig) -> None:
             f"Skipping audio stage (start_stage={stage_plan.start_stage}).",
         )
 
-    resolved_transcript_path = resolve_path(transcript_path, base_dir=project_root)
-    if not resolved_transcript_path.exists():
-        if stage_plan.start_stage == "stage-3":
-            raise ValueError(
-                "transcript_path must point to an existing transcript JSON with "
-                "metadata.speaker_samples_manifest_path when "
-                "pipeline.start_stage=stage-3."
+    if stage_plan.start_stage == "stage-4":
+        event_bus.publish(
+            "system_message",
+            (
+                "Skipping transcript load for stage-4. Using the provided summary XML "
+                "and voice-clone manifest only."
+            ),
+        )
+        transcript = Transcript.from_mapping({"segments": [], "metadata": {}})
+    else:
+        resolved_transcript_path = resolve_path(transcript_path, base_dir=project_root)
+        if not resolved_transcript_path.exists():
+            if stage_plan.start_stage == "stage-3":
+                raise ValueError(
+                    "transcript_path must point to an existing transcript JSON with "
+                    "metadata.speaker_samples_manifest_path when "
+                    "pipeline.start_stage=stage-3."
+                )
+            raise FileNotFoundError(
+                f"Transcript file not found: {resolved_transcript_path}"
             )
-        raise FileNotFoundError(f"Transcript file not found: {resolved_transcript_path}")
 
-    transcript_path = str(resolved_transcript_path)
-    event_bus.publish("system_message", f"Loading transcript from {transcript_path}...")
-    transcript_payload = load_transcript(transcript_path)
-    transcript = Transcript.from_mapping(transcript_payload)
-    event_bus.publish(
-        "system_message",
-        f"Loaded {len(transcript.segments)} segments",
-    )
+        transcript_path = str(resolved_transcript_path)
+        event_bus.publish("system_message", f"Loading transcript from {transcript_path}...")
+        transcript_payload = load_transcript(transcript_path)
+        transcript = Transcript.from_mapping(transcript_payload)
+        event_bus.publish(
+            "system_message",
+            f"Loaded {len(transcript.segments)} segments",
+        )
     speaker_sample_preparer: Callable[[Transcript], Transcript] | None = None
-    if _should_defer_speaker_samples(audio_cfg_dict):
+    if stage_plan.start_stage == "stage-4":
+        speaker_sample_preparer = None
+    elif _should_defer_speaker_samples(audio_cfg_dict):
         event_bus.publish(
             "system_message",
             "Speaker sample generation deferred until voice clone stage.",
@@ -551,6 +600,8 @@ def main(cfg: DictConfig) -> None:
             project_root=project_root,
             transcript_path=transcript_path,
             eta_strategy=audio_orchestrator.eta_strategy,
+            eta_profile_path=eta_profile_path,
+            eta_profile_context=eta_profile_context,
             eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
             eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
             eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
@@ -564,6 +615,8 @@ def main(cfg: DictConfig) -> None:
             transcript_path=transcript_path,
             transcript=transcript,
             eta_strategy=audio_orchestrator.eta_strategy,
+            eta_profile_path=eta_profile_path,
+            eta_profile_context=eta_profile_context,
             eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
             eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
             eta_overrun_factor=audio_orchestrator.eta_overrun_factor,
@@ -583,10 +636,75 @@ def main(cfg: DictConfig) -> None:
             if not stage_terminal_logging:
                 _suppress_chatty_logger_propagation()
 
+    event_bus.publish("system_message", "Instantiating LLM providers...")
+    shared_agent_client = AgentClient(event_bus=event_bus)
+    logging_enabled = bool(cfg.get("logging", {}).get("enabled", False))
+    shared_llm = _instantiate_llm_provider(cfg.llm, enable_logging=logging_enabled)
+
+    stage_llm_cfg = _to_plain_dict(cfg.get("stage_llm", {}))
+    summarizer_llm, summarizer_llm_source = _resolve_stage_llm(
+        stage_llm_cfg.get("summarizer"),
+        shared_llm=shared_llm,
+        enable_logging=logging_enabled,
+    )
+    critic_llm, critic_llm_source = _resolve_stage_llm(
+        stage_llm_cfg.get("critic"),
+        shared_llm=shared_llm,
+        enable_logging=logging_enabled,
+    )
+    interjector_llm, interjector_llm_source = _resolve_stage_llm(
+        stage_llm_cfg.get("interjector"),
+        shared_llm=shared_llm,
+        enable_logging=logging_enabled,
+    )
+
+    event_bus.publish(
+        "system_message", f"Default LLM provider: {type(shared_llm).__name__}"
+    )
+    event_bus.publish(
+        "system_message",
+        (
+            "Summarizer LLM provider: "
+            f"{type(summarizer_llm).__name__} (source={summarizer_llm_source})"
+        ),
+    )
+    event_bus.publish(
+        "system_message",
+        f"Critic LLM provider: {type(critic_llm).__name__} (source={critic_llm_source})",
+    )
+    event_bus.publish(
+        "system_message",
+        (
+            "Interjector LLM provider: "
+            f"{type(interjector_llm).__name__} (source={interjector_llm_source})"
+        ),
+    )
+
     voice_clone_orchestrator = build_voice_clone_orchestrator(
         audio_cfg_dict,
         project_root=project_root,
     )
+    interjector_orchestrator = build_interjector_orchestrator(
+        audio_cfg_dict,
+        llm=interjector_llm,
+        project_root=project_root,
+    )
+    if stage_plan.start_stage == "stage-4" and interjector_orchestrator is None:
+        raise ValueError(
+            "audio.interjector.enabled must be true when "
+            "pipeline.start_stage=stage-4."
+        )
+    if (
+        interjector_orchestrator is not None
+        and voice_clone_orchestrator is None
+        and stage_plan.start_stage != "stage-4"
+    ):
+        raise ValueError(
+            "audio.interjector.enabled=true requires audio.voice_clone.enabled=true "
+            "unless pipeline.start_stage=stage-4 with an existing "
+            "pipeline.voice_clone_manifest_path."
+        )
+
     voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
     if voice_clone_orchestrator is None:
         event_bus.publish("system_message", "Voice clone stage disabled.")
@@ -642,37 +760,16 @@ def main(cfg: DictConfig) -> None:
                     f"threshold={heartbeat_cfg.dedicated_usage_threshold_ratio:.0%})."
                 ),
             )
-    event_bus.publish("system_message", "Instantiating LLM providers...")
-    shared_agent_client = AgentClient(event_bus=event_bus)
-    logging_enabled = bool(cfg.get("logging", {}).get("enabled", False))
-    shared_llm = _instantiate_llm_provider(cfg.llm, enable_logging=logging_enabled)
-
-    stage_llm_cfg = _to_plain_dict(cfg.get("stage_llm", {}))
-    summarizer_llm, summarizer_llm_source = _resolve_stage_llm(
-        stage_llm_cfg.get("summarizer"),
-        shared_llm=shared_llm,
-        enable_logging=logging_enabled,
-    )
-    critic_llm, critic_llm_source = _resolve_stage_llm(
-        stage_llm_cfg.get("critic"),
-        shared_llm=shared_llm,
-        enable_logging=logging_enabled,
-    )
-
-    event_bus.publish(
-        "system_message", f"Default LLM provider: {type(shared_llm).__name__}"
-    )
-    event_bus.publish(
-        "system_message",
-        (
-            "Summarizer LLM provider: "
-            f"{type(summarizer_llm).__name__} (source={summarizer_llm_source})"
-        ),
-    )
-    event_bus.publish(
-        "system_message",
-        f"Critic LLM provider: {type(critic_llm).__name__} (source={critic_llm_source})",
-    )
+    if interjector_orchestrator is None:
+        event_bus.publish("system_message", "Interjector stage disabled.")
+    else:
+        event_bus.publish(
+            "system_message",
+            (
+                "Interjector stage enabled with output dir "
+                f"{interjector_orchestrator.output_dir}"
+            ),
+        )
 
     is_embedding_enabled = "NoOpEmbeddingProvider" not in cfg.embedding.get(
         "_target_", ""
@@ -827,8 +924,11 @@ def main(cfg: DictConfig) -> None:
         max_words=int(cfg.orchestrator.max_words),
         max_iterations=int(cfg.orchestrator.max_iterations),
         voice_clone_orchestrator=voice_clone_orchestrator,
+        interjector_orchestrator=interjector_orchestrator,
         speaker_sample_preparer=speaker_sample_preparer,
         eta_strategy=audio_orchestrator.eta_strategy,
+        eta_profile_path=eta_profile_path,
+        eta_profile_context=eta_profile_context,
         eta_update_interval_seconds=audio_orchestrator.eta_update_interval_seconds,
         eta_progress_smoothing=audio_orchestrator.eta_progress_smoothing,
         eta_overrun_factor=audio_orchestrator.eta_overrun_factor,

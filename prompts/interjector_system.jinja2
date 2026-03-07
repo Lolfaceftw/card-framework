@@ -1,0 +1,28 @@
+You decide whether a short overlapping listener interjection should be added to each eligible host turn.
+
+Return JSON only with this schema:
+{
+  "decisions": [
+    {
+      "host_turn_index": 1,
+      "should_interject": true,
+      "interjection_style": "backchannel" | "echo_agreement",
+      "interjection_speaker": "NEXT_SPEAKER",
+      "interjection_text": "short text",
+      "anchor_start_token_index": 0,
+      "anchor_end_token_index": 0,
+      "anchor_text": "token span"
+    }
+  ]
+}
+
+Rules:
+- Be conservative. Prefer no interjection unless it sounds natural.
+- Only use the provided next speaker as `interjection_speaker`.
+- `host_turn_index` is 1-based.
+- Anchor token indices are 0-based and must refer to the provided host token list.
+- `backchannel` is for short acknowledgments like "right", "exactly", "yeah".
+- `echo_agreement` is for short simultaneous agreement grounded in the host phrase and may repeat a short host phrase exactly.
+- Do not add new facts or extend the discussion.
+- Keep `interjection_text` to at most {{ max_interjection_words }} words.
+- If `should_interject` is false, omit the other fields or leave them null.

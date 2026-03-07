@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
+from audio_pipeline.eta import LinearStageEtaStrategy, StageSpeedProfile
 from orchestration.stage_orchestrator import StageOrchestrator
 from orchestration.transcript import Transcript
 from pipeline_plan import PipelineStagePlan
@@ -31,6 +33,7 @@ class _FakeOrchestrator:
 @dataclass(slots=True)
 class _FakeVoiceCloneResult:
     output_dir: Path
+    manifest_path: Path
     artifacts: tuple[str, ...]
 
 
@@ -52,7 +55,41 @@ class _FakeVoiceCloneOrchestrator:
         del progress_callback
         self.summary_xml = summary_xml
         self.manifest_path = speaker_samples_manifest_path
-        return _FakeVoiceCloneResult(output_dir=self.output_dir, artifacts=("turn.wav",))
+        return _FakeVoiceCloneResult(
+            output_dir=self.output_dir,
+            manifest_path=self.output_dir / "manifest.json",
+            artifacts=("turn.wav",),
+        )
+
+
+@dataclass(slots=True)
+class _FakeInterjectorResult:
+    output_dir: Path
+    artifacts: tuple[str, ...]
+
+
+class _FakeInterjectorOrchestrator:
+    """Capture Stage-4 interjector invocations without external dependencies."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = output_dir
+        self.summary_xml: str | None = None
+        self.voice_clone_manifest_path: Path | None = None
+
+    def run(
+        self,
+        *,
+        summary_xml: str,
+        voice_clone_manifest_path: Path,
+        language: str = "en",
+    ) -> _FakeInterjectorResult:
+        del language
+        self.summary_xml = summary_xml
+        self.voice_clone_manifest_path = voice_clone_manifest_path
+        return _FakeInterjectorResult(
+            output_dir=self.output_dir,
+            artifacts=("overlay.wav",),
+        )
 
 
 class _FakeGpuHeartbeat:
@@ -75,6 +112,7 @@ def _build_stage_orchestrator(
     fake_orchestrator: _FakeOrchestrator,
     project_root: Path,
     fake_voice_clone_orchestrator: _FakeVoiceCloneOrchestrator | None = None,
+    fake_interjector_orchestrator: _FakeInterjectorOrchestrator | None = None,
     fake_gpu_heartbeat: _FakeGpuHeartbeat | None = None,
 ) -> StageOrchestrator:
     """Create a stage-orchestrator with stable defaults for tests."""
@@ -86,6 +124,7 @@ def _build_stage_orchestrator(
         max_words=30,
         max_iterations=3,
         voice_clone_orchestrator=fake_voice_clone_orchestrator,  # type: ignore[arg-type]
+        interjector_orchestrator=fake_interjector_orchestrator,  # type: ignore[arg-type]
         voice_clone_gpu_heartbeat=fake_gpu_heartbeat,  # type: ignore[arg-type]
     )
 
@@ -218,6 +257,78 @@ def test_run_stage_two_triggers_voice_clone(tmp_path: Path) -> None:
     ).resolve()
 
 
+def test_run_stage_two_voice_clone_hides_first_run_eta_and_persists_learning(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Keep first-run voice-clone ETA silent while still persisting learned throughput."""
+    fake_orchestrator = _FakeOrchestrator()
+    fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
+    messages: list[str] = []
+
+    def _capture(event_type: str, *args: Any, **kwargs: Any) -> None:
+        del event_type, kwargs
+        if args:
+            messages.append(str(args[-1]))
+
+    monkeypatch.setattr("orchestration.stage_orchestrator.event_bus.publish", _capture)
+
+    profile_path = tmp_path / "eta_profile.json"
+    stage_orchestrator = StageOrchestrator(
+        orchestrator=fake_orchestrator,  # type: ignore[arg-type]
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        project_root=tmp_path,
+        min_words=10,
+        max_words=30,
+        max_iterations=3,
+        voice_clone_orchestrator=fake_voice_clone,  # type: ignore[arg-type]
+        eta_strategy=LinearStageEtaStrategy(
+            separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+            transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+            diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        ),
+        eta_profile_path=profile_path,
+        eta_profile_context={"device": "cpu"},
+        eta_update_interval_seconds=0.0,
+    )
+    transcript = {
+        "segments": [{"speaker": "SPEAKER_00", "text": "hello world"}],
+        "metadata": {"speaker_samples_manifest_path": "speaker_samples/manifest.json"},
+    }
+
+    asyncio.run(stage_orchestrator.run(transcript=transcript, retrieval_enabled=False))
+
+    assert not any("estimated time left" in message for message in messages)
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert payload["unit_stages"]["voice_clone"]["samples"] == 1
+
+
+def test_run_stage_two_triggers_interjector_after_voice_clone(tmp_path: Path) -> None:
+    """Run Stage-4 interjection after voice clone when configured."""
+    fake_orchestrator = _FakeOrchestrator()
+    fake_voice_clone = _FakeVoiceCloneOrchestrator(output_dir=tmp_path / "voice_clone")
+    fake_interjector = _FakeInterjectorOrchestrator(output_dir=tmp_path / "interjector")
+    stage_orchestrator = _build_stage_orchestrator(
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        fake_orchestrator=fake_orchestrator,
+        project_root=tmp_path,
+        fake_voice_clone_orchestrator=fake_voice_clone,
+        fake_interjector_orchestrator=fake_interjector,
+    )
+    transcript = {
+        "segments": [{"speaker": "SPEAKER_00", "text": "hello world"}],
+        "metadata": {"speaker_samples_manifest_path": "speaker_samples/manifest.json"},
+    }
+
+    asyncio.run(stage_orchestrator.run(transcript=transcript, retrieval_enabled=False))
+
+    assert fake_voice_clone.summary_xml == "<SPEAKER_00>loop</SPEAKER_00>"
+    assert fake_interjector.summary_xml == "<SPEAKER_00>loop</SPEAKER_00>"
+    assert fake_interjector.voice_clone_manifest_path == (
+        tmp_path / "voice_clone" / "manifest.json"
+    )
+
+
 def test_run_stage_two_starts_and_stops_gpu_heartbeat(tmp_path: Path) -> None:
     """Start and stop GPU heartbeat around stage-3 voice-clone execution."""
     fake_orchestrator = _FakeOrchestrator()
@@ -287,3 +398,35 @@ def test_run_stage_two_prepares_deferred_speaker_samples_for_voice_clone(
 
     assert prepared_calls == ["called"]
     assert fake_voice_clone.manifest_path == manifest_path.resolve()
+
+
+def test_run_stage_four_uses_existing_summary_and_manifest(tmp_path: Path) -> None:
+    """Run direct Stage-4 interjection from existing summary and stage-3 manifest."""
+    fake_orchestrator = _FakeOrchestrator()
+    fake_interjector = _FakeInterjectorOrchestrator(output_dir=tmp_path / "interjector")
+    final_summary_path = tmp_path / "summary.xml"
+    voice_clone_manifest_path = tmp_path / "voice_clone" / "manifest.json"
+    final_summary_path.write_text("<SPEAKER_00>hello</SPEAKER_00>", encoding="utf-8")
+    voice_clone_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    voice_clone_manifest_path.write_text('{"artifacts": []}', encoding="utf-8")
+    stage_orchestrator = _build_stage_orchestrator(
+        stage_plan=PipelineStagePlan(
+            start_stage="stage-4",
+            final_summary_path=final_summary_path,
+            voice_clone_manifest_path=voice_clone_manifest_path,
+        ),
+        fake_orchestrator=fake_orchestrator,
+        project_root=tmp_path,
+        fake_interjector_orchestrator=fake_interjector,
+    )
+
+    asyncio.run(
+        stage_orchestrator.run(
+            transcript={"segments": [], "metadata": {}},
+            retrieval_enabled=False,
+        )
+    )
+
+    assert fake_orchestrator.loop_kwargs is None
+    assert fake_interjector.summary_xml == "<SPEAKER_00>hello</SPEAKER_00>"
+    assert fake_interjector.voice_clone_manifest_path == voice_clone_manifest_path

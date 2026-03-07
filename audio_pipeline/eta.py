@@ -232,8 +232,33 @@ class UnitStageEtaStrategy(Protocol):
         *,
         stage: EtaUnitStageName,
         total_units: int,
-    ) -> float | None:
+        ) -> float | None:
         """Return estimated unit-stage duration in seconds."""
+
+
+@runtime_checkable
+class StageEtaHistory(Protocol):
+    """Optional contract for strategies that can report learned audio-stage history."""
+
+    def has_stage_history(
+        self,
+        *,
+        stage: AudioStageName,
+        device: str,
+    ) -> bool:
+        """Return whether learned throughput exists for the stage and device."""
+
+
+@runtime_checkable
+class UnitStageEtaHistory(Protocol):
+    """Optional contract for strategies that can report learned unit-stage history."""
+
+    def has_unit_stage_history(
+        self,
+        *,
+        stage: EtaUnitStageName,
+    ) -> bool:
+        """Return whether learned throughput exists for the unit stage."""
 
 
 @runtime_checkable
@@ -290,6 +315,8 @@ class EtaProfilePersistence(Protocol):
 class LinearStageEtaStrategy(
     StageEtaStrategy,
     UnitStageEtaStrategy,
+    StageEtaHistory,
+    UnitStageEtaHistory,
     StageEtaLearner,
     UnitStageEtaLearner,
     EtaProfilePersistence,
@@ -399,6 +426,23 @@ class LinearStageEtaStrategy(
             max(self.min_unit_seconds_per_unit, seconds_per_unit),
         )
         return max(1.0, clamped * float(total_units))
+
+    def has_stage_history(
+        self,
+        *,
+        stage: AudioStageName,
+        device: str,
+    ) -> bool:
+        """Return whether learned audio-stage throughput exists for the stage/device."""
+        return (stage, self._normalize_device(device)) in self.observed_throughput
+
+    def has_unit_stage_history(
+        self,
+        *,
+        stage: EtaUnitStageName,
+    ) -> bool:
+        """Return whether learned unit-stage throughput exists for the stage."""
+        return stage in self.observed_unit_throughput
 
     def observe_stage_duration(
         self,

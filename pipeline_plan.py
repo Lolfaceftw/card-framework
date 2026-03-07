@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, TypeAlias, cast
 
-PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3"]
+PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3", "stage-4"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -16,11 +16,15 @@ class PipelineStagePlan:
 
     Attributes:
         start_stage: Stage where the pipeline starts.
-        final_summary_path: Optional summary XML path used by ``start_stage='stage-3'``.
+        final_summary_path: Optional summary XML path used by
+            ``start_stage='stage-3'`` and ``start_stage='stage-4'``.
+        voice_clone_manifest_path: Optional stage-3 voice-clone manifest path used by
+            ``start_stage='stage-4'``.
     """
 
     start_stage: PipelineStartStage
     final_summary_path: Path | None = None
+    voice_clone_manifest_path: Path | None = None
 
     @property
     def run_audio_stage(self) -> bool:
@@ -63,6 +67,9 @@ def build_pipeline_stage_plan(
     """
     start_stage = _parse_start_stage(pipeline_cfg.get("start_stage", "stage-1"))
     final_summary_path_value = str(pipeline_cfg.get("final_summary_path", "")).strip()
+    voice_clone_manifest_path_value = str(
+        pipeline_cfg.get("voice_clone_manifest_path", "")
+    ).strip()
 
     if start_stage == "stage-3":
         if not final_summary_path_value:
@@ -75,17 +82,44 @@ def build_pipeline_stage_plan(
                 final_summary_path_value,
                 base_dir=project_root,
             ),
+            voice_clone_manifest_path=None,
         )
 
-    return PipelineStagePlan(start_stage=start_stage, final_summary_path=None)
+    if start_stage == "stage-4":
+        if not final_summary_path_value:
+            raise ValueError(
+                "pipeline.final_summary_path is required when pipeline.start_stage=stage-4."
+            )
+        if not voice_clone_manifest_path_value:
+            raise ValueError(
+                "pipeline.voice_clone_manifest_path is required when "
+                "pipeline.start_stage=stage-4."
+            )
+        return PipelineStagePlan(
+            start_stage=start_stage,
+            final_summary_path=_resolve_path(
+                final_summary_path_value,
+                base_dir=project_root,
+            ),
+            voice_clone_manifest_path=_resolve_path(
+                voice_clone_manifest_path_value,
+                base_dir=project_root,
+            ),
+        )
+
+    return PipelineStagePlan(
+        start_stage=start_stage,
+        final_summary_path=None,
+        voice_clone_manifest_path=None,
+    )
 
 
 def _parse_start_stage(value: Any) -> PipelineStartStage:
     """Parse pipeline start stage with explicit error message."""
     normalized = str(value).strip().lower()
-    if normalized not in {"stage-1", "stage-2", "stage-3"}:
+    if normalized not in {"stage-1", "stage-2", "stage-3", "stage-4"}:
         raise ValueError(
-            "pipeline.start_stage must be one of: stage-1, stage-2, stage-3"
+            "pipeline.start_stage must be one of: stage-1, stage-2, stage-3, stage-4"
         )
     return cast(PipelineStartStage, normalized)
 

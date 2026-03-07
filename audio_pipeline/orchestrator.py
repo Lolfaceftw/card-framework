@@ -26,6 +26,7 @@ from audio_pipeline.eta import (
     EtaProfilePersistence,
     StageProgressCallback,
     StageProgressUpdate,
+    StageEtaHistory,
     StageEtaLearner,
     StageEtaStrategy,
     default_stage_eta_strategy,
@@ -111,6 +112,8 @@ class AudioToScriptOrchestrator:
                 description=f"separating sources from {input_audio_path}",
                 audio_duration_ms=source_duration_ms,
                 device=device,
+                profile_path=eta_profile_path,
+                profile_context=eta_profile_context,
                 operation=lambda progress_callback: self.separator.separate_vocals(
                     input_audio_path=input_audio_path,
                     output_dir=work_dir / "separation",
@@ -125,6 +128,8 @@ class AudioToScriptOrchestrator:
                 description=f"transcribing vocals {vocals_path}",
                 audio_duration_ms=vocals_duration_ms,
                 device=device,
+                profile_path=eta_profile_path,
+                profile_context=eta_profile_context,
                 operation=lambda progress_callback: self.transcriber.transcribe(
                     vocals_path,
                     device=device,
@@ -137,6 +142,8 @@ class AudioToScriptOrchestrator:
                 description="running NeMo diarization",
                 audio_duration_ms=vocals_duration_ms,
                 device=device,
+                profile_path=eta_profile_path,
+                profile_context=eta_profile_context,
                 operation=lambda progress_callback: self.diarizer.diarize(
                     audio_path=vocals_path,
                     output_dir=work_dir / "diarization",
@@ -232,6 +239,8 @@ class AudioToScriptOrchestrator:
         description: str,
         audio_duration_ms: int | None,
         device: str,
+        profile_path: Path | None = None,
+        profile_context: dict[str, str] | None = None,
         operation: Callable[[StageProgressCallback | None], T],
     ) -> T:
         """
@@ -325,6 +334,11 @@ class AudioToScriptOrchestrator:
             elapsed_seconds=elapsed_seconds,
             device=device,
         )
+        if profile_path is not None:
+            self._save_eta_profile(
+                profile_path=profile_path,
+                context=profile_context or {},
+            )
         event_bus.publish(
             "status_message",
             f"Audio stage: {stage} finished in {format_eta_seconds(elapsed_seconds)}",
@@ -340,6 +354,11 @@ class AudioToScriptOrchestrator:
     ) -> float | None:
         """Estimate stage duration from strategy and known audio length."""
         if audio_duration_ms is None:
+            return None
+        if (
+            isinstance(self.eta_strategy, StageEtaHistory)
+            and not self.eta_strategy.has_stage_history(stage=stage, device=device)
+        ):
             return None
         return self.eta_strategy.estimate_total_seconds(
             stage=stage,

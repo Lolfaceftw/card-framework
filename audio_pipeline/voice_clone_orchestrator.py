@@ -95,8 +95,8 @@ class VoiceCloneOrchestrator:
             NonRetryableAudioStageError: If required inputs are missing/invalid.
             ArtifactWriteError: If manifest persistence fails.
         """
-        turns = _parse_summary_turns(summary_xml)
-        sample_refs = _load_speaker_sample_references(speaker_samples_manifest_path)
+        turns = parse_summary_turns(summary_xml)
+        sample_refs = load_speaker_sample_references(speaker_samples_manifest_path)
         total_turns = len(turns)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +172,7 @@ class VoiceCloneOrchestrator:
         if self.merge_segments:
             merged_output_audio_path = self.output_dir / self.merged_output_filename
             try:
-                _merge_artifacts_to_wav(
+                merge_audio_artifacts_to_wav(
                     artifact_paths=[artifact.output_audio_path for artifact in artifacts],
                     output_path=merged_output_audio_path,
                     audio_codec=self.merge_audio_codec,
@@ -218,7 +218,7 @@ class VoiceCloneOrchestrator:
         )
 
 
-def _parse_summary_turns(summary_xml: str) -> list[VoiceCloneTurn]:
+def parse_summary_turns(summary_xml: str) -> list[VoiceCloneTurn]:
     """Parse summary speaker turns from simple XML tag pairs."""
     normalized = summary_xml.strip()
     if not normalized:
@@ -243,7 +243,7 @@ def _parse_summary_turns(summary_xml: str) -> list[VoiceCloneTurn]:
     return turns
 
 
-def _load_speaker_sample_references(
+def load_speaker_sample_references(
     manifest_path: Path,
 ) -> dict[str, VoiceSampleReference]:
     """Load speaker sample references, selecting longest sample per speaker."""
@@ -317,7 +317,7 @@ def _build_output_filename(*, turn_index: int, speaker: str) -> str:
     return f"{turn_index:03d}_{sanitized}.wav"
 
 
-def _merge_artifacts_to_wav(
+def merge_audio_artifacts_to_wav(
     *,
     artifact_paths: Sequence[Path],
     output_path: Path,
@@ -326,7 +326,9 @@ def _merge_artifacts_to_wav(
 ) -> None:
     """Merge turn-level voice-clone WAV artifacts into one WAV output."""
     if not artifact_paths:
-        raise NonRetryableAudioStageError("Voice clone merge requires at least one artifact.")
+        raise NonRetryableAudioStageError(
+            "Voice clone merge requires at least one artifact."
+        )
     for artifact_path in artifact_paths:
         if not artifact_path.exists():
             raise NonRetryableAudioStageError(

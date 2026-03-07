@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+import json
 from pathlib import Path
 import sys
 import types
 
 import pytest
+from audio_pipeline.eta import LinearStageEtaStrategy, StageSpeedProfile
 from orchestration.transcript import Transcript
 
 pytest.importorskip("a2a")
@@ -98,6 +100,27 @@ class _StubSampleGenerator:
         )
 
 
+class _LearningSampleGenerator:
+    def generate(
+        self,
+        *,
+        transcript_payload: dict[str, object],
+        source_audio_path: Path,
+        output_dir: Path,
+        progress_callback=None,
+    ) -> _SampleResult:
+        del transcript_payload, source_audio_path, progress_callback
+        output_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = output_dir / "manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        return _SampleResult(
+            output_dir=output_dir,
+            manifest_path=manifest_path,
+            generated_at_utc="2026-01-01T00:00:00+00:00",
+            artifacts=(object(),),
+        )
+
+
 def test_post_transcript_step_enforces_vocals_source_mode(
     monkeypatch,
     tmp_path: Path,
@@ -153,6 +176,73 @@ def test_post_transcript_step_enforces_vocals_source_mode(
         updated_transcript.metadata.get("speaker_samples_manifest_path")
         == str(tmp_path / "artifacts" / "audio_stage" / "speaker_samples" / "manifest.json")
     )
+
+
+def test_post_transcript_step_hides_first_run_eta_and_persists_learning(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app_main = _import_app_main()
+    messages: list[str] = []
+
+    def _capture(
+        event_type: str,
+        message: str,
+        **kwargs,
+    ) -> None:
+        del event_type, kwargs
+        messages.append(message)
+
+    monkeypatch.setattr(
+        app_main,
+        "resolve_sample_source_audio_path",
+        lambda **kwargs: tmp_path / "vocals.wav",
+    )
+    monkeypatch.setattr(
+        app_main,
+        "build_speaker_sample_generator",
+        lambda cfg: _LearningSampleGenerator(),
+    )
+    monkeypatch.setattr(app_main, "write_transcript_atomic", lambda payload, path: None)
+    monkeypatch.setattr(app_main.event_bus, "publish", _capture)
+
+    vocals_path = tmp_path / "vocals.wav"
+    vocals_path.write_bytes(b"vocals")
+    profile_path = tmp_path / "eta_profile.json"
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [{"speaker": "SPEAKER_00", "text": "text"}],
+            "metadata": {},
+        }
+    )
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+
+    app_main._run_post_transcript_speaker_sample_step(
+        stage_start="stage-1",
+        audio_cfg_dict={
+            "audio_path": "audio.wav",
+            "work_dir": "artifacts/audio_stage",
+            "speaker_samples": {
+                "enabled": True,
+                "output_dir_name": "speaker_samples",
+            },
+        },
+        project_root=tmp_path,
+        transcript_path="artifacts/transcripts/latest.transcript.json",
+        transcript=transcript,
+        eta_strategy=strategy,
+        eta_profile_path=profile_path,
+        eta_profile_context={"device": "cpu"},
+        eta_update_interval_seconds=0.0,
+    )
+
+    assert not any("estimated time left" in message for message in messages)
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert payload["unit_stages"]["speaker_samples"]["samples"] == 1
 
 
 def test_wait_for_agent_servers_uses_shared_wait_strategy(monkeypatch) -> None:

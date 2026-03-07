@@ -297,6 +297,30 @@ def test_build_run_overrides_can_disable_voice_clone_defaults(
     assert "audio.voice_clone.model_dir" not in override_map
 
 
+def test_build_run_overrides_can_enable_interjector_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    index_tts_dir = repo_root / "third_party" / "index_tts"
+    index_tts_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(bootstrap, "INDEX_TTS_DIR", index_tts_dir)
+
+    overrides = bootstrap.build_run_overrides(
+        run_id="20260302_120000",
+        start_stage="stage-4",
+        enable_voice_clone=False,
+        enable_interjector=True,
+    )
+    override_map = dict(entry.split("=", 1) for entry in overrides)
+
+    assert override_map["pipeline.start_stage"] == "stage-4"
+    assert override_map["audio.interjector.enabled"] == "true"
+    assert "transcript_path" not in override_map
+
+
 def test_build_run_overrides_stage_three_omits_stage_one_transcript_defaults(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -317,6 +341,12 @@ def test_build_run_overrides_stage_three_omits_stage_one_transcript_defaults(
     assert override_map["pipeline.start_stage"] == "stage-3"
     assert "audio.output_transcript_path" not in override_map
     assert "transcript_path" not in override_map
+
+
+def test_resolve_start_stage_accepts_stage_four() -> None:
+    assert (
+        bootstrap.resolve_start_stage(["pipeline.start_stage=stage-4"]) == "stage-4"
+    )
 
 
 def test_normalize_cli_overrides_rejects_malformed_values() -> None:
@@ -429,6 +459,30 @@ def test_ensure_transcript_override_for_stage_three_creates_synthetic_transcript
 
     assert transcript_path.exists()
     assert payload["metadata"]["speaker_samples_manifest_path"] == manifest_path.as_posix()
+
+
+def test_ensure_transcript_override_for_stage_four_does_not_add_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", repo_root)
+
+    overrides = [
+        "pipeline.start_stage=stage-4",
+        "pipeline.final_summary_path=summary.xml",
+        "pipeline.voice_clone_manifest_path=voice_clone/manifest.json",
+    ]
+    bootstrap.ensure_transcript_override_for_stage(
+        overrides=overrides,
+        start_stage="stage-4",
+        run_id="20260302_130000",
+    )
+
+    override_map = dict(entry.split("=", 1) for entry in overrides)
+    assert "transcript_path" not in override_map
 
 
 def test_resolve_audio_input_supports_relative_path(

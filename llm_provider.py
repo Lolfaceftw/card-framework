@@ -5,12 +5,15 @@ Strategy interfaces that allow swapping LLM and embedding backends
 without changing any agent or retrieval logic.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 
 MessageRole = Literal["system", "user", "assistant", "tool", "developer", "model"]

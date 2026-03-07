@@ -1,4 +1,4 @@
-"""All-in-one setup and execution bootstrap for the audio + voice-clone pipeline."""
+"""All-in-one setup and execution bootstrap for the staged audio pipeline."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ BASE_REQUIRED_REPO_PATHS = (
 VOICE_CLONE_REQUIRED_REPO_PATHS = (
     "audio_pipeline/runners/indextts_infer_runner.py",
 )
-PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3"]
+PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3", "stage-4"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -83,8 +83,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse bootstrap CLI arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Setup dependencies/models and run the full stage-1->stage-3 pipeline with "
-            "speaker samples + IndexTTS2 voice cloning."
+            "Setup dependencies/models and run the staged pipeline with optional "
+            "speaker samples, voice cloning, and Stage-4 interjections."
         )
     )
     parser.add_argument(
@@ -866,12 +866,12 @@ def resolve_start_stage(overrides: Sequence[str]) -> PipelineStartStage:
         key="pipeline.start_stage",
         default="stage-1",
     ).strip().lower()
-    if start_stage not in {"stage-1", "stage-2", "stage-3"}:
+    if start_stage not in {"stage-1", "stage-2", "stage-3", "stage-4"}:
         raise BootstrapError(
             step="input",
             message=(
                 "pipeline.start_stage must be one of: "
-                "stage-1, stage-2, stage-3."
+                "stage-1, stage-2, stage-3, stage-4."
             ),
         )
     return cast(PipelineStartStage, start_stage)
@@ -896,6 +896,7 @@ def build_run_overrides(
     start_stage: PipelineStartStage = "stage-1",
     audio_path: Path | None = None,
     enable_voice_clone: bool = True,
+    enable_interjector: bool = False,
 ) -> list[str]:
     """
     Build deterministic Hydra overrides for full pipeline + voice cloning run.
@@ -905,6 +906,7 @@ def build_run_overrides(
         start_stage: Effective stage that should drive default overrides.
         audio_path: Optional resolved source audio path.
         enable_voice_clone: Whether wrapper defaults should enable stage-3 voice cloning.
+        enable_interjector: Whether wrapper defaults should enable stage-4 interjection.
 
     Returns:
         Ordered list of Hydra override key-value strings.
@@ -918,6 +920,7 @@ def build_run_overrides(
         "audio.speaker_samples.enabled=true",
         "audio.speaker_samples.source_audio=vocals",
         "audio.speaker_samples.target_duration_seconds=30",
+        f"audio.interjector.enabled={'true' if enable_interjector else 'false'}",
         "logging.print_to_terminal=true",
         "logging.summarizer_critic_print_to_terminal=false",
     ]
@@ -1000,6 +1003,9 @@ def ensure_transcript_override_for_stage(
         overrides.append(f"transcript_path={_path_for_override(transcript_path)}")
         return
 
+    if start_stage == "stage-4":
+        return
+
     speaker_manifest_path = _find_latest_speaker_samples_manifest()
     synthetic_transcript_path = _write_voiceclone_shortcut_transcript(
         run_id=run_id,
@@ -1053,12 +1059,14 @@ def print_summary(
     transcript_path = transcript_path.resolve()
     speaker_manifest = run_work_dir / "speaker_samples" / "manifest.json"
     voice_clone_manifest = run_work_dir / "voice_clone" / "manifest.json"
+    interjector_manifest = run_work_dir / "interjector" / "interjector_manifest.json"
 
     print(f"run_id: {run_id}")
     print(f"work_dir: {run_work_dir}")
     print(f"transcript: {transcript_path}")
     print(f"speaker_samples_manifest: {speaker_manifest}")
     print(f"voice_clone_manifest: {voice_clone_manifest}")
+    print(f"interjector_manifest: {interjector_manifest}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1086,6 +1094,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             key="audio.voice_clone.enabled",
             default=True,
         )
+        interjector_enabled = resolve_boolean_override(
+            [*preflight_shortcut_overrides, *pass_through_overrides],
+            key="audio.interjector.enabled",
+            default=False,
+        )
+        synthesis_enabled = voice_clone_enabled or interjector_enabled
         speaker_samples_enabled = resolve_boolean_override(
             [*preflight_shortcut_overrides, *pass_through_overrides],
             key="audio.speaker_samples.enabled",
@@ -1094,19 +1108,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         ffmpeg_required = (
             effective_start_stage == "stage-1"
             or speaker_samples_enabled
-            or voice_clone_enabled
+            or synthesis_enabled
         )
 
         print("[1/6] Preflight checks")
         check_prerequisites(
             git_executable=args.git_executable,
-            require_git=voice_clone_enabled,
+            require_git=synthesis_enabled,
             require_ffmpeg=ffmpeg_required,
         )
         records.append(StepRecord(name="preflight", status="ok", detail="Tools and paths validated."))
 
         print("[2/6] IndexTTS repository sync")
-        if voice_clone_enabled:
+        if synthesis_enabled:
             repo_result = ensure_indextts_repo(
                 git_executable=args.git_executable,
                 skip_update=bool(args.skip_repo_update),
@@ -1122,7 +1136,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 StepRecord(
                     name="repo_sync",
                     status="skipped",
-                    detail="Skipped because audio.voice_clone.enabled=false.",
+                    detail=(
+                        "Skipped because audio.voice_clone.enabled=false and "
+                        "audio.interjector.enabled=false."
+                    ),
                 )
             )
 
@@ -1130,7 +1147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         synced_projects = smart_sync_projects(
             uv_executable=args.uv_executable,
             force_sync=bool(args.force_sync),
-            include_index_tts=voice_clone_enabled,
+            include_index_tts=synthesis_enabled,
         )
         if synced_projects:
             detail = f"synced projects: {', '.join(synced_projects)}"
@@ -1139,7 +1156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         records.append(StepRecord(name="dependency_sync", status="ok", detail=detail))
 
         print("[4/6] Model provisioning")
-        if voice_clone_enabled:
+        if synthesis_enabled:
             model_result = ensure_indextts_model(
                 uv_executable=args.uv_executable,
                 force_download=bool(args.force_model_download),
@@ -1153,7 +1170,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 StepRecord(
                     name="model_download",
                     status="skipped",
-                    detail="Skipped because audio.voice_clone.enabled=false.",
+                    detail=(
+                        "Skipped because audio.voice_clone.enabled=false and "
+                        "audio.interjector.enabled=false."
+                    ),
                 )
             )
 
@@ -1179,6 +1199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id=run_id,
             start_stage=effective_start_stage,
             enable_voice_clone=voice_clone_enabled,
+            enable_interjector=interjector_enabled,
         )
         overrides = [*base_overrides, *shortcut_overrides, *pass_through_overrides]
         ensure_transcript_override_for_stage(
