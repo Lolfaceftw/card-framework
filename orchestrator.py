@@ -64,6 +64,7 @@ class Orchestrator:
         "summarizer": 900.0,
         "critic": 300.0,
     }
+    _LIVE_DRAFT_SUMMARIZER_TIMEOUT_MULTIPLIER = 6.0
 
     def __init__(
         self,
@@ -84,13 +85,40 @@ class Orchestrator:
         )
         self.event_bus = event_bus if event_bus is not None else get_event_bus()
 
-    def _resolve_stage_timeout(self, stage: str, full_transcript_text: str) -> float:
-        """Resolve per-stage timeout with full-transcript safety floors."""
+    def _resolve_live_draft_summarizer_timeout_floor(
+        self,
+        *,
+        target_seconds: int,
+    ) -> float:
+        """Resolve the live-draft summarizer timeout floor in seconds."""
+        target_floor = float(target_seconds) * self._LIVE_DRAFT_SUMMARIZER_TIMEOUT_MULTIPLIER
+        full_transcript_floor = self._FULL_TRANSCRIPT_TIMEOUT_FLOORS["summarizer"]
+        return max(full_transcript_floor, target_floor)
+
+    def _resolve_stage_timeout(
+        self,
+        stage: str,
+        full_transcript_text: str,
+        *,
+        target_seconds: int | None = None,
+        live_draft_audio_requested: bool = False,
+    ) -> float:
+        """Resolve per-stage timeout with runtime-aware safety floors."""
         timeout = float(self.timeouts.get(stage, self._DEFAULT_TIMEOUTS[stage]))
         if full_transcript_text.strip():
             floor = self._FULL_TRANSCRIPT_TIMEOUT_FLOORS.get(stage)
             if floor is not None and timeout < floor:
-                return floor
+                timeout = floor
+        if (
+            stage == "summarizer"
+            and live_draft_audio_requested
+            and target_seconds is not None
+        ):
+            live_draft_floor = self._resolve_live_draft_summarizer_timeout_floor(
+                target_seconds=target_seconds
+            )
+            if timeout < live_draft_floor:
+                timeout = live_draft_floor
         return timeout
 
     async def index_transcript(self, transcript: TranscriptLike) -> int:
@@ -155,7 +183,9 @@ class Orchestrator:
         """Run a single summarizer pass without critic feedback iterations."""
         self.event_bus.publish("system_message", "Running single-pass summarizer stage...")
         summarizer_timeout = self._resolve_stage_timeout(
-            "summarizer", full_transcript_text
+            "summarizer",
+            full_transcript_text,
+            target_seconds=target_seconds,
         )
         summarizer_task = SummarizerTaskRequest(
             target_seconds=target_seconds,
@@ -234,8 +264,12 @@ class Orchestrator:
                     f"{loop_memory_artifact_path}"
                 ),
             )
+        live_draft_audio_requested = draft_audio_state_path is not None
         summarizer_timeout = self._resolve_stage_timeout(
-            "summarizer", full_transcript_text
+            "summarizer",
+            full_transcript_text,
+            target_seconds=target_seconds,
+            live_draft_audio_requested=live_draft_audio_requested,
         )
         critic_timeout = self._resolve_stage_timeout("critic", full_transcript_text)
 

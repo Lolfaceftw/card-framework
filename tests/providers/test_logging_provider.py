@@ -69,9 +69,13 @@ class _FakeMessage:
 
 class _FakeLogger:
     def __init__(self) -> None:
+        self.debug_calls: list[str] = []
         self.info_calls: list[str] = []
         self.warning_calls: list[str] = []
         self.error_calls: list[str] = []
+
+    def debug(self, message: str) -> None:
+        self.debug_calls.append(message)
 
     def info(self, message: str) -> None:
         self.info_calls.append(message)
@@ -154,6 +158,35 @@ def test_logging_provider_chat_publishes_event(monkeypatch) -> None:
     assert payload["provider"] == "_FakeInnerProvider"
     assert payload["input_messages"] == 2
     assert payload["tool_count"] == 1
+
+
+def test_logging_provider_chat_logs_terminal_friendly_summaries(monkeypatch) -> None:
+    message = _FakeMessage(
+        role="assistant",
+        content="Long answer body that should not be dumped in full at info level.",
+        tool_calls=[{"id": "tool_1", "function": {"name": "add_message", "arguments": "{}"}}],
+    )
+    inner = _FakeInnerProvider(chat_result=message)
+    fake_logger = _FakeLogger()
+
+    monkeypatch.setattr(_MODULE, "logger", fake_logger)
+
+    provider = LoggingLLMProvider(inner_provider=inner)
+    provider.chat(
+        messages=[
+            {"role": "system", "content": "Summarizer"},
+            {"role": "user", "content": "Please summarize this very long transcript."},
+        ],
+        tools=[{"type": "function", "function": {"name": "add_message"}}],
+        tool_choice="auto",
+        max_tokens=64,
+    )
+
+    assert any("Message Summary:" in line for line in fake_logger.info_calls)
+    assert any("Tool Summary:" in line for line in fake_logger.info_calls)
+    assert any("LLM CHAT RESPONSE SUMMARY:" in line for line in fake_logger.info_calls)
+    assert not any(line.startswith("Tools: [") for line in fake_logger.info_calls)
+    assert any(line.startswith("Tools: [") for line in fake_logger.debug_calls)
 
 
 def test_logging_provider_generate_reraises_inner_errors(monkeypatch) -> None:

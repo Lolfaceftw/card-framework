@@ -28,6 +28,7 @@
     <directory path="agents">A2A executor implementations, task DTOs, tool dispatch, loop control, parsing, correction guidance, and client transport helpers.</directory>
     <directory path="audio_pipeline">Stage-1 and stage-3 use-case orchestration, contracts, ETA tracking, runtime helpers, gateways, runners, speaker-sample generation, voice-clone orchestration, and the live draft voice-clone session used by merged stage-2/stage-3 runs.</directory>
     <directory path="benchmark">Summarization benchmark CLI, reference-free evaluation pipeline, QA benchmark CLI, manifests, rubrics, metrics, matrix construction, and report artifact helpers.</directory>
+    <directory path="scripts">Operator-facing helper scripts such as the summary matrix runner that shells out to `setup_and_run.py` for batch model-pair comparisons.</directory>
     <directory path="providers">Concrete LLM and embedding adapters such as vLLM, Transformers, DeepSeek, GLM, Google GenAI, Hugging Face, Nanbeige, sentence-transformer embeddings, and logging wrappers.</directory>
     <directory path="prompts">Jinja2 prompt templates for summarizer, critic, QA ground-truth generation, QA evaluator, and corrector flows.</directory>
     <directory path="orchestration">Typed transcript DTOs and the stage orchestrator that bridges stage plans with runtime execution.</directory>
@@ -39,6 +40,7 @@
       <entrypoint path="main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
       <entrypoint path="calibrate.py">One-time voice-clone calibration helper that discovers or bootstraps speaker samples, renders punctuation-rich calibration phrases, and prints the persisted preset/WPM mapping.</entrypoint>
       <entrypoint path="setup_and_run.py">Bootstrap and convenience runner for dependency checks, stage-aware third-party sync/model provisioning, and full pipeline execution.</entrypoint>
+      <entrypoint path="scripts/run_summary_matrix.py">Batch helper that runs the standard setup-and-run summarizer workflow across ordered summarizer/critic model pairs, optionally adds a DeepSeek model to the pair pool, preserves the repo-default merged live-draft stage-2/stage-3 voice-clone flow, isolates loop-memory artifacts per model pair, streams each child run's live output back to the parent terminal, disables only stage-4 interjector output, and copies each resulting summary into `artifacts/summary_matrix` as `<summarizer>_<critic>-summary.xml`.</entrypoint>
       <entrypoint path="benchmark/run.py">CLI for summarization benchmark matrix execution and manifest preparation.</entrypoint>
       <entrypoint path="benchmark/qa.py">CLI for source-grounded QA benchmark execution against an existing summary and source transcript.</entrypoint>
       <entrypoint path="eval.py">Compatibility wrapper that forwards to the benchmark smoke preset.</entrypoint>
@@ -69,6 +71,7 @@
       <rule>When a real embedding provider is configured, transcript segments are indexed into embeddings.TranscriptIndex and retrieved through the retrieval agent.</rule>
       <rule>When embedding is disabled or configured as the no-op provider, the summarizer and critic receive the full transcript text directly instead of retrieval results.</rule>
       <rule>Timeout floors are increased automatically for full-transcript mode because prompt payloads become much larger.</rule>
+      <rule>When live-draft stage-2 or merged stage-2/stage-3 voice cloning is active, the summarizer timeout floor is raised further to `max(900s, target_seconds * 6)` because tool mutations can block on real IndexTTS renders before the localhost A2A request returns.</rule>
     </retrievalPolicy>
     <localAgentTopology>
       <agent>Summarizer agent runs on the configured summarizer localhost port.</agent>
@@ -156,6 +159,7 @@
       <step>VoiceCloneOrchestrator consumes summary XML plus the manifest to create per-turn cloned segments and optional merged output. Live-draft finalization now emits the same manifest shape plus extra fields such as `turn_id`, `duration_ms`, `word_count`, and `actual_wpm` for downstream consumers. Each turn resolves its stored `emo_preset` to repo-configured `emo_text` before calling IndexTTS.</step>
       <step>The default IndexTTS subprocess backend now keeps one warm nested worker per matching voice-clone config, so calibration, stage-3 cloning, and stage-4 interjection reuse the same loaded weights until the provider is explicitly closed or the parent process exits.</step>
       <step>Within that warm runtime, repeated `emo_text` preset prompts are cached as resolved emotion vectors and forwarded back into IndexTTS directly, avoiding repeated Qwen emotion-analysis passes for common presets such as `neutral`, `warm`, or `engaged`.</step>
+      <step>The repo-default low-latency IndexTTS path forwards `length_penalty` only when beam search is actually enabled, so the default `num_beams=1` configuration does not emit invalid-generation-flag warnings on every live-draft render.</step>
       <step>InterjectorOrchestrator can then analyze eligible host turns, align stage-3 audio back to summary text, synthesize short overlaps from the next speaker, and emit a second merged WAV plus its own manifest. The stage-4 planner prompt now includes a per-turn preferred anchor token window derived from the configured host-progress ratios, requests only positive overlap decisions so long runs do not waste tokens on explicit false entries, and the parser can salvage fully formed decisions from a truncated JSON array before synthesis.</step>
     </postTranscriptFlow>
     <adapterMap>
@@ -230,6 +234,7 @@
       <command>uv run python calibrate.py</command>
       <command>uv run python main.py</command>
       <command>uv run python setup_and_run.py --audio-path &lt;path-to-audio&gt;</command>
+      <command>uv run python scripts/run_summary_matrix.py --vllm-host &lt;host&gt; --transcript-path &lt;path-to-transcript.json&gt;</command>
       <command>uv run python -m benchmark.run execute --preset hourly</command>
       <command>uv run python -m benchmark.run prepare-manifest --sources local --output benchmark/manifests/benchmark_v1.json</command>
       <command>uv run python -m benchmark.diarization prepare-manifest</command>
@@ -246,6 +251,11 @@
       <note>`audio.diarization.provider` now supports the default NeMo MSDD path, `pyannote_community1`, `nemo_sortformer_offline`, `nemo_sortformer_streaming`, and the existing `single_speaker` fallback backend.</note>
       <note>`calibrate.py` is the project-level one-time calibration helper. It prints the persisted preset/WPM mapping and can bootstrap speaker samples from a manifest, transcript, or raw audio path.</note>
       <note>setup_and_run.py is the preferred convenience wrapper when the task involves third-party IndexTTS setup and full end-to-end stage execution.</note>
+      <note>When `setup_and_run.py` enables terminal logging, it now leaves `logging.summarizer_critic_print_to_terminal` unset so the live Summarizer and Critic reasoning/content stream follows the repo logging config unless the caller explicitly disables it.</note>
+      <note>The `LoggingLLMProvider` terminal path now logs concise message/tool/response summaries at `INFO` and reserves full prompt, tool-schema, and response payload dumps for `DEBUG`, so streamed runs stay readable while deeper payload inspection remains opt-in.</note>
+      <note>The Rich UI now parses JSON-shaped `tool_result` payloads before printing them, so dict and list outputs render as structured multiline blocks and transcript excerpts keep their real line breaks instead of showing escaped `\n` sequences.</note>
+      <note>When stdout is not a real terminal, such as child runs launched through `scripts/run_summary_matrix.py`, the shared streamed-response callback path used by the repo's vLLM and DeepSeek providers falls back from Rich live panels to plain streamed `[THINKING]` and `[CONTENT]` text, while ignoring whitespace-only preambles so the parent pipe receives meaningful incremental model output instead of blank section headers.</note>
+      <note>`scripts/run_summary_matrix.py` is the operator helper for ordered summarizer/critic pair comparisons, including self-pairs. It still drives `setup_and_run.py` so stage selection and summarizer/critic orchestration stay aligned with the repo default workflow, preserves the merged live-draft stage-2/stage-3 path, disables only stage-4 interjector output, streams live child output to the parent terminal, and writes one copied summary file per summarizer/critic pair under `artifacts/summary_matrix`.</note>
       <note>When no explicit start stage is provided, setup_and_run.py now auto-selects stage-2 if it finds a reusable transcript, preferring repo-root `transcript.json` or `*.transcript.json` before `artifacts/transcripts/*.transcript.json`.</note>
       <note>When stage-2 is auto-selected while a repo-root `summary.xml` already exists, setup_and_run.py prints that it will still rerun summarization before voice cloning and points operators at `--voiceclone-from-summary` for stage-3 clone-only runs.</note>
       <note>For stage-2 reusable transcripts that lack a valid `metadata.speaker_samples_manifest_path`, setup_and_run.py now resolves source audio from transcript metadata first, then from a repo-root `audio.wav`-style file, and otherwise prompts so the runtime can bootstrap fresh separation, transcription, diarization, and speaker-sample generation. The runtime will reject that bootstrap result early when the inferred transcript or speaker coverage does not match the reusable transcript.</note>

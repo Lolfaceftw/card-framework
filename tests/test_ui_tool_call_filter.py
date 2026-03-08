@@ -1,6 +1,8 @@
 """Unit tests for terminal display filtering of tool-call markup."""
 
 from ui import (
+    _capture_tool_result_output,
+    _format_tool_result_for_terminal,
     _capture_live_agent_message_output,
     _sanitize_console_text,
     _strip_tool_call_blocks,
@@ -31,3 +33,28 @@ def test_live_agent_message_output_keeps_one_final_panel_before_next_status() ->
 
     assert output.count("full critic analysis") == 1
     assert "Voice cloning complete" in output
+
+
+def test_format_tool_result_for_terminal_preserves_multiline_string_values() -> None:
+    formatted = _format_tool_result_for_terminal(
+        '{"speaker":"SPEAKER_01","excerpt":"Line one\\nLine two","count":2}'
+    )
+
+    assert "speaker: SPEAKER_01" in formatted
+    assert "excerpt:" in formatted
+    assert "  Line one" in formatted
+    assert "  Line two" in formatted
+    assert "count: 2" in formatted
+
+
+def test_tool_result_output_renders_structured_json_over_multiple_lines() -> None:
+    output = _capture_tool_result_output(
+        "query_transcript",
+        '{"excerpt":"[SPEAKER_00]: hello\\n[SPEAKER_01]: world","match_count":2}',
+    )
+
+    assert "Tool Result (query_transcript):" in output
+    assert "excerpt:" in output
+    assert "[SPEAKER_00]: hello" in output
+    assert "[SPEAKER_01]: world" in output
+    assert "match_count: 2" in output

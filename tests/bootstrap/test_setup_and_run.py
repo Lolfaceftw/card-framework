@@ -248,7 +248,7 @@ def test_build_run_overrides_include_required_voice_clone_settings(
     assert override_map["audio.voice_clone.enabled"] == "true"
     assert override_map["audio.voice_clone.execution_backend"] == "subprocess"
     assert override_map["logging.print_to_terminal"] == "true"
-    assert override_map["logging.summarizer_critic_print_to_terminal"] == "false"
+    assert "logging.summarizer_critic_print_to_terminal" not in override_map
     assert override_map["audio.speaker_samples.source_audio"] == "vocals"
     assert override_map["audio.speaker_samples.target_duration_seconds"] == "30"
     assert "\\" not in override_map["audio.audio_path"]

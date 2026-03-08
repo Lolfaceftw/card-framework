@@ -1,5 +1,49 @@
 # Errors And Notes
 
+### 2026-03-08T00:25:00+08:00 - Summary-Matrix Streaming Must Ignore Blank Sections And Cover DeepSeek Too
+- Problem: Piped summary-matrix runs could still show empty `[CONTENT]` headers from whitespace-only tool-call preambles, and DeepSeek stage overrides bypassed the shared streaming callback entirely, so reasoning/content streaming stayed inconsistent across model pairs.
+- Solution: Ignore leading whitespace-only chunks before opening plain `[THINKING]` or `[CONTENT]` sections, and route DeepSeek streaming through the shared response-callback path so both terminal and piped matrix runs use the same fallback behavior.
+
+### 2026-03-08T00:12:38+08:00 - Piped Summary-Matrix Runs Need A Plain Streaming Fallback Instead Of Rich Live Panels
+- Problem: `scripts/run_summary_matrix.py` captures each child `setup_and_run.py` stdout through a pipe. Rich live panels in the child process are designed for a real TTY, so once the noisy raw JSON logger output was removed, matrix runs appeared to stop streaming because the live token renderer had no pipe-friendly fallback.
+- Solution: Make `RichConsoleResponseCallback` detect non-interactive stdout and fall back to plain-text streamed `[THINKING]` and `[CONTENT]` chunks, so child runs still stream through the matrix runner pipe without relying on Rich live terminal behavior.
+
+### 2026-03-08T00:07:59+08:00 - Tool Results Must Render Structured JSON With Real Newlines In The Terminal
+- Problem: The Rich terminal UI printed `tool_result` payloads as a single truncated string, so JSON dict payloads showed escaped `\\n` sequences instead of readable multiline transcript excerpts, and the console logger echoed the same payload as one long noisy blob.
+- Solution: Parse JSON-shaped tool results before terminal rendering, format dict/list payloads as structured multiline output that preserves newline-bearing string values, and reduce the logger-side `tool_result` console line to a concise summary.
+
+### 2026-03-08T00:05:01+08:00 - Terminal Logging Must Summarize LLM Payloads Instead Of Dumping Full Messages And Tool Schemas
+- Problem: Once `setup_and_run.py` stopped suppressing the live Summarizer and Critic stream, `LoggingLLMProvider` started printing full `Messages`, full `Tools` schema lists, and full response JSON at `INFO`, which buried the useful live stream under huge terminal dumps.
+- Solution: Keep terminal logs at concise summaries such as message counts, tool names, and response lengths/previews, and reserve full payload dumps for `DEBUG` logging only.
+
+### 2026-03-08T00:01:32+08:00 - setup_and_run Must Not Suppress Live Summarizer And Critic Terminal Output
+- Problem: `setup_and_run.py` enabled `logging.print_to_terminal=true` for operator feedback but also hard-overrode `logging.summarizer_critic_print_to_terminal=false`, so the live Summarizer and Critic reasoning/content stream stayed hidden even when callers expected the child run to stream to the terminal.
+- Solution: Stop injecting the suppressing `logging.summarizer_critic_print_to_terminal=false` override in `build_run_overrides(...)` so the repo default once again follows `logging.print_to_terminal` unless a caller explicitly disables the agent stream.
+
+### 2026-03-07T23:54:33+08:00 - Live-Draft Summarizer Timeout Must Cover Inline Voice Cloning
+- Problem: Stage-2 live-draft runs synthesize real IndexTTS audio inside the summarizer tool loop, but the orchestrator still capped full-transcript summarizer requests at the generic 900-second timeout floor. Longer runs timed out the localhost summarizer call first, then the process began unwinding while the agent was still voice cloning, which surfaced secondary IndexTTS worker-exit and interpreter-shutdown noise.
+- Solution: Raise the live-draft summarizer timeout floor to `max(900s, target_seconds * 6)` whenever a draft-audio state path is active, and keep the vendored IndexTTS `infer_v2` path from forwarding `length_penalty` when `num_beams=1` so the repo-default low-latency generation path stops emitting invalid-generation warnings.
+
+### 2026-03-07T23:17:13+08:00 - Hydra Stage Critic Overrides Must Use Append Syntax In The Summary Matrix Runner
+- Problem: `scripts/run_summary_matrix.py` injected `stage_llm.critic._target_=` and sibling keys as plain Hydra overrides, but `stage_llm.critic` starts as an empty structured dict in `conf/config.yaml`, so Hydra rejected those keys with `Key '_target_' is not in struct`.
+- Solution: Emit the matrix runner's `stage_llm.critic.*` overrides with Hydra append syntax such as `+stage_llm.critic._target_=...`, `+stage_llm.critic.base_url=...`, and `+stage_llm.critic.api_key=...` so the critic config can be created from the empty repo default.
+
+### 2026-03-07T23:14:59+08:00 - Summary Matrix Must Not Override The Repo-Default Live Stage-2/Stage-3 Path
+- Problem: The summary-matrix runner forced `audio.voice_clone.enabled=false` and `audio.voice_clone.live_drafting.enabled=false`, which silently pushed stage-2 runs onto the legacy calibration-backed duration path instead of the repository's default merged live-draft stage-2/stage-3 flow.
+- Solution: Preserve the repo defaults for voice cloning and live drafting inside `scripts/run_summary_matrix.py`, disable only stage-4 interjector output, and keep tests that assert the runner no longer injects the legacy calibration-triggering overrides.
+
+### 2026-03-07T23:13:07+08:00 - Summary Matrix Pairs Intentionally Include Self-Pairs And Must Stream Child Output
+- Problem: The summary-matrix helper had been pushed toward strict permutation semantics, but the actual operator requirement is to run every ordered summarizer/critic pair from one model pool, including self-pairs such as `qwen3_5_27b x qwen3_5_27b`, and to show live child token/output instead of buffering everything until the pair finishes.
+- Solution: Build pair cells with `itertools.product(model_profiles, repeat=2)`, keep both directions for mixed-model pairs, print a start line for each cell, and tee the child `setup_and_run.py` stdout/stderr stream live to the parent terminal while also persisting the raw UTF-8 log file per pair.
+
+### 2026-03-07T23:08:31+08:00 - Summary Matrix Must Use One Model Pool Permutation Set, Not A 3x4 Cross Product
+- Problem: `scripts/run_summary_matrix.py` was described as running summarizer/critic permutations, but the implementation still iterated a separate 3-summarizer by 4-critic cross product and allowed same-model self-pairs such as `qwen3_5_27b x qwen3_5_27b`.
+- Solution: Build one shared model pool, add the optional DeepSeek model to that pool, and generate ordered distinct summarizer/critic pairs with `itertools.permutations(..., 2)` so the reported counts and executed runs match real permutation semantics.
+
+### 2026-03-07T23:08:31+08:00 - IndexTTS Worker Log Streaming Must Sanitize Unicode Before Printing On Windows
+- Problem: The warm IndexTTS subprocess worker streamed raw log lines back through `print(...)`, and a Windows `cp1252` stdout encoding crashed on characters such as `👉` before the parent run could finish.
+- Solution: Sanitize streamed worker log lines for the active stdout encoding before printing so unsupported Unicode is replaced safely instead of raising `UnicodeEncodeError`.
+
 ### 2026-03-07T22:40:46+08:00 - Summarizer Tool Handlers Must Reject Empty Required Args Without Crashing
 - Problem: A stage-2 live-drafting run hit `add_speaker_message {}` from the summarizer, and `AddSpeakerMessageHandler.execute()` indexed `arguments["speaker_id"]` directly. That raised `KeyError('speaker_id')`, crashed the A2A worker, and aborted the whole pipeline instead of returning a normal tool error the loop could recover from.
 - Solution: Validate required string arguments in the summarizer tool handlers before use, return structured `missing_*` or `empty_*` tool errors for malformed calls, and keep regression tests around empty `add_speaker_message` and `query_transcript` payloads plus dispatcher behavior so bad tool args stay inside the tool loop.

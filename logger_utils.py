@@ -19,6 +19,26 @@ def _format_with_metadata(message: str, **metadata) -> str:
     return f"{message} | meta={json.dumps(metadata, default=str, sort_keys=True)}"
 
 
+def _summarize_tool_result(result: str) -> str:
+    """Return a concise one-line summary for tool-result logger output."""
+    stripped = result.strip()
+    if not stripped:
+        return "<empty>"
+    if stripped[0] in "{[":
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            return f"dict keys={list(payload.keys())}"
+        if isinstance(payload, list):
+            return f"list len={len(payload)}"
+    compact = " ".join(str(result).split())
+    if len(compact) <= 160:
+        return compact
+    return f"{compact[:157]}..."
+
+
 def configure_logger(cfg):
     """
     Configures the logger based on the provided configuration object.
@@ -96,7 +116,10 @@ def _on_tool_invocation(tool_name: str, arguments: dict, **kwargs):
 
 def _on_tool_result(tool_name: str, result: str, **kwargs):
     logger.info(
-        _format_with_metadata(f"[Tool Result] {tool_name}: {str(result)[:500]}", **kwargs)
+        _format_with_metadata(
+            f"[Tool Result] {tool_name}: {_summarize_tool_result(result)}",
+            **kwargs,
+        )
     )
 
 

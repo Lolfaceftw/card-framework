@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import builtins
 from pathlib import Path
 import sys
@@ -516,6 +517,31 @@ def test_indextts_gateway_generation_kwargs_skip_length_penalty_without_beam_sea
         "repetition_penalty": 10.0,
         "max_mel_tokens": 1500,
     }
+
+
+def test_persistent_worker_record_log_line_sanitizes_stream_output_for_cp1252(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = object.__new__(gateway_module._PersistentIndexTTSSubprocessWorker)
+    worker._stream_output = True
+    worker._log_tail = deque(maxlen=5)
+
+    printed: list[str] = []
+
+    class _StdoutStub:
+        encoding = "cp1252"
+
+    def _fake_print(*args: object, **kwargs: object) -> None:
+        del kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr(gateway_module.sys, "stdout", _StdoutStub())
+    monkeypatch.setattr(builtins, "print", _fake_print)
+
+    worker._record_log_line("Summarizer \u2192 ready \U0001f449")
+
+    assert list(worker._log_tail) == ["Summarizer \u2192 ready \U0001f449"]
+    assert printed == ["Summarizer -> ready ?"]
 
 
 def test_indextts_gateway_subprocess_backend_reuses_shared_worker_across_calls(

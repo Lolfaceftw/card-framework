@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import queue
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -22,6 +23,14 @@ _INDEXTTS_PROTOCOL_PREFIX = "__INDEXTTS_JSON__"
 _INDEXTTS_READY_TIMEOUT_SECONDS = 600.0
 _INDEXTTS_PROTOCOL_POLL_SECONDS = 0.2
 _INDEXTTS_LOG_TAIL_LINE_LIMIT = 80
+_CONSOLE_SAFE_TRANSLATIONS = str.maketrans(
+    {
+        "\u2192": "->",
+        "\u2014": "-",
+        "\u2013": "-",
+        "\u2026": "...",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -309,7 +318,16 @@ class _PersistentIndexTTSSubprocessWorker:
             return
         self._log_tail.append(normalized)
         if self._stream_output:
-            print(normalized, flush=True)
+            sanitized = normalized.translate(_CONSOLE_SAFE_TRANSLATIONS)
+            encoding = getattr(sys.stdout, "encoding", None)
+            if encoding:
+                sanitized = sanitized.encode(encoding, errors="replace").decode(
+                    encoding
+                )
+            print(
+                sanitized,
+                flush=True,
+            )
 
     def _format_failure_detail(self, error_message: str) -> str:
         """Build a compact operator-facing detail string for worker failures."""
