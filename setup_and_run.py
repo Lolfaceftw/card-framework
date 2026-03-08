@@ -1214,7 +1214,6 @@ def build_run_overrides(
         "audio.speaker_samples.target_duration_seconds=30",
         f"audio.interjector.enabled={'true' if enable_interjector else 'false'}",
         "logging.print_to_terminal=true",
-        "logging.summarizer_critic_print_to_terminal=false",
     ]
     if enable_voice_clone:
         overrides.extend(

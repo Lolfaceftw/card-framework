@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Local tooling state
+.agents/
+
 # Logs
 *.log
 *.log.*
@@ -19,6 +22,10 @@ artifacts/
 summary.json
 summary.xml
 eval_report.json
+
+# Local benchmark output and backup copies
+summary_matrix/
+summary.xml.old.*
 
 # Cache
 .pytest_cache/

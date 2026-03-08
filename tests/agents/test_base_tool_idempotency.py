@@ -939,3 +939,18 @@ def test_summarizer_resets_stagnation_after_meaningful_edit() -> None:
         )
     )
     assert context_data["stagnation_turns"] == 0
+
+
+def test_base_executor_summarize_json_text_reports_dict_keys() -> None:
+    summary = BaseA2AExecutor._summarize_json_text(
+        '{"segments":[{"speaker":"SPEAKER_00","text":"hello"}],"total_words":1}'
+    )
+
+    assert summary == "dict keys=['segments', 'total_words']"
+
+
+def test_base_executor_summarize_json_text_truncates_plain_text() -> None:
+    summary = BaseA2AExecutor._summarize_json_text("word " * 80)
+
+    assert len(summary) <= 160
+    assert summary.endswith("...")

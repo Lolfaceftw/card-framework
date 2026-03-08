@@ -323,6 +323,41 @@ def test_run_summarizer_once_uses_full_transcript_timeout_floor() -> None:
     assert observed_timeout["value"] == 900.0
 
 
+def test_run_loop_uses_live_draft_summarizer_timeout_floor() -> None:
+    observed_timeout: dict[str, float] = {}
+
+    async def _fake_send_task(port, task_data, timeout=120.0, max_retries=3, metadata=None):
+        del task_data, max_retries, metadata
+        if port == 9010:
+            observed_timeout["value"] = float(timeout)
+            return "<summary>ok</summary>"
+        if port == 9011:
+            return '{"status":"pass","word_count":72,"estimated_seconds":300.0,"feedback":"ok"}'
+        raise AssertionError(f"Unexpected port: {port}")
+
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        timeouts={"summarizer": 180},
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
+
+    result = asyncio.run(
+        orchestrator.run_loop(
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            full_transcript_text="full transcript present",
+            speaker_samples_manifest_path=Path("speaker_samples_manifest.json"),
+            draft_audio_state_path=Path("live_draft.state.json"),
+        )
+    )
+
+    assert result == "<summary>ok</summary>"
+    assert observed_timeout["value"] == 1800.0
+
+
 def test_run_critic_once_uses_full_transcript_timeout_floor() -> None:
     observed_timeout: dict[str, float] = {}
 

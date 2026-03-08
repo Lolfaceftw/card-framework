@@ -22,6 +22,26 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         self.name = name
 
     @staticmethod
+    def _summarize_json_text(raw_text: str, *, max_preview_chars: int = 160) -> str:
+        """Return a concise one-line summary for JSON-like payload logs."""
+        stripped = raw_text.strip()
+        if not stripped:
+            return "<empty>"
+        if stripped[0] in "{[":
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                return f"dict keys={list(payload.keys())}"
+            if isinstance(payload, list):
+                return f"list len={len(payload)}"
+        compact = " ".join(raw_text.split())
+        if len(compact) <= max_preview_chars:
+            return compact
+        return f"{compact[: max_preview_chars - 3]}..."
+
+    @staticmethod
     def _is_synthetic_tool_call_id(tool_call_id: str) -> bool:
         """Return True for parser-generated fallback IDs that can repeat across turns."""
         return (
@@ -122,7 +142,10 @@ class BaseA2AExecutor(AgentExecutor, ABC):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         raw_input = context.get_user_input()
-        logger.info(f"[{self.name}] Received task: {raw_input}")
+        logger.info(
+            f"[{self.name}] Received task: {self._summarize_json_text(str(raw_input))}"
+        )
+        logger.debug(f"[{self.name}] Received task payload: {raw_input}")
 
         if not raw_input:
             raise ValueError(f"No task provided to {self.name}")
@@ -147,7 +170,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
 
     async def send_response(self, result: str, event_queue: EventQueue) -> None:
         """Helper to send a text response back."""
-        logger.info(f"[{self.name}] Result: {result}")
+        logger.info(f"[{self.name}] Result: {self._summarize_json_text(result)}")
+        logger.debug(f"[{self.name}] Result payload: {result}")
         await event_queue.enqueue_event(new_agent_text_message(result))
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
