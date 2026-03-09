@@ -1,5 +1,9 @@
 # Errors And Notes
 
+### 2026-03-09T22:00:07+08:00 - Secret-History Remediation Must Expect `git-filter-repo` To Drop `origin`
+- Problem: Purging leaked secrets and private endpoints from published Git history required a full `git-filter-repo --replace-text` rewrite across all refs. The rewrite succeeded, but `git-filter-repo` intentionally removed the `origin` remote as a safety guard, which can look like unrelated repository damage if the operator expects the remote to remain configured.
+- Solution: Before rewriting, create an out-of-repo backup bundle and capture the exact secret and private-endpoint replacements to redact. After the rewrite, rescan both `HEAD` and `git log --all` for the exact leaked values plus broad secret and private-IP patterns, then restore `origin` explicitly before preparing the required `git push --force-with-lease --all` and tag follow-up.
+
 ### 2026-03-09T21:40:00+08:00 - PyPI Publish Workflow Smoke Test Must Match The Real Public `infer(...)` Signature
 - Problem: The first tagged PyPI publish attempt built the `card-framework` distributions successfully but the GitHub Actions smoke test still asserted that `card_framework.infer(...)` exposed only three parameters. The real public API had already grown keyword-only `device`, `vllm_url`, and `vllm_api_key` parameters, so the build job failed before `uv publish`, leaving the pending trusted publisher unused and PyPI with no released version.
 - Solution: Update `.github/workflows/publish-pypi.yml` so the smoke test asserts the full public `infer(...)` signature, then bump the package version for the next release tag instead of retrying the broken tag unchanged.
