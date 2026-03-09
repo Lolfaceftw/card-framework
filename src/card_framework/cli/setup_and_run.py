@@ -13,7 +13,7 @@ import subprocess
 import sys
 from typing import Any, Literal, Mapping, Sequence, TypeAlias, cast
 
-from card_framework.shared.paths import REPO_ROOT
+from card_framework.shared.paths import REPO_ROOT, discover_reusable_transcript_path
 
 MAIN_MODULE = "card_framework.cli.main"
 CALIBRATE_MODULE = "card_framework.cli.calibrate"
@@ -734,37 +734,7 @@ def _discover_existing_transcript_path() -> Path | None:
     2. The most recently modified ``*.transcript.json`` at the repo root.
     3. The most recently modified ``artifacts/transcripts/*.transcript.json``.
     """
-    root_transcript = (REPO_ROOT / "transcript.json").resolve()
-    if root_transcript.is_file():
-        return root_transcript
-
-    root_candidates = sorted(
-        (
-            path.resolve()
-            for path in REPO_ROOT.glob("*.transcript.json")
-            if path.is_file()
-        ),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    if root_candidates:
-        return root_candidates[0]
-
-    artifact_candidates = sorted(
-        (
-            path.resolve()
-            for path in (REPO_ROOT / "artifacts" / "transcripts").glob(
-                "*.transcript.json"
-            )
-            if path.is_file()
-        ),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    if artifact_candidates:
-        return artifact_candidates[0]
-
-    return None
+    return discover_reusable_transcript_path(REPO_ROOT)
 
 
 def _discover_existing_audio_path() -> Path | None:

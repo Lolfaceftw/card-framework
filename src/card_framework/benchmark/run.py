@@ -61,7 +61,13 @@ from card_framework.benchmark.reference_free.pipeline import (
     ReferenceFreePipeline,
     ReferenceFreePipelineConfig,
 )
-from card_framework.benchmark.types import BenchmarkReport, CellRunResult, ProviderProfile, SampleRunResult
+from card_framework.benchmark.types import (
+    BenchmarkAggregate,
+    BenchmarkReport,
+    CellRunResult,
+    ProviderProfile,
+    SampleRunResult,
+)
 from card_framework.retrieval.embeddings import TranscriptIndex
 from card_framework.shared.events import event_bus
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
@@ -272,8 +278,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     prepare.add_argument(
         "--local-transcript-path",
-        default="summary.json",
-        help="Local transcript path for local source",
+        default="auto",
+        help=(
+            "Local transcript path for local source. Defaults to auto-discovery "
+            "from repo-root transcript.json, repo-root *.transcript.json, then "
+            "artifacts/transcripts/*.transcript.json."
+        ),
     )
 
     return parser
@@ -647,6 +657,42 @@ def _provider_filter(raw: str) -> set[str] | None:
     return set(cleaned)
 
 
+def _resolve_report_outcome(
+    *,
+    aggregates: BenchmarkAggregate,
+    failures: list[dict[str, Any]],
+) -> tuple[str, str | None]:
+    """Resolve top-level benchmark status and optional terminal error.
+
+    Args:
+        aggregates: Aggregate execution counters for the benchmark run.
+        failures: Collected cell-level failure payloads.
+
+    Returns:
+        Tuple of report status and optional user-facing error summary.
+    """
+    if aggregates.executed_cells <= 0:
+        first_failure = failures[0].get("error") if failures else None
+        detail = (
+            f" First failure: {first_failure}"
+            if isinstance(first_failure, str) and first_failure.strip()
+            else ""
+        )
+        return (
+            "failed",
+            (
+                "Benchmark did not execute any cells. Check provider reachability, "
+                f"credentials, and runtime prerequisites.{detail}"
+            ),
+        )
+    if aggregates.total_samples <= 0:
+        return (
+            "failed",
+            "Benchmark executed zero samples. Check the manifest and sample selection.",
+        )
+    return "completed", None
+
+
 def execute_command(args: argparse.Namespace) -> int:
     """Execute benchmark command and write report artifacts."""
     repo_root = REPO_ROOT
@@ -792,11 +838,15 @@ def execute_command(args: argparse.Namespace) -> int:
             )
 
     aggregates = aggregate_results(results)
+    report_status, terminal_error = _resolve_report_outcome(
+        aggregates=aggregates,
+        failures=failures,
+    )
     commit, branch = git_info(repo_root)
 
     report = BenchmarkReport(
         run_id=run_id,
-        status="completed",
+        status=report_status,
         generated_at_utc=utc_now_iso(),
         git_commit=commit,
         git_branch=branch,
@@ -844,6 +894,7 @@ def execute_command(args: argparse.Namespace) -> int:
     write_json_with_hash(verification_path, verification)
 
     summary = {
+        "status": report_status,
         "run_id": run_id,
         "report_path": str(report_path),
         "quality_report_path": str(quality_report_path),
@@ -857,8 +908,10 @@ def execute_command(args: argparse.Namespace) -> int:
         "alignscore_mean": aggregates.alignscore_mean,
         "judge_overall_mean": aggregates.judge_overall_mean,
     }
+    if terminal_error is not None:
+        summary["error"] = terminal_error
     print(json.dumps(summary, indent=2))
-    return 0
+    return 0 if report_status == "completed" else 1
 
 
 def prepare_manifest_command(args: argparse.Namespace) -> int:
