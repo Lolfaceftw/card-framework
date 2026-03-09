@@ -53,3 +53,15 @@ def test_setup_and_run_help_smoke_for_packaged_entrypoint() -> None:
     packaged_output = packaged_result.stdout + packaged_result.stderr
     for token in ("--audio-path", "--voiceclone-from-summary", "--skip-repo-update"):
         assert token in packaged_output
+
+
+@pytest.mark.integration
+def test_eval_help_smoke_for_packaged_entrypoint() -> None:
+    """Run the packaged eval helper help command as a real subprocess."""
+    packaged_result = _run_python("-m", "card_framework.cli.eval", "--help")
+
+    assert packaged_result.returncode == 0, packaged_result.stderr
+
+    packaged_output = packaged_result.stdout + packaged_result.stderr
+    for token in ("Summarizer benchmark runner", "execute", "prepare-manifest"):
+        assert token in packaged_output
