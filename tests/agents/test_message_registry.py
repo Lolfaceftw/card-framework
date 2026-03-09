@@ -1,8 +1,8 @@
-"""Message registry behavior tests for edit/no-op semantics."""
+﻿"""Message registry behavior tests for edit/no-op semantics."""
 
 from __future__ import annotations
 
-from agents.message_registry import MessageRegistry
+from card_framework.agents.message_registry import MessageRegistry
 
 
 def test_edit_returns_noop_metadata_when_content_is_unchanged() -> None:
@@ -38,3 +38,4 @@ def test_edit_returns_structured_error_for_missing_line() -> None:
 
     assert result["error_code"] == "line_not_found"
     assert result["line"] == 2
+

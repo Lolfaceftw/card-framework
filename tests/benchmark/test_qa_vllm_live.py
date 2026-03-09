@@ -10,6 +10,8 @@ from omegaconf import DictConfig, OmegaConf
 import pytest
 import requests
 
+from card_framework.shared.paths import DEFAULT_QA_CONFIG_PATH
+
 
 def _load_qa_config(path: Path) -> DictConfig:
     """Load QA benchmark config as DictConfig."""
@@ -25,7 +27,7 @@ def _resolve_vllm_base_url() -> tuple[str, str, float]:
     api_key_override = os.getenv("VLLM_API_KEY", "").strip()
     timeout_override = os.getenv("VLLM_TIMEOUT_SECONDS", "").strip()
 
-    qa_cfg = _load_qa_config(Path("benchmark/qa_config.yaml"))
+    qa_cfg = _load_qa_config(DEFAULT_QA_CONFIG_PATH)
     base_url = (
         config_override or str(qa_cfg.get("vllm", {}).get("base_url", "")).strip()
     )
@@ -38,7 +40,9 @@ def _resolve_vllm_base_url() -> tuple[str, str, float]:
     )
 
     if not base_url:
-        raise AssertionError("benchmark/qa_config.yaml must define vllm.base_url")
+        raise AssertionError(
+            f"{DEFAULT_QA_CONFIG_PATH.as_posix()} must define vllm.base_url"
+        )
     timeout_seconds = float(timeout_raw)
     if timeout_seconds <= 0:
         raise AssertionError("vllm.timeout_seconds must be positive")

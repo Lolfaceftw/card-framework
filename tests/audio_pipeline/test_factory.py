@@ -1,32 +1,32 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 import pytest
 
-from audio_pipeline.factory import (
+from card_framework.audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
     build_interjector_orchestrator,
     build_speaker_diarizer,
     build_speaker_sample_generator,
     build_voice_clone_orchestrator,
 )
-from audio_pipeline.eta import LinearStageEtaStrategy
-from audio_pipeline.gateways.fallback_voice_clone_gateway import (
+from card_framework.audio_pipeline.eta import LinearStageEtaStrategy
+from card_framework.audio_pipeline.gateways.fallback_voice_clone_gateway import (
     PassthroughVoiceCloneGateway,
 )
-from audio_pipeline.gateways.indextts_voice_clone_gateway import (
+from card_framework.audio_pipeline.gateways.indextts_voice_clone_gateway import (
     IndexTTSVoiceCloneGateway,
 )
-from audio_pipeline.gateways.demucs_gateway import DemucsSourceSeparator
-from audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
-from audio_pipeline.gateways.fallback_gateways import (
+from card_framework.audio_pipeline.gateways.demucs_gateway import DemucsSourceSeparator
+from card_framework.audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
+from card_framework.audio_pipeline.gateways.fallback_gateways import (
     PassthroughSourceSeparator,
     SingleSpeakerDiarizer,
 )
-from audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
-from audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
-from audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
-from audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
-from llm_provider import LLMProvider
+from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
+from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
+from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
+from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
+from card_framework.shared.llm_provider import LLMProvider
 
 
 class _FakeLLMProvider(LLMProvider):
@@ -367,12 +367,14 @@ def test_factory_builds_indextts_subprocess_provider_defaults(tmp_path: Path) ->
     assert provider.execution_backend == "subprocess"
     assert provider.stream_subprocess_output is True
     assert provider.num_beams == 1
-    assert provider.runner_project_dir == (tmp_path / "third_party" / "index_tts").resolve()
+    assert provider.runner_project_dir == (
+        tmp_path / "src" / "card_framework" / "_vendor" / "index_tts"
+    ).resolve()
     assert provider.cfg_path == (
-        tmp_path / "third_party" / "index_tts" / "checkpoints" / "config.yaml"
+        tmp_path / "checkpoints" / "index_tts" / "config.yaml"
     ).resolve()
     assert provider.model_dir == (
-        tmp_path / "third_party" / "index_tts" / "checkpoints"
+        tmp_path / "checkpoints" / "index_tts"
     ).resolve()
 
 
@@ -459,4 +461,7 @@ def test_factory_builds_interjector_with_indextts_defaults(tmp_path: Path) -> No
     assert orchestrator is not None
     provider = orchestrator.provider
     assert isinstance(provider, IndexTTSVoiceCloneGateway)
-    assert provider.runner_project_dir == (tmp_path / "third_party" / "index_tts").resolve()
+    assert provider.runner_project_dir == (
+        tmp_path / "src" / "card_framework" / "_vendor" / "index_tts"
+    ).resolve()
+

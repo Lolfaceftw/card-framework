@@ -1,10 +1,17 @@
-"""Pytest bootstrap for repository-local module imports."""
+"""Shared pytest configuration for the repository."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+import importlib
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+
+def pytest_configure() -> None:
+    """Preload required dependencies before test modules install fallback stubs."""
+    for module_name in (
+        "a2a.server.agent_execution",
+        "a2a.server.events",
+        "a2a.utils",
+        "numpy",
+        "openai",
+    ):
+        importlib.import_module(module_name)

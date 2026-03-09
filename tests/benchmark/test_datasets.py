@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
 
 import pytest
 
-from benchmark.datasets import ManifestError, load_manifest
+from card_framework.benchmark.datasets import ManifestError, load_manifest
 
 
 def test_load_manifest_resolves_relative_path(tmp_path: Path) -> None:
@@ -41,3 +41,4 @@ def test_load_manifest_raises_for_missing_samples(tmp_path: Path) -> None:
 
     with pytest.raises(ManifestError):
         load_manifest(manifest_path, tmp_path)
+

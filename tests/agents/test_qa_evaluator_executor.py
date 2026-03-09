@@ -1,4 +1,4 @@
-"""Unit tests for QAEvaluatorExecutor."""
+﻿"""Unit tests for QAEvaluatorExecutor."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import json
 import sys
 import types
 from typing import Any, Literal
+
+from tests.support.a2a import extract_agent_text_message
 
 # Provide minimal `numpy` module stub for llm_provider typing imports.
 if "numpy" not in sys.modules:
@@ -86,16 +88,16 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.server.events"] = events_module
     sys.modules["a2a.utils"] = utils_module
 
-from benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
-from benchmark.qa_settings import EvaluatorRuntimeConfig, QuoteRelevanceConfig
-from events import EventBus
-from agents.dtos import (
+from card_framework.benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
+from card_framework.benchmark.qa_settings import EvaluatorRuntimeConfig, QuoteRelevanceConfig
+from card_framework.shared.events import EventBus
+from card_framework.agents.dtos import (
     CorrectorFewShotExample,
     CorrectorTaskRequest,
     CorrectorTaskResponse,
 )
-from agents.qa_evaluator import QAEvaluatorExecutor
-from prompt_manager import PromptManager
+from card_framework.agents.qa_evaluator import QAEvaluatorExecutor
+from card_framework.shared.prompt_manager import PromptManager
 
 
 class _FakeResponse:
@@ -578,7 +580,7 @@ def test_handle_task_fills_missing_answers_when_model_noops() -> None:
     )
 
     assert len(queue.events) == 1
-    payload = json.loads(str(queue.events[0]))
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
     assert payload["status"] == "completed"
     assert payload["score"]["score_out_of_100"] == 0
     assert len(payload["answers"]) == 100
@@ -603,7 +605,7 @@ def test_handle_task_stops_after_no_tool_call_patience() -> None:
     )
 
     assert llm.calls == 3
-    payload = json.loads(str(queue.events[0]))
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
     assert payload["status"] == "completed"
     assert len(payload["answers"]) == 100
 
@@ -1098,3 +1100,4 @@ def test_handle_task_does_not_leak_expected_answer_to_prompt() -> None:
 
     serialized_messages = " ".join(str(message) for message in llm.last_messages)
     assert "expected_answer" not in serialized_messages
+

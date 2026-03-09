@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from benchmark.qa_contracts import (
+from card_framework.benchmark.qa_contracts import (
     EvaluatorAnswerRecord,
     GroundTruthSet,
     _normalize_question_intent,
@@ -130,8 +130,9 @@ def test_validate_answer_coverage_rejects_duplicate_question_ids() -> None:
 
 
 def test_normalize_question_intent_supports_non_latin_text() -> None:
-    first = _normalize_question_intent("这是一个测试问题？")
-    second = _normalize_question_intent("这是另一个测试问题？")
+    first = _normalize_question_intent("è¿™æ˜¯ä¸€ä¸ªæµ‹è¯•é—®é¢˜ï¼Ÿ")
+    second = _normalize_question_intent("è¿™æ˜¯å¦ä¸€ä¸ªæµ‹è¯•é—®é¢˜ï¼Ÿ")
     assert first
     assert second
     assert first != second
+

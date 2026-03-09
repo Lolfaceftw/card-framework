@@ -1,7 +1,7 @@
-import json
+﻿import json
 
-from audio_pipeline.contracts import TranscriptSegment
-from audio_pipeline.io import build_transcript_payload, write_transcript_atomic
+from card_framework.audio_pipeline.contracts import TranscriptSegment
+from card_framework.audio_pipeline.io import build_transcript_payload, write_transcript_atomic
 
 
 def test_write_transcript_atomic_persists_payload(tmp_path) -> None:
@@ -24,3 +24,4 @@ def test_write_transcript_atomic_persists_payload(tmp_path) -> None:
     loaded = json.loads(output_path.read_text(encoding="utf-8"))
     assert loaded["segments"][0]["speaker"] == "SPEAKER_00"
     assert loaded["segments"][0]["start_time"] == 0
+

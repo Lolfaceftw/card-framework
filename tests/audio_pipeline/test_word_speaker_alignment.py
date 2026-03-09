@@ -1,5 +1,5 @@
-from audio_pipeline.contracts import DiarizationTurn, WordSpeakerToken, WordTimestamp
-from audio_pipeline.word_speaker_alignment import (
+﻿from card_framework.audio_pipeline.contracts import DiarizationTurn, WordSpeakerToken, WordTimestamp
+from card_framework.audio_pipeline.word_speaker_alignment import (
     build_word_speaker_segments,
     map_words_to_speakers,
     realign_speakers_with_punctuation,
@@ -78,3 +78,4 @@ def test_realign_speakers_with_punctuation_preserves_edge_minority_turn() -> Non
         "SPEAKER_01",
         "SPEAKER_01",
     ]
+

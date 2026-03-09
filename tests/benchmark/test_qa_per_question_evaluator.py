@@ -1,4 +1,4 @@
-"""Tests for per-question evaluator execution in QA benchmark workflow."""
+﻿"""Tests for per-question evaluator execution in QA benchmark workflow."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from typing import Any
 
 import pytest
 
-from benchmark.qa_evaluator_runner import (
+from card_framework.benchmark.qa_evaluator_runner import (
     evaluate_questions_with_fresh_contexts,
     extract_single_question_answer,
 )
-from benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
-from events import event_bus
+from card_framework.benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
+from card_framework.shared.events import event_bus
 
 
 class _FakeAgentClient:
@@ -317,3 +317,4 @@ def test_evaluate_questions_with_fresh_contexts_emits_spawn_and_close_events() -
     ]
     assert all(1 <= value <= 2 for value in spawn_in_flight_values)
     assert all(0 <= value <= 1 for value in close_in_flight_values)
+

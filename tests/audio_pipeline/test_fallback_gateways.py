@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
-from audio_pipeline.gateways.fallback_gateways import (
+from card_framework.audio_pipeline.gateways.fallback_gateways import (
     PassthroughSourceSeparator,
     SingleSpeakerDiarizer,
 )
@@ -35,3 +35,4 @@ def test_single_speaker_diarizer_returns_single_timeline() -> None:
     assert turns[0].speaker == "SPEAKER_09"
     assert turns[0].start_time_ms == 0
     assert turns[0].end_time_ms == 1234
+

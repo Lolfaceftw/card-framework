@@ -1,4 +1,4 @@
-from audio_pipeline.config import should_use_audio_stage
+﻿from card_framework.audio_pipeline.config import should_use_audio_stage
 
 
 def test_should_use_audio_stage_true_for_default_audio_first() -> None:
@@ -43,3 +43,4 @@ def test_should_use_audio_stage_raises_for_invalid_mode() -> None:
 
     with pytest.raises(ValueError):
         should_use_audio_stage({"input_mode": "invalid"})
+

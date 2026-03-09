@@ -1,10 +1,10 @@
-import json
+﻿import json
 from pathlib import Path
 
 import pytest
 
-from audio_pipeline.errors import NonRetryableAudioStageError
-from audio_pipeline.speaker_samples import (
+from card_framework.audio_pipeline.errors import NonRetryableAudioStageError
+from card_framework.audio_pipeline.speaker_samples import (
     AudioSlice,
     SpeakerSampleGenerator,
     build_speaker_sample_plans,
@@ -395,3 +395,4 @@ def test_speaker_sample_generator_emits_progress_updates(tmp_path: Path) -> None
     assert len(result.artifacts) == 2
     assert updates[0] == (0, 2)
     assert updates[-1] == (2, 2)
+

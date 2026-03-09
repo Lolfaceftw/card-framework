@@ -1,294 +1,282 @@
-"""Reasoning behavior tests for the vLLM provider."""
+"""Exercise the vLLM provider against a real OpenAI-compatible stream."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
 from typing import Any
 
-# Provide minimal `numpy` module stub for imports used by llm_provider typing.
-if "numpy" not in sys.modules:
-    numpy_module = types.ModuleType("numpy")
-
-    class _NDArray:
-        pass
-
-    numpy_module.ndarray = _NDArray
-    sys.modules["numpy"] = numpy_module
-
-# Provide a minimal `openai` module stub for environments without the package.
-if "openai" not in sys.modules:
-    openai_module = types.ModuleType("openai")
-
-    class _OpenAI:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self.chat = types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=lambda **_kwargs: iter(()))
-            )
-
-    openai_module.OpenAI = _OpenAI
-    sys.modules["openai"] = openai_module
-
-_ROOT = Path(__file__).resolve().parents[2]
-_PROVIDER_PATH = _ROOT / "providers" / "vllm_provider.py"
-_SPEC = importlib.util.spec_from_file_location(
-    "vllm_provider_for_tests", _PROVIDER_PATH
-)
-if _SPEC is None or _SPEC.loader is None:
-    raise RuntimeError("Unable to load providers/vllm_provider.py for tests.")
-vllm_provider_module = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(vllm_provider_module)
+from card_framework.providers.vllm_provider import VLLMProvider
+from tests.support.servers import run_openai_compatible_server
 
 
-class _FakeDelta:
-    def __init__(
-        self,
-        *,
-        content: str | None = None,
-        reasoning_content: str | None = None,
-        tool_calls: list[Any] | None = None,
-    ) -> None:
-        self.content = content
-        self.reasoning_content = reasoning_content
-        self.tool_calls = tool_calls
+def _chunk(
+    *,
+    content: str | None = None,
+    reasoning_content: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+    finish_reason: str | None = None,
+) -> dict[str, Any]:
+    """Build one OpenAI chat-completion chunk payload."""
+    delta: dict[str, Any] = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning_content is not None:
+        delta["reasoning_content"] = reasoning_content
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fake-model",
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
 
 
-class _FakeChoice:
-    def __init__(self, delta: _FakeDelta) -> None:
-        self.delta = delta
+def _tool_call_delta(
+    *,
+    index: int,
+    id: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
+) -> dict[str, Any]:
+    """Build one streamed tool-call delta payload."""
+    function: dict[str, Any] = {}
+    if name is not None:
+        function["name"] = name
+    if arguments is not None:
+        function["arguments"] = arguments
 
-
-class _FakeChunk:
-    def __init__(self, delta: _FakeDelta) -> None:
-        self.choices = [_FakeChoice(delta)]
-
-
-class _FakeToolCallFunctionDelta:
-    def __init__(
-        self,
-        *,
-        name: str | None = None,
-        arguments: str | None = None,
-    ) -> None:
-        self.name = name
-        self.arguments = arguments
-
-
-class _FakeToolCallDelta:
-    def __init__(
-        self,
-        *,
-        index: int,
-        id: str | None = None,
-        function: _FakeToolCallFunctionDelta | None = None,
-    ) -> None:
-        self.index = index
-        self.id = id
-        self.function = function
-
-
-class _FakeCompletions:
-    def __init__(self, chunks: list[_FakeChunk]) -> None:
-        self._chunks = chunks
-        self.last_kwargs: dict[str, Any] | None = None
-
-    def create(self, **kwargs: Any):
-        self.last_kwargs = kwargs
-        return iter(self._chunks)
-
-
-class _FakeOpenAI:
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        self.completions = _FakeCompletions([])
-        self.chat = types.SimpleNamespace(completions=self.completions)
+    payload: dict[str, Any] = {"index": index}
+    if id is not None:
+        payload["id"] = id
+    if function:
+        payload["function"] = function
+    return payload
 
 
 def _build_provider(
-    monkeypatch,
+    base_url: str,
     *,
-    chunks: list[_FakeChunk],
     enable_thinking: bool = True,
     fallback_to_reasoning_content: bool = True,
-) -> tuple[vllm_provider_module.VLLMProvider, _FakeCompletions]:
-    monkeypatch.setattr(vllm_provider_module, "OpenAI", _FakeOpenAI)
-    monkeypatch.setattr(
-        vllm_provider_module.VLLMProvider,
-        "_fetch_model_id",
-        lambda _self: "fake-model",
-    )
-
-    provider = vllm_provider_module.VLLMProvider(
-        base_url="http://localhost:8000/v1",
+) -> VLLMProvider:
+    """Create a provider pointed at the local OpenAI-compatible test server."""
+    return VLLMProvider(
+        base_url=f"{base_url}/v1",
         api_key="EMPTY",
         enable_thinking=enable_thinking,
         fallback_to_reasoning_content=fallback_to_reasoning_content,
     )
-    provider._client.completions = _FakeCompletions(chunks)
-    provider._client.chat = types.SimpleNamespace(
-        completions=provider._client.completions
-    )
-    return provider, provider._client.completions
 
 
-def test_generate_requests_thinking_mode(monkeypatch) -> None:
-    provider, completions = _build_provider(
-        monkeypatch,
-        chunks=[
-            _FakeChunk(_FakeDelta(reasoning_content="thinking")),
-            _FakeChunk(_FakeDelta(content="answer")),
-        ],
-    )
+def test_generate_requests_thinking_mode(free_tcp_port: int) -> None:
+    """Send the real reasoning-mode request body to a local vLLM-style server."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content="thinking"),
+                _chunk(content="answer"),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
 
-    result = provider.generate(
-        system_prompt="sys",
-        user_prompt="user",
-        max_tokens=32,
-    )
+        result = provider.generate(
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=32,
+        )
+
+        provider._client.close()
 
     assert result == "answer"
-    assert completions.last_kwargs is not None
-    assert completions.last_kwargs["extra_body"] == {
-        "chat_template_kwargs": {"enable_thinking": True}
-    }
+    assert server.chat_requests[-1]["chat_template_kwargs"] == {"enable_thinking": True}
 
 
-def test_chat_returns_reasoning_content_field(monkeypatch) -> None:
-    provider, completions = _build_provider(
-        monkeypatch,
-        chunks=[
-            _FakeChunk(_FakeDelta(reasoning_content="plan")),
-            _FakeChunk(_FakeDelta(content="done")),
-        ],
-    )
+def test_chat_returns_reasoning_content_field(free_tcp_port: int) -> None:
+    """Capture both content and reasoning from the streamed OpenAI response."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content="plan"),
+                _chunk(content="done"),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
 
-    message = provider.chat(messages=[{"role": "system", "content": "Summarizer"}])
-    dumped = message.model_dump()
+        dumped = provider.chat(
+            messages=[{"role": "system", "content": "Summarizer"}]
+        ).model_dump()
 
-    assert completions.last_kwargs is not None
-    assert "extra_body" in completions.last_kwargs
+        provider._client.close()
+
     assert dumped["content"] == "done"
     assert dumped["reasoning_content"] == "plan"
     assert "reasoning" not in dumped
 
 
-def test_chat_can_disable_thinking_mode(monkeypatch) -> None:
-    provider, completions = _build_provider(
-        monkeypatch,
-        chunks=[_FakeChunk(_FakeDelta(content="ok"))],
-        enable_thinking=False,
-    )
+def test_chat_can_disable_thinking_mode(free_tcp_port: int) -> None:
+    """Omit the extra reasoning body when thinking mode is disabled."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream([_chunk(content="ok"), _chunk(finish_reason="stop")])
+        provider = _build_provider(server.base_url, enable_thinking=False)
 
-    provider.chat(messages=[{"role": "system", "content": "Critic"}])
+        provider.chat(messages=[{"role": "system", "content": "Critic"}])
 
-    assert completions.last_kwargs is not None
-    assert "extra_body" not in completions.last_kwargs
+        provider._client.close()
+
+    assert "chat_template_kwargs" not in server.chat_requests[-1]
 
 
-def test_generate_falls_back_to_reasoning_when_content_empty(monkeypatch) -> None:
-    provider, _completions = _build_provider(
-        monkeypatch,
-        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"ok":true}'))],
-    )
+def test_generate_falls_back_to_reasoning_when_content_empty(
+    free_tcp_port: int,
+) -> None:
+    """Use structured reasoning content when the content channel stays empty."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content='{"ok":true}'),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
 
-    result = provider.generate(
-        system_prompt="sys",
-        user_prompt="user",
-    )
+        result = provider.generate(system_prompt="sys", user_prompt="user")
+
+        provider._client.close()
 
     assert result == '{"ok":true}'
 
 
-def test_chat_falls_back_to_reasoning_when_content_empty(monkeypatch) -> None:
-    provider, _completions = _build_provider(
-        monkeypatch,
-        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"plan":"tool"}'))],
-    )
+def test_chat_falls_back_to_reasoning_when_content_empty(
+    free_tcp_port: int,
+) -> None:
+    """Mirror the generate fallback behavior for chat completions."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content='{"plan":"tool"}'),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
 
-    message = provider.chat(messages=[{"role": "system", "content": "Summarizer"}])
-    dumped = message.model_dump()
+        dumped = provider.chat(
+            messages=[{"role": "system", "content": "Summarizer"}]
+        ).model_dump()
+
+        provider._client.close()
 
     assert dumped["content"] == '{"plan":"tool"}'
     assert dumped["reasoning_content"] == '{"plan":"tool"}'
 
 
-def test_generate_can_disable_reasoning_fallback(monkeypatch) -> None:
-    provider, _completions = _build_provider(
-        monkeypatch,
-        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"ok":true}'))],
-        fallback_to_reasoning_content=False,
-    )
+def test_generate_can_disable_reasoning_fallback(free_tcp_port: int) -> None:
+    """Return empty content when reasoning fallback is disabled."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content='{"ok":true}'),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(
+            server.base_url,
+            fallback_to_reasoning_content=False,
+        )
 
-    result = provider.generate(
-        system_prompt="sys",
-        user_prompt="user",
-    )
+        result = provider.generate(system_prompt="sys", user_prompt="user")
 
-    assert result == ""
-
-
-def test_generate_does_not_fallback_for_unstructured_reasoning(monkeypatch) -> None:
-    provider, _completions = _build_provider(
-        monkeypatch,
-        chunks=[_FakeChunk(_FakeDelta(reasoning_content="step-by-step analysis"))],
-    )
-
-    result = provider.generate(
-        system_prompt="sys",
-        user_prompt="user",
-    )
+        provider._client.close()
 
     assert result == ""
 
 
-def test_chat_can_disable_reasoning_fallback(monkeypatch) -> None:
-    provider, _completions = _build_provider(
-        monkeypatch,
-        chunks=[_FakeChunk(_FakeDelta(reasoning_content='{"plan":"tool"}'))],
-        fallback_to_reasoning_content=False,
-    )
+def test_generate_does_not_fallback_for_unstructured_reasoning(
+    free_tcp_port: int,
+) -> None:
+    """Reject narrative reasoning when the fallback requires structured output."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content="step-by-step analysis"),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
 
-    message = provider.chat(messages=[{"role": "system", "content": "Summarizer"}])
-    dumped = message.model_dump()
+        result = provider.generate(system_prompt="sys", user_prompt="user")
+
+        provider._client.close()
+
+    assert result == ""
+
+
+def test_chat_can_disable_reasoning_fallback(free_tcp_port: int) -> None:
+    """Keep reasoning metadata without using it as the content body."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content='{"plan":"tool"}'),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(
+            server.base_url,
+            fallback_to_reasoning_content=False,
+        )
+
+        dumped = provider.chat(
+            messages=[{"role": "system", "content": "Summarizer"}]
+        ).model_dump()
+
+        provider._client.close()
 
     assert dumped["content"] == ""
     assert dumped["reasoning_content"] == '{"plan":"tool"}'
 
 
-def test_chat_does_not_fallback_when_tool_calls_present(monkeypatch) -> None:
-    provider, _completions = _build_provider(
-        monkeypatch,
-        chunks=[
-            _FakeChunk(_FakeDelta(reasoning_content='{"plan":"call tool"}')),
-            _FakeChunk(
-                _FakeDelta(
+def test_chat_does_not_fallback_when_tool_calls_present(free_tcp_port: int) -> None:
+    """Preserve streamed tool calls without replacing content from reasoning."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content='{"plan":"call tool"}'),
+                _chunk(
                     tool_calls=[
-                        _FakeToolCallDelta(
+                        _tool_call_delta(
                             index=0,
                             id="call_1",
-                            function=_FakeToolCallFunctionDelta(name="submit_answer"),
+                            name="submit_answer",
                         )
                     ]
-                )
-            ),
-            _FakeChunk(
-                _FakeDelta(
+                ),
+                _chunk(
                     tool_calls=[
-                        _FakeToolCallDelta(
+                        _tool_call_delta(
                             index=0,
-                            function=_FakeToolCallFunctionDelta(
-                                arguments='{"question_id":"Q001"}'
-                            ),
+                            arguments='{"question_id":"Q001"}',
                         )
                     ]
-                )
-            ),
-        ],
-    )
+                ),
+                _chunk(finish_reason="tool_calls"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
 
-    message = provider.chat(messages=[{"role": "system", "content": "Evaluator"}])
-    dumped = message.model_dump()
+        dumped = provider.chat(
+            messages=[{"role": "system", "content": "Evaluator"}]
+        ).model_dump()
+
+        provider._client.close()
 
     assert dumped["content"] == ""
     assert dumped["reasoning_content"] == '{"plan":"call tool"}'

@@ -1,18 +1,9 @@
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
 import sys
 from typing import Any
 
-_ROOT = Path(__file__).resolve().parents[2]
-_PROVIDER_PATH = _ROOT / "providers" / "null_provider.py"
-_SPEC = importlib.util.spec_from_file_location("null_provider_for_tests", _PROVIDER_PATH)
-if _SPEC is None or _SPEC.loader is None:
-    raise RuntimeError("Unable to load providers/null_provider.py for tests.")
-_MODULE = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(_MODULE)
-NoOpEmbeddingProvider = _MODULE.NoOpEmbeddingProvider
+from card_framework.providers.null_provider import NoOpEmbeddingProvider
 
 
 def _ensure_numpy_zeros_support() -> None:

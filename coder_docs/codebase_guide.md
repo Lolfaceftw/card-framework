@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<codebaseGuide workspace="llm_test" package="llm-test" language="Python" pythonVersion="3.12+" packageManager="uv" linter="ruff">
+<codebaseGuide workspace="llm_test" package="card-framework" language="Python" pythonVersion="3.12+" packageManager="uv" linter="ruff">
   <overview>
     <purpose>Orient a new coding agent to the actual architecture, workflows, contracts, and maintenance expectations of this repository before code changes are made.</purpose>
     <repositoryIdentity>This workspace combines a Hydra-configured summarization runtime, an audio-to-transcript and voice-clone pipeline, multiple LLM and embedding provider adapters, and two benchmark systems: a matrix-style summarization benchmark and a source-grounded QA benchmark.</repositoryIdentity>
@@ -8,6 +8,7 @@
       <step>Review coder_docs/memory/errors_and_notes.md for previously captured pitfalls before repeating work in an area.</step>
       <step>Use coder_docs/academic_standards.md for formulas, thresholds, scoring logic, or methodology-sensitive implementations.</step>
       <step>Use coder_docs/ruff.md for lint workflow, coder_docs/uv_package_manager.md for dependency and environment workflow, coder_docs/git_github_workflow.md for contributor Git and GitHub workflow, and coder_docs/scrapling.md for external web retrieval workflow.</step>
+      <step>Use coder_docs/fault_localization_workflow.md as the source of truth when a task is primarily bug triage, failing-test analysis, or fault localization.</step>
       <step>Inspect the exact config and prompt files for the subsystem you are changing before editing behavior.</step>
       <step>When behavior, configuration, commands, or workflow changes materially, update this guide in the same change.</step>
     </sessionStartChecklist>
@@ -25,31 +26,32 @@
   </overview>
 
   <section id="repo-layout" title="Repository Layout">
-    <directory path="agents">A2A executor implementations, task DTOs, tool dispatch, loop control, parsing, correction guidance, and client transport helpers.</directory>
-    <directory path="audio_pipeline">Stage-1 and stage-3 use-case orchestration, contracts, ETA tracking, runtime helpers, gateways, runners, speaker-sample generation, voice-clone orchestration, and the live draft voice-clone session used by merged stage-2/stage-3 runs.</directory>
-    <directory path="benchmark">Summarization benchmark CLI, reference-free evaluation pipeline, QA benchmark CLI, manifests, rubrics, metrics, matrix construction, and report artifact helpers.</directory>
-    <directory path="scripts">Operator-facing helper scripts such as the summary matrix runner that shells out to `setup_and_run.py` for batch model-pair comparisons.</directory>
-    <directory path="providers">Concrete LLM and embedding adapters such as vLLM, Transformers, DeepSeek, GLM, Google GenAI, Hugging Face, Nanbeige, sentence-transformer embeddings, and logging wrappers.</directory>
-    <directory path="prompts">Jinja2 prompt templates for summarizer, critic, QA ground-truth generation, QA evaluator, and corrector flows.</directory>
-    <directory path="orchestration">Typed transcript DTOs and the stage orchestrator that bridges stage plans with runtime execution.</directory>
-    <directory path="conf">Hydra application configuration, including provider selection, stage controls, audio settings, ports, orchestrator limits, and logging.</directory>
+    <directory path="src/card_framework/agents">A2A executor implementations, task DTOs, tool dispatch, loop control, parsing, correction guidance, and client transport helpers.</directory>
+    <directory path="src/card_framework/audio_pipeline">Stage-1 and stage-3 use-case orchestration, contracts, ETA tracking, runtime helpers, gateways, runners, speaker-sample generation, voice-clone orchestration, and the live draft voice-clone session used by merged stage-2/stage-3 runs.</directory>
+    <directory path="src/card_framework/benchmark">Summarization benchmark CLI, reference-free evaluation pipeline, QA benchmark CLI, manifests, rubrics, metrics, matrix construction, and report artifact helpers.</directory>
+    <directory path="src/card_framework/cli">Operator-facing CLI modules for the runtime, calibration helper, setup bootstrap, summary-matrix runner, evaluation entrypoint, and terminal UI.</directory>
+    <directory path="src/card_framework/providers">Concrete LLM and embedding adapters such as vLLM, Transformers, DeepSeek, GLM, Google GenAI, Hugging Face, Nanbeige, sentence-transformer embeddings, and logging wrappers.</directory>
+    <directory path="src/card_framework/prompts/templates">Jinja2 prompt templates for summarizer, critic, QA ground-truth generation, QA evaluator, and corrector flows.</directory>
+    <directory path="src/card_framework/orchestration">Typed transcript DTOs and the stage orchestrator that bridges stage plans with runtime execution.</directory>
+    <directory path="src/card_framework/config">Hydra application configuration, including provider selection, stage controls, audio settings, ports, orchestrator limits, and logging.</directory>
+    <directory path="src/card_framework/_vendor/index_tts">Vendored third-party IndexTTS runtime source required by the voice-clone pipeline.</directory>
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
-    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover methodology, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
+    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
     <file path="AGENTS.md">Repo-local coding-agent instructions, including the required Scrapling web-research policy and the rule to keep coder_docs aligned with prompt changes.</file>
     <entrypoints>
-      <entrypoint path="main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
-      <entrypoint path="calibrate.py">One-time voice-clone calibration helper that discovers or bootstraps speaker samples, renders punctuation-rich calibration phrases, and prints the persisted preset/WPM mapping.</entrypoint>
-      <entrypoint path="setup_and_run.py">Bootstrap and convenience runner for dependency checks, stage-aware third-party sync/model provisioning, and full pipeline execution.</entrypoint>
-      <entrypoint path="scripts/run_summary_matrix.py">Batch helper that runs the standard setup-and-run summarizer workflow across ordered summarizer/critic model pairs, optionally adds a DeepSeek model to the pair pool, preserves the repo-default merged live-draft stage-2/stage-3 voice-clone flow, isolates loop-memory artifacts per model pair, streams each child run's live output back to the parent terminal, disables only stage-4 interjector output, and copies each resulting summary into `artifacts/summary_matrix` as `<summarizer>_<critic>-summary.xml`.</entrypoint>
-      <entrypoint path="benchmark/run.py">CLI for summarization benchmark matrix execution and manifest preparation.</entrypoint>
-      <entrypoint path="benchmark/qa.py">CLI for source-grounded QA benchmark execution against an existing summary and source transcript.</entrypoint>
-      <entrypoint path="eval.py">Compatibility wrapper that forwards to the benchmark smoke preset.</entrypoint>
-      <entrypoint path="ui.py">Rich terminal presentation layer that subscribes to the shared event bus.</entrypoint>
+      <entrypoint path="src/card_framework/cli/main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
+      <entrypoint path="src/card_framework/cli/calibrate.py">One-time voice-clone calibration helper that discovers or bootstraps speaker samples, renders punctuation-rich calibration phrases, and prints the persisted preset/WPM mapping.</entrypoint>
+      <entrypoint path="src/card_framework/cli/setup_and_run.py">Bootstrap and convenience runner for dependency checks, stage-aware vendored-runtime sync/model provisioning, and full pipeline execution.</entrypoint>
+      <entrypoint path="src/card_framework/cli/run_summary_matrix.py">Batch helper that runs the standard setup-and-run summarizer workflow across ordered summarizer/critic model pairs, optionally adds a DeepSeek model to the pair pool, preserves the repo-default merged live-draft stage-2/stage-3 voice-clone flow, isolates loop-memory artifacts per model pair, streams each child run's live output back to the parent terminal, disables only stage-4 interjector output, and copies each resulting summary into `artifacts/summary_matrix` as `<summarizer>_<critic>-summary.xml`.</entrypoint>
+      <entrypoint path="src/card_framework/benchmark/run.py">CLI for summarization benchmark matrix execution and manifest preparation.</entrypoint>
+      <entrypoint path="src/card_framework/benchmark/qa.py">CLI for source-grounded QA benchmark execution against an existing summary and source transcript.</entrypoint>
+      <entrypoint path="src/card_framework/cli/eval.py">Benchmark smoke entrypoint.</entrypoint>
+      <entrypoint path="src/card_framework/cli/ui.py">Rich terminal presentation layer that subscribes to the shared event bus.</entrypoint>
     </entrypoints>
   </section>
 
   <section id="runtime-pipeline" title="Runtime Pipeline">
-    <compositionRoot>The runtime composes from main.py using Hydra config from conf/config.yaml and resolves paths relative to the original working directory.</compositionRoot>
+    <compositionRoot>The runtime composes from card_framework.cli.main using Hydra config from src/card_framework/config/config.yaml and resolves paths relative to the original working directory.</compositionRoot>
     <stagePlanning>
       <rule>pipeline.start_stage controls execution mode and is validated by pipeline_plan.build_pipeline_stage_plan.</rule>
       <mode id="stage-1">Run audio stage, then summarizer/critic loop, then optional voice clone and optional stage-4 interjector.</mode>
@@ -78,7 +80,7 @@
       <agent>Critic agent runs on the configured critic localhost port.</agent>
       <agent>Retrieval agent runs on the configured retrieval localhost port.</agent>
       <transport>agents.client.AgentClient is the internal transport used by the orchestrator and executor layers.</transport>
-      <startup>main.py now waits for local A2A servers with a shared parallel health-poll loop instead of a fixed preflight sleep followed by serial checks.</startup>
+      <startup>card_framework.cli.main now waits for local A2A servers with a shared parallel health-poll loop instead of a fixed preflight sleep followed by serial checks.</startup>
     </localAgentTopology>
   </section>
 
@@ -99,15 +101,15 @@
       <component path="agents/loop_context.py">Iteration memory and compact feedback carry-forward for summarizer retries.</component>
     </agentInfrastructure>
     <prompts>
-      <prompt path="prompts/summarizer_system.jinja2">Primary summarizer system instructions.</prompt>
-      <prompt path="prompts/summarizer_revise.jinja2">Revision-mode summarizer instructions.</prompt>
-      <prompt path="prompts/critic_system.jinja2">Critic system instructions.</prompt>
-      <prompt path="prompts/interjector_system.jinja2">Stage-4 planner instructions for overlap decisions and anchor spans.</prompt>
-      <prompt path="prompts/interjector_user.jinja2">Stage-4 planner user payload describing eligible host turns and token indices.</prompt>
-      <prompt path="prompts/qa_ground_truth_system.jinja2">QA ground-truth generation instructions.</prompt>
-      <prompt path="prompts/qa_evaluator_system.jinja2">QA evaluator instructions.</prompt>
-      <prompt path="prompts/corrector_system.jinja2">Corrector retry-guidance instructions.</prompt>
-      <manager path="prompt_manager.py">Jinja2 loading and rendering is centralized in PromptManager.</manager>
+      <prompt path="src/card_framework/prompts/templates/summarizer_system.jinja2">Primary summarizer system instructions.</prompt>
+      <prompt path="src/card_framework/prompts/templates/summarizer_revise.jinja2">Revision-mode summarizer instructions.</prompt>
+      <prompt path="src/card_framework/prompts/templates/critic_system.jinja2">Critic system instructions.</prompt>
+      <prompt path="src/card_framework/prompts/templates/interjector_system.jinja2">Stage-4 planner instructions for overlap decisions and anchor spans.</prompt>
+      <prompt path="src/card_framework/prompts/templates/interjector_user.jinja2">Stage-4 planner user payload describing eligible host turns and token indices.</prompt>
+      <prompt path="src/card_framework/prompts/templates/qa_ground_truth_system.jinja2">QA ground-truth generation instructions.</prompt>
+      <prompt path="src/card_framework/prompts/templates/qa_evaluator_system.jinja2">QA evaluator instructions.</prompt>
+      <prompt path="src/card_framework/prompts/templates/corrector_system.jinja2">Corrector retry-guidance instructions.</prompt>
+      <manager path="src/card_framework/shared/prompt_manager.py">Jinja2 loading and rendering is centralized in PromptManager.</manager>
     </prompts>
     <editingGuidance>
       <rule>If you change tool schemas, task DTOs, or prompt expectations, inspect both the executor implementation and the matching template files.</rule>
@@ -136,9 +138,9 @@
       <contract>QA benchmark DTOs in agents/dtos.py define creator, evaluator, and corrector payload shapes.</contract>
     </agentTaskContracts>
     <benchmarkContracts>
-      <summarizationBenchmark>benchmark/manifests/benchmark_v1.json defines transcript samples; benchmark/provider_profiles.yaml defines provider configs; benchmark/rubrics/default_summarization_rubric.json defines LLM-judge rubric inputs.</summarizationBenchmark>
+      <summarizationBenchmark>src/card_framework/benchmark/manifests/benchmark_v1.json defines transcript samples; src/card_framework/benchmark/provider_profiles.yaml defines provider configs; src/card_framework/benchmark/rubrics/default_summarization_rubric.json defines LLM-judge rubric inputs.</summarizationBenchmark>
       <qaBenchmark>benchmark.qa_contracts.GroundTruthSet enforces a 100-question contract with exactly 50 factualness and 50 naturalness questions.</qaBenchmark>
-      <reporting>benchmark/types.py and benchmark/qa_contracts.py hold the serializable report and scoring structures that downstream tooling should preserve.</reporting>
+      <reporting>src/card_framework/benchmark/types.py and src/card_framework/benchmark/qa_contracts.py hold the serializable report and scoring structures that downstream tooling should preserve.</reporting>
     </benchmarkContracts>
   </section>
 
@@ -175,7 +177,7 @@
       <rule>Operator-facing ETA messages are shown only after the matching stage has learned or loaded persisted throughput history; first-run stages stay silent until history exists.</rule>
       <rule>Learned ETA throughput is persisted immediately after each completed audio, speaker-sample, and voice-clone stage so interrupted pipelines retain finished-stage history.</rule>
       <rule>Windows-only dedicated GPU heartbeat monitoring can run during voice cloning when enabled and when the resolved provider device is CUDA.</rule>
-      <rule>events.py provides the shared event bus used by UI and logging subscribers.</rule>
+      <rule>src/card_framework/shared/events.py provides the shared event bus used by UI and logging subscribers.</rule>
     </etaAndObservability>
     <artifacts>
       <artifact>Default transcript output path: artifacts/transcripts/latest.transcript.json</artifact>
@@ -198,14 +200,14 @@
     <diarizationBenchmark>
       <workflow>benchmark.diarization executes the repo's actual speaker-diarizer providers against a manifest of audio files plus reference RTTM and optional UEM files, writes predicted RTTMs per provider, and aggregates DER, optional JER, runtime, real-time factor, and peak GPU memory. The same module now also prepares a default public AMI manifest by downloading `Mix-Headset.wav` audio plus RTTM/UEM/list files from the AMI corpus and `BUTSpeechFIT/AMI-diarization-setup`.</workflow>
       <subcommand name="execute">Runs diarization provider comparisons such as NeMo MSDD, pyannote Community-1, and NeMo Sortformer variants using the same adapter factory used by stage-1 audio inference.</subcommand>
-      <subcommand name="prepare-manifest">Builds the default AMI diarization manifest at `benchmark/manifests/diarization_ami_test.json` and caches downloaded public assets under `artifacts/diarization_datasets/ami`.</subcommand>
-      <manifestShape>The diarization manifest expects per-sample audio, reference RTTM, optional UEM, dataset, subset, and optional speaker-count metadata. Use `benchmark/manifests/diarization_manifest.example.json` as the manual template for CALLHOME, DIHARD, or other local datasets.</manifestShape>
+      <subcommand name="prepare-manifest">Builds the default AMI diarization manifest at `src/card_framework/benchmark/manifests/diarization_ami_test.json` and caches downloaded public assets under `artifacts/diarization_datasets/ami`.</subcommand>
+      <manifestShape>The diarization manifest expects per-sample audio, reference RTTM, optional UEM, dataset, subset, and optional speaker-count metadata. Use `src/card_framework/benchmark/manifests/diarization_manifest.example.json` as the manual template for CALLHOME, DIHARD, or other local datasets.</manifestShape>
       <scoringPolicy>Diarization scoring uses `pyannote.metrics` DER for every sample and computes JER only when a UEM file is available. The default CLI policy is strict scoring with zero collar and overlapping speech included.</scoringPolicy>
     </diarizationBenchmark>
     <qaBenchmark>
-      <workflow>benchmark/qa.py evaluates an existing summary.xml against a source transcript by generating QA ground truth, then asking an evaluator agent to answer from the summary.</workflow>
+      <workflow>src/card_framework/benchmark/qa.py evaluates an existing summary.xml against a source transcript by generating QA ground truth, then asking an evaluator agent to answer from the summary.</workflow>
       <providerSelection>Creator and evaluator providers may share one provider profile or be split through explicit CLI overrides.</providerSelection>
-      <runtimeConfig>QA-specific limits, quote-relevance behavior, timeouts, vLLM settings, and corrector settings live in benchmark/qa_config.yaml and benchmark/qa_settings.py.</runtimeConfig>
+      <runtimeConfig>QA-specific limits, quote-relevance behavior, timeouts, vLLM settings, and corrector settings live in src/card_framework/benchmark/qa_config.yaml and src/card_framework/benchmark/qa_settings.py.</runtimeConfig>
       <compatibilityGuard>The QA input guard checks that the supplied summary and source transcript appear compatible before expensive evaluation begins.</compatibilityGuard>
     </qaBenchmark>
     <outputs>
@@ -217,9 +219,9 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="conf/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, live draft voice-clone toggles, voice-clone emotion presets, calibration artifact path, duration targets, loop-memory artifact path, loop guardrails, and logging.</file>
-      <file path="benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa.</file>
-      <file path="benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts.</file>
+      <file path="src/card_framework/config/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, live draft voice-clone toggles, voice-clone emotion presets, calibration artifact path, duration targets, loop-memory artifact path, loop guardrails, and logging.</file>
+      <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa.</file>
+      <file path="src/card_framework/benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts.</file>
       <file path="pyproject.toml">Python version floor, dependencies, uv source/index policy, and pytest configuration.</file>
       <file path="uv.lock">Committed lockfile for the uv-managed environment.</file>
     </configurationFiles>
@@ -231,40 +233,40 @@
     </providerPolicy>
     <canonicalCommands>
       <command>uv sync --dev</command>
-      <command>uv run python calibrate.py</command>
-      <command>uv run python main.py</command>
-      <command>uv run python setup_and_run.py --audio-path &lt;path-to-audio&gt;</command>
-      <command>uv run python scripts/run_summary_matrix.py --vllm-host &lt;host&gt; --transcript-path &lt;path-to-transcript.json&gt;</command>
-      <command>uv run python -m benchmark.run execute --preset hourly</command>
-      <command>uv run python -m benchmark.run prepare-manifest --sources local --output benchmark/manifests/benchmark_v1.json</command>
-      <command>uv run python -m benchmark.diarization prepare-manifest</command>
-      <command>uv run python -m benchmark.diarization</command>
-      <command>uv run python -m benchmark.qa --summary-xml &lt;path-to-summary.xml&gt; --source-transcript &lt;path-to-transcript&gt;</command>
+      <command>uv run python -m card_framework.cli.calibrate</command>
+      <command>uv run python -m card_framework.cli.main</command>
+      <command>uv run python -m card_framework.cli.setup_and_run --audio-path &lt;path-to-audio&gt;</command>
+      <command>uv run python -m card_framework.cli.run_summary_matrix --vllm-host &lt;host&gt; --transcript-path &lt;path-to-transcript.json&gt;</command>
+      <command>uv run python -m card_framework.benchmark.run execute --preset hourly</command>
+      <command>uv run python -m card_framework.benchmark.run prepare-manifest --sources local</command>
+      <command>uv run python -m card_framework.benchmark.diarization prepare-manifest</command>
+      <command>uv run python -m card_framework.benchmark.diarization execute</command>
+      <command>uv run python -m card_framework.benchmark.qa --summary-xml &lt;path-to-summary.xml&gt; --source-transcript &lt;path-to-transcript&gt;</command>
       <command>uv run ruff check .</command>
       <command>uv run pytest</command>
     </canonicalCommands>
     <commandNotes>
       <note>Use uv run for repo commands so execution stays inside the locked environment.</note>
-      <note>Benchmark, diarization benchmark, and QA CLIs are module entrypoints; main.py is a direct script entrypoint under Hydra.</note>
+      <note>Benchmark, diarization benchmark, QA, runtime, calibration, and setup helpers are all package module entrypoints under `card_framework.*`.</note>
       <note>The diarization benchmark uses the same `audio_pipeline.factory.build_speaker_diarizer(...)` path as the runtime so provider benchmark results stay aligned with stage-1 behavior.</note>
       <note>The default AMI prep path currently targets the public `Mix-Headset` stream and the `only_words` RTTM/UEM setup from `BUTSpeechFIT/AMI-diarization-setup`.</note>
       <note>`audio.diarization.provider` now supports the default NeMo MSDD path, `pyannote_community1`, `nemo_sortformer_offline`, `nemo_sortformer_streaming`, and the existing `single_speaker` fallback backend.</note>
-      <note>`calibrate.py` is the project-level one-time calibration helper. It prints the persisted preset/WPM mapping and can bootstrap speaker samples from a manifest, transcript, or raw audio path.</note>
-      <note>setup_and_run.py is the preferred convenience wrapper when the task involves third-party IndexTTS setup and full end-to-end stage execution.</note>
-      <note>When `setup_and_run.py` enables terminal logging, it now leaves `logging.summarizer_critic_print_to_terminal` unset so the live Summarizer and Critic reasoning/content stream follows the repo logging config unless the caller explicitly disables it.</note>
+      <note>`card_framework.cli.calibrate` is the project-level one-time calibration helper. It prints the persisted preset/WPM mapping and can bootstrap speaker samples from a manifest, transcript, or raw audio path.</note>
+      <note>`card_framework.cli.setup_and_run` is the preferred convenience wrapper when the task involves IndexTTS setup and full end-to-end stage execution.</note>
+      <note>When `card_framework.cli.setup_and_run` enables terminal logging, it now leaves `logging.summarizer_critic_print_to_terminal` unset so the live Summarizer and Critic reasoning/content stream follows the repo logging config unless the caller explicitly disables it.</note>
       <note>The `LoggingLLMProvider` terminal path now logs concise message/tool/response summaries at `INFO` and reserves full prompt, tool-schema, and response payload dumps for `DEBUG`, so streamed runs stay readable while deeper payload inspection remains opt-in.</note>
       <note>The Rich UI now parses JSON-shaped `tool_result` payloads before printing them, so dict and list outputs render as structured multiline blocks and transcript excerpts keep their real line breaks instead of showing escaped `\n` sequences.</note>
-      <note>When stdout is not a real terminal, such as child runs launched through `scripts/run_summary_matrix.py`, the shared streamed-response callback path used by the repo's vLLM and DeepSeek providers falls back from Rich live panels to plain streamed `[THINKING]` and `[CONTENT]` text, while ignoring whitespace-only preambles so the parent pipe receives meaningful incremental model output instead of blank section headers.</note>
-      <note>`scripts/run_summary_matrix.py` is the operator helper for ordered summarizer/critic pair comparisons, including self-pairs. It still drives `setup_and_run.py` so stage selection and summarizer/critic orchestration stay aligned with the repo default workflow, preserves the merged live-draft stage-2/stage-3 path, disables only stage-4 interjector output, streams live child output to the parent terminal, and writes one copied summary file per summarizer/critic pair under `artifacts/summary_matrix`.</note>
-      <note>When no explicit start stage is provided, setup_and_run.py now auto-selects stage-2 if it finds a reusable transcript, preferring repo-root `transcript.json` or `*.transcript.json` before `artifacts/transcripts/*.transcript.json`.</note>
-      <note>When stage-2 is auto-selected while a repo-root `summary.xml` already exists, setup_and_run.py prints that it will still rerun summarization before voice cloning and points operators at `--voiceclone-from-summary` for stage-3 clone-only runs.</note>
-      <note>For stage-2 reusable transcripts that lack a valid `metadata.speaker_samples_manifest_path`, setup_and_run.py now resolves source audio from transcript metadata first, then from a repo-root `audio.wav`-style file, and otherwise prompts so the runtime can bootstrap fresh separation, transcription, diarization, and speaker-sample generation. The runtime will reject that bootstrap result early when the inferred transcript or speaker coverage does not match the reusable transcript.</note>
+      <note>When stdout is not a real terminal, such as child runs launched through `card_framework.cli.run_summary_matrix`, the shared streamed-response callback path used by the repo's vLLM and DeepSeek providers falls back from Rich live panels to plain streamed `[THINKING]` and `[CONTENT]` text, while ignoring whitespace-only preambles so the parent pipe receives meaningful incremental model output instead of blank section headers.</note>
+      <note>`card_framework.cli.run_summary_matrix` is the operator helper for ordered summarizer/critic pair comparisons, including self-pairs. It still drives `card_framework.cli.setup_and_run` so stage selection and summarizer/critic orchestration stay aligned with the repo default workflow, preserves the merged live-draft stage-2/stage-3 path, disables only stage-4 interjector output, streams live child output to the parent terminal, and writes one copied summary file per summarizer/critic pair under `artifacts/summary_matrix`.</note>
+      <note>When no explicit start stage is provided, `card_framework.cli.setup_and_run` now auto-selects stage-2 if it finds a reusable transcript, preferring repo-root `transcript.json` or `*.transcript.json` before `artifacts/transcripts/*.transcript.json`.</note>
+      <note>When stage-2 is auto-selected while a repo-root `summary.xml` already exists, `card_framework.cli.setup_and_run` prints that it will still rerun summarization before voice cloning and points operators at `--voiceclone-from-summary` for stage-3 clone-only runs.</note>
+      <note>For stage-2 reusable transcripts that lack a valid `metadata.speaker_samples_manifest_path`, `card_framework.cli.setup_and_run` now resolves source audio from transcript metadata first, then from a repo-root `audio.wav`-style file, and otherwise prompts so the runtime can bootstrap fresh separation, transcription, diarization, and speaker-sample generation. The runtime will reject that bootstrap result early when the inferred transcript or speaker coverage does not match the reusable transcript.</note>
       <note>When a stage-2 reusable transcript already carries a valid `metadata.speaker_samples_manifest_path`, the runtime reuses that manifest and skips the speaker-sample bootstrap audio pass.</note>
-      <note>`audio.voice_clone.live_drafting.enabled=true` is now the default merged stage-2/stage-3 path when voice cloning is enabled. In that mode setup_and_run.py skips calibration and the runtime uses actual rendered turn durations instead of WPM estimates.</note>
-      <note>setup_and_run.py pre-runs calibration only for the legacy stage-2 estimate path, skips calibration for stage-3 clone-only runs, and explicitly defers calibration to `main.py` for fresh stage-1 runs when the legacy estimate path is active so it does not duplicate the audio stage.</note>
+      <note>`audio.voice_clone.live_drafting.enabled=true` is now the default merged stage-2/stage-3 path when voice cloning is enabled. In that mode `card_framework.cli.setup_and_run` skips calibration and the runtime uses actual rendered turn durations instead of WPM estimates.</note>
+      <note>`card_framework.cli.setup_and_run` pre-runs calibration only for the legacy stage-2 estimate path, skips calibration for stage-3 clone-only runs, and explicitly defers calibration to `card_framework.cli.main` for fresh stage-1 runs when the legacy estimate path is active so it does not duplicate the audio stage.</note>
       <note>Stage-2 calibration logs only appear in the legacy estimate path now. Live drafting should emit actual turn renders during the summarizer loop instead of temporary calibration syntheses.</note>
-      <note>When CLI overrides do not specify `audio.voice_clone.enabled`, `audio.interjector.enabled`, or `audio.speaker_samples.enabled`, setup_and_run.py now respects the defaults declared in `conf/config.yaml` instead of forcing wrapper-local fallback values.</note>
-      <note>setup_and_run.py now skips IndexTTS repo sync, nested uv sync, and model provisioning only when neither final synthesis nor the legacy calibration-backed estimate path needs the voice-clone runtime.</note>
+      <note>When CLI overrides do not specify `audio.voice_clone.enabled`, `audio.interjector.enabled`, or `audio.speaker_samples.enabled`, `card_framework.cli.setup_and_run` now respects the defaults declared in `src/card_framework/config/config.yaml` instead of forcing wrapper-local fallback values.</note>
+      <note>`card_framework.cli.setup_and_run` now skips IndexTTS repo sync, nested uv sync, and model provisioning only when neither final synthesis nor the legacy calibration-backed estimate path needs the voice-clone runtime.</note>
       <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of live drafting or stage-3 rendering.</note>
     </commandNotes>
   </section>
@@ -274,10 +276,13 @@
       <group path="tests/agents">Agent loop behavior, DTO interactions, correction logic, parser fallback behavior, and QA evaluator behavior.</group>
       <group path="tests/audio_pipeline">Alignment, ETA, gateways, sample generation, voice clone orchestration, and audio-stage behavior.</group>
       <group path="tests/benchmark">Manifest, matrix, QA config, QA contracts, reference-free evaluation, and benchmark runner behavior.</group>
-      <group path="tests/bootstrap">setup_and_run.py bootstrap and override logic.</group>
+      <group path="tests/cli">Operator-facing CLI and terminal UI behavior.</group>
       <group path="tests/orchestration">Stage orchestrator and transcript DTO behavior.</group>
       <group path="tests/providers">Provider normalization, logging wrapper, null provider, and vLLM reasoning behavior.</group>
-      <group path="tests/*.py">Top-level runtime behavior such as pipeline planning, loop context, summary persistence, and UI filtering.</group>
+      <group path="tests/runtime">Loop orchestrator and pipeline-stage planning behavior.</group>
+      <group path="tests/shared">Shared utilities such as summary persistence and logging helpers.</group>
+      <group path="tests/real">Packaged-resource and CLI smoke coverage that exercises the installed package shape.</group>
+      <group path="tests/support">Reusable test-only helpers for localhost servers and A2A message extraction. Keep them small and behavior-focused so tests reuse infrastructure without growing a parallel framework.</group>
     </testLayout>
     <pytestPolicy>
       <marker>unit: deterministic fast unit tests</marker>
@@ -292,9 +297,10 @@
       <rule>When a change affects tested behavior, add or update tests in the corresponding subsystem.</rule>
       <rule>When you fix a meaningful error, recurring pitfall, or debugging trap, prepend a short dated and timed Problem and Solution note to the top of coder_docs/memory/errors_and_notes.md.</rule>
       <rule>When contributor Git or GitHub workflow expectations change materially, update coder_docs/git_github_workflow.md and this guide in the same change.</rule>
+      <rule>When the repository's bug-triage or fault-localization workflow changes materially, update coder_docs/fault_localization_workflow.md and this guide in the same change.</rule>
       <rule>Before commit or pull request, review staged diffs for secrets, private endpoints such as vLLM URLs, credentials, tokens, and other private data. Do not let them enter repo history.</rule>
       <rule>When methodology-sensitive benchmark logic changes, update coder_docs/academic_standards.md usage at the implementation site and keep citations or gap notes current.</rule>
-      <rule>Keep README.md, benchmark/README.md, and coder_docs files aligned when commands or workflows move.</rule>
+      <rule>Keep README.md, src/card_framework/benchmark/README.md, and coder_docs files aligned when commands or workflows move.</rule>
       <rule>Prefer architecture-preserving edits: orchestration logic in orchestration or main, protocol and adapter logic in audio_pipeline or providers, benchmark-specific behavior in benchmark, and A2A task behavior in agents.</rule>
     </maintenanceRules>
   </section>

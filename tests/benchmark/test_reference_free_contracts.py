@@ -1,18 +1,18 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
 
-from benchmark.reference_free.contracts import (
+from card_framework.benchmark.reference_free.contracts import (
     ReferenceFreeContractError,
     load_judge_rubric,
 )
+from card_framework.shared.paths import DEFAULT_JUDGE_RUBRIC_PATH
 
 
 def test_load_judge_rubric_valid_contract() -> None:
-    rubric_path = Path("benchmark/rubrics/default_summarization_rubric.json")
-    rubric = load_judge_rubric(rubric_path)
+    rubric = load_judge_rubric(DEFAULT_JUDGE_RUBRIC_PATH)
 
     assert rubric.rubric_id == "summarization_reference_free_v1"
     assert rubric.pairwise_dimension == "overall"
@@ -30,3 +30,4 @@ def test_load_judge_rubric_invalid_contract(tmp_path: Path) -> None:
 
     with pytest.raises(ReferenceFreeContractError):
         load_judge_rubric(bad_path)
+

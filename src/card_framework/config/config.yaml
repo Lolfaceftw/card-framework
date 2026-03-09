@@ -1,0 +1,334 @@
+# ── Provider Configuration ─────────────────────────────────────────────
+# Swap LLMs or embedding models by changing _target_ and its parameters.
+# Override from CLI:  python -m card_framework.cli.main llm.base_url=http://other:8000/v1
+#
+# Usage Examples:
+#
+# 1) Local Transformers Setup (e.g. for Salesforce/Llama-xLAM-2-3b-fc-r):
+#   llm:
+#     _target_: card_framework.providers.transformers_provider.TransformersProvider
+#     model: "Salesforce/Llama-xLAM-2-3b-fc-r"
+#     device_map: "auto"
+#     torch_dtype: "bfloat16"
+#
+# 2) Local vLLM Setup (e.g. for Salesforce/xLAM-2-1b-fc-r):
+#   llm:
+#     _target_: card_framework.providers.vllm_provider.VLLMProvider
+#     base_url: "http://localhost:8000/v1"
+#     api_key: "EMPTY"
+#
+# 2) vLLM Setup:
+llm:
+  _target_: card_framework.providers.vllm_provider.VLLMProvider
+  base_url: "http://localhost:8000/v1"
+  api_key: "EMPTY"
+
+# Optional per-stage LLM overrides.
+# If left empty, both stages use the shared `llm` provider above.
+# Example:
+#   python -m card_framework.cli.main stage_llm.summarizer._target_=card_framework.providers.deepseek_provider.DeepSeekProvider stage_llm.summarizer.api_key=YOUR_DEEPSEEK_API_KEY
+stage_llm:
+  summarizer: {}
+  critic: {}
+  interjector: {}
+    # llm:
+    #   _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
+    #   api_key: "YOUR_DEEPSEEK_API_KEY"
+    #   model: "deepseek-reasoner" # or "deepseek-reasoner"
+    #   base_url: "https://api.deepseek.com"
+#     _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
+#     api_key: "YOUR_DEEPSEEK_API_KEY"
+#     model: "deepseek-reasoner" # or "deepseek-reasoner"
+#     base_url: "https://api.deepseek.com"
+# #
+# 3) DeepSeek Setup:
+#   llm:
+#     _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
+#     api_key: "YOUR_DEEPSEEK_API_KEY"
+#     model: "deepseek-chat" # or "deepseek-reasoner"
+#     base_url: "https://api.deepseek.com"
+#
+# 3) Google Gen AI Setup (Gemini):
+#   llm:
+#     _target_: card_framework.providers.google_genai_provider.GoogleGenAIProvider
+#     api_key: "YOUR_GEMINI_API_KEY"
+#     model: "gemini-2.5-pro"
+#
+# 4) GLM Setup (ZAI):
+#   llm:
+#     _target_: card_framework.providers.glm_provider.GLMProvider
+#     api_key: "YOUR_ZAI_API_KEY"
+#     model: "glm-4.6"
+#
+# 5) Hugging Face Setup (ToolACE):
+#   llm:
+#     _target_: card_framework.providers.huggingface_provider.HuggingfaceProvider
+#     api_key: "YOUR_HF_API_TOKEN"
+#     model: "Team-ACE/ToolACE-8B"
+#
+# 6) Nanbeige Setup (Thinking Model):
+#   llm:
+#     _target_: card_framework.providers.nanbeige_provider.NanbeigeProvider
+#     api_key: "YOUR_HF_API_TOKEN"
+#     model: "Nanbeige/Nanbeige4-3B-Thinking-2511"
+#
+#   Note: DeepSeek models support a 128k context window (approx 100k words).
+#   You can increase orchestrator.max_iterations or retrieval.top_k if needed.
+
+# llm:
+#   _target_: card_framework.providers.vllm_provider.VLLMProvider
+#   base_url: "http://localhost:8000/v1"
+#   api_key: "EMPTY"
+
+# llm:
+#   _target_: card_framework.providers.transformers_provider.TransformersProvider
+#   model: "Salesforce/Llama-xLAM-2-8b-fc-r"
+#   device_map: "auto"
+#   torch_dtype: "bfloat16"
+# llm:
+#   _target_: card_framework.providers.huggingface_provider.HuggingfaceProvider
+#   api_key: "YOUR_HF_API_TOKEN"
+#   model: "Team-ACE/ToolACE-2-Llama-3.1-8B"
+# ── To enable RAG, comment the NoOp provider and uncomment the SentenceTransformer provider ──
+# If you don't have a CUDA-enabled GPU, you can still use the SentenceTransformer provider
+# by changing `device: "cuda"` to `device: "cpu"`. Alternatively, use the NoOp provider
+# to completely disable RAG (this will pass the full transcript to the agents).
+# 3) DeepSeek Setup:
+# llm:
+#   _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
+#   api_key: "YOUR_DEEPSEEK_API_KEY"
+#   model: "deepseek-chat" # or "deepseek-reasoner"
+#   base_url: "https://api.deepseek.com"
+# llm:
+#   _target_: card_framework.providers.glm_provider.GLMProvider
+#   api_key: "YOUR_ZAI_API_KEY"
+#   model: "glm-4.6"
+embedding:
+  _target_: card_framework.providers.null_provider.NoOpEmbeddingProvider
+
+# embedding:
+#   _target_: card_framework.providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider
+#   model_name: "Qwen/Qwen3-Embedding-4B"
+#   device: "cuda"
+#   torch_dtype: "float16"
+#   batch_size: 4
+
+# ── Application Settings ──────────────────────────────────────────────
+transcript_path: "summary.json"
+
+# Stage controls:
+# - Full pipeline: start_stage=stage-1
+# - Start at summarizer+critic loop: start_stage=stage-2
+# - Stage-3 voice clone only: start_stage=stage-3 + final_summary_path=<summary_xml_file>
+# - Stage-4 interjector only: start_stage=stage-4 + final_summary_path=<summary_xml_file> + voice_clone_manifest_path=<stage3_manifest>
+pipeline:
+  start_stage: "stage-1" # "stage-1" | "stage-2" | "stage-3" | "stage-4"
+  final_summary_path: "" # required when start_stage="stage-3"
+  voice_clone_manifest_path: "" # required when start_stage="stage-4"
+
+audio:
+  audio_path: "" # required when pipeline.start_stage="stage-1"
+  output_transcript_path: "artifacts/transcripts/latest.transcript.json"
+  work_dir: "artifacts/audio_stage"
+  device: "auto" # "auto" | "cpu" | "cuda"
+  merge_gap_ms: 800
+  default_speaker: "SPEAKER_00"
+  retry:
+    attempts: 2
+    base_delay_seconds: 1.0
+  eta:
+    update_interval_seconds: 10
+    dynamic:
+      progress_smoothing: 0.25
+      overrun_factor: 1.15
+      headroom_seconds: 1.0
+    stage_multipliers:
+      separation:
+        cpu: 4.0
+        cuda: 0.8
+      transcription:
+        cpu: 1.5
+        cuda: 0.35
+      diarization:
+        cpu: 2.5
+        cuda: 0.9
+    adaptive:
+      learning_rate: 0.35
+      min_multiplier: 0.05
+      max_multiplier: 20.0
+    unit_bootstrap_seconds_per_unit:
+      speaker_samples: 8.0
+      voice_clone: 20.0
+  separation:
+    provider: "demucs"
+    model: "htdemucs"
+    timeout_seconds: 1800
+  asr:
+    provider: "faster_whisper"
+    model: "medium.en"
+    compute_type_cuda: "int8_float16"
+    compute_type_cpu: "int8"
+    beam_size: 5
+    vad_filter: true
+    batch_size: 8
+    language:
+    suppress_numerals: false
+    forced_alignment:
+      enabled: true
+      required: true
+      batch_size: 8
+  diarization:
+    provider: "nemo" # "nemo" | "pyannote_community1" | "nemo_sortformer_offline" | "nemo_sortformer_streaming" | "single_speaker"
+    nemo_model: "diar_msdd_telephonic"
+    vad_model: "vad_multilingual_marblenet"
+    speaker_embedding_model: "titanet_large"
+    min_speakers:
+    max_speakers:
+    allow_single_speaker_fallback: false
+    pyannote:
+      pipeline_name: "pyannote/speaker-diarization-community-1"
+      auth_token: ""
+      auth_token_env: "HUGGINGFACE_TOKEN"
+      use_exclusive_diarization: true
+    sortformer_offline:
+      model_name: "nvidia/diar_sortformer_4spk-v1"
+      checkpoint_path: ""
+      batch_size: 1
+    sortformer_streaming:
+      model_name: "nvidia/diar_streaming_sortformer_4spk-v2"
+      checkpoint_path: ""
+      batch_size: 1
+      chunk_len: 340
+      chunk_right_context: 40
+      fifo_len: 40
+      spkcache_update_period: 300
+      spkcache_len: 188
+  speaker_samples:
+    enabled: true
+    defer_until_voice_clone: false
+    target_duration_seconds: 30
+    output_dir_name: "speaker_samples"
+    source_audio: "vocals" # runtime prefers transcript vocals metadata and falls back to audio.audio_path when needed
+    clip_method: "concat_turns"
+    short_speaker_policy: "export_shorter"
+    sample_rate_hz: 44100
+    channels: 1
+    edge_fade_ms: 20
+    min_slice_duration_ms: 1200
+    max_slices: 6
+    selection_order: "chronological"
+    low_data_policy: "quality_first_shorter"
+    audio_codec: "pcm_s24le"
+    manifest_filename: "manifest.json"
+  voice_clone:
+    enabled: true
+    live_drafting:
+      enabled: true
+    provider: "indextts" # "indextts" | "passthrough"
+    execution_backend: "subprocess" # "subprocess" | "inprocess"; subprocess keeps one warm nested worker per matching config until explicit release or process exit
+    stream_subprocess_output: true
+    runner_project_dir: "src/card_framework/_vendor/index_tts"
+    uv_executable: "uv"
+    fail_on_error: true
+    output_dir_name: "voice_clone"
+    manifest_filename: "manifest.json"
+    merge_segments: true
+    merged_output_filename: "voice_cloned.wav"
+    merge_timeout_seconds: 300
+    cfg_path: "checkpoints/index_tts/config.yaml"
+    model_dir: "checkpoints/index_tts"
+    device: "auto" # "auto" | "cpu" | "cuda"
+    use_fp16: true
+    use_cuda_kernel: false
+    use_deepspeed: false
+    use_accel: false
+    use_torch_compile: false
+    verbose: false
+    max_text_tokens_per_segment: 120
+    do_sample: true
+    top_p: 0.8
+    top_k: 30
+    temperature: 0.8
+    length_penalty: 0.0
+    num_beams: 1 # lower than upstream default 3 for faster steady-state synthesis after emotion-vector setup
+    repetition_penalty: 10.0
+    max_mel_tokens: 1500
+    calibration:
+      artifact_path: "artifacts/calibration/voice_clone_calibration.json" # used only when live_drafting.enabled=false for stage-2 duration estimation
+    emo_presets:
+      neutral: "calm, neutral, steady conversational tone."
+      warm: "warmly, gently, and supportively, like an empathetic co-host."
+      engaged: "engaged, explanatory, thoughtful podcast tone."
+      upbeat: "upbeat energy, curiosity, and lively enthusiasm."
+      urgent: "focused urgency and serious emphasis."
+    gpu_heartbeat:
+      enabled: true
+      interval_seconds: 10
+      dedicated_usage_threshold_ratio: 0.95
+      top_other_processes: 5
+      command_timeout_seconds: 3.0
+  interjector:
+    enabled: true
+    output_dir_name: "interjector"
+    manifest_filename: "interjector_manifest.json"
+    merged_output_filename: "voice_cloned_interjected.wav"
+    analysis_max_tokens: 900
+    max_interjection_words: 5
+    max_interjections_per_host_turn: 1
+    backchannel_reaction_latency_ms: 120
+    echo_alignment_offset_ms: 20
+    min_host_progress_ratio: 0.35
+    max_host_progress_ratio: 0.90
+    min_available_overlap_ms: 120
+    turn_end_guard_ms: 180
+    mix_timeout_seconds: 300
+
+orchestrator:
+  target_minutes: 5
+  duration_tolerance_ratio: 0.05
+  max_iterations: 60
+  loop_memory:
+    artifact_path: "artifacts/audio_stage/summarizer_loop_memory.json"
+  timeouts:
+    summarizer: 180
+    critic: 180
+    retrieval: 60
+    index: 300
+
+ports:
+  summarizer: 9010
+  critic: 9011
+  retrieval: 9012
+
+agents:
+  summarizer:
+    max_tool_turns: 50
+    loop_guardrails:
+      enabled: true
+      target_models:
+        - "qwen"
+      target_providers:
+        - "vllmprovider"
+        - "transformersprovider"
+        - "huggingfaceprovider"
+      enable_stall_guidance: true
+      enable_noop_edit_detection: true
+      enable_extended_text_tool_parser: true
+      enable_staged_discovery: true
+      required_discovery_queries: 5
+      max_discovery_queries: 10
+      require_unique_discovery_queries: true
+      stall_guidance_threshold_turns: 3
+      stall_guidance_cooldown_turns: 2
+  critic:
+    max_tool_turns: 50
+
+# ── Logging Settings ──────────────────────────────────────────────────
+logging:
+  enabled: true
+  log_file: "agent_interactions.log"
+  level: "INFO"
+  print_to_terminal: false
+  summarizer_critic_print_to_terminal: ${logging.print_to_terminal}
+
+

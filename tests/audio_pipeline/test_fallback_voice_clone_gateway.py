@@ -1,9 +1,9 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 import pytest
 
-from audio_pipeline.errors import NonRetryableAudioStageError
-from audio_pipeline.gateways.fallback_voice_clone_gateway import (
+from card_framework.audio_pipeline.errors import NonRetryableAudioStageError
+from card_framework.audio_pipeline.gateways.fallback_voice_clone_gateway import (
     PassthroughVoiceCloneGateway,
 )
 
@@ -33,3 +33,4 @@ def test_passthrough_voice_clone_gateway_requires_reference_audio(tmp_path: Path
             text="hello world",
             output_audio_path=tmp_path / "output.wav",
         )
+

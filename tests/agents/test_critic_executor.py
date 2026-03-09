@@ -1,4 +1,4 @@
-"""Unit tests for critic deterministic-check tool handling."""
+﻿"""Unit tests for critic deterministic-check tool handling."""
 
 from __future__ import annotations
 
@@ -80,10 +80,10 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.server.events"] = events_module
     sys.modules["a2a.utils"] = utils_module
 
-from agents.critic import CriticExecutor
-from agents.utils import count_words
-from audio_pipeline.calibration import VoiceCloneCalibration
-from prompt_manager import PromptManager
+from card_framework.agents.critic import CriticExecutor
+from card_framework.agents.utils import count_words
+from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
+from card_framework.shared.prompt_manager import PromptManager
 
 
 def setup_function(function: object) -> None:
@@ -343,3 +343,4 @@ def test_run_deterministic_checks_prefers_live_draft_audio_state(tmp_path: Path)
     assert payload["duration_source"] == "actual_audio"
     assert payload["actual_estimated_seconds"] == 2.4
     assert payload["status"] == "pass"
+
