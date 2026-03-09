@@ -21,6 +21,15 @@ def _force_windows_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("card_framework.api.platform.system", lambda: "Windows")
 
 
+@pytest.fixture(autouse=True)
+def _stub_ctc_forced_aligner_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep infer API tests from attempting a real aligner bootstrap install."""
+    monkeypatch.setattr(
+        "card_framework.api.ensure_ctc_forced_aligner_runtime",
+        lambda **_: None,
+    )
+
+
 def test_infer_rejects_missing_audio(tmp_path: Path) -> None:
     """Fail fast when the source audio path does not exist."""
     with pytest.raises(FileNotFoundError):
@@ -175,6 +184,103 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
         f"audio.voice_clone.runner_project_dir={layout.vendor_runtime_dir.as_posix()}"
         in recorded_command
     )
+
+
+def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Bootstrap the pinned aligner when packaged stage-1 settings require it."""
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"RIFF")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "audio:",
+                "  voice_clone:",
+                "    enabled: false",
+                "    live_drafting:",
+                "      enabled: false",
+                "  interjector:",
+                "    enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CARD_FRAMEWORK_CONFIG", str(config_path))
+    monkeypatch.setattr("card_framework.api.ensure_runtime_requirements", lambda **_: None)
+    monkeypatch.setattr("card_framework.api.resolve_runtime_layout", lambda: _runtime_layout(tmp_path))
+    monkeypatch.setattr("card_framework.api.ensure_index_tts_runtime", lambda **_: None)
+
+    bootstrap_calls: list[str] = []
+    monkeypatch.setattr(
+        "card_framework.api.ensure_ctc_forced_aligner_runtime",
+        lambda *, python_executable: bootstrap_calls.append(python_executable),
+    )
+    monkeypatch.setattr(
+        "card_framework.api.subprocess.run",
+        lambda command, cwd=None, check=False, capture_output=True, text=True, env=None: (
+            _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+
+    infer(audio_path, tmp_path / "outputs", 180, device="cpu")
+
+    assert bootstrap_calls == [sys.executable]
+
+
+def test_infer_skips_ctc_forced_aligner_bootstrap_when_alignment_and_interjector_are_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Do not bootstrap the aligner when packaged config disables both call sites."""
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"RIFF")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "audio:",
+                "  asr:",
+                "    forced_alignment:",
+                "      enabled: false",
+                "  voice_clone:",
+                "    enabled: false",
+                "    live_drafting:",
+                "      enabled: false",
+                "  interjector:",
+                "    enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CARD_FRAMEWORK_CONFIG", str(config_path))
+    monkeypatch.setattr("card_framework.api.ensure_runtime_requirements", lambda **_: None)
+    monkeypatch.setattr("card_framework.api.resolve_runtime_layout", lambda: _runtime_layout(tmp_path))
+    monkeypatch.setattr("card_framework.api.ensure_index_tts_runtime", lambda **_: None)
+
+    bootstrap_calls: list[str] = []
+    monkeypatch.setattr(
+        "card_framework.api.ensure_ctc_forced_aligner_runtime",
+        lambda *, python_executable: bootstrap_calls.append(python_executable),
+    )
+    monkeypatch.setattr(
+        "card_framework.api.subprocess.run",
+        lambda command, cwd=None, check=False, capture_output=True, text=True, env=None: (
+            _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+
+    infer(audio_path, tmp_path / "outputs", 180, device="cpu")
+
+    assert bootstrap_calls == []
 
 
 def test_infer_omits_voice_clone_overrides_when_voice_clone_is_disabled(

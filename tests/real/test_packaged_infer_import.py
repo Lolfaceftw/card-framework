@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import venv
+import zipfile
 
 import pytest
 
@@ -69,3 +70,30 @@ def test_built_wheel_exports_infer_symbol(tmp_path: Path) -> None:
     assert "target_duration_seconds" in import_result.stdout
     assert "device" in import_result.stdout
     assert "vllm_url" in import_result.stdout
+
+
+@pytest.mark.integration
+def test_built_wheel_metadata_avoids_pypi_rejected_direct_dependencies() -> None:
+    """Keep the published wheel metadata free of forbidden direct URL dependencies."""
+    build_result = subprocess.run(
+        ["uv", "build", "--wheel", "--no-sources"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    assert build_result.returncode == 0, build_result.stderr
+
+    wheel_paths = sorted((REPO_ROOT / "dist").glob("card_framework-*.whl"))
+    assert wheel_paths, "No built wheel was found in dist/."
+    wheel_path = wheel_paths[-1]
+
+    with zipfile.ZipFile(wheel_path) as wheel_zip:
+        metadata_name = next(
+            name for name in wheel_zip.namelist() if name.endswith("METADATA")
+        )
+        metadata = wheel_zip.read(metadata_name).decode("utf-8")
+
+    assert "Requires-Dist: ctc-forced-aligner" not in metadata
+    assert " @ git+" not in metadata

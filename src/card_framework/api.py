@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from card_framework.runtime.bootstrap import (
     RuntimeBootstrapError,
+    ensure_ctc_forced_aligner_runtime,
     ensure_index_tts_runtime,
     ensure_runtime_requirements,
 )
@@ -145,10 +146,13 @@ def infer(
         audio_cfg = _as_mapping(config.get("audio", {}))
         voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
         interjector_cfg = _as_mapping(audio_cfg.get("interjector", {}))
+        asr_cfg = _as_mapping(audio_cfg.get("asr", {}))
+        forced_alignment_cfg = _as_mapping(asr_cfg.get("forced_alignment", {}))
         live_drafting_cfg = _as_mapping(voice_clone_cfg.get("live_drafting", {}))
 
         voice_clone_enabled = bool(voice_clone_cfg.get("enabled", False))
         interjector_enabled = bool(interjector_cfg.get("enabled", False))
+        forced_alignment_enabled = bool(forced_alignment_cfg.get("enabled", True))
         live_drafting_enabled = voice_clone_enabled and bool(
             live_drafting_cfg.get("enabled", True)
         )
@@ -161,6 +165,8 @@ def infer(
             require_ffmpeg=True,
             uv_executable=uv_executable,
         )
+        if forced_alignment_enabled or interjector_enabled:
+            ensure_ctc_forced_aligner_runtime(python_executable=sys.executable)
 
         layout = resolve_runtime_layout()
         if require_uv:

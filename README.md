@@ -169,20 +169,8 @@ The repository now exposes a library entrypoint for installed-package use:
 pip install card-framework
 ```
 
-As of March 9, 2026, the already-published `card-framework 1.0.1` release on
-PyPI still carries the older bare `ctc-forced-aligner` dependency metadata.
-Plain `pip install card-framework` can therefore resolve the unrelated Deskpai
-`ctc-forced-aligner 1.0.2` source distribution from PyPI, which fails on
-Windows during linking with `LNK2001: unresolved external symbol
-PyInit_align_ops`. Until a newer CARD release is cut from this repository
-state, either:
-
-```bash
-python -m pip install "ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git@e23e1525bae810f0582b6e539ce7aec63fd01196"
-python -m pip install card-framework
-```
-
-or install from a checkout with the repo-standard command:
+For local repository development, keep using the repo-standard environment
+setup:
 
 ```bash
 uv sync --dev
@@ -257,6 +245,13 @@ Installed-package runtime notes:
   When voice cloning or calibration paths are active, the package also expects
   `uv` so it can bootstrap the vendored IndexTTS runtime in the writable
   runtime home on first use.
+- Packaged `infer(...)` no longer publishes `ctc-forced-aligner` in
+  `Requires-Dist` because PyPI rejects direct URL dependencies and the unrelated
+  PyPI package with the same name is incompatible with CARD. When stage-1
+  forced alignment or stage-4 interjection needs it and the module is missing,
+  `infer(...)` bootstraps the pinned upstream source into the active Python
+  environment on first use. That first bootstrap requires network access and
+  Windows C++ build tools.
 
 ## Public PyPI Release
 
@@ -273,8 +268,10 @@ publisher** flow because the project does not exist on PyPI yet. Configure:
 - Environment name: `pypi`
 
 Because the already-published `card-framework 1.0.1` wheel used the older bare
-`ctc-forced-aligner` requirement, the next fixed public release must use a new
-version tag rather than retrying `v1.0.1`.
+`ctc-forced-aligner` requirement and the attempted `v1.0.2` release on March
+9, 2026 failed when PyPI rejected a direct Git dependency in wheel metadata,
+the next fixed public release must use a new version tag rather than retrying
+either `v1.0.1` or `v1.0.2`.
 
 Repository-side release steps:
 

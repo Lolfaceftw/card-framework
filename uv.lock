@@ -443,12 +443,11 @@ wheels = [
 
 [[package]]
 name = "card-framework"
-version = "1.0.1"
+version = "1.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["all"] },
     { name = "accelerate" },
-    { name = "ctc-forced-aligner" },
     { name = "datasets" },
     { name = "deepmultilingualpunctuation" },
     { name = "demucs" },
@@ -483,6 +482,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "ctc-forced-aligner" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -491,7 +491,6 @@ dev = [
 requires-dist = [
     { name = "a2a-sdk", extras = ["all"] },
     { name = "accelerate", specifier = ">=1.12.0" },
-    { name = "ctc-forced-aligner", git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git?rev=e23e1525bae810f0582b6e539ce7aec63fd01196" },
     { name = "datasets", specifier = ">=4.5.0" },
     { name = "deepmultilingualpunctuation", git = "https://github.com/oliverguhr/deepmultilingualpunctuation.git" },
     { name = "demucs", specifier = ">=4.0.1" },
@@ -526,6 +525,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ctc-forced-aligner", git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git?rev=e23e1525bae810f0582b6e539ce7aec63fd01196" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.9.0" },
 ]

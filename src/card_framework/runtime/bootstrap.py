@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -15,6 +16,11 @@ from card_framework.shared.runtime_layout import RuntimeLayout
 
 _MIN_WEIGHT_BYTES = 1_000_000
 _WEIGHT_SUFFIXES = {".safetensors", ".pt", ".pth", ".bin", ".ckpt"}
+_CTC_FORCED_ALIGNER_COMMIT = "e23e1525bae810f0582b6e539ce7aec63fd01196"
+_CTC_FORCED_ALIGNER_ARCHIVE_URL = (
+    "https://codeload.github.com/MahmoudAshraf97/ctc-forced-aligner/tar.gz/"
+    f"{_CTC_FORCED_ALIGNER_COMMIT}"
+)
 
 
 @dataclass(slots=True)
@@ -82,6 +88,32 @@ def ensure_index_tts_runtime(
         layout=layout,
         uv_executable=uv_executable,
         force_download=force_model_download,
+    )
+
+
+def ensure_ctc_forced_aligner_runtime(*, python_executable: str) -> None:
+    """Install the pinned CTC forced-aligner package when it is missing.
+
+    Args:
+        python_executable: Interpreter whose environment should receive the package.
+
+    Raises:
+        RuntimeBootstrapError: The aligner was missing and the bootstrap install failed.
+    """
+    if importlib.util.find_spec("ctc_forced_aligner") is not None:
+        return
+
+    _run_cmd(
+        step="ctc_forced_aligner_install",
+        command=[
+            python_executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            _CTC_FORCED_ALIGNER_ARCHIVE_URL,
+        ],
     )
 
 

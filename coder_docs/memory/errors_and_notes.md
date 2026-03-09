@@ -1,5 +1,9 @@
 # Errors And Notes
 
+### 2026-03-09T23:35:00+08:00 - PyPI Rejects Direct URL Dependencies Even When The Wheel Metadata Is Otherwise Valid
+- Problem: Tag `v1.0.2` built and smoke-tested successfully, but the publish job still failed because PyPI rejected `Requires-Dist: ctc-forced-aligner @ git+...` with `400 Can't have direct dependency`. Using a direct Git requirement in published metadata fixed the wrong-package resolution from `1.0.1`, but PyPI would not accept the upload.
+- Solution: Move the pinned `ctc-forced-aligner` requirement out of `[project.dependencies]` and into the repo-local `dependency-groups.dev` environment, teach packaged `infer(...)` to bootstrap the pinned upstream aligner on first use when forced alignment or interjection needs it, and update release smoke checks so wheel and sdist metadata must not contain either a direct Git URL dependency or the incompatible bare `ctc-forced-aligner` PyPI name.
+
 ### 2026-03-09T23:10:00+08:00 - Public Wheel Metadata Must Pin The Git `ctc-forced-aligner` Source, Not The PyPI Name
 - Problem: The published `card-framework 1.0.1` wheel exposed a bare `Requires-Dist: ctc-forced-aligner`, but plain `pip` ignores this repo's `tool.uv.sources` override. Downstream Windows installs therefore resolved the unrelated Deskpai `ctc-forced-aligner 1.0.2` sdist from PyPI, which failed during linking with `LNK2001: unresolved external symbol PyInit_align_ops` and also did not expose the API that CARD imports.
 - Solution: Move `ctc-forced-aligner` to a direct Git requirement in `[project.dependencies]`, keep the lockfile pinned to commit `e23e1525bae810f0582b6e539ce7aec63fd01196`, update package-management and README guidance, and extend the publish workflow smoke test to assert that both wheel and sdist metadata preserve the Git-pinned requirement instead of regressing to the bare PyPI package name.
