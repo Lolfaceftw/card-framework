@@ -27,11 +27,20 @@ Outputs:
 - `artifacts/benchmark/<run_id>/verification.json`
 - `artifacts/quality/<run_id>/report.json`
 
+If every benchmark cell is skipped before any sample runs, the CLI exits
+non-zero and keeps the generated artifacts so the failure can be diagnosed.
+
 Prepare a manifest:
 
 ```bash
 uv run python -m card_framework.benchmark.run prepare-manifest --sources local
 ```
+
+For the local source, the CLI now auto-discovers a reusable transcript in this
+order unless you pass `--local-transcript-path` explicitly:
+- repo-root `transcript.json`
+- repo-root `*.transcript.json`
+- `artifacts/transcripts/*.transcript.json`
 
 ## Diarization Benchmark
 

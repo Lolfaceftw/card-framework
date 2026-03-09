@@ -192,9 +192,9 @@
 
   <section id="benchmarking" title="Benchmarking">
     <summarizationBenchmark>
-      <workflow>benchmark.run executes provider and embedding matrix cells over a manifest of transcript samples, then aggregates runtime and reference-free metrics.</workflow>
+      <workflow>benchmark.run executes provider and embedding matrix cells over a manifest of transcript samples, then aggregates runtime and reference-free metrics. When every cell is skipped before any sample executes, the CLI now exits non-zero while still writing report artifacts for diagnosis.</workflow>
       <subcommand name="execute">Runs the benchmark matrix with a preset, provider profiles, optional judge provider, and reference-free scoring controls.</subcommand>
-      <subcommand name="prepare-manifest">Builds a frozen manifest from supported sources such as local, QMSum, or AMI.</subcommand>
+      <subcommand name="prepare-manifest">Builds a frozen manifest from supported sources such as local, QMSum, or AMI. For the local source, the CLI now auto-discovers a reusable transcript from repo-root `transcript.json`, repo-root `*.transcript.json`, then `artifacts/transcripts/*.transcript.json` unless the operator passes `--local-transcript-path` explicitly.</subcommand>
       <referenceFreeMetrics>Reference-free evaluation combines AlignScore-like scoring and LLM-as-judge scoring, including order-swap and repeat diagnostics.</referenceFreeMetrics>
     </summarizationBenchmark>
     <diarizationBenchmark>

@@ -1,5 +1,9 @@
 # Errors And Notes
 
+### 2026-03-09T13:33:25+08:00 - Local Benchmark Defaults Must Discover Real Transcripts And Fail Loudly On Zero Execution
+- Problem: The packaged summarization benchmark still assumed a stale `summary.json` local transcript default, so `card-framework-benchmark prepare-manifest --sources local` and the legacy `card-framework-eval` entrypoint broke on a fresh repo state. After fixing transcript discovery, the benchmark still exited successfully even when every cell was skipped before any sample ran, which made a missing vLLM endpoint look like a green run.
+- Solution: Reuse repo-aware transcript auto-discovery for local benchmark manifests, switch packaged local manifest defaults to `auto`, align the main config transcript default with `audio.output_transcript_path`, and make the benchmark CLI exit non-zero with a direct operator-facing error when zero cells or zero samples execute while still preserving the report artifacts.
+
 ### 2026-03-09T13:27:24+08:00 - Packaged Eval Help And Repo Ruff Gate Must Reflect Maintained Code
 - Problem: The legacy `card_framework.cli.eval` entrypoint ignored CLI arguments, so `card-framework-eval --help` ran the smoke benchmark path instead of showing help, and the documented repo-level `uv run ruff check .` command regressed by linting the vendored `src/card_framework/_vendor` tree as if it were maintained first-party code.
 - Solution: Make the eval wrapper forward real CLI arguments to `card_framework.benchmark.run`, preserve the smoke preset only as the no-argument default, add a real packaged help smoke test, and exclude `src/card_framework/_vendor` from the repo Ruff gate while documenting that vendor exclusion in `coder_docs/ruff.md`.
