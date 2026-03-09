@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from benchmark.matrix import build_cells
-from benchmark.types import BenchmarkPreset, EmbeddingProfile, ProviderProfile
+from card_framework.benchmark.matrix import build_cells
+from card_framework.benchmark.types import BenchmarkPreset, EmbeddingProfile, ProviderProfile
 
 
 def test_build_cells_prunes_with_provider_coverage() -> None:
@@ -9,17 +9,17 @@ def test_build_cells_prunes_with_provider_coverage() -> None:
         ProviderProfile(
             provider_id="p1",
             description="Provider 1",
-            llm_config={"_target_": "providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
+            llm_config={"_target_": "card_framework.providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
         ),
         ProviderProfile(
             provider_id="p2",
             description="Provider 2",
-            llm_config={"_target_": "providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
+            llm_config={"_target_": "card_framework.providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
         ),
         ProviderProfile(
             provider_id="p3",
             description="Provider 3",
-            llm_config={"_target_": "providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
+            llm_config={"_target_": "card_framework.providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
         ),
     ]
 
@@ -27,12 +27,20 @@ def test_build_cells_prunes_with_provider_coverage() -> None:
         "disabled": EmbeddingProfile(
             embedding_id="disabled",
             description="off",
-            embedding_config={"_target_": "providers.null_provider.NoOpEmbeddingProvider"},
+            embedding_config={
+                "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+            },
         ),
         "enabled": EmbeddingProfile(
             embedding_id="enabled",
             description="on",
-            embedding_config={"_target_": "providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider", "model_name": "x"},
+            embedding_config={
+                "_target_": (
+                    "card_framework.providers.sentence_transformer_provider."
+                    "SentenceTransformerEmbeddingProvider"
+                ),
+                "model_name": "x",
+            },
         ),
     }
 
@@ -57,3 +65,4 @@ def test_build_cells_prunes_with_provider_coverage() -> None:
     assert ("p2", "disabled", 1) in covered
     assert ("p3", "disabled", 1) in covered
     assert len(cells) <= 3
+

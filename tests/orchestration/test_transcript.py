@@ -1,8 +1,8 @@
-"""Tests for transcript domain DTO adapters."""
+﻿"""Tests for transcript domain DTO adapters."""
 
 from __future__ import annotations
 
-from orchestration.transcript import Transcript
+from card_framework.orchestration.transcript import Transcript
 
 
 def test_transcript_roundtrip_preserves_known_and_extra_fields() -> None:
@@ -35,3 +35,4 @@ def test_transcript_to_full_text_matches_prompt_format() -> None:
     )
 
     assert transcript.to_full_text() == "[SPEAKER_00]: hello world\n"
+

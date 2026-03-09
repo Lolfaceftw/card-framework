@@ -40,11 +40,15 @@ def _loaded_transformer_modules(import_statement: str) -> set[str]:
 
 def test_importing_logging_provider_does_not_load_transformer_stacks() -> None:
     """Keep logging-provider imports cheap for remote-provider startup."""
-    loaded_modules = _loaded_transformer_modules("import providers.logging_provider")
+    loaded_modules = _loaded_transformer_modules(
+        "import card_framework.providers.logging_provider"
+    )
     assert loaded_modules == set()
 
 
 def test_importing_deepseek_provider_does_not_load_transformer_stacks() -> None:
     """Avoid package-level fan-out when importing the active DeepSeek provider."""
-    loaded_modules = _loaded_transformer_modules("import providers.deepseek_provider")
+    loaded_modules = _loaded_transformer_modules(
+        "import card_framework.providers.deepseek_provider"
+    )
     assert loaded_modules == set()

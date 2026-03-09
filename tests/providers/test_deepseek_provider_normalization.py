@@ -2,44 +2,10 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
-# Provide minimal `numpy` module stub for imports used by llm_provider typing.
-if "numpy" not in sys.modules:
-    numpy_module = types.ModuleType("numpy")
-
-    class _NDArray:
-        pass
-
-    numpy_module.ndarray = _NDArray
-    sys.modules["numpy"] = numpy_module
-
-# Provide minimal `openai` module stub for unit tests.
-if "openai" not in sys.modules:
-    openai_module = types.ModuleType("openai")
-
-    class _OpenAI:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self.chat = types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=lambda **_kwargs: iter(()))
-            )
-
-    openai_module.OpenAI = _OpenAI
-    sys.modules["openai"] = openai_module
-
-_ROOT = Path(__file__).resolve().parents[2]
-_PROVIDER_PATH = _ROOT / "providers" / "deepseek_provider.py"
-_SPEC = importlib.util.spec_from_file_location("deepseek_provider_for_tests", _PROVIDER_PATH)
-if _SPEC is None or _SPEC.loader is None:
-    raise RuntimeError("Unable to load providers/deepseek_provider.py for tests.")
-_MODULE = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(_MODULE)
-DeepSeekProvider = _MODULE.DeepSeekProvider
+from card_framework.providers.deepseek_provider import DeepSeekProvider
 
 
 def _tool_call(tool_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:

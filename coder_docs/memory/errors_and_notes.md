@@ -1,5 +1,21 @@
 # Errors And Notes
 
+### 2026-03-09T12:15:00+08:00 - Vendored IndexTTS GPT Constructors Must Stay Valid Python For Live-Draft Runs
+- Problem: A real `card_framework.cli.setup_and_run --audio-path audio.wav` stage-1 run completed separation, transcription, diarization, and speaker-sample generation, then crashed on the first live-draft voice-clone call because the warm IndexTTS subprocess could not import vendored `indextts/gpt/model.py` and `model_v2.py`; both constructors had a malformed parameter named `card_framework.retrieval.embeddings`.
+- Solution: Restore the constructor argument name to `embeddings` in both vendored GPT modules and add a regression test that `py_compile`s the vendored GPT files so syntax regressions fail in pytest before a long runtime run.
+
+### 2026-03-08T23:58:00+08:00 - src Migration Tests Must Use Real A2A Message Payloads And OmegaConf Lists
+- Problem: After preloading the real `a2a` package to stop cross-test stub pollution, several executor tests still parsed `str(queue.events[0])` as if A2A responses were raw JSON strings, while `benchmark.mrcr` still rejected valid `provider_profiles.yaml` data because OmegaConf exposes `providers` as `ListConfig`, not a plain `list`.
+- Solution: Add a shared test helper that extracts the first text part from either stubbed or real A2A messages, update the stale executor assertions and packaged CLI import path, and make `benchmark.mrcr` accept OmegaConf `ListConfig` provider lists so the MRCR config resolver works with the repository's real YAML loader.
+
+### 2026-03-08T23:20:00+08:00 - Removing Root Wrappers Requires Module-Based Subprocess Calls Everywhere
+- Problem: After the `src/card_framework` migration, bootstrap subprocesses, summary-matrix subprocesses, tests, and docs still called `main.py`, `calibrate.py`, and `setup_and_run.py`, so deleting the root wrappers would have broken the actual runtime and verification flow.
+- Solution: Move all subprocess invocations, test expectations, and operator docs to `python -m card_framework.cli.*`, then remove the root wrapper files and shim packages so the repository is package-first end to end.
+
+### 2026-03-08T22:36:30+08:00 - src Layout Refactor Must Rebase Default Paths And Import-Time Benchmarks
+- Problem: Moving maintained code under `src/card_framework` and vendoring IndexTTS under `src/card_framework/_vendor` left several defaults, docs, and tests still pointing at root `conf/`, `prompts/`, `benchmark/`, and `third_party/index_tts`, while `benchmark.mrcr` still performed heavyweight downloads and endpoint calls during import.
+- Solution: Rebase runtime defaults and docs onto the packaged `src/card_framework` layout, keep bootstrap path resolution tolerant of the legacy tree during the migration window, and rewrite `benchmark.mrcr` into a lazy config-resolution helper so test collection no longer triggers network or dataset side effects.
+
 ### 2026-03-08T00:25:00+08:00 - Summary-Matrix Streaming Must Ignore Blank Sections And Cover DeepSeek Too
 - Problem: Piped summary-matrix runs could still show empty `[CONTENT]` headers from whitespace-only tool-call preambles, and DeepSeek stage overrides bypassed the shared streaming callback entirely, so reasoning/content streaming stayed inconsistent across model pairs.
 - Solution: Ignore leading whitespace-only chunks before opening plain `[THINKING]` or `[CONTENT]` sections, and route DeepSeek streaming through the shared response-callback path so both terminal and piped matrix runs use the same fallback behavior.

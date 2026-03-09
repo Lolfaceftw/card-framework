@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from benchmark.metrics import aggregate_results
-from benchmark.types import CellRunResult, SampleRunResult
+from card_framework.benchmark.metrics import aggregate_results
+from card_framework.benchmark.types import CellRunResult, SampleRunResult
 
 
 def test_aggregate_results_reference_free_metrics() -> None:
@@ -70,3 +70,4 @@ def test_aggregate_results_reference_free_metrics() -> None:
     assert aggregate.judge_order_consistency_rate == 1.0
     assert aggregate.judge_repeat_stability_mean == 0.03
     assert aggregate.reference_free_coverage_rate == 0.5
+

@@ -1,4 +1,4 @@
-"""Unit tests for Corrector agent guidance generation."""
+﻿"""Unit tests for Corrector agent guidance generation."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import json
 import sys
 import types
 from typing import Any
+
+from tests.support.a2a import extract_agent_text_message
 
 # Provide minimal `numpy` module stub for llm_provider typing imports.
 if "numpy" not in sys.modules:
@@ -86,13 +88,13 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.server.events"] = events_module
     sys.modules["a2a.utils"] = utils_module
 
-from agents.corrector import (
+from card_framework.agents.corrector import (
     CorrectorExecutor,
     LLMCorrectorAgent,
     render_correction_guidance,
 )
-from agents.dtos import CorrectorTaskRequest
-from prompt_manager import PromptManager
+from card_framework.agents.dtos import CorrectorTaskRequest
+from card_framework.shared.prompt_manager import PromptManager
 
 
 class _FakeLLM:
@@ -237,5 +239,6 @@ def test_corrector_executor_returns_json_payload() -> None:
     )
 
     assert len(queue.events) == 1
-    payload = json.loads(str(queue.events[0]))
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
     assert payload["correction_instruction"] == "Fix question id."
+

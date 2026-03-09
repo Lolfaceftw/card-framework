@@ -19,7 +19,7 @@ Run these from the repository root:
 ```bash
 uv sync
 uv sync --dev
-uv run python src/main.py
+uv run python -m card_framework.cli.main
 uv add <package>
 uv add --dev <package>
 uv remove <package>
@@ -42,7 +42,7 @@ Preferred workflow:
 
 ## Repo-Specific PyTorch Rule
 
-This repo pins `torch`, `torchvision`, and `torchaudio` to the explicit `pytorch-cu126` index through `tool.uv.sources` and `[[tool.uv.index]]`.
+This repo pins `torch` and `torchaudio` to the explicit `pytorch-cu128` index through `tool.uv.sources` and `[[tool.uv.index]]`, while keeping `pytorch-cu126` configured as an optional fallback index for environments that need CUDA 12.6 wheels.
 
 When changing any of those packages:
 
@@ -52,7 +52,7 @@ When changing any of those packages:
 
 ## Command Usage Notes
 
-- Prefer `uv run python src/main.py` over raw `python src/main.py` so the locked environment is used consistently.
+- Prefer `uv run python -m card_framework.cli.main` over raw `python -m card_framework.cli.main` so the locked environment is used consistently.
 - Prefer `uv sync --dev` for local development because Ruff is currently a dev dependency.
 - Use `uv add --dev` for developer tooling such as linters or test tools.
 - Use `uv lock` after meaningful dependency edits or when reconciling a lockfile mismatch.

@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from benchmark.reference_free.contracts import JudgeRubric, JudgeRubricDimension
-from benchmark.reference_free.judge_runner import LLMJudgeRunner
+from card_framework.benchmark.reference_free.contracts import JudgeRubric, JudgeRubricDimension
+from card_framework.benchmark.reference_free.judge_runner import LLMJudgeRunner
 
 
 class FakeJudgeProvider:
@@ -82,3 +82,4 @@ def test_judge_runner_handles_invalid_json() -> None:
     assert result.status == "error"
     assert result.scores is None
     assert result.error_message is not None
+

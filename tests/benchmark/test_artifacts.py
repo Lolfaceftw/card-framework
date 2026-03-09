@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
-from benchmark.artifacts import sha256_file, write_json_with_hash
+from card_framework.benchmark.artifacts import sha256_file, write_json_with_hash
 
 
 def test_write_json_with_hash_matches_file_digest(tmp_path: Path) -> None:
@@ -14,3 +14,4 @@ def test_write_json_with_hash_matches_file_digest(tmp_path: Path) -> None:
     assert target.exists()
     assert len(reported_hash) == 64
     assert reported_hash == sha256_file(target)
+

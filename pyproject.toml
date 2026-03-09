@@ -1,5 +1,9 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "llm-test"
+name = "card-framework"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -22,6 +26,7 @@ dependencies = [
     "zai-sdk>=0.2.2",
     "jinja2",
     "datasets>=4.5.0",
+    "huggingface-hub>=0.34.0",
     "hf-transfer>=0.1.9",
     "pydantic>=2.12.5",
     "demucs>=4.0.1",
@@ -36,6 +41,51 @@ dependencies = [
     "tiktoken",
     "textual",
     "unidecode"
+]
+
+[project.scripts]
+card-framework-main = "card_framework.cli.main:main"
+card-framework-setup = "card_framework.cli.setup_and_run:main"
+card-framework-calibrate = "card_framework.cli.calibrate:main"
+card-framework-eval = "card_framework.cli.eval:main"
+card-framework-ui = "card_framework.cli.ui_cli:main"
+card-framework-benchmark = "card_framework.benchmark.run:main"
+card-framework-qa = "card_framework.benchmark.qa:main"
+card-framework-diarization = "card_framework.benchmark.diarization:main"
+card-framework-summary-matrix = "card_framework.cli.run_summary_matrix:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.9.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+card_framework = [
+    "config/*.yaml",
+    "prompts/templates/*.jinja2",
+    "benchmark/*.yaml",
+    "benchmark/*.md",
+    "benchmark/manifests/*.json",
+    "benchmark/rubrics/*.json",
+    "audio_pipeline/gateways/*.yaml",
+    "_vendor/index_tts/pyproject.toml",
+    "_vendor/index_tts/uv.lock",
+    "_vendor/index_tts/**/*.py",
+    "_vendor/index_tts/**/*.json",
+    "_vendor/index_tts/**/*.jsonl",
+    "_vendor/index_tts/**/*.md",
+    "_vendor/index_tts/**/*.model",
+    "_vendor/index_tts/**/*.txt",
+    "_vendor/index_tts/**/*.yaml",
+    "_vendor/index_tts/**/*.yml",
 ]
 
 [[tool.uv.index]]

@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
-from benchmark.metrics import parse_junit_totals
+from card_framework.benchmark.metrics import parse_junit_totals
 
 
 def test_parse_junit_totals_returns_zeros_for_missing_file(tmp_path: Path) -> None:
@@ -47,3 +47,4 @@ def test_parse_junit_totals_returns_zeros_for_invalid_xml(tmp_path: Path) -> Non
     totals = parse_junit_totals(junit_path)
 
     assert totals == {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+

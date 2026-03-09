@@ -1,4 +1,4 @@
-"""Tests for Windows dedicated-GPU heartbeat telemetry and lifecycle."""
+﻿"""Tests for Windows dedicated-GPU heartbeat telemetry and lifecycle."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from audio_pipeline.gpu_heartbeat import (
+from card_framework.audio_pipeline.gpu_heartbeat import (
     GpuDeviceSnapshot,
     GpuPressureAlert,
     VoiceCloneGpuHeartbeatService,
@@ -241,4 +241,5 @@ def test_gpu_heartbeat_service_warns_once_when_probe_fails() -> None:
     assert len(system_messages) == 1
     assert "GPU heartbeat probe unavailable" in system_messages[0]
     assert probe.calls >= 2
+
 

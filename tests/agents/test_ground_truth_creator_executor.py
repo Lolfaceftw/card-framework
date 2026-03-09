@@ -1,4 +1,4 @@
-"""Unit tests for GroundTruthCreatorExecutor."""
+﻿"""Unit tests for GroundTruthCreatorExecutor."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import types
 from typing import Any
 
 import pytest
+from tests.support.a2a import extract_agent_text_message
 
 # Provide minimal `numpy` module stub for llm_provider typing imports.
 if "numpy" not in sys.modules:
@@ -88,13 +89,13 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.server.events"] = events_module
     sys.modules["a2a.utils"] = utils_module
 
-from agents.ground_truth_creator import GroundTruthCreatorExecutor
-from agents.dtos import (
+from card_framework.agents.ground_truth_creator import GroundTruthCreatorExecutor
+from card_framework.agents.dtos import (
     CorrectorFewShotExample,
     CorrectorTaskRequest,
     CorrectorTaskResponse,
 )
-from prompt_manager import PromptManager
+from card_framework.shared.prompt_manager import PromptManager
 
 
 class _FakeLLM:
@@ -228,7 +229,7 @@ def test_ground_truth_creator_retries_until_valid_payload() -> None:
 
     assert len(fake_llm.calls) == 5
     assert len(queue.events) == 1
-    payload = json.loads(str(queue.events[0]))
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
     assert len(payload["questions"]) == 100
 
 
@@ -379,8 +380,8 @@ def test_generate_batch_raises_when_all_attempts_overlap_global_intents() -> Non
 
 
 def test_intent_key_supports_non_latin_text() -> None:
-    key_a = GroundTruthCreatorExecutor._intent_key("这是一个测试问题？")
-    key_b = GroundTruthCreatorExecutor._intent_key("这是另一个测试问题？")
+    key_a = GroundTruthCreatorExecutor._intent_key("è¿™æ˜¯ä¸€ä¸ªæµ‹è¯•é—®é¢˜ï¼Ÿ")
+    key_b = GroundTruthCreatorExecutor._intent_key("è¿™æ˜¯å¦ä¸€ä¸ªæµ‹è¯•é—®é¢˜ï¼Ÿ")
     assert key_a
     assert key_b
     assert key_a != key_b
@@ -420,5 +421,6 @@ def test_handle_task_retries_cross_batch_global_intent_overlap() -> None:
     )
 
     assert len(fake_llm.calls) == 5
-    payload = json.loads(str(queue.events[0]))
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
     assert len(payload["questions"]) == 100
+

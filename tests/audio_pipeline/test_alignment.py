@@ -1,5 +1,5 @@
-from audio_pipeline.alignment import align_segments_with_speakers
-from audio_pipeline.contracts import DiarizationTurn, TimedTextSegment
+﻿from card_framework.audio_pipeline.alignment import align_segments_with_speakers
+from card_framework.audio_pipeline.contracts import DiarizationTurn, TimedTextSegment
 
 
 def test_align_segments_assigns_overlap_and_merges_adjacent() -> None:
@@ -40,3 +40,4 @@ def test_align_segments_uses_default_when_no_diarization() -> None:
     assert len(aligned) == 1
     assert aligned[0].speaker == "SPEAKER_00"
     assert aligned[0].text == "test one test two"
+

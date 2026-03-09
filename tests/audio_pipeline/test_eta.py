@@ -1,9 +1,9 @@
-from pathlib import Path
+﻿from pathlib import Path
 import json
 
 import pytest
 
-from audio_pipeline.eta import (
+from card_framework.audio_pipeline.eta import (
     DynamicEtaTracker,
     LinearStageEtaStrategy,
     StageSpeedProfile,
@@ -215,3 +215,4 @@ def test_dynamic_eta_tracker_inflates_after_overrun() -> None:
     remaining = tracker.estimate_signed_remaining_seconds(elapsed_seconds=10.0)
     assert remaining < 0
     assert tracker.estimate_total_seconds(elapsed_seconds=10.0) == 12.0
+

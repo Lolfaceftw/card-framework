@@ -1,8 +1,8 @@
-"""Unit tests for QA input compatibility guard."""
+﻿"""Unit tests for QA input compatibility guard."""
 
 from __future__ import annotations
 
-from benchmark.qa_input_guard import evaluate_input_compatibility
+from card_framework.benchmark.qa_input_guard import evaluate_input_compatibility
 
 
 def test_input_guard_marks_compatible_inputs() -> None:
@@ -59,3 +59,4 @@ def test_input_guard_adapts_name_phrase_threshold_to_available_mentions() -> Non
     )
     assert result.is_compatible is True
     assert result.shared_name_phrase_count >= 1
+

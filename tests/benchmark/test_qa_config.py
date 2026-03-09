@@ -1,11 +1,11 @@
-"""Unit tests for QA benchmark timeout config parsing."""
+﻿"""Unit tests for QA benchmark timeout config parsing."""
 
 from __future__ import annotations
 
 from omegaconf import OmegaConf
 import pytest
 
-from benchmark.qa_settings import (
+from card_framework.benchmark.qa_settings import (
     CorrectorRuntimeConfig,
     EvaluatorRuntimeConfig,
     QAConfigError,
@@ -202,3 +202,4 @@ def test_resolve_corrector_runtime_config_reads_values() -> None:
     assert resolved.enabled is False
     assert resolved.max_tokens == 1200
     assert resolved.max_examples == 4
+
