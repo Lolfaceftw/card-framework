@@ -9,9 +9,9 @@ This document is intentionally about linting, not formatting. If the project lat
 - Ruff is installed as a dev dependency through `[dependency-groups].dev` in `pyproject.toml`.
 - Current checked version in this repo is `ruff 0.15.5`.
 - Current baseline status is clean: `uv run ruff check .` passes.
-- There is currently no explicit `[tool.ruff]` configuration block in `pyproject.toml`.
+- `pyproject.toml` now defines `[tool.ruff] extend-exclude = ["src/card_framework/_vendor"]` so the repo-level lint gate applies to maintained project code and does not treat the vendored third-party IndexTTS tree as first-party Ruff debt.
 
-Because there is no local Ruff config yet, the working baseline is the default Ruff behavior plus project conventions from `AGENTS.md` and `coder_docs/`.
+The working baseline is the default Ruff behavior plus the repo-local vendor exclusion and project conventions from `AGENTS.md` and `coder_docs/`.
 
 ## Canonical Commands
 
@@ -51,5 +51,6 @@ If this project adds Ruff configuration later:
 ## Agent Expectations
 
 - Treat `uv run ruff check .` as the repo-level lint gate.
+- Keep vendored third-party trees excluded from the repo-level Ruff gate unless the repository intentionally decides to adopt and maintain their lint debt.
 - Do not introduce a second linter unless the repository intentionally adopts one.
 - If Ruff starts failing because of new code or new configuration, fix the code or update the documented policy in the same change.
