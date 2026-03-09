@@ -26,6 +26,53 @@ DEFAULT_JUDGE_RUBRIC_PATH = (
 )
 
 
+def discover_reusable_transcript_path(repo_root: Path = REPO_ROOT) -> Path | None:
+    """Return the preferred reusable transcript JSON path when one exists.
+
+    Search order is:
+    1. ``transcript.json`` at the repository root.
+    2. The most recently modified ``*.transcript.json`` at the repository root.
+    3. The most recently modified ``artifacts/transcripts/*.transcript.json``.
+
+    Args:
+        repo_root: Repository root to inspect.
+
+    Returns:
+        Resolved transcript path when one exists, otherwise ``None``.
+    """
+    root_transcript = (repo_root / "transcript.json").resolve()
+    if root_transcript.is_file():
+        return root_transcript
+
+    root_candidates = sorted(
+        (
+            path.resolve()
+            for path in repo_root.glob("*.transcript.json")
+            if path.is_file()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if root_candidates:
+        return root_candidates[0]
+
+    artifact_candidates = sorted(
+        (
+            path.resolve()
+            for path in (repo_root / "artifacts" / "transcripts").glob(
+                "*.transcript.json"
+            )
+            if path.is_file()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if artifact_candidates:
+        return artifact_candidates[0]
+
+    return None
+
+
 def resolve_repo_relative(path: str | Path) -> Path:
     """Resolve a repository-relative path into an absolute path."""
     candidate = Path(path).expanduser()
@@ -40,4 +87,3 @@ def resolve_benchmark_relative(path: str | Path) -> Path:
     if candidate.is_absolute():
         return candidate.resolve()
     return (BENCHMARK_DIR / candidate).resolve()
-
