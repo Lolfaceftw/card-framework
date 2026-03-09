@@ -36,9 +36,11 @@
     <directory path="src/card_framework/config">Hydra application configuration, including provider selection, stage controls, audio settings, ports, orchestrator limits, and logging.</directory>
     <directory path="src/card_framework/_vendor/index_tts">Vendored third-party IndexTTS runtime source required by the voice-clone pipeline.</directory>
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
+    <directory path=".github/workflows">Repository automation. `publish-pypi.yml` builds tagged release distributions, smoke-checks the built wheel and source distribution, and publishes them to PyPI through GitHub OIDC trusted publishing.</directory>
     <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
     <file path="AGENTS.md">Repo-local coding-agent instructions, including the required Scrapling web-research policy and the rule to keep coder_docs aligned with prompt changes.</file>
     <entrypoints>
+      <entrypoint path="src/card_framework/api.py">Public installed-package entrypoint exposing `card_framework.infer(audio_wav, output_dir, target_duration_seconds, *, device, vllm_url=None, vllm_api_key=None)` and the typed `InferenceResult` artifact bundle.</entrypoint>
       <entrypoint path="src/card_framework/cli/main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
       <entrypoint path="src/card_framework/cli/calibrate.py">One-time voice-clone calibration helper that discovers or bootstraps speaker samples, renders punctuation-rich calibration phrases, and prints the persisted preset/WPM mapping.</entrypoint>
       <entrypoint path="src/card_framework/cli/setup_and_run.py">Bootstrap and convenience runner for dependency checks, stage-aware vendored-runtime sync/model provisioning, and full pipeline execution.</entrypoint>
@@ -52,6 +54,8 @@
 
   <section id="runtime-pipeline" title="Runtime Pipeline">
     <compositionRoot>The runtime composes from card_framework.cli.main using Hydra config from src/card_framework/config/config.yaml and resolves paths relative to the original working directory.</compositionRoot>
+    <compositionRoot>The installed-package `card_framework.infer(...)` API now wraps that same Hydra runtime through a subprocess boundary, requires an explicit `target_duration_seconds` argument, forces `pipeline.start_stage=stage-1`, writes run artifacts under the caller-supplied output directory, and returns a typed artifact-path bundle instead of exposing Hydra details directly.</compositionRoot>
+    <compositionRoot>The public packaged-runtime contract is Windows-only as of March 9, 2026. `infer(...)` rejects macOS and Linux up front, requires an explicit packaged device choice (`cpu` or `cuda`), treats `vllm_url` as the first-class packaged LLM override, and resolves missing API keys or access tokens before the subprocess launch so secrets do not need to travel on the CLI argv.</compositionRoot>
     <stagePlanning>
       <rule>pipeline.start_stage controls execution mode and is validated by pipeline_plan.build_pipeline_stage_plan.</rule>
       <mode id="stage-1">Run audio stage, then summarizer/critic loop, then optional voice clone and optional stage-4 interjector.</mode>
@@ -183,10 +187,12 @@
       <artifact>Default transcript output path: artifacts/transcripts/latest.transcript.json</artifact>
       <artifact>Default audio working directory: artifacts/audio_stage</artifact>
       <artifact>Default calibration artifact path: artifacts/calibration/voice_clone_calibration.json</artifact>
+      <artifact>The installed-package `infer(audio_wav, output_dir, target_duration_seconds, *, device, ...)` path overrides those repo defaults to write `transcript.json`, `summary.xml`, and `agent_interactions.log` at the output root plus `audio_stage/*` beneath that root.</artifact>
       <artifact>Speaker sample artifacts live under the configured speaker sample output directory inside the audio work directory.</artifact>
       <artifact>Voice clone artifacts live under the configured voice clone output directory inside the audio work directory.</artifact>
       <artifact>Live-draft turn audio is cached under `voice_clone/live_draft_turns`, and the corresponding sidecar state file is written alongside other voice-clone artifacts inside the voice clone output directory.</artifact>
       <artifact>Interjector artifacts live under the configured interjector output directory inside the audio work directory and include an `interjector_manifest.json` plus a merged overlap WAV.</artifact>
+      <artifact>Installed-package mutable runtime assets no longer assume a repo checkout. `card_framework.shared.runtime_layout` resolves a writable runtime home, defaulting to the platform user-data directory or `CARD_FRAMEWORK_HOME`, and the library bootstrap extracts the vendored IndexTTS project plus checkpoints there.</artifact>
     </artifacts>
   </section>
 
@@ -219,7 +225,7 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="src/card_framework/config/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, live draft voice-clone toggles, voice-clone emotion presets, calibration artifact path, duration targets, loop-memory artifact path, loop guardrails, and logging.</file>
+      <file path="src/card_framework/config/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, live draft voice-clone toggles, voice-clone emotion presets, calibration artifact path, duration targets (`orchestrator.target_minutes` plus optional exact `orchestrator.target_seconds`), loop-memory artifact path, loop guardrails, and logging.</file>
       <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa.</file>
       <file path="src/card_framework/benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts.</file>
       <file path="pyproject.toml">Python version floor, dependencies, uv source/index policy, and pytest configuration.</file>
@@ -244,10 +250,20 @@
       <command>uv run python -m card_framework.benchmark.qa --summary-xml &lt;path-to-summary.xml&gt; --source-transcript &lt;path-to-transcript&gt;</command>
       <command>uv run ruff check .</command>
       <command>uv run pytest</command>
+      <command>uv build --wheel</command>
+      <command>uv publish --dry-run</command>
+      <command>git tag -a vX.Y.Z -m vX.Y.Z</command>
+      <command>git push origin vX.Y.Z</command>
     </canonicalCommands>
     <commandNotes>
       <note>Use uv run for repo commands so execution stays inside the locked environment.</note>
       <note>Benchmark, diarization benchmark, QA, runtime, calibration, and setup helpers are all package module entrypoints under `card_framework.*`.</note>
+      <note>The installed-package library entrypoint is `from card_framework import infer`. It accepts `(audio_wav, output_dir, target_duration_seconds, *, device, vllm_url=None, vllm_api_key=None)`, treats the duration target and the packaged device choice as required per call, reads an optional full-config override from `CARD_FRAMEWORK_CONFIG`, and uses `CARD_FRAMEWORK_HOME` for writable runtime assets when set.</note>
+      <note>The packaged path is intentionally vLLM-first. `vllm_url` or `CARD_FRAMEWORK_VLLM_URL` forces the shared summarizer, critic, and interjector LLM selection onto one OpenAI-compatible endpoint, while `CARD_FRAMEWORK_VLLM_API_KEY` can supply optional endpoint auth.</note>
+      <note>If a packaged caller selects `device=\"cuda\"`, the runtime now validates that the installed PyTorch build reports CUDA 12.6 and rejects other CUDA builds or CPU-only installs up front.</note>
+      <note>When the effective packaged config selects DeepSeek, Gemini, ZAI/GLM, Hugging Face, Nanbeige, or pyannote gated diarization, `infer(...)` resolves the required key or access token from config first, then from supported environment variables, then from a secure interactive prompt. Non-interactive callers get a fail-fast error naming the missing field and supported env var instead of a late provider crash.</note>
+      <note>Public PyPI publishing is now driven by `.github/workflows/publish-pypi.yml`. The workflow triggers on tags matching `v*`, builds with `uv build --no-sources`, smoke-checks both the wheel and sdist for the public `infer` export, and publishes with `uv publish` using GitHub OIDC trusted publishing in the `pypi` environment.</note>
+      <note>Because `card-framework` is not yet registered on PyPI, the first public release must use PyPI's pending-publisher flow with owner `Lolfaceftw`, repository `card-framework`, workflow filename `publish-pypi.yml`, environment `pypi`, and project name `card-framework`.</note>
       <note>The diarization benchmark uses the same `audio_pipeline.factory.build_speaker_diarizer(...)` path as the runtime so provider benchmark results stay aligned with stage-1 behavior.</note>
       <note>The default AMI prep path currently targets the public `Mix-Headset` stream and the `only_words` RTTM/UEM setup from `BUTSpeechFIT/AMI-diarization-setup`.</note>
       <note>`audio.diarization.provider` now supports the default NeMo MSDD path, `pyannote_community1`, `nemo_sortformer_offline`, `nemo_sortformer_streaming`, and the existing `single_speaker` fallback backend.</note>

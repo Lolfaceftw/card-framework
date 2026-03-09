@@ -1051,9 +1051,16 @@ def _resolve_duration_targets(
     orchestrator_cfg: dict[str, Any],
 ) -> tuple[int, float]:
     """Resolve target duration and tolerance from config."""
-    target_minutes = float(orchestrator_cfg.get("target_minutes", 5.0))
-    if target_minutes <= 0:
-        raise ValueError("orchestrator.target_minutes must be greater than zero.")
+    raw_target_seconds = orchestrator_cfg.get("target_seconds")
+    if raw_target_seconds in (None, ""):
+        target_minutes = float(orchestrator_cfg.get("target_minutes", 5.0))
+        if target_minutes <= 0:
+            raise ValueError("orchestrator.target_minutes must be greater than zero.")
+        target_seconds = max(1, int(round(target_minutes * 60.0)))
+    else:
+        target_seconds = int(round(float(raw_target_seconds)))
+        if target_seconds <= 0:
+            raise ValueError("orchestrator.target_seconds must be greater than zero.")
     duration_tolerance_ratio = float(
         orchestrator_cfg.get(
             "duration_tolerance_ratio",
@@ -1064,7 +1071,7 @@ def _resolve_duration_targets(
         raise ValueError(
             "orchestrator.duration_tolerance_ratio must be within (0.0, 1.0)."
         )
-    return max(1, int(round(target_minutes * 60.0))), duration_tolerance_ratio
+    return target_seconds, duration_tolerance_ratio
 
 
 @hydra.main(

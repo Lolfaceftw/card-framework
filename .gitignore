@@ -32,6 +32,7 @@ summary.xml.old.*
 .mypy_cache/
 .ruff_cache/
 checkpoints/hf_cache/
+checkpoints/index_tts/
 
 audio.wav
 third_party/index_tts/

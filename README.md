@@ -161,6 +161,118 @@ uv run python -m card_framework.cli.main
 uv run python -m card_framework.cli.calibrate
 ```
 
+## Package Usage
+
+The repository now exposes a library entrypoint for installed-package use:
+
+```bash
+pip install card-framework
+```
+
+```python
+from card_framework import infer
+
+result = infer(
+    "audio.wav",
+    "outputs/run_001",
+    300,
+    device="cpu",
+    vllm_url="http://localhost:8000/v1",
+)
+print(result.summary_xml_path)
+print(result.final_audio_path)
+```
+
+`infer(audio_wav, output_dir, target_duration_seconds, *, device, ...)` runs
+the full stage-1 to stage-4 pipeline and returns an `InferenceResult` with the
+main emitted artifact paths. `target_duration_seconds` is required for every
+call and overrides any duration target declared in the loaded config file.
+`device` is also required and must be either `cpu` or `cuda`. `vllm_url` is the
+first-class packaged-runtime override for OpenAI-compatible endpoints, and it
+forces the shared summarizer, critic, and interjector LLM path onto the
+provided vLLM-compatible server for that call. The call writes into `output_dir`
+using this high-level layout:
+
+```text
+outputs/run_001/
+  transcript.json
+  summary.xml
+  agent_interactions.log
+  audio_stage/
+    voice_clone/
+    interjector/
+```
+
+Installed-package runtime notes:
+
+- Supported public packaged-runtime platform as of March 9, 2026: Windows only.
+  macOS and Linux are not yet validated for the public `pip install
+  card-framework` whole-pipeline path, and `infer(...)` now fails fast on those
+  platforms instead of attempting a partial run.
+- `CARD_FRAMEWORK_CONFIG`: optional path to a full YAML config file when you
+  need to override the default packaged provider/runtime config for `infer(...)`.
+- `CARD_FRAMEWORK_HOME`: optional writable runtime home used for extracted
+  IndexTTS assets, checkpoints, and bootstrap state. If unset, the package uses
+  the platform-appropriate user data directory.
+- `CARD_FRAMEWORK_VLLM_URL`: optional environment-variable equivalent of the
+  `vllm_url=` argument.
+- `CARD_FRAMEWORK_VLLM_API_KEY`: optional environment-variable equivalent of
+  the `vllm_api_key=` argument. If omitted for vLLM, the packaged runtime uses
+  `EMPTY`, which matches the common local keyless vLLM setup.
+- If you choose `device="cuda"`, the packaged runtime currently supports only
+  CUDA 12.6. `infer(...)` now validates that the installed PyTorch build reports
+  CUDA 12.6 before it proceeds.
+- The packaged default is now vLLM-first. If the effective config selects
+  another provider, `infer(...)` resolves required credentials before it starts
+  the subprocess runtime:
+  - interactive terminals: `infer(...)` securely prompts for missing API keys
+    or access tokens without echoing them and without placing them on the
+    subprocess command line
+  - non-interactive runs: `infer(...)` fails fast with an actionable error that
+    names the missing config field and the supported environment variable
+- Supported credential environment variables for the packaged path include
+  `DEEPSEEK_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `ZAI_API_KEY`,
+  `HUGGINGFACE_TOKEN` or `HF_TOKEN`, and the configured
+  `audio.diarization.pyannote.auth_token_env` value.
+- Whole-pipeline inference still requires external tools such as `ffmpeg`.
+  When voice cloning or calibration paths are active, the package also expects
+  `uv` so it can bootstrap the vendored IndexTTS runtime in the writable
+  runtime home on first use.
+
+## Public PyPI Release
+
+This repository now includes a GitHub Actions trusted-publishing workflow at
+`.github/workflows/publish-pypi.yml` that publishes tags matching `v*` to PyPI.
+
+For the first public release of `card-framework`, use PyPI's **pending
+publisher** flow because the project does not exist on PyPI yet. Configure:
+
+- PyPI project name: `card-framework`
+- GitHub owner: `Lolfaceftw`
+- GitHub repository: `card-framework`
+- Workflow filename: `publish-pypi.yml`
+- Environment name: `pypi`
+
+Repository-side release steps:
+
+1. Merge the publishing workflow to `main`.
+2. In GitHub repository settings, create the `pypi` environment.
+3. In PyPI account settings, add the pending trusted publisher with the fields
+   above.
+4. Tag the release from `main` and push it, for example:
+
+   ```bash
+   git tag -a v0.1.0 -m v0.1.0
+   git push origin v0.1.0
+   ```
+
+5. After the workflow succeeds, verify the public release:
+
+   ```bash
+   python -m pip install --no-cache-dir card-framework
+   python -c "from card_framework import infer; print(infer)"
+   ```
+
 ## Documentation
 
 - [`EEE_196_CARD_UCL.md`](./EEE_196_CARD_UCL.md): the CARD paper and project
