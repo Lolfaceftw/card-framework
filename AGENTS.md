@@ -86,6 +86,8 @@
     <rule>Protect integration branches with rulesets or branch protection, required reviews, and required status checks.</rule>
     <rule>Require CODEOWNERS review on sensitive paths such as workflows, deployment code, security-critical modules, and the CODEOWNERS file itself when present.</rule>
     <rule>Treat CI checks as merge gates, not advisory signals.</rule>
+    <rule>Create a dedicated semver-named release-preparation branch such as `release/vX.Y.Z` before attempting any PyPI publish, and push the release tag only after that branch has been reviewed and merged.</rule>
+    <rule>After pushing a release tag or other workflow-sensitive change, verify the resulting GitHub Actions run to completion instead of assuming the push succeeded end to end.</rule>
     <rule>Enable secret scanning and push protection, and rotate exposed credentials immediately if a secret is detected.</rule>
     <rule>Never stage, commit, or open a pull request with files that contain API keys, access tokens, secrets, private service URLs such as vLLM endpoints, or other private information.</rule>
     <rule>Sign commits and release tags where repository policy supports it.</rule>
@@ -93,6 +95,7 @@
     <rule>Review dependency and workflow changes with extra scrutiny before merging.</rule>
     <rule>Prefer git revert on shared branches rather than rewriting published history.</rule>
     <rule>Preserve traceability from commit to release artifact wherever possible.</rule>
+    <rule>If a tagged release workflow fails, fix forward with a new version and tag instead of reusing the failed release version ambiguously.</rule>
   </section>
 
   <section id="logging-industry-standard-practices" title="Logging Industry Standard Practices">
@@ -134,12 +137,14 @@
     <rule>Use coder_docs/academic_standards.md as the source of truth for formulas, algorithms, heuristics, scoring rules, or other robustness-sensitive implementations that require academic backing.</rule>
     <rule>For methodology-sensitive implementations, search academic journals first, avoid unsupported magic formulas, and add inline IEEE-style citation comments at the implementation site with a fuller same-file reference whenever practical.</rule>
     <rule>Use coder_docs/git_github_workflow.md as the source of truth for local Git staging, commit construction, push safety, and GitHub pull request workflow in this repository.</rule>
+    <rule>Use coder_docs/github_actions_release_spec.md as the source of truth for GitHub Actions release workflow behavior, build standards, and post-tag verification in this repository.</rule>
     <rule>Use coder_docs/ruff.md as the source of truth for linting workflow and coder_docs/uv_package_manager.md as the source of truth for dependency and environment management.</rule>
     <rule>Use uv as the package manager for this repository and use ruff as the linter for this repository.</rule>
     <rule>When implementation changes affect tested behavior, contracts, or outputs, update the relevant tests in the same change before considering the work complete.</rule>
     <rule>When code changes affect behavior, interfaces, setup, outputs, workflows, or operator expectations, update the relevant Markdown documentation in the same change, including files such as README.md, docs/*.md, and applicable coder_docs/*.md.</rule>
     <rule>Treat Markdown documentation review as part of every implementation, review, and verification pass so documentation updates are considered before concluding the task.</rule>
     <rule>When code, configuration, prompts, runtime flow, tooling, or developer workflow changes materially, update coder_docs/codebase_guide.md in the same change so it stays current.</rule>
+    <rule>When GitHub Actions release behavior, release verification, or build standards change materially, update coder_docs/github_actions_release_spec.md, coder_docs/git_github_workflow.md, and coder_docs/codebase_guide.md in the same change.</rule>
     <rule>When linting, dependency-management, Git and GitHub workflow, or academic-methodology policy changes materially, update the corresponding file in coder_docs in the same change.</rule>
     <rule>Keep coder_docs content specific to this repository's actual behavior, current commands, and constraints. Do not let it drift into generic Python advice.</rule>
     <rule>If AGENTS.md conflicts with a repo-specific operational detail documented in coder_docs, reconcile the documents immediately rather than ignoring the mismatch.</rule>

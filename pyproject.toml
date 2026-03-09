@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "card-framework"
-version = "1.0.4"
+version = "1.0.5"
 description = "Constraint-aware audio resynthesis and distillation pipeline."
 readme = "README.md"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"

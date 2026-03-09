@@ -7,9 +7,12 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 import getpass
+import importlib
+import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -33,7 +36,10 @@ _VLLM_API_KEY_ENV_VAR = "CARD_FRAMEWORK_VLLM_API_KEY"
 _SUPPORTED_PLATFORM = "Windows"
 _SUPPORTED_CUDA_VERSION = "12.6"
 _DEFAULT_VLLM_API_KEY = "EMPTY"
+_PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu126"
+_PYTORCH_FALLBACK_INDEX_URL = "https://pypi.org/simple"
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
+_CUDA_VERSION_PATTERN = re.compile(r"(\d+\.\d+)")
 _PROVIDER_API_KEY_REQUIREMENTS: dict[str, dict[str, object]] = {
     "card_framework.providers.deepseek_provider.DeepSeekProvider": {
         "credential_id": "deepseek_api_key",
@@ -95,6 +101,46 @@ class _CredentialRequirement:
     prompt_label: str
     env_var_names: tuple[str, ...]
     secret: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class _TorchCudaRuntimeState:
+    """Capture one installed PyTorch CUDA runtime inspection."""
+
+    cuda_version: str | None
+    cuda_available: bool
+    import_error: str | None = None
+
+    @property
+    def is_supported(self) -> bool:
+        """Return whether the inspected runtime satisfies packaged CUDA needs."""
+        return bool(
+            self.cuda_version
+            and self.cuda_version.startswith(_SUPPORTED_CUDA_VERSION)
+            and self.cuda_available
+        )
+
+    @property
+    def display_label(self) -> str:
+        """Return the user-facing runtime label for errors and warnings."""
+        return self.cuda_version or "cpu-only or unknown build"
+
+
+@dataclass(slots=True, frozen=True)
+class _HostCudaDetection:
+    """Describe one host-level CUDA detection result."""
+
+    version: str | None
+    source: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class _TorchRuntimeInstaller:
+    """Describe the package manager command used for PyTorch self-repair."""
+
+    tool: Literal["pip", "uv"]
+    executable: str
+    working_directory: Path | None = None
 
 
 def infer(
@@ -525,31 +571,351 @@ def _resolve_requested_device(device: str) -> Literal["cpu", "cuda"]:
 
 def _ensure_supported_cuda_runtime() -> None:
     """Validate the packaged CUDA runtime contract for public infer calls."""
-    try:
-        import torch
-    except ImportError as exc:
-        raise RuntimeError(
-            "infer(device='cuda') requires a PyTorch CUDA build. "
-            f"Only CUDA {_SUPPORTED_CUDA_VERSION} is supported for the packaged runtime."
-        ) from exc
+    runtime_state = _inspect_torch_cuda_runtime()
+    if runtime_state.is_supported:
+        return
 
-    detected_cuda_version = _resolve_optional_text(
-        str(getattr(getattr(torch, "version", None), "cuda", "") or "")
-    )
-    if not detected_cuda_version.startswith(_SUPPORTED_CUDA_VERSION):
-        detected_label = detected_cuda_version or "cpu-only or unknown build"
+    host_cuda = _detect_host_cuda_runtime()
+    auto_repair_attempted = False
+    if host_cuda.version and host_cuda.version.startswith(_SUPPORTED_CUDA_VERSION):
+        auto_repair_attempted = True
+        _install_supported_torch_cuda_runtime()
+        runtime_state = _inspect_torch_cuda_runtime()
+        if runtime_state.is_supported:
+            warnings.warn(
+                "infer(device='cuda') detected host CUDA 12.6 and automatically "
+                "replaced the installed PyTorch build with the CUDA 12.6 wheels.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return
+
+    if auto_repair_attempted:
         raise RuntimeError(
-            "infer(device='cuda') currently supports only CUDA "
-            f"{_SUPPORTED_CUDA_VERSION}. Detected PyTorch CUDA runtime: {detected_label}."
+            "infer(device='cuda') detected host CUDA "
+            f"{_SUPPORTED_CUDA_VERSION} via {host_cuda.source or 'an automatic probe'} "
+            "and reinstalled the PyTorch CUDA 12.6 wheels, but the runtime is still "
+            f"unsupported. Detected PyTorch CUDA runtime: {runtime_state.display_label}."
         )
 
+    message = (
+        "infer(device='cuda') currently supports only CUDA "
+        f"{_SUPPORTED_CUDA_VERSION}. Detected PyTorch CUDA runtime: "
+        f"{runtime_state.display_label}."
+    )
+    if runtime_state.import_error:
+        message += f" Torch import detail: {runtime_state.import_error}."
+    if host_cuda.version:
+        message += (
+            f" Automatic repair did not run because the host reported CUDA "
+            f"{host_cuda.version} via {host_cuda.source or 'an automatic probe'}, "
+            f"not CUDA {_SUPPORTED_CUDA_VERSION}."
+        )
+    else:
+        message += (
+            f" Automatic repair did not run because the host CUDA "
+            f"{_SUPPORTED_CUDA_VERSION} runtime could not be confirmed."
+        )
+    raise RuntimeError(message)
+
+
+def _inspect_torch_cuda_runtime() -> _TorchCudaRuntimeState:
+    """Inspect the installed PyTorch CUDA runtime without importing it in-process."""
+    inspection_script = """
+import json
+
+payload = {
+    "cuda_version": None,
+    "cuda_available": False,
+    "import_error": None,
+}
+
+try:
+    import torch
+except Exception as exc:  # pragma: no cover - executed in the child process
+    payload["import_error"] = f"{type(exc).__name__}: {exc}"
+else:
+    cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
+    payload["cuda_version"] = str(cuda_version).strip() if cuda_version else None
     cuda_module = getattr(torch, "cuda", None)
     is_available = getattr(cuda_module, "is_available", None)
-    if not callable(is_available) or not bool(is_available()):
-        raise RuntimeError(
-            "infer(device='cuda') requires a working CUDA "
-            f"{_SUPPORTED_CUDA_VERSION} runtime on this machine."
+    if callable(is_available):
+        try:
+            payload["cuda_available"] = bool(is_available())
+        except Exception as exc:  # pragma: no cover - executed in the child process
+            payload["import_error"] = f"{type(exc).__name__}: {exc}"
+
+print(json.dumps(payload))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", inspection_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        error_message = detail[-500:] if detail else "inspection subprocess failed"
+        return _TorchCudaRuntimeState(
+            cuda_version=None,
+            cuda_available=False,
+            import_error=error_message,
         )
+
+    try:
+        payload = json.loads(completed.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return _TorchCudaRuntimeState(
+            cuda_version=None,
+            cuda_available=False,
+            import_error="torch inspection returned invalid JSON",
+        )
+    if not isinstance(payload, dict):
+        return _TorchCudaRuntimeState(
+            cuda_version=None,
+            cuda_available=False,
+            import_error="torch inspection returned an invalid payload",
+        )
+    return _TorchCudaRuntimeState(
+        cuda_version=_resolve_optional_text(str(payload.get("cuda_version", "") or "")),
+        cuda_available=bool(payload.get("cuda_available", False)),
+        import_error=_resolve_optional_text(str(payload.get("import_error", "") or "")),
+    )
+
+
+def _detect_host_cuda_runtime() -> _HostCudaDetection:
+    """Detect the host CUDA version that packaged infer can safely auto-repair to."""
+    cuda_path_126 = _resolve_optional_text(os.environ.get("CUDA_PATH_V12_6", ""))
+    if cuda_path_126:
+        cuda_dir = Path(cuda_path_126).expanduser()
+        if cuda_dir.exists():
+            return _HostCudaDetection(
+                version=_SUPPORTED_CUDA_VERSION,
+                source="CUDA_PATH_V12_6",
+            )
+
+    cuda_path = _resolve_optional_text(os.environ.get("CUDA_PATH", ""))
+    if cuda_path:
+        cuda_dir = Path(cuda_path).expanduser()
+        detected_version = _detect_cuda_version_from_directory(cuda_dir)
+        if detected_version:
+            return _HostCudaDetection(version=detected_version, source="CUDA_PATH")
+
+    for command, source in ((["nvidia-smi"], "nvidia-smi"), (["nvcc", "--version"], "nvcc")):
+        detected_version = _detect_cuda_version_from_command(command)
+        if detected_version:
+            return _HostCudaDetection(version=detected_version, source=source)
+
+    return _HostCudaDetection(version=None, source=None)
+
+
+def _detect_cuda_version_from_directory(cuda_dir: Path) -> str | None:
+    """Read a CUDA version from one candidate toolkit directory."""
+    if not cuda_dir.exists():
+        return None
+
+    version_json_path = cuda_dir / "version.json"
+    if version_json_path.exists():
+        try:
+            payload = json.loads(version_json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        version_text = _extract_cuda_version_text(payload)
+        if version_text:
+            return version_text
+
+    candidate_names = [cuda_dir.name, str(cuda_dir)]
+    for candidate in candidate_names:
+        version_text = _extract_cuda_version_text(candidate)
+        if version_text:
+            return version_text
+    return None
+
+
+def _extract_cuda_version_text(value: object) -> str | None:
+    """Extract the first CUDA-like version string from one nested payload."""
+    if isinstance(value, str):
+        match = _CUDA_VERSION_PATTERN.search(value)
+        if match is None:
+            return None
+        return match.group(1)
+    if isinstance(value, Mapping):
+        for nested_value in value.values():
+            version_text = _extract_cuda_version_text(nested_value)
+            if version_text:
+                return version_text
+    if isinstance(value, list):
+        for nested_value in value:
+            version_text = _extract_cuda_version_text(nested_value)
+            if version_text:
+                return version_text
+    return None
+
+
+def _detect_cuda_version_from_command(command: list[str]) -> str | None:
+    """Run one host CUDA discovery command and parse its reported version."""
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    output = "\n".join(
+        part.strip() for part in (completed.stdout, completed.stderr) if part
+    )
+    if not output:
+        return None
+    for pattern in (r"CUDA Version:\s*(\d+\.\d+)", r"release\s+(\d+\.\d+)"):
+        match = re.search(pattern, output)
+        if match is not None:
+            return match.group(1)
+    return None
+
+
+def _install_supported_torch_cuda_runtime() -> None:
+    """Replace the installed PyTorch wheels with the supported CUDA 12.6 build."""
+    installer = _resolve_torch_runtime_installer()
+    _clear_loaded_torch_modules()
+    if installer.tool == "uv":
+        _run_package_manager_command(
+            step="pytorch_uninstall",
+            command=[
+                installer.executable,
+                "pip",
+                "uninstall",
+                "--python",
+                sys.executable,
+                "torch",
+                "torchaudio",
+            ],
+            cwd=installer.working_directory,
+        )
+        _run_package_manager_command(
+            step="pytorch_install",
+            command=[
+                installer.executable,
+                "pip",
+                "install",
+                "--python",
+                sys.executable,
+                "--reinstall",
+                "--torch-backend",
+                "cu126",
+                "torch",
+                "torchaudio",
+            ],
+            cwd=installer.working_directory,
+        )
+    else:
+        _run_package_manager_command(
+            step="pytorch_uninstall",
+            command=[
+                sys.executable,
+                "-m",
+                "pip",
+                "uninstall",
+                "--yes",
+                "torch",
+                "torchaudio",
+            ],
+        )
+        _run_package_manager_command(
+            step="pytorch_install",
+            command=[
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "--upgrade",
+                "--force-reinstall",
+                "--index-url",
+                _PYTORCH_CUDA_INDEX_URL,
+                "--extra-index-url",
+                _PYTORCH_FALLBACK_INDEX_URL,
+                "torch",
+                "torchaudio",
+            ],
+        )
+    _clear_loaded_torch_modules()
+    importlib.invalidate_caches()
+
+
+def _clear_loaded_torch_modules() -> None:
+    """Drop loaded torch modules so later imports see any repaired wheel set."""
+    for module_name in list(sys.modules):
+        if module_name == "torch" or module_name.startswith("torch."):
+            sys.modules.pop(module_name, None)
+
+
+def _resolve_torch_runtime_installer() -> _TorchRuntimeInstaller:
+    """Choose the package manager used for packaged PyTorch self-repair."""
+    uv_project_root = _detect_uv_project_root(Path.cwd())
+    if uv_project_root is not None:
+        raw_uv_executable = str(os.environ.get(_UV_ENV_VAR, "uv")).strip() or "uv"
+        try:
+            uv_executable = resolve_uv_executable(uv_executable=raw_uv_executable)
+        except RuntimeBootstrapError:
+            uv_executable = ""
+        if uv_executable:
+            return _TorchRuntimeInstaller(
+                tool="uv",
+                executable=uv_executable,
+                working_directory=uv_project_root,
+            )
+    return _TorchRuntimeInstaller(tool="pip", executable=sys.executable)
+
+
+def _detect_uv_project_root(start_dir: Path) -> Path | None:
+    """Return the nearest parent directory that looks like a uv-managed project."""
+    for candidate in (start_dir, *start_dir.parents):
+        if (candidate / "uv.lock").exists():
+            return candidate
+
+        pyproject_path = candidate / "pyproject.toml"
+        if not pyproject_path.exists():
+            continue
+        try:
+            pyproject_text = pyproject_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "[tool.uv" in pyproject_text or "[dependency-groups]" in pyproject_text:
+            return candidate
+    return None
+
+
+def _run_package_manager_command(
+    *,
+    step: str,
+    command: list[str],
+    cwd: Path | None = None,
+) -> None:
+    """Run one installer command for packaged runtime self-healing."""
+    completed = subprocess.run(
+        command,
+        cwd=str(cwd) if cwd is not None else None,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return
+
+    detail = (completed.stderr or completed.stdout or "").strip()
+    detail_tail = (
+        detail[-1200:] if detail else "No installer error output was captured."
+    )
+    raise RuntimeError(
+        "infer(device='cuda') could not automatically repair the PyTorch CUDA "
+        f"{_SUPPORTED_CUDA_VERSION} runtime during `{step}`. "
+        f"Command: {' '.join(command)}. Details: {detail_tail}"
+    )
 
 
 def _resolve_audio_input(audio_wav: str | Path) -> Path:

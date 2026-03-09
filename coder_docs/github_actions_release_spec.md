@@ -28,31 +28,36 @@ on them.
 
 ## Release Build Standards
 
-Before pushing a release tag, the release branch or topic branch must satisfy
-all of the following:
+Before pushing a release tag, create a dedicated semver-named release branch
+such as `release/vX.Y.Z` from the target integration branch. Run the version
+bump, release preflight, and review flow there, merge that branch, and only
+then push the matching `vX.Y.Z` tag from the merged integration-branch commit.
+That release-preparation branch must satisfy all of the following:
 
-1. `pyproject.toml` version matches the intended tag without the leading `v`.
+1. The branch name and intended tag agree on the same semantic version.
+   Example: branch `release/v1.0.4` pairs with tag `v1.0.4`.
+2. `pyproject.toml` version matches the intended tag without the leading `v`.
    Example: tag `v1.0.4` requires `version = "1.0.4"`.
-2. The release artifacts build with:
+3. The release artifacts build with:
 
    ```bash
    uv build --no-sources
    ```
 
-3. Local preflight checks pass:
+4. Local preflight checks pass:
 
    ```bash
    uv run ruff check .
    uv run pytest tests/api/test_runtime_layout.py tests/api/test_infer_api.py tests/real/test_packaged_infer_import.py
    ```
 
-4. The exact release artifacts pass a targeted publish dry-run:
+5. The exact release artifacts pass a targeted publish dry-run:
 
    ```bash
    uv publish --dry-run dist/card_framework-X.Y.Z-py3-none-any.whl dist/card_framework-X.Y.Z.tar.gz
    ```
 
-5. Built wheel and sdist metadata remain PyPI-compatible.
+6. Built wheel and sdist metadata remain PyPI-compatible.
 
    Current repo-specific requirement:
 
@@ -62,7 +67,7 @@ all of the following:
      dependency name, because PyPI resolves that name to an incompatible third-
      party project rather than the upstream aligner CARD expects.
 
-6. Built artifacts must install into a clean environment with `--no-deps` and
+7. Built artifacts must install into a clean environment with `--no-deps` and
    expose the public packaged API import shape used by the publish workflow:
 
    - `from card_framework import InferenceResult, infer`
@@ -93,6 +98,9 @@ same change.
 Pushing a version tag is not the end of release work. A release is considered
 done only after the triggered GitHub Actions run is watched to completion and
 its success is verified.
+
+The pushed `vX.Y.Z` tag should point at the merged integration-branch commit
+that came from `release/vX.Y.Z`, not at an unmerged topic-branch tip.
 
 Required sequence after pushing `vX.Y.Z`:
 
@@ -146,6 +154,8 @@ Current repo rule:
 
 Use this checklist for every release-tag push:
 
+- Release branch `release/vX.Y.Z` created from the current integration branch
+- Release branch merged before the matching tag is created
 - Version bumped in `pyproject.toml`
 - `uv lock` updated when dependency metadata changed
 - `uv build --no-sources` passed

@@ -220,8 +220,11 @@ Installed-package runtime notes:
   the `vllm_api_key=` argument. If omitted for vLLM, the packaged runtime uses
   `EMPTY`, which matches the common local keyless vLLM setup.
 - If you choose `device="cuda"`, the packaged runtime currently supports only
-  CUDA 12.6. `infer(...)` now validates that the installed PyTorch build reports
-  CUDA 12.6 before it proceeds.
+  CUDA 12.6. `infer(...)` now inspects the installed PyTorch build first and,
+  when the host itself reports CUDA 12.6, automatically replaces CPU-only or
+  mismatched `torch` and `torchaudio` wheels with the CUDA 12.6 build before it
+  proceeds. In a uv-managed project it uses `uv pip`; otherwise it falls back
+  to `python -m pip`.
 - The packaged default is now vLLM-first. If the effective config selects
   another provider, `infer(...)` resolves required credentials before it starts
   the subprocess runtime:
@@ -259,20 +262,22 @@ The public PyPI project already exists. As of March 9, 2026:
   `ctc-forced-aligner` dependency name for downstream `pip` users.
 - `v1.0.2` was tagged but never published because PyPI rejected the direct Git
   dependency metadata.
-- `1.0.3` is the current public recovery release.
-- The next install-path fix must ship under a new version such as `1.0.4`; do
+- `1.0.4` is the current public release.
+- The next install-path fix must ship under a new version such as `1.0.5`; do
   not reuse a failed or already-published version number.
 
 Repository-side release steps:
 
-1. Run the release preflight in
+1. Create a dedicated release-preparation branch such as `release/v1.0.5` from
+   the target integration branch, then run the release preflight in
    [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_release_spec.md),
    including build, targeted tests, and artifact-scoped `uv publish --dry-run`.
-2. Tag the release from `main` and push it, for example:
+2. Merge the reviewed release branch, then tag the merged integration-branch
+   commit and push it, for example:
 
    ```bash
-   git tag -a v1.0.4 -m v1.0.4
-   git push origin v1.0.4
+   git tag -a v1.0.5 -m v1.0.5
+   git push origin v1.0.5
    ```
 
 3. Do not assume the release is complete just because the tag push succeeded.
