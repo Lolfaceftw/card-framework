@@ -54,6 +54,9 @@ jobs:
               "audio_wav",
               "output_dir",
               "target_duration_seconds",
+              "device",
+              "vllm_url",
+              "vllm_api_key",
           )
           PY
           }

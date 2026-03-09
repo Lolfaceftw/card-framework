@@ -1,5 +1,9 @@
 # Errors And Notes
 
+### 2026-03-09T21:40:00+08:00 - PyPI Publish Workflow Smoke Test Must Match The Real Public `infer(...)` Signature
+- Problem: The first tagged PyPI publish attempt built the `card-framework` distributions successfully but the GitHub Actions smoke test still asserted that `card_framework.infer(...)` exposed only three parameters. The real public API had already grown keyword-only `device`, `vllm_url`, and `vllm_api_key` parameters, so the build job failed before `uv publish`, leaving the pending trusted publisher unused and PyPI with no released version.
+- Solution: Update `.github/workflows/publish-pypi.yml` so the smoke test asserts the full public `infer(...)` signature, then bump the package version for the next release tag instead of retrying the broken tag unchanged.
+
 ### 2026-03-09T17:05:00+08:00 - Packaged `infer(...)` Must Require An Explicit Device And Gate CUDA To 12.6
 - Problem: The public `infer(...)` contract still relied on config-default `audio.device=auto`, so packaged callers could not declare CPU versus CUDA intent at the API boundary, and nothing stopped a user from attempting unsupported CUDA runtime combinations.
 - Solution: Make the packaged API require `device=\"cpu\"` or `device=\"cuda\"`, inject that choice into the effective runtime config, and reject `device=\"cuda\"` unless the installed PyTorch build reports CUDA 12.6 and CUDA is actually available on the machine.
