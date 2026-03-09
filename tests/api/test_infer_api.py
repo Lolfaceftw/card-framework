@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import card_framework.api as infer_api
 from card_framework.api import InferenceResult, infer
 from card_framework.runtime.bootstrap import RuntimeBootstrapError
 from card_framework.shared.runtime_layout import RuntimeLayout
@@ -81,22 +82,133 @@ def test_infer_rejects_cuda_without_supported_126_runtime(
     tmp_path: Path,
 ) -> None:
     """Reject CUDA requests unless PyTorch reports a CUDA 12.6 runtime."""
-    class _FakeCuda:
-        @staticmethod
-        def is_available() -> bool:
-            return True
-
-    class _FakeVersion:
-        cuda = "12.8"
-
-    class _FakeTorch:
-        cuda = _FakeCuda()
-        version = _FakeVersion()
-
-    monkeypatch.setitem(sys.modules, "torch", _FakeTorch())
+    _set_fake_torch_runtime_inspections(
+        monkeypatch,
+        _torch_runtime_state(cuda_version="12.8", cuda_available=True),
+    )
+    monkeypatch.setattr(
+        "card_framework.api._detect_host_cuda_runtime",
+        lambda: infer_api._HostCudaDetection(version=None, source=None),
+    )
 
     with pytest.raises(RuntimeError, match="only CUDA 12.6"):
         infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cuda")
+
+
+def test_infer_auto_repairs_cpu_torch_when_host_reports_cuda_126(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Replace the default CPU PyTorch wheels when the host reports CUDA 12.6."""
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"RIFF")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "audio:",
+                "  voice_clone:",
+                "    enabled: false",
+                "    live_drafting:",
+                "      enabled: false",
+                "  interjector:",
+                "    enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CARD_FRAMEWORK_CONFIG", str(config_path))
+    monkeypatch.setattr("card_framework.api.ensure_runtime_requirements", lambda **_: None)
+    monkeypatch.setattr(
+        "card_framework.api.resolve_runtime_layout",
+        lambda: _runtime_layout(tmp_path),
+    )
+    monkeypatch.setattr("card_framework.api.ensure_index_tts_runtime", lambda **_: None)
+    _set_fake_torch_runtime_inspections(
+        monkeypatch,
+        _torch_runtime_state(cuda_version=None, cuda_available=False),
+        _torch_runtime_state(cuda_version="12.6", cuda_available=True),
+    )
+    monkeypatch.setattr(
+        "card_framework.api._detect_host_cuda_runtime",
+        lambda: infer_api._HostCudaDetection(version="12.6", source="nvidia-smi"),
+    )
+
+    install_calls: list[str] = []
+    monkeypatch.setattr(
+        "card_framework.api._install_supported_torch_cuda_runtime",
+        lambda: install_calls.append("install"),
+    )
+    monkeypatch.setattr(
+        "card_framework.api.subprocess.run",
+        lambda command, cwd=None, check=False, capture_output=True, text=True, env=None: (
+            _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+
+    with pytest.warns(RuntimeWarning, match="automatically replaced"):
+        infer(audio_path, tmp_path / "outputs", 180, device="cuda")
+
+    assert install_calls == ["install"]
+
+
+def test_install_supported_torch_cuda_runtime_prefers_uv_in_uv_project(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Use `uv pip` instead of raw pip when the caller is in a uv-managed project."""
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "card_framework.api.resolve_uv_executable",
+        lambda *, uv_executable: "uv",
+    )
+    monkeypatch.setattr("card_framework.api._clear_loaded_torch_modules", lambda: None)
+
+    recorded_commands: list[tuple[list[str], str | None]] = []
+
+    def _fake_run(
+        command: list[str],
+        cwd: Path | str | None = None,
+        check: bool = False,
+        capture_output: bool = True,
+        text: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, env
+        recorded_commands.append((command, str(cwd) if cwd is not None else None))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("card_framework.api.subprocess.run", _fake_run)
+
+    infer_api._install_supported_torch_cuda_runtime()
+
+    assert recorded_commands[0][0] == [
+        "uv",
+        "pip",
+        "uninstall",
+        "--python",
+        sys.executable,
+        "torch",
+        "torchaudio",
+    ]
+    assert recorded_commands[1][0] == [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--reinstall",
+        "--torch-backend",
+        "cu126",
+        "torch",
+        "torchaudio",
+    ]
+    assert recorded_commands[0][1] == str(tmp_path)
+    assert recorded_commands[1][1] == str(tmp_path)
 
 
 def test_infer_runs_pipeline_and_returns_artifact_paths(
@@ -728,19 +840,36 @@ def _runtime_layout(tmp_path: Path) -> RuntimeLayout:
 
 def _install_fake_cuda_126_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Install a minimal fake torch module that satisfies the CUDA 12.6 contract."""
-    class _FakeCuda:
-        @staticmethod
-        def is_available() -> bool:
-            return True
+    _set_fake_torch_runtime_inspections(
+        monkeypatch,
+        _torch_runtime_state(cuda_version="12.6", cuda_available=True),
+    )
 
-    class _FakeVersion:
-        cuda = "12.6"
 
-    class _FakeTorch:
-        cuda = _FakeCuda()
-        version = _FakeVersion()
+def _set_fake_torch_runtime_inspections(
+    monkeypatch: pytest.MonkeyPatch,
+    *states: infer_api._TorchCudaRuntimeState,
+) -> None:
+    """Patch the packaged CUDA inspection helper with deterministic states."""
+    state_iterator = iter(states)
+    monkeypatch.setattr(
+        "card_framework.api._inspect_torch_cuda_runtime",
+        lambda: next(state_iterator),
+    )
 
-    monkeypatch.setitem(sys.modules, "torch", _FakeTorch())
+
+def _torch_runtime_state(
+    *,
+    cuda_version: str | None,
+    cuda_available: bool,
+    import_error: str | None = None,
+) -> infer_api._TorchCudaRuntimeState:
+    """Build one fake PyTorch runtime inspection payload."""
+    return infer_api._TorchCudaRuntimeState(
+        cuda_version=cuda_version,
+        cuda_available=cuda_available,
+        import_error=import_error,
+    )
 
 
 def _load_invoked_config(command: list[str]) -> dict[str, Any]:

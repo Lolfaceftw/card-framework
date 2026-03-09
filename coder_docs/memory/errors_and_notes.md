@@ -1,5 +1,13 @@
 # Errors And Notes
 
+### 2026-03-09T23:53:20.1028388+08:00 - Packaged CUDA Repair Must Prefer `uv pip` Inside uv-Managed Projects
+- Problem: The packaged `infer(device="cuda")` path could now self-repair a CPU-only PyTorch install to CUDA 12.6, but the first implementation always shelled out to `python -m pip`. That ignored the repository's uv-first packaging policy and could bypass a caller's uv-managed environment workflow.
+- Solution: Inspect the caller's working directory and parent directories for uv project signals such as `uv.lock` or `pyproject.toml` uv metadata, then prefer `uv pip uninstall/install --python <active-interpreter> --torch-backend cu126` for the PyTorch repair path. Keep `python -m pip` only as the fallback when no uv-managed project can be confirmed.
+
+### 2026-03-09T23:27:36+08:00 - Release Publishes Need A Dedicated Semver-Named Branch Before Tag Push
+- Problem: The repo's PyPI workflow is tag-triggered, which made it easy to mentally collapse "branch" and "publish" into one step and skip an explicit release-branch rule. That ambiguity encourages ad hoc tagging from whatever local branch happens to contain the version bump, which weakens review flow and makes it less obvious which commit was intentionally prepared for release.
+- Solution: Document one release path across `AGENTS.md`, `coder_docs/git_github_workflow.md`, `coder_docs/github_actions_release_spec.md`, and `coder_docs/codebase_guide.md`: create a dedicated semver-named release-preparation branch such as `release/vX.Y.Z`, run preflight there, merge it, then create and push the matching `vX.Y.Z` tag from the merged integration-branch commit.
+
 ### 2026-03-09T23:55:00+08:00 - Packaged `infer(...)` Must Self-Resolve `uv` And `ffmpeg` And Degrade Cleanly On Aligner Bootstrap Failures
 - Problem: The PyPI wheel could publish and import, but the packaged `infer(...)` path still depended on PATH luck for `uv` and `ffmpeg`, and the published docs claimed the pinned `ctc-forced-aligner` would bootstrap automatically even though the checked-in code did not. That left downstream `pip install` users one missing executable or one failed aligner build away from a brittle first run.
 - Solution: Add runtime dependency coverage for `uv` and `imageio-ffmpeg`, resolve packaged `uv` from the active interpreter scripts directory and `ffmpeg` from PATH or the bundled `imageio-ffmpeg` executable, keep the wheel metadata free of `ctc-forced-aligner`, and make packaged `infer(...)` fall back to approximate timing when the pinned aligner bootstrap cannot complete instead of aborting the whole run.

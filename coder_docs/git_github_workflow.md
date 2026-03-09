@@ -18,6 +18,7 @@ This repository expects topic branches plus pull requests for shared history. Ke
 
 - Branch from the integration branch you intend to merge into. In most cases this is the repository default branch or another agreed shared branch for the task.
 - Keep one topic or bug fix per branch.
+- For PyPI releases, create a dedicated release-preparation branch named `release/vX.Y.Z` from the target integration branch before changing version metadata, running release preflight, or attempting publication.
 - Prefer several small coherent commits over one large mixed commit.
 - Do not push directly to shared protected branches.
 - Do not rewrite published shared history. If a shared branch needs undoing, prefer `git revert`.
@@ -74,6 +75,11 @@ This repository expects topic branches plus pull requests for shared history. Ke
 
 - Use `coder_docs/github_actions_release_spec.md` as the release source of
   truth for `.github/workflows/publish-pypi.yml`.
+- Start every release from a dedicated branch named `release/vX.Y.Z`.
+- Run the version bump, release preflight, and pull request workflow on that
+  release branch.
+- Merge the reviewed release branch back into the integration branch before
+  creating the matching `vX.Y.Z` tag.
 - Do not treat `git push origin vX.Y.Z` as the end of release work.
 - Before pushing a release tag, run the release preflight described in the spec
   document, including build, targeted tests, and an artifact-scoped
@@ -132,8 +138,8 @@ This repository expects topic branches plus pull requests for shared history. Ke
 - The PyPI trusted-publishing workflow in `.github/workflows/publish-pypi.yml` depends on a GitHub environment named `pypi`. Keep environment protection rules and the matching PyPI trusted-publisher configuration aligned with the workflow filename and repository coordinates.
 - `card-framework` is already live on PyPI as of March 9, 2026. Treat `1.0.1`
   as the first public release, `v1.0.2` as the failed publication attempt, and
-  `1.0.3` as the current recovery release. New packaging fixes must advance to
-  a new version such as `1.0.4`.
+  `1.0.4` as the current public release. New packaging fixes must advance to
+  a new version such as `1.0.5`.
 
 ## Command Reference
 
@@ -141,6 +147,7 @@ This repository expects topic branches plus pull requests for shared history. Ke
 git status
 git diff
 git diff --staged
+git checkout -b release/vX.Y.Z
 git add -p
 git commit
 git fetch origin

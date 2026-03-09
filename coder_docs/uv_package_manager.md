@@ -54,6 +54,8 @@ Preferred workflow:
 
 This repo pins `torch` and `torchaudio` to the explicit `pytorch-cu126` index through `tool.uv.sources` and `[[tool.uv.index]]`. The repository's packaged CUDA contract is now CUDA 12.6 only.
 
+For the published `card_framework.infer(..., device="cuda")` path, packaged runtime self-repair now prefers `uv pip uninstall/install --python <active-interpreter> --torch-backend cu126` when the caller is inside a uv-managed project. If no uv-managed project can be confirmed, it falls back to `python -m pip` with the explicit CUDA 12.6 PyTorch index. Keep that uv-first packaged repair path aligned with any future PyTorch source-strategy changes.
+
 When changing any of those packages:
 
 - Preserve the explicit index mapping unless the task intentionally changes the PyTorch source strategy.
