@@ -6,7 +6,7 @@ This repository expects topic branches plus pull requests for shared history. Ke
 
 ## Current Repo State
 
-- As of 2026-03-07, this workspace does not contain a checked-in `.github/` directory.
+- As of 2026-03-09, this workspace contains `.github/workflows/publish-pypi.yml`, a tag-driven PyPI trusted-publishing workflow that builds distributions, smoke-checks them, and publishes from the `pypi` GitHub environment.
 - As of 2026-03-07, this workspace does not contain a checked-in `CODEOWNERS` file.
 - Shared-branch protection, required status checks, secret scanning, push protection, and CODEOWNERS enforcement should therefore be treated as GitHub-hosted repository settings unless a future change checks those files into the repo.
 
@@ -99,6 +99,8 @@ This repository expects topic branches plus pull requests for shared history. Ke
 - Require or encourage signed commits and signed release tags where repository policy supports them.
 - Review dependency and workflow changes with extra scrutiny before merge.
 - Preserve traceability from commit to released artifact wherever the delivery pipeline supports it.
+- The PyPI trusted-publishing workflow in `.github/workflows/publish-pypi.yml` depends on a GitHub environment named `pypi`. Keep environment protection rules and the matching PyPI trusted-publisher configuration aligned with the workflow filename and repository coordinates.
+- Because `card-framework` is not yet live on PyPI, the first public release uses PyPI's pending-publisher flow rather than the existing-project publisher flow.
 
 ## Command Reference
 
@@ -111,6 +113,8 @@ git commit
 git fetch origin
 git push -u origin <branch>
 git push --force-with-lease origin <branch>
+git tag -a vX.Y.Z -m vX.Y.Z
+git push origin vX.Y.Z
 gh pr create --draft
 ```
 

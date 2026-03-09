@@ -1,5 +1,29 @@
 # Errors And Notes
 
+### 2026-03-09T17:05:00+08:00 - Packaged `infer(...)` Must Require An Explicit Device And Gate CUDA To 12.6
+- Problem: The public `infer(...)` contract still relied on config-default `audio.device=auto`, so packaged callers could not declare CPU versus CUDA intent at the API boundary, and nothing stopped a user from attempting unsupported CUDA runtime combinations.
+- Solution: Make the packaged API require `device=\"cpu\"` or `device=\"cuda\"`, inject that choice into the effective runtime config, and reject `device=\"cuda\"` unless the installed PyTorch build reports CUDA 12.6 and CUDA is actually available on the machine.
+
+### 2026-03-09T16:42:00+08:00 - Frozen `RuntimeBootstrapError` Broke Traceback Handling During Temp-Config Cleanup
+- Problem: The installed-package `infer(...)` path now uses a temporary merged config whenever it injects prompted credentials or vLLM-first overrides. When bootstrap failed inside that context, `contextlib` tried to reattach `__traceback__`, but the frozen dataclass `RuntimeBootstrapError` rejected that mutation and raised a misleading `TypeError` instead of preserving the original bootstrap failure.
+- Solution: Remove `frozen=True` from `RuntimeBootstrapError` and keep a regression test that forces a bootstrap failure while temp-config cleanup is active, so real bootstrap errors surface as themselves.
+
+### 2026-03-09T16:25:00+08:00 - Packaged `infer(...)` Must Fail Fast On Unsupported Platforms And Resolve Secrets Before Launch
+- Problem: The public pip-installed `card_framework.infer(...)` path still trusted the loaded config blindly. That left packaged runs on macOS or Linux failing later and less clearly, and provider credentials such as API keys or Hugging Face access tokens were only discovered deep inside the runtime after the subprocess had already started.
+- Solution: Make `infer(...)` explicitly Windows-only for the packaged whole-pipeline contract, add a vLLM-first `vllm_url` and `vllm_api_key` override path, and resolve missing provider credentials from config, environment variables, or secure interactive prompts before subprocess launch so secrets do not need to travel through CLI argv.
+
+### 2026-03-09T15:32:00+08:00 - First Public PyPI Release Needs A Pending Trusted Publisher, Not Just `uv publish`
+- Problem: Local `uv publish --dry-run` validated the `card-framework` artifacts, but the release still could not become public because PyPI had no project and no trusted publisher configured yet. Relying on a local token-based publish would bypass the repo's long-term release path and leave the public release process undocumented.
+- Solution: Add a top-level GitHub Actions trusted-publishing workflow (`.github/workflows/publish-pypi.yml`) that builds and smoke-checks the tagged distributions before `uv publish`, and document that the first public release must use PyPI's pending-publisher flow for project `card-framework` with owner `Lolfaceftw`, repository `card-framework`, workflow filename `publish-pypi.yml`, and environment `pypi`.
+
+### 2026-03-09T15:07:42+08:00 - Installed `infer(...)` Calls Must Carry An Explicit Duration Target
+- Problem: The new packaged `card_framework.infer(...)` entrypoint initially only required `(audio_wav, output_dir)` even though the runtime is duration-first and the summarizer budget is a first-class contract. That left installed-package callers implicitly depending on config-default duration instead of declaring the intended output length at the API boundary.
+- Solution: Require `target_duration_seconds` on every `infer(audio_wav, output_dir, target_duration_seconds)` call, validate it before bootstrap or subprocess work begins, and pass it into the Hydra runtime as an explicit duration override.
+
+### 2026-03-09T14:58:54+08:00 - Installed Wheel Runtime Must Not Treat Site-Packages Like The Repository Root
+- Problem: The built `card-framework` wheel already imported and packaged correctly, but installed-package runtime code still derived writable paths from `shared.paths.REPO_ROOT`. In a clean virtualenv that made `REPO_ROOT` resolve to the environment `Lib` directory, which pointed mutable runtime defaults such as `checkpoints/index_tts` and vendored runner paths into site-packages-shaped locations instead of a real writable CARD runtime home.
+- Solution: Add an install-safe runtime layout for the public `card_framework.infer(audio_wav, output_dir, target_duration_seconds)` API, bootstrap the vendored IndexTTS project and checkpoints into a writable runtime home (`CARD_FRAMEWORK_HOME` or the platform user-data directory), and run the existing Hydra pipeline with explicit installed-package overrides rather than assuming a checkout-shaped filesystem.
+
 ### 2026-03-09T13:33:25+08:00 - Local Benchmark Defaults Must Discover Real Transcripts And Fail Loudly On Zero Execution
 - Problem: The packaged summarization benchmark still assumed a stale `summary.json` local transcript default, so `card-framework-benchmark prepare-manifest --sources local` and the legacy `card-framework-eval` entrypoint broke on a fresh repo state. After fixing transcript discovery, the benchmark still exited successfully even when every cell was skipped before any sample ran, which made a missing vLLM endpoint look like a green run.
 - Solution: Reuse repo-aware transcript auto-discovery for local benchmark manifests, switch packaged local manifest defaults to `auto`, align the main config transcript default with `audio.output_transcript_path`, and make the benchmark CLI exit non-zero with a direct operator-facing error when zero cells or zero samples execute while still preserving the report artifacts.
