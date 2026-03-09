@@ -24,6 +24,8 @@ uv add <package>
 uv add --dev <package>
 uv remove <package>
 uv lock
+uv build --wheel
+uv publish --dry-run
 ```
 
 Preferred workflow:
@@ -32,6 +34,8 @@ Preferred workflow:
 2. `uv run ...` for project commands so they execute in the locked environment.
 3. `uv add`, `uv add --dev`, or `uv remove` for dependency changes instead of editing dependency lists by hand.
 4. Commit both `pyproject.toml` and `uv.lock` when dependencies change.
+5. Use `uv build` for release artifacts and `uv publish --dry-run` before any real package upload.
+6. Keep the GitHub trusted-publishing workflow aligned with the local release commands. This repo's `.github/workflows/publish-pypi.yml` uses `uv build --no-sources` followed by `uv publish`.
 
 ## Dependency Management Rules
 
@@ -42,7 +46,7 @@ Preferred workflow:
 
 ## Repo-Specific PyTorch Rule
 
-This repo pins `torch` and `torchaudio` to the explicit `pytorch-cu128` index through `tool.uv.sources` and `[[tool.uv.index]]`, while keeping `pytorch-cu126` configured as an optional fallback index for environments that need CUDA 12.6 wheels.
+This repo pins `torch` and `torchaudio` to the explicit `pytorch-cu126` index through `tool.uv.sources` and `[[tool.uv.index]]`. The repository's packaged CUDA contract is now CUDA 12.6 only.
 
 When changing any of those packages:
 
@@ -56,6 +60,9 @@ When changing any of those packages:
 - Prefer `uv sync --dev` for local development because Ruff is currently a dev dependency.
 - Use `uv add --dev` for developer tooling such as linters or test tools.
 - Use `uv lock` after meaningful dependency edits or when reconciling a lockfile mismatch.
+- Use `uv build --wheel` or `uv build` to produce release artifacts for `card-framework`.
+- Use `uv publish --dry-run` as the required preflight before uploading to PyPI with `uv publish`.
+- For GitHub Actions releases, prefer `uv build --no-sources` so release builds do not accidentally depend on local `tool.uv.sources` overrides that downstream users will not have.
 
 ## Do Not Do This
 

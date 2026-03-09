@@ -284,6 +284,7 @@ audio:
     mix_timeout_seconds: 300
 
 orchestrator:
+  target_seconds: # optional exact override; when set, it takes precedence over target_minutes
   target_minutes: 5
   duration_tolerance_ratio: 0.05
   max_iterations: 60
