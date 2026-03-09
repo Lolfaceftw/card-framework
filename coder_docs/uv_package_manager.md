@@ -11,6 +11,9 @@ Use `uv` for environment creation, dependency installation, command execution, d
 - Runtime dependencies live in `[project.dependencies]` in `pyproject.toml`.
 - Dev dependencies currently live in `[dependency-groups].dev`.
 - The lockfile is `uv.lock` and is committed repository state.
+- The packaged `infer(...)` runtime now keeps `uv` and `imageio-ffmpeg` in
+  `[project.dependencies]` because the published wheel uses them at runtime for
+  IndexTTS bootstrap and FFmpeg fallback resolution.
 
 ## Canonical Commands
 
@@ -41,6 +44,9 @@ Preferred workflow:
 
 - Runtime libraries belong in `[project.dependencies]`.
 - Dev-only tools belong in a dependency group, usually `dev` unless the project intentionally introduces a more specific group.
+- Keep `ctc-forced-aligner` out of published runtime dependencies. In this repo
+  it belongs in `dependency-groups.dev`, while packaged `infer(...)` bootstraps
+  the pinned upstream source on demand.
 - If you manually edit dependency declarations in `pyproject.toml`, run `uv lock` afterward and review the resulting lockfile diff.
 - Keep dependency changes atomic and easy to review.
 
@@ -58,6 +64,9 @@ When changing any of those packages:
 
 - Prefer `uv run python -m card_framework.cli.main` over raw `python -m card_framework.cli.main` so the locked environment is used consistently.
 - Prefer `uv sync --dev` for local development because Ruff is currently a dev dependency.
+- Keep the runtime `uv` dependency and the repo-local `uv` tool usage aligned.
+  The published wheel depends on `uv` because `card_framework.infer(...)`
+  bootstraps the vendored IndexTTS runtime through the installed console script.
 - Use `uv add --dev` for developer tooling such as linters or test tools.
 - Use `uv lock` after meaningful dependency edits or when reconciling a lockfile mismatch.
 - Use `uv build --wheel` or `uv build` to produce release artifacts for `card-framework`.

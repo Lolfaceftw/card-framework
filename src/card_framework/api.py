@@ -14,11 +14,14 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from typing import Any, Literal
+import warnings
 
 from card_framework.runtime.bootstrap import (
     RuntimeBootstrapError,
+    ensure_ctc_forced_aligner_runtime,
     ensure_index_tts_runtime,
     ensure_runtime_requirements,
+    resolve_uv_executable,
 )
 from card_framework.shared.paths import DEFAULT_CONFIG_PATH
 from card_framework.shared.runtime_layout import RuntimeLayout, resolve_runtime_layout
@@ -154,12 +157,17 @@ def infer(
         )
         calibration_enabled = not live_drafting_enabled
 
-        uv_executable = str(os.environ.get(_UV_ENV_VAR, "uv")).strip() or "uv"
+        raw_uv_executable = str(os.environ.get(_UV_ENV_VAR, "uv")).strip() or "uv"
         require_uv = voice_clone_enabled or interjector_enabled or calibration_enabled
         ensure_runtime_requirements(
             require_uv=require_uv,
             require_ffmpeg=True,
-            uv_executable=uv_executable,
+            uv_executable=raw_uv_executable,
+        )
+        uv_executable = (
+            resolve_uv_executable(uv_executable=raw_uv_executable)
+            if require_uv
+            else raw_uv_executable
         )
 
         layout = resolve_runtime_layout()
@@ -229,6 +237,9 @@ def _prepared_inference_config(
 
     config_modified = (
         _resolve_runtime_credentials(effective_config) or config_modified
+    )
+    config_modified = (
+        _prepare_forced_alignment_runtime(effective_config) or config_modified
     )
 
     if not config_modified:
@@ -345,6 +356,41 @@ def _resolve_runtime_credentials(config: dict[str, Any]) -> bool:
         )
 
     return modified
+
+
+def _prepare_forced_alignment_runtime(config: dict[str, Any]) -> bool:
+    """Bootstrap forced alignment when possible and fall back cleanly when not."""
+    audio_cfg = _as_mapping(config.get("audio", {}))
+    asr_cfg = _as_mapping(audio_cfg.get("asr", {}))
+    forced_alignment_cfg = _as_mapping(asr_cfg.get("forced_alignment", {}))
+    interjector_cfg = _as_mapping(audio_cfg.get("interjector", {}))
+
+    forced_alignment_enabled = bool(forced_alignment_cfg.get("enabled", True))
+    interjector_enabled = bool(interjector_cfg.get("enabled", False))
+    if not forced_alignment_enabled and not interjector_enabled:
+        return False
+
+    try:
+        ensure_ctc_forced_aligner_runtime(python_executable=sys.executable)
+        return False
+    except RuntimeBootstrapError as exc:
+        modified = False
+        if forced_alignment_enabled:
+            forced_alignment_cfg["enabled"] = False
+            forced_alignment_cfg["required"] = False
+            asr_cfg["forced_alignment"] = forced_alignment_cfg
+            audio_cfg["asr"] = asr_cfg
+            config["audio"] = audio_cfg
+            modified = True
+
+        warnings.warn(
+            "CARD could not bootstrap the pinned ctc-forced-aligner runtime; "
+            "packaged inference will continue with approximate timing fallbacks. "
+            f"Details: {exc}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return modified
 
 
 def _collect_credential_requirements(

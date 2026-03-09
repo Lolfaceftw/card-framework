@@ -234,44 +234,66 @@ Installed-package runtime notes:
   `DEEPSEEK_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `ZAI_API_KEY`,
   `HUGGINGFACE_TOKEN` or `HF_TOKEN`, and the configured
   `audio.diarization.pyannote.auth_token_env` value.
-- Whole-pipeline inference still requires external tools such as `ffmpeg`.
-  When voice cloning or calibration paths are active, the package also expects
-  `uv` so it can bootstrap the vendored IndexTTS runtime in the writable
-  runtime home on first use.
+- `CARD_FRAMEWORK_FFMPEG_EXECUTABLE`: optional path to a custom `ffmpeg`
+  binary. When unset, packaged `infer(...)` falls back to the bundled
+  `imageio-ffmpeg` executable and prepends its directory to `PATH` for nested
+  subprocesses.
+- `CARD_FRAMEWORK_UV_EXECUTABLE`: optional path to a custom `uv` binary.
+  When unset, packaged `infer(...)` resolves the installed `uv` console script
+  from the active environment before bootstrapping the vendored IndexTTS
+  runtime.
+- Packaged `infer(...)` no longer publishes `ctc-forced-aligner` in
+  `Requires-Dist`. It first tries to install the pinned upstream source on
+  demand when stage-1 forced alignment needs it. If that bootstrap cannot
+  complete, packaged inference falls back to approximate segment-derived timing
+  instead of failing the whole run.
 
 ## Public PyPI Release
 
 This repository now includes a GitHub Actions trusted-publishing workflow at
 `.github/workflows/publish-pypi.yml` that publishes tags matching `v*` to PyPI.
 
-For the first public release of `card-framework`, use PyPI's **pending
-publisher** flow because the project does not exist on PyPI yet. Configure:
+The public PyPI project already exists. As of March 9, 2026:
 
-- PyPI project name: `card-framework`
-- GitHub owner: `Lolfaceftw`
-- GitHub repository: `card-framework`
-- Workflow filename: `publish-pypi.yml`
-- Environment name: `pypi`
+- `1.0.1` is the first public release, but it published the wrong bare
+  `ctc-forced-aligner` dependency name for downstream `pip` users.
+- `v1.0.2` was tagged but never published because PyPI rejected the direct Git
+  dependency metadata.
+- `1.0.3` is the current public recovery release.
+- The next install-path fix must ship under a new version such as `1.0.4`; do
+  not reuse a failed or already-published version number.
 
 Repository-side release steps:
 
-1. Merge the publishing workflow to `main`.
-2. In GitHub repository settings, create the `pypi` environment.
-3. In PyPI account settings, add the pending trusted publisher with the fields
-   above.
-4. Tag the release from `main` and push it, for example:
+1. Run the release preflight in
+   [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_release_spec.md),
+   including build, targeted tests, and artifact-scoped `uv publish --dry-run`.
+2. Tag the release from `main` and push it, for example:
 
    ```bash
-   git tag -a v0.1.0 -m v0.1.0
-   git push origin v0.1.0
+   git tag -a v1.0.4 -m v1.0.4
+   git push origin v1.0.4
    ```
 
-5. After the workflow succeeds, verify the public release:
+3. Do not assume the release is complete just because the tag push succeeded.
+   Watch the GitHub Actions run to completion and inspect failures directly if
+   needed:
+
+   ```bash
+   gh run list --workflow "Publish PyPI Package" --limit 1
+   gh run watch <run-id> --exit-status
+   gh run view <run-id> --log-failed
+   ```
+
+4. After the workflow succeeds, verify the public release:
 
    ```bash
    python -m pip install --no-cache-dir card-framework
    python -c "from card_framework import infer; print(infer)"
    ```
+
+For the repo-specific release build standards and post-tag verification rules,
+see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_release_spec.md).
 
 ## Documentation
 

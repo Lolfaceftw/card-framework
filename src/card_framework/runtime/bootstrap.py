@@ -5,16 +5,25 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import shutil
 import subprocess
+import sysconfig
 from typing import Any
 
+from card_framework.audio_pipeline.errors import DependencyMissingError
+from card_framework.audio_pipeline.runtime import resolve_command_path
 from card_framework.shared.runtime_layout import RuntimeLayout
 
 _MIN_WEIGHT_BYTES = 1_000_000
 _WEIGHT_SUFFIXES = {".safetensors", ".pt", ".pth", ".bin", ".ckpt"}
+_CTC_FORCED_ALIGNER_COMMIT = "e23e1525bae810f0582b6e539ce7aec63fd01196"
+_CTC_FORCED_ALIGNER_ARCHIVE_URL = (
+    "https://codeload.github.com/MahmoudAshraf97/ctc-forced-aligner/tar.gz/"
+    f"{_CTC_FORCED_ALIGNER_COMMIT}"
+)
 
 
 @dataclass(slots=True)
@@ -42,12 +51,17 @@ def ensure_runtime_requirements(
     uv_executable: str = "uv",
 ) -> None:
     """Validate external tools required by runtime bootstrap and execution."""
-    required_tools = []
+    missing_tools: list[str] = []
     if require_uv:
-        required_tools.append(uv_executable)
+        try:
+            resolve_uv_executable(uv_executable=uv_executable)
+        except RuntimeBootstrapError:
+            missing_tools.append("uv")
     if require_ffmpeg:
-        required_tools.append("ffmpeg")
-    missing_tools = [tool for tool in required_tools if shutil.which(tool) is None]
+        try:
+            resolve_command_path("ffmpeg")
+        except DependencyMissingError:
+            missing_tools.append("ffmpeg")
     if missing_tools:
         raise RuntimeBootstrapError(
             step="preflight",
@@ -66,6 +80,7 @@ def ensure_index_tts_runtime(
     force_model_download: bool = False,
 ) -> None:
     """Ensure the writable IndexTTS runtime project and checkpoints are ready."""
+    resolved_uv_executable = resolve_uv_executable(uv_executable=uv_executable)
     _ensure_runtime_directories(layout=layout)
     source_fingerprints = _project_fingerprints(layout.vendor_source_dir)
     _copy_vendor_project_if_needed(
@@ -74,22 +89,76 @@ def ensure_index_tts_runtime(
     )
     _sync_vendor_project_if_needed(
         layout=layout,
-        uv_executable=uv_executable,
+        uv_executable=resolved_uv_executable,
         source_fingerprints=source_fingerprints,
         force_sync=force_sync,
     )
     _ensure_model_checkpoints(
         layout=layout,
-        uv_executable=uv_executable,
+        uv_executable=resolved_uv_executable,
         force_download=force_model_download,
+    )
+
+
+def ensure_ctc_forced_aligner_runtime(*, python_executable: str) -> None:
+    """Install the pinned CTC forced-aligner package when it is missing."""
+    if importlib.util.find_spec("ctc_forced_aligner") is not None:
+        return
+
+    _run_cmd(
+        step="ctc_forced_aligner_install",
+        command=[
+            python_executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            _CTC_FORCED_ALIGNER_ARCHIVE_URL,
+        ],
+    )
+
+
+def resolve_uv_executable(*, uv_executable: str = "uv") -> str:
+    """Resolve the `uv` executable path for packaged runtime bootstrap."""
+    normalized = uv_executable.strip() or "uv"
+
+    configured_path = Path(normalized).expanduser()
+    if configured_path.is_file():
+        return str(configured_path.resolve())
+
+    resolved_path = shutil.which(normalized)
+    if resolved_path is not None:
+        return resolved_path
+
+    scripts_dir_value = sysconfig.get_path("scripts")
+    if scripts_dir_value:
+        scripts_dir = Path(scripts_dir_value)
+        candidate_names = [normalized]
+        if Path(normalized).suffix.lower() != ".exe":
+            candidate_names.append(f"{normalized}.exe")
+        for candidate_name in candidate_names:
+            candidate_path = scripts_dir / candidate_name
+            if candidate_path.is_file():
+                return str(candidate_path.resolve())
+
+    raise RuntimeBootstrapError(
+        step="preflight",
+        message=(
+            f"Missing required command '{normalized}'. "
+            f"{build_tool_guidance(['uv'])}"
+        ),
     )
 
 
 def build_tool_guidance(missing_tools: Sequence[str]) -> str:
     """Return concise install guidance for missing external tools."""
     guidance_map = {
-        "uv": "Install uv: `pip install -U uv`.",
-        "ffmpeg": "Install FFmpeg and add it to PATH: https://www.gyan.dev/ffmpeg/builds/.",
+        "uv": "Install uv into the active environment: `python -m pip install -U uv`.",
+        "ffmpeg": (
+            "Install FFmpeg and add it to PATH, or let packaged infer use the "
+            "`imageio-ffmpeg` fallback."
+        ),
     }
     guidance_parts = [guidance_map[tool] for tool in missing_tools if tool in guidance_map]
     return " ".join(guidance_parts)

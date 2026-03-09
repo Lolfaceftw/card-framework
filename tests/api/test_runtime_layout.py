@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
-from card_framework.runtime.bootstrap import ensure_index_tts_runtime
+from card_framework.runtime.bootstrap import (
+    _CTC_FORCED_ALIGNER_ARCHIVE_URL,
+    ensure_ctc_forced_aligner_runtime,
+    ensure_index_tts_runtime,
+    resolve_uv_executable,
+)
 from card_framework.shared.runtime_layout import RuntimeLayout, resolve_runtime_home
 
 
@@ -63,6 +68,10 @@ def test_ensure_index_tts_runtime_copies_vendor_syncs_and_downloads(
         raise AssertionError(f"Unexpected command: {command}")
 
     monkeypatch.setattr("card_framework.runtime.bootstrap.subprocess.run", _fake_run)
+    monkeypatch.setattr(
+        "card_framework.runtime.bootstrap.resolve_uv_executable",
+        lambda *, uv_executable: uv_executable,
+    )
 
     ensure_index_tts_runtime(layout=layout, uv_executable="uv")
 
@@ -74,3 +83,58 @@ def test_ensure_index_tts_runtime_copies_vendor_syncs_and_downloads(
     assert layout.bootstrap_state_path.exists()
     assert any(command[:3] == ["uv", "sync", "--locked"] for command in recorded_commands)
     assert any(command[:3] == ["uv", "tool", "run"] for command in recorded_commands)
+
+
+def test_ensure_ctc_forced_aligner_runtime_installs_when_missing(monkeypatch) -> None:
+    """Bootstrap the pinned aligner only when the module is absent."""
+    recorded_commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "card_framework.runtime.bootstrap.importlib.util.find_spec",
+        lambda module_name: None if module_name == "ctc_forced_aligner" else object(),
+    )
+
+    def _fake_run(
+        command: list[str],
+        cwd: str | None = None,
+        check: bool = False,
+        capture_output: bool = True,
+        text: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, check, capture_output, text
+        recorded_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("card_framework.runtime.bootstrap.subprocess.run", _fake_run)
+
+    ensure_ctc_forced_aligner_runtime(python_executable="python")
+
+    assert recorded_commands == [
+        [
+            "python",
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            _CTC_FORCED_ALIGNER_ARCHIVE_URL,
+        ]
+    ]
+
+
+def test_resolve_uv_executable_uses_active_scripts_dir_when_path_lookup_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Find the packaged uv executable in the interpreter scripts directory."""
+    scripts_dir = tmp_path / "Scripts"
+    scripts_dir.mkdir()
+    uv_path = scripts_dir / "uv.exe"
+    uv_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("card_framework.runtime.bootstrap.shutil.which", lambda command: None)
+    monkeypatch.setattr("card_framework.runtime.bootstrap.sysconfig.get_path", lambda key: str(scripts_dir))
+
+    resolved = resolve_uv_executable(uv_executable="uv")
+
+    assert resolved == str(uv_path.resolve())

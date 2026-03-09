@@ -69,7 +69,6 @@ class FasterWhisperTranscriber(SpeechTranscriber):
             Transcription result with segment-level and word-level timings.
         """
         ensure_command_available("ffmpeg")
-        ensure_command_available("ffprobe")
         model = self._get_model(device=device)
 
         try:

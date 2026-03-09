@@ -2,6 +2,10 @@
 
 Use this document as the source of truth for local Git staging, commit construction, push safety, and GitHub pull request workflow in this repository.
 
+For GitHub Actions release workflow behavior, release build standards, and the
+required post-tag success verification, also follow
+`coder_docs/github_actions_release_spec.md`.
+
 This repository expects topic branches plus pull requests for shared history. Keep changes reviewable, preserve history clarity, and prefer explicit staging over convenience shortcuts when the change is not trivial.
 
 ## Current Repo State
@@ -66,6 +70,32 @@ This repository expects topic branches plus pull requests for shared history. Ke
 - Do not normalize on `git push --force`.
 - If a history rewrite is necessary on your own topic branch, use `git push --force-with-lease origin <branch>`. Never use force-push on shared integration branches.
 
+## Release Tag Workflow
+
+- Use `coder_docs/github_actions_release_spec.md` as the release source of
+  truth for `.github/workflows/publish-pypi.yml`.
+- Do not treat `git push origin vX.Y.Z` as the end of release work.
+- Before pushing a release tag, run the release preflight described in the spec
+  document, including build, targeted tests, and an artifact-scoped
+  `uv publish --dry-run`.
+- After pushing the tag, identify the workflow run and watch it to completion:
+
+  ```bash
+  gh run list --workflow "Publish PyPI Package" --limit 1
+  gh run watch <run-id> --exit-status
+  ```
+
+- If the run fails, inspect the logs directly:
+
+  ```bash
+  gh run view <run-id> --log-failed
+  ```
+
+- Treat the release as complete only after both `Build Distributions` and
+  `Publish To PyPI` succeed.
+- If a tagged release fails, fix forward with a new version and tag rather than
+  reusing the failed release version ambiguously.
+
 ## Pull Request Workflow
 
 - Open a draft pull request while the branch is still in progress. Use the GitHub UI or `gh pr create --draft`.
@@ -100,7 +130,10 @@ This repository expects topic branches plus pull requests for shared history. Ke
 - Review dependency and workflow changes with extra scrutiny before merge.
 - Preserve traceability from commit to released artifact wherever the delivery pipeline supports it.
 - The PyPI trusted-publishing workflow in `.github/workflows/publish-pypi.yml` depends on a GitHub environment named `pypi`. Keep environment protection rules and the matching PyPI trusted-publisher configuration aligned with the workflow filename and repository coordinates.
-- Because `card-framework` is not yet live on PyPI, the first public release uses PyPI's pending-publisher flow rather than the existing-project publisher flow.
+- `card-framework` is already live on PyPI as of March 9, 2026. Treat `1.0.1`
+  as the first public release, `v1.0.2` as the failed publication attempt, and
+  `1.0.3` as the current recovery release. New packaging fixes must advance to
+  a new version such as `1.0.4`.
 
 ## Command Reference
 
@@ -116,6 +149,9 @@ git push --force-with-lease origin <branch>
 git tag -a vX.Y.Z -m vX.Y.Z
 git push origin vX.Y.Z
 gh pr create --draft
+gh run list --workflow "Publish PyPI Package" --limit 1
+gh run watch <run-id> --exit-status
+gh run view <run-id> --log-failed
 ```
 
 ## References
