@@ -10,6 +10,11 @@ readme = "README.md"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE.md"]
 requires-python = ">=3.12"
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "openai",
     "requests",
@@ -31,6 +36,7 @@ dependencies = [
     "huggingface-hub>=0.34.0",
     "hf-transfer>=0.1.9",
     "pydantic>=2.12.5",
+    "platformdirs>=4.3.6",
     "demucs>=4.0.1",
     "faster-whisper>=1.1.1",
     "nemo-toolkit[asr]>=2.4.0",
@@ -44,6 +50,11 @@ dependencies = [
     "textual",
     "unidecode"
 ]
+
+[project.urls]
+Homepage = "https://github.com/Lolfaceftw/card-framework"
+Repository = "https://github.com/Lolfaceftw/card-framework"
+Issues = "https://github.com/Lolfaceftw/card-framework/issues"
 
 [project.scripts]
 card-framework-main = "card_framework.cli.main:main"
@@ -91,20 +102,13 @@ card_framework = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
-# Optional fallback index kept for environments that need CUDA 12.6 wheels.
-# To switch, temporarily point `tool.uv.sources` torch/torchaudio to `pytorch-cu126`.
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }
 ctc-forced-aligner = { git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git" }
 deepmultilingualpunctuation = { git = "https://github.com/oliverguhr/deepmultilingualpunctuation.git" }
 
