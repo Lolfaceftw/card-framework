@@ -12,6 +12,7 @@ from card_framework.audio_pipeline.gpu_heartbeat import (
     GpuPressureAlert,
     VoiceCloneGpuHeartbeatService,
     WindowsNvidiaDedicatedGpuProbe,
+    _run_subprocess_command,
     parse_voice_clone_gpu_heartbeat_config,
 )
 
@@ -241,5 +242,45 @@ def test_gpu_heartbeat_service_warns_once_when_probe_fails() -> None:
     assert len(system_messages) == 1
     assert "GPU heartbeat probe unavailable" in system_messages[0]
     assert probe.calls >= 2
+
+
+def test_run_subprocess_command_uses_utf8_safe_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decode GPU telemetry command output with UTF-8 replacement on Windows."""
+    observed_kwargs: dict[str, object] = {}
+
+    def _fake_run(
+        command: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        encoding: str,
+        errors: str,
+        timeout: float,
+    ) -> object:
+        observed_kwargs.update(
+            {
+                "check": check,
+                "capture_output": capture_output,
+                "text": text,
+                "encoding": encoding,
+                "errors": errors,
+                "timeout": timeout,
+            }
+        )
+        return type(
+            "_CompletedProcess",
+            (),
+            {"stdout": '{"ok": true}', "stderr": ""},
+        )()
+
+    monkeypatch.setattr("card_framework.audio_pipeline.gpu_heartbeat.subprocess.run", _fake_run)
+
+    result = _run_subprocess_command(["nvidia-smi"], 3.0)
+
+    assert result == '{"ok": true}'
+    assert observed_kwargs["encoding"] == "utf-8"
+    assert observed_kwargs["errors"] == "replace"
 
 

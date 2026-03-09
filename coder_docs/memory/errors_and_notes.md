@@ -1,5 +1,13 @@
 # Errors And Notes
 
+### 2026-03-10T06:17:51+08:00 - Packaged CTC Aligner Bootstrap Must Use uv-Compatible Archive URLs And UTF-8-Safe Subprocess Capture
+- Problem: A fresh packaged `infer(device="cuda")` run inside a repo-local `uv venv` no longer had `pip`, so the pinned `ctc-forced-aligner` bootstrap fell back to approximate timing. The first `uv pip` fix still failed because the old GitHub codeload URL did not end in a file extension that `uv` accepts, and the parent packaged subprocess capture could also throw `UnicodeDecodeError` on Windows while reading child output with the locale codec.
+- Solution: Prefer `uv pip install --python <active-interpreter>` when `uv` is available, switch the pinned aligner archive URL to the GitHub archive form that ends in `.tar.gz`, and force packaged bootstrap and pipeline subprocess capture to use `encoding="utf-8", errors="replace"` so Windows output cannot crash the parent process.
+
+### 2026-03-10T06:17:51+08:00 - Embeddings-Disabled Summarizer Fallback Must Use A Bounded Coverage Sample, Not The Raw Full Transcript
+- Problem: The packaged summarizer path with embeddings disabled was injecting the entire transcript directly into the first tool-loop prompt. On the real `audio.wav` smoke input that grew to an 88k-character prompt and the first summarizer request timed out after 30 minutes without returning.
+- Solution: Build a bounded transcript excerpt for embeddings-disabled summarization that preserves start, middle, and end coverage with omission markers and per-line truncation. Keep the critic on the full transcript, but keep the summarizer prompt small enough to respond in real packaged CUDA runs.
+
 ### 2026-03-09T23:53:20.1028388+08:00 - Packaged CUDA Repair Must Prefer `uv pip` Inside uv-Managed Projects
 - Problem: The packaged `infer(device="cuda")` path could now self-repair a CPU-only PyTorch install to CUDA 12.6, but the first implementation always shelled out to `python -m pip`. That ignored the repository's uv-first packaging policy and could bypass a caller's uv-managed environment workflow.
 - Solution: Inspect the caller's working directory and parent directories for uv project signals such as `uv.lock` or `pyproject.toml` uv metadata, then prefer `uv pip uninstall/install --python <active-interpreter> --torch-backend cu126` for the PyTorch repair path. Keep `python -m pip` only as the fallback when no uv-managed project can be confirmed.

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import sysconfig
 from typing import Any
 
@@ -21,8 +22,8 @@ _MIN_WEIGHT_BYTES = 1_000_000
 _WEIGHT_SUFFIXES = {".safetensors", ".pt", ".pth", ".bin", ".ckpt"}
 _CTC_FORCED_ALIGNER_COMMIT = "e23e1525bae810f0582b6e539ce7aec63fd01196"
 _CTC_FORCED_ALIGNER_ARCHIVE_URL = (
-    "https://codeload.github.com/MahmoudAshraf97/ctc-forced-aligner/tar.gz/"
-    f"{_CTC_FORCED_ALIGNER_COMMIT}"
+    "https://github.com/MahmoudAshraf97/ctc-forced-aligner/archive/"
+    f"{_CTC_FORCED_ALIGNER_COMMIT}.tar.gz"
 )
 
 
@@ -76,11 +77,15 @@ def ensure_index_tts_runtime(
     *,
     layout: RuntimeLayout,
     uv_executable: str = "uv",
+    python_executable: str | None = None,
     force_sync: bool = False,
     force_model_download: bool = False,
 ) -> None:
     """Ensure the writable IndexTTS runtime project and checkpoints are ready."""
     resolved_uv_executable = resolve_uv_executable(uv_executable=uv_executable)
+    resolved_python_executable = _resolve_python_executable(
+        python_executable=python_executable
+    )
     _ensure_runtime_directories(layout=layout)
     source_fingerprints = _project_fingerprints(layout.vendor_source_dir)
     _copy_vendor_project_if_needed(
@@ -90,6 +95,7 @@ def ensure_index_tts_runtime(
     _sync_vendor_project_if_needed(
         layout=layout,
         uv_executable=resolved_uv_executable,
+        python_executable=resolved_python_executable,
         source_fingerprints=source_fingerprints,
         force_sync=force_sync,
     )
@@ -105,17 +111,14 @@ def ensure_ctc_forced_aligner_runtime(*, python_executable: str) -> None:
     if importlib.util.find_spec("ctc_forced_aligner") is not None:
         return
 
+    install_command, install_cwd = _build_python_package_install_command(
+        python_executable=python_executable,
+        package_spec=_CTC_FORCED_ALIGNER_ARCHIVE_URL,
+    )
     _run_cmd(
         step="ctc_forced_aligner_install",
-        command=[
-            python_executable,
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-input",
-            _CTC_FORCED_ALIGNER_ARCHIVE_URL,
-        ],
+        command=install_command,
+        cwd=install_cwd,
     )
 
 
@@ -126,10 +129,6 @@ def resolve_uv_executable(*, uv_executable: str = "uv") -> str:
     configured_path = Path(normalized).expanduser()
     if configured_path.is_file():
         return str(configured_path.resolve())
-
-    resolved_path = shutil.which(normalized)
-    if resolved_path is not None:
-        return resolved_path
 
     scripts_dir_value = sysconfig.get_path("scripts")
     if scripts_dir_value:
@@ -142,12 +141,61 @@ def resolve_uv_executable(*, uv_executable: str = "uv") -> str:
             if candidate_path.is_file():
                 return str(candidate_path.resolve())
 
+    resolved_path = shutil.which(normalized)
+    if resolved_path is not None:
+        return resolved_path
+
     raise RuntimeBootstrapError(
         step="preflight",
         message=(
             f"Missing required command '{normalized}'. "
             f"{build_tool_guidance(['uv'])}"
         ),
+    )
+
+
+def _resolve_python_executable(*, python_executable: str | None) -> str:
+    """Resolve the interpreter path that packaged nested uv commands must reuse."""
+    normalized = (python_executable or sys.executable).strip() or sys.executable
+    candidate = Path(normalized).expanduser()
+    if candidate.exists():
+        return str(candidate.resolve())
+    return normalized
+
+
+def _build_python_package_install_command(
+    *,
+    python_executable: str,
+    package_spec: str,
+    uv_executable: str = "uv",
+) -> tuple[list[str], Path | None]:
+    """Choose a package install command that works in both uv and pip environments."""
+    try:
+        resolved_uv_executable = resolve_uv_executable(uv_executable=uv_executable)
+    except RuntimeBootstrapError:
+        return (
+            [
+                python_executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                package_spec,
+            ],
+            None,
+        )
+
+    return (
+        [
+            resolved_uv_executable,
+            "pip",
+            "install",
+            "--python",
+            python_executable,
+            package_spec,
+        ],
+        Path.cwd(),
     )
 
 
@@ -249,6 +297,7 @@ def _sync_vendor_project_if_needed(
     *,
     layout: RuntimeLayout,
     uv_executable: str,
+    python_executable: str,
     source_fingerprints: Mapping[str, str],
     force_sync: bool,
 ) -> None:
@@ -264,17 +313,25 @@ def _sync_vendor_project_if_needed(
         or not runtime_venv_path.exists()
         or vendor_state.get("source_pyproject_hash") != source_fingerprints["pyproject_hash"]
         or vendor_state.get("source_lock_hash") != source_fingerprints["lock_hash"]
+        or vendor_state.get("python_executable") != python_executable
     )
     if needs_sync:
         _run_cmd(
             step="vendor_sync",
-            command=[uv_executable, "sync", "--locked"],
+            command=[
+                uv_executable,
+                "sync",
+                "--locked",
+                "--python",
+                python_executable,
+            ],
             cwd=layout.vendor_runtime_dir,
         )
 
     vendor_state = {
         "source_pyproject_hash": source_fingerprints["pyproject_hash"],
         "source_lock_hash": source_fingerprints["lock_hash"],
+        "python_executable": python_executable,
     }
     state["vendor_project"] = vendor_state
     _write_bootstrap_state(layout.bootstrap_state_path, state)
@@ -418,6 +475,8 @@ def _run_cmd(
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()

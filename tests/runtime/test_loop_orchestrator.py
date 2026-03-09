@@ -320,7 +320,7 @@ def test_run_summarizer_once_uses_full_transcript_timeout_floor() -> None:
             full_transcript_text="full transcript present",
         )
     )
-    assert observed_timeout["value"] == 900.0
+    assert observed_timeout["value"] == 1800.0
 
 
 def test_run_loop_uses_live_draft_summarizer_timeout_floor() -> None:

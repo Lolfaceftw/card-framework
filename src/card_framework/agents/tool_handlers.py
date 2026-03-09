@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 from card_framework.agents.client import AgentTaskClient, get_default_agent_client
@@ -170,10 +171,16 @@ class AddSpeakerMessageHandler(ToolHandler):
         registry: MessageRegistry,
         budget: BudgetContext,
         live_draft_session: LiveDraftVoiceCloneSession | None = None,
+        allowed_speaker_ids: Sequence[str] | None = None,
     ) -> None:
         self._registry = registry
         self._budget = budget
         self._live_draft_session = live_draft_session
+        self._allowed_speaker_ids = tuple(
+            speaker_id.strip()
+            for speaker_id in (allowed_speaker_ids or ())
+            if speaker_id.strip()
+        )
 
     @property
     def name(self) -> str:
@@ -181,6 +188,17 @@ class AddSpeakerMessageHandler(ToolHandler):
 
     @property
     def schema(self) -> dict[str, Any]:
+        speaker_id_schema: dict[str, Any] = {
+            "type": "string",
+            "description": "The speaker ID (for example SPEAKER_00).",
+        }
+        if self._allowed_speaker_ids:
+            speaker_id_schema["enum"] = list(self._allowed_speaker_ids)
+            speaker_id_schema["description"] = (
+                "The speaker ID. Use one of the available transcript speakers: "
+                + ", ".join(self._allowed_speaker_ids)
+                + "."
+            )
         return {
             "name": "add_speaker_message",
             "description": (
@@ -191,10 +209,7 @@ class AddSpeakerMessageHandler(ToolHandler):
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "speaker_id": {
-                        "type": "string",
-                        "description": "The speaker ID (for example SPEAKER_00).",
-                    },
+                    "speaker_id": speaker_id_schema,
                     "content": {
                         "type": "string",
                         "description": "The summarized content for this speaker turn.",
@@ -214,6 +229,19 @@ class AddSpeakerMessageHandler(ToolHandler):
         )
         if speaker_error is not None:
             return speaker_error
+        if (
+            self._allowed_speaker_ids
+            and speaker_id not in self._allowed_speaker_ids
+        ):
+            return {
+                "error": (
+                    "Argument 'speaker_id' must match an available transcript speaker. "
+                    f"Allowed values: {', '.join(self._allowed_speaker_ids)}."
+                ),
+                "error_code": "unknown_speaker_id",
+                "speaker_id": speaker_id,
+                "available_speaker_ids": list(self._allowed_speaker_ids),
+            }
 
         content, content_error = _require_non_empty_string_argument(
             arguments, "content"
@@ -644,6 +672,7 @@ def build_summarizer_tools(
     is_embedding_enabled: bool = True,
     agent_client: AgentTaskClient | None = None,
     live_draft_session: LiveDraftVoiceCloneSession | None = None,
+    allowed_speaker_ids: Sequence[str] | None = None,
 ) -> ToolRegistry:
     """Build the full summarizer tool registry."""
     budget = BudgetContext(
@@ -659,6 +688,7 @@ def build_summarizer_tools(
             registry,
             budget,
             live_draft_session=live_draft_session,
+            allowed_speaker_ids=allowed_speaker_ids,
         )
     )
     tool_registry.register(EstimateDurationHandler(registry, budget, calibration))
@@ -695,6 +725,7 @@ def build_revise_tools(
     is_embedding_enabled: bool = True,
     agent_client: AgentTaskClient | None = None,
     live_draft_session: LiveDraftVoiceCloneSession | None = None,
+    allowed_speaker_ids: Sequence[str] | None = None,
 ) -> ToolRegistry:
     """Build revise-mode tools with add/edit/remove support."""
     budget = BudgetContext(
@@ -710,6 +741,7 @@ def build_revise_tools(
             registry,
             budget,
             live_draft_session=live_draft_session,
+            allowed_speaker_ids=allowed_speaker_ids,
         )
     )
     tool_registry.register(EstimateDurationHandler(registry, budget, calibration))

@@ -143,7 +143,7 @@ def test_infer_auto_repairs_cpu_torch_when_host_reports_cuda_126(
     )
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
-        lambda command, cwd=None, check=False, capture_output=True, text=True, env=None: (
+        lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
             _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
             or subprocess.CompletedProcess(command, 0, "", "")
         ),
@@ -176,9 +176,11 @@ def test_install_supported_torch_cuda_runtime_prefers_uv_in_uv_project(
         check: bool = False,
         capture_output: bool = True,
         text: bool = True,
+        encoding: str | None = None,
+        errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, env
+        del check, capture_output, text, encoding, errors, env
         recorded_commands.append((command, str(cwd) if cwd is not None else None))
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -244,15 +246,23 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
     layout = _runtime_layout(tmp_path)
     monkeypatch.setenv("CARD_FRAMEWORK_CONFIG", str(config_path))
     monkeypatch.setattr("card_framework.api.ensure_runtime_requirements", lambda **_: None)
-    bootstrap_calls: list[tuple[RuntimeLayout, str]] = []
+    bootstrap_calls: list[tuple[RuntimeLayout, str, str]] = []
 
-    def _fake_bootstrap(*, layout: RuntimeLayout, uv_executable: str, **_: object) -> None:
-        bootstrap_calls.append((layout, uv_executable))
+    def _fake_bootstrap(
+        *,
+        layout: RuntimeLayout,
+        uv_executable: str,
+        python_executable: str,
+        **_: object,
+    ) -> None:
+        bootstrap_calls.append((layout, uv_executable, python_executable))
 
     monkeypatch.setattr("card_framework.api.ensure_index_tts_runtime", _fake_bootstrap)
     monkeypatch.setattr("card_framework.api.resolve_runtime_layout", lambda: layout)
 
     recorded_command: list[str] = []
+    recorded_encoding: str | None = None
+    recorded_errors: str | None = None
 
     def _fake_run(
         command: list[str],
@@ -260,10 +270,15 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
         check: bool = False,
         capture_output: bool = True,
         text: bool = True,
+        encoding: str | None = None,
+        errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        nonlocal recorded_encoding, recorded_errors
         del check, capture_output, text, env
         recorded_command[:] = command
+        recorded_encoding = encoding
+        recorded_errors = errors
         output_root = Path(cwd) if cwd is not None else tmp_path
         _write_success_outputs(output_root)
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -296,7 +311,9 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
         / "interjector"
         / "voice_cloned_interjected.wav"
     ).resolve()
-    assert bootstrap_calls == [(layout, "uv")]
+    assert bootstrap_calls == [(layout, "uv", sys.executable)]
+    assert recorded_encoding == "utf-8"
+    assert recorded_errors == "replace"
     assert "--config-path" in recorded_command
     assert "pipeline.start_stage=stage-1" in recorded_command
     assert "orchestrator.target_seconds=300" in recorded_command
@@ -343,7 +360,7 @@ def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
     )
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
-        lambda command, cwd=None, check=False, capture_output=True, text=True, env=None: (
+        lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
             _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
             or subprocess.CompletedProcess(command, 0, "", "")
         ),
@@ -400,9 +417,11 @@ def test_infer_disables_packaged_forced_alignment_when_bootstrap_fails(
         check: bool = False,
         capture_output: bool = True,
         text: bool = True,
+        encoding: str | None = None,
+        errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, env
+        del check, capture_output, text, encoding, errors, env
         invoked_config.update(_load_invoked_config(command))
         output_root = Path(cwd) if cwd is not None else tmp_path
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")
@@ -460,7 +479,7 @@ def test_infer_skips_ctc_forced_aligner_bootstrap_when_alignment_and_interjector
     )
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
-        lambda command, cwd=None, check=False, capture_output=True, text=True, env=None: (
+        lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
             _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
             or subprocess.CompletedProcess(command, 0, "", "")
         ),
@@ -509,9 +528,11 @@ def test_infer_omits_voice_clone_overrides_when_voice_clone_is_disabled(
         check: bool = False,
         capture_output: bool = True,
         text: bool = True,
+        encoding: str | None = None,
+        errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, env
+        del check, capture_output, text, encoding, errors, env
         recorded_command[:] = command
         output_root = Path(cwd) if cwd is not None else tmp_path
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")
@@ -579,9 +600,11 @@ def test_infer_vllm_url_override_forces_vllm_first_runtime(
         check: bool = False,
         capture_output: bool = True,
         text: bool = True,
+        encoding: str | None = None,
+        errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, env
+        del check, capture_output, text, encoding, errors, env
         recorded_command[:] = command
         invoked_config.update(_load_invoked_config(command))
         output_root = Path(cwd) if cwd is not None else tmp_path
@@ -660,9 +683,11 @@ def test_infer_prompts_for_missing_provider_api_key_without_cli_secret_leak(
         check: bool = False,
         capture_output: bool = True,
         text: bool = True,
+        encoding: str | None = None,
+        errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, env
+        del check, capture_output, text, encoding, errors, env
         recorded_command[:] = command
         invoked_config.update(_load_invoked_config(command))
         output_root = Path(cwd) if cwd is not None else tmp_path
@@ -729,9 +754,11 @@ def test_infer_prompts_for_pyannote_access_token(
         check: bool = False,
         capture_output: bool = True,
         text: bool = True,
+        encoding: str | None = None,
+        errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, env
+        del check, capture_output, text, encoding, errors, env
         invoked_config.update(_load_invoked_config(command))
         output_root = Path(cwd) if cwd is not None else tmp_path
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")

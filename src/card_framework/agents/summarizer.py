@@ -22,7 +22,10 @@ from card_framework.agents.summarizer_tool_dispatcher import (
 from card_framework.agents.tool_handlers import build_revise_tools, build_summarizer_tools
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
-from card_framework.audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
+from card_framework.audio_pipeline.voice_clone_orchestrator import (
+    VoiceCloneOrchestrator,
+    load_speaker_sample_references,
+)
 from card_framework.shared.events import EventBus, get_event_bus
 from card_framework.shared.llm_provider import LLMProvider
 from card_framework.shared.prompt_manager import PromptManager
@@ -33,6 +36,10 @@ class SummarizerExecutor(BaseA2AExecutor):
     """Produce an abstractive, duration-targeted summary of a transcript."""
 
     _DEFAULT_NEUTRAL_WPM = 150.0
+    _FULL_TRANSCRIPT_EXCERPT_MAX_CHARS = 12_000
+    _FULL_TRANSCRIPT_EXCERPT_TARGET_LINES = 42
+    _FULL_TRANSCRIPT_EXCERPT_EDGE_LINES = 6
+    _FULL_TRANSCRIPT_EXCERPT_LINE_CHAR_CAP = 220
 
     _DEFAULT_LOOP_GUARDRAILS: dict[str, Any] = {
         "enabled": False,
@@ -128,6 +135,101 @@ class SummarizerExecutor(BaseA2AExecutor):
     def _build_loop_context_prompt_block(raw_loop_context: Any) -> str:
         """Build a bounded loop-context payload for prompt injection."""
         return build_loop_context_prompt_block(raw_loop_context, char_cap=1024)
+
+    @classmethod
+    def _truncate_transcript_line(cls, line: str) -> str:
+        """Bound one transcript line while preserving its speaker prefix."""
+        if len(line) <= cls._FULL_TRANSCRIPT_EXCERPT_LINE_CHAR_CAP:
+            return line
+
+        suffix = "... [truncated line]"
+        prefix = ""
+        content = line
+        if "]: " in line:
+            raw_prefix, content = line.split("]: ", 1)
+            prefix = f"{raw_prefix}]: "
+
+        available = cls._FULL_TRANSCRIPT_EXCERPT_LINE_CHAR_CAP - len(prefix) - len(
+            suffix
+        )
+        if available <= 0:
+            trimmed_prefix = prefix[
+                : max(cls._FULL_TRANSCRIPT_EXCERPT_LINE_CHAR_CAP - len(suffix), 0)
+            ].rstrip()
+            return f"{trimmed_prefix}{suffix}"
+        return f"{prefix}{content[:available].rstrip()}{suffix}"
+
+    @classmethod
+    def _select_excerpt_line_indices(cls, total_lines: int) -> list[int]:
+        """Choose transcript lines that preserve start, end, and midstream coverage."""
+        if total_lines <= 0:
+            return []
+        if total_lines <= cls._FULL_TRANSCRIPT_EXCERPT_TARGET_LINES:
+            return list(range(total_lines))
+
+        edge_lines = min(
+            cls._FULL_TRANSCRIPT_EXCERPT_EDGE_LINES,
+            cls._FULL_TRANSCRIPT_EXCERPT_TARGET_LINES // 2,
+            total_lines // 2,
+        )
+        tail_start = max(total_lines - edge_lines, edge_lines)
+        middle_start = edge_lines
+        middle_span = max(tail_start - middle_start, 0)
+        middle_target = min(
+            max(cls._FULL_TRANSCRIPT_EXCERPT_TARGET_LINES - (edge_lines * 2), 0),
+            middle_span,
+        )
+
+        indices = list(range(edge_lines))
+        if middle_target > 0 and middle_span > 0:
+            step = middle_span / middle_target
+            middle_indices: list[int] = []
+            for slot in range(middle_target):
+                candidate = middle_start + int((slot + 0.5) * step)
+                candidate = min(candidate, tail_start - 1)
+                if middle_indices and candidate <= middle_indices[-1]:
+                    candidate = min(tail_start - 1, middle_indices[-1] + 1)
+                middle_indices.append(candidate)
+            indices.extend(middle_indices)
+        indices.extend(range(tail_start, total_lines))
+        return indices
+
+    @classmethod
+    def _build_full_transcript_prompt_excerpt(cls, full_transcript: str) -> str:
+        """Build a bounded transcript excerpt for embeddings-disabled summarization."""
+        transcript_text = full_transcript.strip()
+        if len(transcript_text) <= cls._FULL_TRANSCRIPT_EXCERPT_MAX_CHARS:
+            return transcript_text
+
+        lines = [line.strip() for line in transcript_text.splitlines() if line.strip()]
+        if not lines:
+            return transcript_text[: cls._FULL_TRANSCRIPT_EXCERPT_MAX_CHARS].rstrip()
+
+        selected_indices = cls._select_excerpt_line_indices(len(lines))
+        rendered_lines = [
+            (
+                "[Coverage-sampled transcript excerpt because embeddings are disabled. "
+                f"Showing {len(selected_indices)} of {len(lines)} transcript lines "
+                "spanning the full conversation.]"
+            )
+        ]
+        previous_index = -1
+        for line_index in selected_indices:
+            omitted_lines = line_index - previous_index - 1
+            if omitted_lines > 0:
+                rendered_lines.append(
+                    f"[... omitted {omitted_lines} transcript lines ...]"
+                )
+            rendered_lines.append(cls._truncate_transcript_line(lines[line_index]))
+            previous_index = line_index
+
+        excerpt = "\n".join(rendered_lines)
+        if len(excerpt) <= cls._FULL_TRANSCRIPT_EXCERPT_MAX_CHARS:
+            return excerpt
+
+        suffix = "\n[excerpt truncated]"
+        available = max(cls._FULL_TRANSCRIPT_EXCERPT_MAX_CHARS - len(suffix), 0)
+        return f"{excerpt[:available].rstrip()}{suffix}"
 
     def _resolve_provider_metadata(self) -> tuple[str, str]:
         """Return provider class name and best-effort model identifier."""
@@ -279,6 +381,7 @@ class SummarizerExecutor(BaseA2AExecutor):
 
         revise_mode = bool(previous_draft and feedback)
         live_draft_session: LiveDraftVoiceCloneSession | None = None
+        allowed_speaker_ids: tuple[str, ...] = ()
         if self.live_draft_audio_enabled:
             if not speaker_samples_manifest_path:
                 raise RuntimeError(
@@ -294,6 +397,14 @@ class SummarizerExecutor(BaseA2AExecutor):
                 orchestrator=self.voice_clone_orchestrator,
                 state_path=Path(draft_audio_state_path),
                 speaker_samples_manifest_path=Path(speaker_samples_manifest_path),
+            )
+        if speaker_samples_manifest_path:
+            allowed_speaker_ids = tuple(
+                sorted(
+                    load_speaker_sample_references(
+                        Path(speaker_samples_manifest_path)
+                    ).keys()
+                )
             )
 
         loop_guardrails = self._resolve_loop_guardrails()
@@ -353,6 +464,7 @@ class SummarizerExecutor(BaseA2AExecutor):
                 self.is_embedding_enabled,
                 agent_client=self.agent_client,
                 live_draft_session=live_draft_session,
+                allowed_speaker_ids=allowed_speaker_ids,
             )
             if restored_live_snapshot is None:
                 self.event_bus.publish(
@@ -371,6 +483,7 @@ class SummarizerExecutor(BaseA2AExecutor):
                 self.is_embedding_enabled,
                 agent_client=self.agent_client,
                 live_draft_session=live_draft_session,
+                allowed_speaker_ids=allowed_speaker_ids,
             )
 
         transcript_excerpt = ""
@@ -427,10 +540,12 @@ class SummarizerExecutor(BaseA2AExecutor):
                 text = seg.get("text", "")
                 transcript_excerpt += f"[{speaker}]: {text}\n"
         else:
-            transcript_excerpt = full_transcript
+            transcript_excerpt = self._build_full_transcript_prompt_excerpt(
+                full_transcript
+            )
             self.event_bus.publish(
                 "system_message",
-                "Using full transcript directly (embeddings disabled).",
+                "Using bounded full-transcript fallback (embeddings disabled).",
             )
             total_words = len(full_transcript.split())
             num_segments = full_transcript.count("\n")

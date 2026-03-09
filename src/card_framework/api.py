@@ -218,7 +218,11 @@ def infer(
 
         layout = resolve_runtime_layout()
         if require_uv:
-            ensure_index_tts_runtime(layout=layout, uv_executable=uv_executable)
+            ensure_index_tts_runtime(
+                layout=layout,
+                uv_executable=uv_executable,
+                python_executable=sys.executable,
+            )
 
         command = _build_pipeline_command(
             audio_path=audio_path,
@@ -903,6 +907,8 @@ def _run_package_manager_command(
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode == 0:
         return
@@ -1045,6 +1051,8 @@ def _run_pipeline_command(*, command: list[str], output_dir: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
     )
     if completed.returncode != 0:
