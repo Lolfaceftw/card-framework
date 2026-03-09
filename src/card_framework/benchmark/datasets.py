@@ -9,10 +9,15 @@ from typing import Any
 
 from card_framework.benchmark.artifacts import utc_now_iso
 from card_framework.benchmark.types import BenchmarkSample
+from card_framework.shared.paths import discover_reusable_transcript_path
 
 
 class ManifestError(RuntimeError):
     """Raised when benchmark manifest data is invalid."""
+
+
+_LOCAL_TRANSCRIPT_AUTO_SENTINEL = "auto"
+_LEGACY_LOCAL_TRANSCRIPT_PATH = "summary.json"
 
 
 def _normalize_transcript_path(raw_path: str, repo_root: Path) -> str:
@@ -20,6 +25,40 @@ def _normalize_transcript_path(raw_path: str, repo_root: Path) -> str:
     if path.is_absolute():
         return str(path)
     return str((repo_root / path).resolve())
+
+
+def _resolve_local_transcript_path(*, raw_path: str, repo_root: Path) -> str:
+    """Resolve the local benchmark transcript path with repo-aware discovery.
+
+    Args:
+        raw_path: Requested local transcript path or the ``auto`` sentinel.
+        repo_root: Repository root used for relative resolution and discovery.
+
+    Returns:
+        Absolute path to the resolved transcript JSON.
+
+    Raises:
+        ManifestError: If no suitable local transcript can be found.
+    """
+    normalized = raw_path.strip()
+    use_auto_discovery = not normalized or normalized == _LOCAL_TRANSCRIPT_AUTO_SENTINEL
+    if not use_auto_discovery:
+        candidate = _normalize_transcript_path(normalized, repo_root)
+        if Path(candidate).exists():
+            return candidate
+        use_auto_discovery = normalized == _LEGACY_LOCAL_TRANSCRIPT_PATH
+
+    if use_auto_discovery:
+        discovered_path = discover_reusable_transcript_path(repo_root)
+        if discovered_path is not None:
+            return str(discovered_path)
+
+    raise ManifestError(
+        "No reusable local transcript was found. Pass "
+        "`--local-transcript-path <path-to-transcript.json>` or create one at "
+        "repo-root `transcript.json`, repo-root `*.transcript.json`, or "
+        "`artifacts/transcripts/*.transcript.json`."
+    )
 
 
 def _segment_stats(transcript: dict[str, Any]) -> dict[str, int]:
@@ -60,7 +99,13 @@ def load_manifest(manifest_path: Path, repo_root: Path) -> list[BenchmarkSample]
                 "Each sample requires sample_id, dataset, and transcript_path"
             )
 
-        transcript_path = _normalize_transcript_path(transcript_path_raw, repo_root)
+        if dataset == "local":
+            transcript_path = _resolve_local_transcript_path(
+                raw_path=transcript_path_raw,
+                repo_root=repo_root,
+            )
+        else:
+            transcript_path = _normalize_transcript_path(transcript_path_raw, repo_root)
         if not Path(transcript_path).exists():
             raise ManifestError(
                 f"Sample '{sample_id}' transcript path does not exist: {transcript_path}"
@@ -107,7 +152,10 @@ def prepare_manifest(
     normalized_sources = [source.strip().lower() for source in sources if source.strip()]
 
     if "local" in normalized_sources:
-        transcript_path = _normalize_transcript_path(local_transcript_path, repo_root)
+        transcript_path = _resolve_local_transcript_path(
+            raw_path=local_transcript_path,
+            repo_root=repo_root,
+        )
         transcript = json.loads(Path(transcript_path).read_text(encoding="utf-8-sig"))
         stats = _segment_stats(transcript)
         samples.append(

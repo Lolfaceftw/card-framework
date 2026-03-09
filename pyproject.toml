@@ -5,8 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "card-framework"
 version = "0.1.0"
-description = "Add your description here"
+description = "Constraint-aware audio resynthesis and distillation pipeline."
 readme = "README.md"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.12"
 dependencies = [
     "openai",
@@ -126,3 +128,6 @@ markers = [
     "gpu: tests that require GPU acceleration",
     "network: tests that require external network access",
 ]
+
+[tool.ruff]
+extend-exclude = ["src/card_framework/_vendor"]
