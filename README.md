@@ -174,3 +174,10 @@ uv run python -m card_framework.cli.calibrate
 
 If you are changing behavior, prompts, workflows, or commands, start with
 `coder_docs/codebase_guide.md`.
+
+## License
+
+This repository is source-available under
+[`LICENSE.md`](./LICENSE.md), using the **PolyForm Noncommercial 1.0.0**
+license. Noncommercial use is allowed; commercial use requires separate
+permission from the licensors.
