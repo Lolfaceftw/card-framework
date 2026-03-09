@@ -37,6 +37,33 @@ jobs:
         run: |
           set -euo pipefail
 
+          python - <<'PY'
+          import pathlib
+          import tarfile
+          import zipfile
+
+          expected = (
+              "Requires-Dist: ctc-forced-aligner @ "
+              "git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git"
+              "@e23e1525bae810f0582b6e539ce7aec63fd01196"
+          )
+          forbidden = "Requires-Dist: ctc-forced-aligner\n"
+
+          wheel_path = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel_path) as wheel_zip:
+              metadata_name = next(name for name in wheel_zip.namelist() if name.endswith("METADATA"))
+              wheel_metadata = wheel_zip.read(metadata_name).decode("utf-8")
+          assert expected in wheel_metadata, wheel_metadata
+          assert forbidden not in wheel_metadata, wheel_metadata
+
+          sdist_path = next(pathlib.Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist_path, "r:gz") as sdist_tar:
+              pkg_info_name = next(name for name in sdist_tar.getnames() if name.endswith("/PKG-INFO"))
+              pkg_info = sdist_tar.extractfile(pkg_info_name).read().decode("utf-8")
+          assert expected in pkg_info, pkg_info
+          assert forbidden not in pkg_info, pkg_info
+          PY
+
           smoke_check() {
             local artifact="$1"
             local venv_dir="$2"

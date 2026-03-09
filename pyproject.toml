@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "card-framework"
-version = "1.0.1"
+version = "1.0.2"
 description = "Constraint-aware audio resynthesis and distillation pipeline."
 readme = "README.md"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
@@ -44,7 +44,7 @@ dependencies = [
     "soundfile>=0.13.1",
     "torchcodec>=0.10.0",
     "nltk>=3.8.1",
-    "ctc-forced-aligner",
+    "ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git@e23e1525bae810f0582b6e539ce7aec63fd01196",
     "deepmultilingualpunctuation",
     "tiktoken",
     "textual",
@@ -109,7 +109,6 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu126" }
 torchaudio = { index = "pytorch-cu126" }
-ctc-forced-aligner = { git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git" }
 deepmultilingualpunctuation = { git = "https://github.com/oliverguhr/deepmultilingualpunctuation.git" }
 
 [tool.pytest.ini_options]

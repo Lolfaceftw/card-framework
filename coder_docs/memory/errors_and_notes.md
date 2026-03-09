@@ -1,5 +1,9 @@
 # Errors And Notes
 
+### 2026-03-09T23:10:00+08:00 - Public Wheel Metadata Must Pin The Git `ctc-forced-aligner` Source, Not The PyPI Name
+- Problem: The published `card-framework 1.0.1` wheel exposed a bare `Requires-Dist: ctc-forced-aligner`, but plain `pip` ignores this repo's `tool.uv.sources` override. Downstream Windows installs therefore resolved the unrelated Deskpai `ctc-forced-aligner 1.0.2` sdist from PyPI, which failed during linking with `LNK2001: unresolved external symbol PyInit_align_ops` and also did not expose the API that CARD imports.
+- Solution: Move `ctc-forced-aligner` to a direct Git requirement in `[project.dependencies]`, keep the lockfile pinned to commit `e23e1525bae810f0582b6e539ce7aec63fd01196`, update package-management and README guidance, and extend the publish workflow smoke test to assert that both wheel and sdist metadata preserve the Git-pinned requirement instead of regressing to the bare PyPI package name.
+
 ### 2026-03-09T22:00:07+08:00 - Secret-History Remediation Must Expect `git-filter-repo` To Drop `origin`
 - Problem: Purging leaked secrets and private endpoints from published Git history required a full `git-filter-repo --replace-text` rewrite across all refs. The rewrite succeeded, but `git-filter-repo` intentionally removed the `origin` remote as a safety guard, which can look like unrelated repository damage if the operator expects the remote to remain configured.
 - Solution: Before rewriting, create an out-of-repo backup bundle and capture the exact secret and private-endpoint replacements to redact. After the rewrite, rescan both `HEAD` and `git log --all` for the exact leaked values plus broad secret and private-IP patterns, then restore `origin` explicitly before preparing the required `git push --force-with-lease --all` and tag follow-up.

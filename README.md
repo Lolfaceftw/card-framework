@@ -169,6 +169,25 @@ The repository now exposes a library entrypoint for installed-package use:
 pip install card-framework
 ```
 
+As of March 9, 2026, the already-published `card-framework 1.0.1` release on
+PyPI still carries the older bare `ctc-forced-aligner` dependency metadata.
+Plain `pip install card-framework` can therefore resolve the unrelated Deskpai
+`ctc-forced-aligner 1.0.2` source distribution from PyPI, which fails on
+Windows during linking with `LNK2001: unresolved external symbol
+PyInit_align_ops`. Until a newer CARD release is cut from this repository
+state, either:
+
+```bash
+python -m pip install "ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git@e23e1525bae810f0582b6e539ce7aec63fd01196"
+python -m pip install card-framework
+```
+
+or install from a checkout with the repo-standard command:
+
+```bash
+uv sync --dev
+```
+
 ```python
 from card_framework import infer
 
@@ -252,6 +271,10 @@ publisher** flow because the project does not exist on PyPI yet. Configure:
 - GitHub repository: `card-framework`
 - Workflow filename: `publish-pypi.yml`
 - Environment name: `pypi`
+
+Because the already-published `card-framework 1.0.1` wheel used the older bare
+`ctc-forced-aligner` requirement, the next fixed public release must use a new
+version tag rather than retrying `v1.0.1`.
 
 Repository-side release steps:
 

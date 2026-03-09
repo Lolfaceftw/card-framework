@@ -491,7 +491,7 @@ dev = [
 requires-dist = [
     { name = "a2a-sdk", extras = ["all"] },
     { name = "accelerate", specifier = ">=1.12.0" },
-    { name = "ctc-forced-aligner", git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git" },
+    { name = "ctc-forced-aligner", git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git?rev=e23e1525bae810f0582b6e539ce7aec63fd01196" },
     { name = "datasets", specifier = ">=4.5.0" },
     { name = "deepmultilingualpunctuation", git = "https://github.com/oliverguhr/deepmultilingualpunctuation.git" },
     { name = "demucs", specifier = ">=4.0.1" },
@@ -817,7 +817,7 @@ wheels = [
 [[package]]
 name = "ctc-forced-aligner"
 version = "0.3.0"
-source = { git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git#e23e1525bae810f0582b6e539ce7aec63fd01196" }
+source = { git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git?rev=e23e1525bae810f0582b6e539ce7aec63fd01196#e23e1525bae810f0582b6e539ce7aec63fd01196" }
 dependencies = [
     { name = "nltk" },
     { name = "torch" },
