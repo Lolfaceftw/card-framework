@@ -126,6 +126,8 @@ def probe_audio_duration_ms(audio_path: Path) -> int | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         duration_match = _FFMPEG_DURATION_PATTERN.search(
             (completed.stderr or "") + "\n" + (completed.stdout or "")

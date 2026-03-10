@@ -46,7 +46,9 @@ Preferred workflow:
 - Dev-only tools belong in a dependency group, usually `dev` unless the project intentionally introduces a more specific group.
 - Keep `ctc-forced-aligner` out of published runtime dependencies. In this repo
   it belongs in `dependency-groups.dev`, while packaged `infer(...)` bootstraps
-  the pinned upstream source on demand.
+  the pinned upstream source on demand, preferring `uv pip --python
+  <active-interpreter>` when `uv` is available and falling back only when it is
+  not.
 - If you manually edit dependency declarations in `pyproject.toml`, run `uv lock` afterward and review the resulting lockfile diff.
 - Keep dependency changes atomic and easy to review.
 

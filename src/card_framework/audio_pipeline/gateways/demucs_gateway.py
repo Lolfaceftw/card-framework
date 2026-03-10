@@ -98,6 +98,8 @@ class DemucsSourceSeparator(SourceSeparator):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=self.timeout_seconds,
                 )
                 break

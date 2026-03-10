@@ -61,7 +61,7 @@ class Orchestrator:
         "index": 300,
     }
     _FULL_TRANSCRIPT_TIMEOUT_FLOORS = {
-        "summarizer": 900.0,
+        "summarizer": 1800.0,
         "critic": 300.0,
     }
     _LIVE_DRAFT_SUMMARIZER_TIMEOUT_MULTIPLIER = 6.0

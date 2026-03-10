@@ -12,6 +12,7 @@ wheels/
 # Local tooling state
 .agents/
 .tmp*/
+.tmp_packaged_infer_env/
 
 # Logs
 *.log

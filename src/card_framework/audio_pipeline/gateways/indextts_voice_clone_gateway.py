@@ -366,6 +366,8 @@ def _build_persistent_worker_command(
         "run",
         "--project",
         str(runner_project_dir),
+        "--python",
+        sys.executable,
         "python",
         str(runner_script),
         "--cfg-path",

@@ -87,9 +87,28 @@ def test_probe_audio_duration_ms_parses_ffmpeg_duration_output(
         "card_framework.audio_pipeline.runtime.resolve_command_path",
         lambda command_name: "ffmpeg.exe",
     )
-    monkeypatch.setattr(
-        "card_framework.audio_pipeline.runtime.subprocess.run",
-        lambda command, check, stdout, stderr, text: subprocess.CompletedProcess(
+    observed_kwargs: dict[str, object] = {}
+
+    def _fake_run(
+        command: list[str],
+        check: bool,
+        stdout: int,
+        stderr: int,
+        text: bool,
+        encoding: str,
+        errors: str,
+    ) -> subprocess.CompletedProcess[str]:
+        observed_kwargs.update(
+            {
+                "check": check,
+                "stdout": stdout,
+                "stderr": stderr,
+                "text": text,
+                "encoding": encoding,
+                "errors": errors,
+            }
+        )
+        return subprocess.CompletedProcess(
             command,
             1,
             "",
@@ -97,9 +116,12 @@ def test_probe_audio_duration_ms_parses_ffmpeg_duration_output(
                 "Input #0, wav, from 'sample.wav':\n"
                 "  Duration: 00:01:23.45, bitrate: 128 kb/s\n"
             ),
-        ),
-    )
+        )
+
+    monkeypatch.setattr("card_framework.audio_pipeline.runtime.subprocess.run", _fake_run)
 
     duration_ms = probe_audio_duration_ms(audio_path)
 
     assert duration_ms == 83_450
+    assert observed_kwargs["encoding"] == "utf-8"
+    assert observed_kwargs["errors"] == "replace"
