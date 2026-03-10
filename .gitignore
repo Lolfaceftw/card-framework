@@ -13,6 +13,7 @@ wheels/
 .agents/
 .tmp*/
 .tmp_packaged_infer_env/
+.actual_test/
 
 # Logs
 *.log

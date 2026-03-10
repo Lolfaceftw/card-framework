@@ -14,7 +14,7 @@ from card_framework.audio_pipeline.calibration import (
     VoiceCloneCalibration,
     ensure_voice_clone_calibration,
 )
-from card_framework.shared.paths import DEFAULT_CONFIG_PATH, REPO_ROOT
+from card_framework.shared.paths import DEFAULT_CONFIG_PATH as PACKAGED_DEFAULT_CONFIG_PATH
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -52,10 +52,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Rebuild calibration even when the artifact already exists.",
     )
+    parser.add_argument("--project-root", help=argparse.SUPPRESS)
+    parser.add_argument("--config-file", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
-def load_audio_config(project_root: Path) -> dict[str, Any]:
+def load_audio_config(project_root: Path, *, config_path: Path | None = None) -> dict[str, Any]:
     """Load the repository audio config as a plain dictionary.
 
     Args:
@@ -68,7 +70,8 @@ def load_audio_config(project_root: Path) -> dict[str, Any]:
         FileNotFoundError: If the repository config file is missing.
         ValueError: If the config file does not define an ``audio`` mapping.
     """
-    config_path = DEFAULT_CONFIG_PATH
+    del project_root
+    config_path = config_path or PACKAGED_DEFAULT_CONFIG_PATH
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     config = OmegaConf.load(config_path)
@@ -99,6 +102,16 @@ def resolve_optional_path(project_root: Path, raw_value: str | None) -> Path | N
     candidate = Path(normalized).expanduser()
     if not candidate.is_absolute():
         candidate = (project_root / candidate).resolve()
+    return candidate.resolve()
+
+
+def resolve_project_root(raw_value: str | None) -> Path:
+    """Resolve the effective project root for relative calibration inputs."""
+    if raw_value is None or not raw_value.strip():
+        return Path.cwd().resolve()
+    candidate = Path(raw_value.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
     return candidate.resolve()
 
 
@@ -152,8 +165,9 @@ def main(argv: list[str] | None = None) -> int:
         Process exit code.
     """
     args = parse_args(argv)
-    project_root = REPO_ROOT
-    audio_cfg = load_audio_config(project_root)
+    project_root = resolve_project_root(args.project_root)
+    config_path = resolve_optional_path(project_root, args.config_file)
+    audio_cfg = load_audio_config(project_root, config_path=config_path)
     calibration = ensure_voice_clone_calibration(
         project_root=project_root,
         audio_cfg=audio_cfg,

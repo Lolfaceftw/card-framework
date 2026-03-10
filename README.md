@@ -203,6 +203,12 @@ outputs/run_001/
     interjector/
 ```
 
+Packaged `infer(...)` now delegates through `card_framework.cli.setup_and_run`
+so live operator output streams again during pip-installed runs. Relative input
+discovery in that wrapper follows the caller workspace, while the packaged
+`infer(...)` contract still keeps final run artifacts under the explicit
+`output_dir`.
+
 Installed-package runtime notes:
 
 - Supported public packaged-runtime platform as of March 9, 2026: Windows only.
