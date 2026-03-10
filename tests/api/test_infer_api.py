@@ -144,7 +144,12 @@ def test_infer_auto_repairs_cpu_torch_when_host_reports_cuda_126(
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
         lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
-            _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
+            _write_success_outputs(
+                _command_output_root(
+                    command,
+                    Path(cwd) if cwd is not None else tmp_path,
+                )
+            )
             or subprocess.CompletedProcess(command, 0, "", "")
         ),
     )
@@ -244,6 +249,7 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
     )
 
     layout = _runtime_layout(tmp_path)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CARD_FRAMEWORK_CONFIG", str(config_path))
     monkeypatch.setattr("card_framework.api.ensure_runtime_requirements", lambda **_: None)
     bootstrap_calls: list[tuple[RuntimeLayout, str, str]] = []
@@ -261,6 +267,7 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
     monkeypatch.setattr("card_framework.api.resolve_runtime_layout", lambda: layout)
 
     recorded_command: list[str] = []
+    recorded_cwd: str | None = None
     recorded_encoding: str | None = None
     recorded_errors: str | None = None
 
@@ -274,12 +281,16 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
         errors: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        nonlocal recorded_encoding, recorded_errors
+        nonlocal recorded_cwd, recorded_encoding, recorded_errors
         del check, capture_output, text, env
         recorded_command[:] = command
+        recorded_cwd = str(cwd) if cwd is not None else None
         recorded_encoding = encoding
         recorded_errors = errors
-        output_root = Path(cwd) if cwd is not None else tmp_path
+        output_root = _command_output_root(
+            command,
+            Path(cwd) if cwd is not None else tmp_path,
+        )
         _write_success_outputs(output_root)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -312,16 +323,21 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
         / "voice_cloned_interjected.wav"
     ).resolve()
     assert bootstrap_calls == [(layout, "uv", sys.executable)]
+    assert recorded_cwd == str(tmp_path)
     assert recorded_encoding == "utf-8"
     assert recorded_errors == "replace"
-    assert "--config-path" in recorded_command
+    assert recorded_command[:3] == [sys.executable, "-m", "card_framework.cli.setup_and_run"]
+    assert "--config-file" in recorded_command
+    recorded_config_path = Path(recorded_command[recorded_command.index("--config-file") + 1])
+    assert recorded_config_path.suffix in {".yaml", ".yml"}
+    assert "--workspace-root" in recorded_command
+    assert str(tmp_path) in recorded_command
+    assert "--output-root" in recorded_command
+    assert str((tmp_path / "outputs").resolve()) in recorded_command
+    assert "--audio-path" in recorded_command
+    assert str(audio_path.resolve()) in recorded_command
     assert "pipeline.start_stage=stage-1" in recorded_command
     assert "orchestrator.target_seconds=300" in recorded_command
-    assert f"audio.audio_path={audio_path.resolve().as_posix()}" in recorded_command
-    assert (
-        f"audio.voice_clone.runner_project_dir={layout.vendor_runtime_dir.as_posix()}"
-        in recorded_command
-    )
 
 
 def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
@@ -361,7 +377,12 @@ def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
         lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
-            _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
+            _write_success_outputs(
+                _command_output_root(
+                    command,
+                    Path(cwd) if cwd is not None else tmp_path,
+                )
+            )
             or subprocess.CompletedProcess(command, 0, "", "")
         ),
     )
@@ -423,7 +444,10 @@ def test_infer_disables_packaged_forced_alignment_when_bootstrap_fails(
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text, encoding, errors, env
         invoked_config.update(_load_invoked_config(command))
-        output_root = Path(cwd) if cwd is not None else tmp_path
+        output_root = _command_output_root(
+            command,
+            Path(cwd) if cwd is not None else tmp_path,
+        )
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")
         (output_root / "summary.xml").write_text("<summary></summary>\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -480,7 +504,12 @@ def test_infer_skips_ctc_forced_aligner_bootstrap_when_alignment_and_interjector
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
         lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
-            _write_success_outputs(Path(cwd) if cwd is not None else tmp_path)
+            _write_success_outputs(
+                _command_output_root(
+                    command,
+                    Path(cwd) if cwd is not None else tmp_path,
+                )
+            )
             or subprocess.CompletedProcess(command, 0, "", "")
         ),
     )
@@ -534,7 +563,10 @@ def test_infer_omits_voice_clone_overrides_when_voice_clone_is_disabled(
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text, encoding, errors, env
         recorded_command[:] = command
-        output_root = Path(cwd) if cwd is not None else tmp_path
+        output_root = _command_output_root(
+            command,
+            Path(cwd) if cwd is not None else tmp_path,
+        )
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")
         (output_root / "summary.xml").write_text("<summary></summary>\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -543,10 +575,7 @@ def test_infer_omits_voice_clone_overrides_when_voice_clone_is_disabled(
 
     result = infer(audio_path, tmp_path / "outputs", 180, device="cpu")
 
-    assert not any(
-        item.startswith("audio.voice_clone.runner_project_dir=")
-        for item in recorded_command
-    )
+    assert "--output-root" in recorded_command
     assert "orchestrator.target_seconds=180" in recorded_command
     assert result.voice_clone_manifest_path is None
     assert result.voice_clone_audio_path is None
@@ -607,7 +636,10 @@ def test_infer_vllm_url_override_forces_vllm_first_runtime(
         del check, capture_output, text, encoding, errors, env
         recorded_command[:] = command
         invoked_config.update(_load_invoked_config(command))
-        output_root = Path(cwd) if cwd is not None else tmp_path
+        output_root = _command_output_root(
+            command,
+            Path(cwd) if cwd is not None else tmp_path,
+        )
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")
         (output_root / "summary.xml").write_text("<summary></summary>\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -690,7 +722,10 @@ def test_infer_prompts_for_missing_provider_api_key_without_cli_secret_leak(
         del check, capture_output, text, encoding, errors, env
         recorded_command[:] = command
         invoked_config.update(_load_invoked_config(command))
-        output_root = Path(cwd) if cwd is not None else tmp_path
+        output_root = _command_output_root(
+            command,
+            Path(cwd) if cwd is not None else tmp_path,
+        )
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")
         (output_root / "summary.xml").write_text("<summary></summary>\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -760,7 +795,10 @@ def test_infer_prompts_for_pyannote_access_token(
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text, encoding, errors, env
         invoked_config.update(_load_invoked_config(command))
-        output_root = Path(cwd) if cwd is not None else tmp_path
+        output_root = _command_output_root(
+            command,
+            Path(cwd) if cwd is not None else tmp_path,
+        )
         (output_root / "transcript.json").write_text('{"segments": []}\n', encoding="utf-8")
         (output_root / "summary.xml").write_text("<summary></summary>\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -903,14 +941,24 @@ def _load_invoked_config(command: list[str]) -> dict[str, Any]:
     """Load the effective config file passed to the CLI subprocess."""
     from omegaconf import OmegaConf
 
-    config_dir = Path(command[command.index("--config-path") + 1])
-    config_name = command[command.index("--config-name") + 1]
-    config_path = config_dir / f"{config_name}.yaml"
-    if not config_path.exists():
-        config_path = config_dir / f"{config_name}.yml"
+    if "--config-file" in command:
+        config_path = Path(command[command.index("--config-file") + 1])
+    else:
+        config_dir = Path(command[command.index("--config-path") + 1])
+        config_name = command[command.index("--config-name") + 1]
+        config_path = config_dir / f"{config_name}.yaml"
+        if not config_path.exists():
+            config_path = config_dir / f"{config_name}.yml"
     payload = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
     assert isinstance(payload, dict)
     return payload
+
+
+def _command_output_root(command: list[str], fallback_root: Path) -> Path:
+    """Resolve the infer wrapper output root from one recorded command."""
+    if "--output-root" not in command:
+        return fallback_root.resolve()
+    return Path(command[command.index("--output-root") + 1]).resolve()
 
 
 def _write_success_outputs(output_root: Path) -> None:

@@ -27,7 +27,7 @@ from card_framework.runtime.bootstrap import (
     resolve_uv_executable,
 )
 from card_framework.shared.paths import DEFAULT_CONFIG_PATH
-from card_framework.shared.runtime_layout import RuntimeLayout, resolve_runtime_layout
+from card_framework.shared.runtime_layout import resolve_runtime_layout
 
 _CONFIG_ENV_VAR = "CARD_FRAMEWORK_CONFIG"
 _UV_ENV_VAR = "CARD_FRAMEWORK_UV_EXECUTABLE"
@@ -39,6 +39,7 @@ _DEFAULT_VLLM_API_KEY = "EMPTY"
 _PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu126"
 _PYTORCH_FALLBACK_INDEX_URL = "https://pypi.org/simple"
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
+_SETUP_AND_RUN_MODULE = "card_framework.cli.setup_and_run"
 _CUDA_VERSION_PATTERN = re.compile(r"(\d+\.\d+)")
 _PROVIDER_API_KEY_REQUIREMENTS: dict[str, dict[str, object]] = {
     "card_framework.providers.deepseek_provider.DeepSeekProvider": {
@@ -180,6 +181,7 @@ def infer(
     )
     resolved_output_dir = Path(output_dir).expanduser().resolve()
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
+    workspace_root = Path.cwd().resolve()
 
     base_config_path = _resolve_config_path()
     base_config = _load_config_mapping(base_config_path)
@@ -226,14 +228,17 @@ def infer(
 
         command = _build_pipeline_command(
             audio_path=audio_path,
+            workspace_root=workspace_root,
             output_dir=resolved_output_dir,
             config_path=config_path,
-            layout=layout,
             target_duration_seconds=resolved_target_duration_seconds,
-            voice_clone_enabled=voice_clone_enabled,
             uv_executable=uv_executable,
         )
-        _run_pipeline_command(command=command, output_dir=resolved_output_dir)
+        _run_pipeline_command(
+            command=command,
+            output_dir=resolved_output_dir,
+            workspace_root=workspace_root,
+        )
         return _build_inference_result(
             output_dir=resolved_output_dir,
             config=config,
@@ -999,68 +1004,59 @@ def _write_config_mapping(config_path: Path, config: Mapping[str, Any]) -> None:
 def _build_pipeline_command(
     *,
     audio_path: Path,
+    workspace_root: Path,
     output_dir: Path,
     config_path: Path,
-    layout: RuntimeLayout,
     target_duration_seconds: int,
-    voice_clone_enabled: bool,
     uv_executable: str,
 ) -> list[str]:
-    """Build the subprocess command used to execute the existing Hydra pipeline."""
+    """Build the subprocess command used to execute packaged inference."""
     command = [
         sys.executable,
         "-m",
-        "card_framework.cli.main",
-        "--config-path",
-        str(config_path.parent),
-        "--config-name",
-        config_path.stem,
-        "hydra.run.dir=.",
-        "hydra.output_subdir=null",
+        _SETUP_AND_RUN_MODULE,
+        "--audio-path",
+        str(audio_path),
+        "--workspace-root",
+        str(workspace_root),
+        "--output-root",
+        str(output_dir),
+        "--config-file",
+        str(config_path),
+        "--uv-executable",
+        uv_executable,
+        "--override",
         "pipeline.start_stage=stage-1",
+        "--override",
         f"orchestrator.target_seconds={target_duration_seconds}",
-        f"audio.audio_path={_hydra_path(audio_path)}",
-        "audio.output_transcript_path=transcript.json",
-        "transcript_path=transcript.json",
-        "audio.work_dir=audio_stage",
-        "logging.log_file=agent_interactions.log",
-        "logging.print_to_terminal=false",
-        "logging.summarizer_critic_print_to_terminal=false",
     ]
-    if voice_clone_enabled:
-        command.extend(
-            [
-                f"audio.voice_clone.runner_project_dir={_hydra_path(layout.vendor_runtime_dir)}",
-                f"audio.voice_clone.cfg_path={_hydra_path(layout.checkpoints_dir / 'config.yaml')}",
-                f"audio.voice_clone.model_dir={_hydra_path(layout.checkpoints_dir)}",
-                f"audio.voice_clone.uv_executable={uv_executable}",
-            ]
-        )
-    del output_dir
     return command
 
 
-def _run_pipeline_command(*, command: list[str], output_dir: Path) -> None:
+def _run_pipeline_command(
+    *,
+    command: list[str],
+    output_dir: Path,
+    workspace_root: Path,
+) -> None:
     """Run the pipeline subprocess and raise a concise error on failure."""
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("HYDRA_FULL_ERROR", "1")
     completed = subprocess.run(
         command,
-        cwd=output_dir,
+        cwd=workspace_root,
         check=False,
-        capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         env=env,
     )
     if completed.returncode != 0:
-        details = _tail_text(completed.stderr or completed.stdout or "", 4000)
         raise RuntimeError(
             "CARD pipeline execution failed.\n"
             f"Command: {' '.join(command)}\n"
-            f"Details:\n{details}"
+            f"Output directory: {output_dir}"
         )
 
 

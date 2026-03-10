@@ -13,14 +13,23 @@ import subprocess
 import sys
 from typing import Any, Literal, Mapping, Sequence, TypeAlias, cast
 
-from card_framework.shared.paths import REPO_ROOT, discover_reusable_transcript_path
+from card_framework.runtime.bootstrap import ensure_index_tts_runtime
+from card_framework.shared.paths import (
+    DEFAULT_CONFIG_PATH as PACKAGED_DEFAULT_CONFIG_PATH,
+    REPO_ROOT,
+    VENDOR_INDEX_TTS_DIR,
+    discover_reusable_transcript_path,
+)
+from card_framework.shared.runtime_layout import resolve_runtime_layout
 
 MAIN_MODULE = "card_framework.cli.main"
 CALIBRATE_MODULE = "card_framework.cli.calibrate"
-SETUP_STATE_PATH = REPO_ROOT / "artifacts" / "bootstrap" / "setup_state.json"
 DEFAULT_CONFIG_PATH: Path | None = None
 INDEX_TTS_DIR: Path | None = None
 INDEX_TTS_CHECKPOINTS_DIR: Path | None = None
+CONFIG_FILE_PATH: Path | None = None
+WORKSPACE_ROOT: Path | None = None
+OUTPUT_ROOT: Path | None = None
 MIN_WEIGHT_BYTES = 1_000_000
 WEIGHT_SUFFIXES = {".safetensors", ".pt", ".pth", ".bin", ".ckpt"}
 PREFERRED_ROOT_AUDIO_FILENAMES = (
@@ -162,6 +171,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="git",
         help="Executable for git commands (default: git).",
     )
+    parser.add_argument("--workspace-root", help=argparse.SUPPRESS)
+    parser.add_argument("--output-root", help=argparse.SUPPRESS)
+    parser.add_argument("--config-file", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -177,25 +189,82 @@ def utc_now_iso() -> str:
 
 def resolve_repo_config_path() -> Path:
     """Return the active repo config path, preferring the packaged src layout."""
+    if CONFIG_FILE_PATH is not None:
+        return Path(CONFIG_FILE_PATH).resolve()
     if DEFAULT_CONFIG_PATH is not None:
         return Path(DEFAULT_CONFIG_PATH).resolve()
-    return (REPO_ROOT / "src" / "card_framework" / "config" / "config.yaml").resolve()
+    return PACKAGED_DEFAULT_CONFIG_PATH.resolve()
+
+
+def resolve_workspace_root() -> Path:
+    """Return the caller workspace root used for relative operator-facing paths."""
+    if WORKSPACE_ROOT is not None:
+        return Path(WORKSPACE_ROOT).resolve()
+    return Path.cwd().resolve()
+
+
+def resolve_output_root() -> Path:
+    """Return the output root used for packaged-style flat artifact layouts."""
+    if OUTPUT_ROOT is not None:
+        return Path(OUTPUT_ROOT).resolve()
+    return resolve_workspace_root()
+
+
+def has_explicit_output_root() -> bool:
+    """Return whether the wrapper was given an explicit output root."""
+    return OUTPUT_ROOT is not None
+
+
+def resolve_setup_state_path() -> Path:
+    """Return the per-workspace setup-state JSON path."""
+    return (resolve_workspace_root() / "artifacts" / "bootstrap" / "setup_state.json").resolve()
+
+
+def resolve_root_project_dir() -> Path | None:
+    """Return the repository checkout root when running from source."""
+    candidate = REPO_ROOT.resolve()
+    if (candidate / "pyproject.toml").exists() and (candidate / ".git").exists():
+        return candidate
+    return None
+
+
+def is_repo_checkout_runtime() -> bool:
+    """Return whether the wrapper is executing from the repository checkout."""
+    return resolve_root_project_dir() is not None
 
 
 def resolve_index_tts_dir() -> Path:
     """Return the active vendored IndexTTS source directory for this repo."""
     if INDEX_TTS_DIR is not None:
         return Path(INDEX_TTS_DIR).resolve()
+    root_project_dir = resolve_root_project_dir()
+    if root_project_dir is not None:
+        return (
+            root_project_dir / "src" / "card_framework" / "_vendor" / "index_tts"
+        ).resolve()
+    return VENDOR_INDEX_TTS_DIR.resolve()
+
+
+def resolve_index_tts_runner_project_dir() -> Path:
+    """Return the IndexTTS project dir that runtime subprocesses should execute from."""
+    if is_repo_checkout_runtime():
+        return resolve_index_tts_dir()
+    layout = resolve_runtime_layout()
     return (
-        REPO_ROOT / "src" / "card_framework" / "_vendor" / "index_tts"
-    ).resolve()
+        layout.vendor_runtime_dir.resolve()
+        if layout.vendor_runtime_dir.exists()
+        else layout.vendor_source_dir.resolve()
+    )
 
 
 def resolve_index_tts_checkpoints_dir() -> Path:
     """Return the active IndexTTS checkpoints directory for this repo."""
     if INDEX_TTS_CHECKPOINTS_DIR is not None:
         return Path(INDEX_TTS_CHECKPOINTS_DIR).resolve()
-    return (REPO_ROOT / "checkpoints" / "index_tts").resolve()
+    root_project_dir = resolve_root_project_dir()
+    if root_project_dir is not None:
+        return (root_project_dir / "checkpoints" / "index_tts").resolve()
+    return resolve_runtime_layout().checkpoints_dir.resolve()
 
 
 def run_cmd(
@@ -255,6 +324,7 @@ def run_cmd(
 
 def check_prerequisites(
     *,
+    uv_executable: str,
     git_executable: str,
     require_git: bool = True,
     require_ffmpeg: bool = True,
@@ -271,10 +341,14 @@ def check_prerequisites(
         BootstrapError: If tools or required repo paths are missing.
     """
     del git_executable
-    required_tools = ["uv"]
+    required_tools = [uv_executable]
     if require_ffmpeg:
         required_tools.append("ffmpeg")
-    missing_tools = [tool for tool in required_tools if shutil.which(tool) is None]
+    missing_tools = [
+        tool
+        for tool in required_tools
+        if not Path(tool).expanduser().is_file() and shutil.which(tool) is None
+    ]
     if missing_tools:
         raise BootstrapError(
             step="preflight",
@@ -284,18 +358,24 @@ def check_prerequisites(
             ),
         )
 
-    required_paths = list(BASE_REQUIRED_REPO_PATHS)
+    required_paths: list[Path] = [Path(__file__).with_name("main.py"), resolve_repo_config_path()]
     if require_git:
-        required_paths.extend(VOICE_CLONE_REQUIRED_REPO_PATHS)
-    missing_paths = [
-        rel_path for rel_path in required_paths if not (REPO_ROOT / rel_path).exists()
-    ]
+        index_tts_dir = resolve_index_tts_dir()
+        required_paths.extend(
+            [
+                index_tts_dir,
+                index_tts_dir / "pyproject.toml",
+                index_tts_dir / "uv.lock",
+                index_tts_dir / "indextts",
+            ]
+        )
+    missing_paths = [str(path) for path in required_paths if not path.exists()]
     if missing_paths:
         raise BootstrapError(
             step="preflight",
             message=(
-                "Repository is missing required path(s): "
-                f"{', '.join(missing_paths)}. Run from repository root."
+                "Runtime is missing required path(s): "
+                f"{', '.join(missing_paths)}."
             ),
         )
 
@@ -370,7 +450,10 @@ def smart_sync_projects(
     Raises:
         BootstrapError: If required project files are missing or sync command fails.
     """
-    project_specs = [("root", REPO_ROOT)]
+    root_project_dir = resolve_root_project_dir()
+    project_specs: list[tuple[str, Path]] = []
+    if root_project_dir is not None:
+        project_specs.append(("root", root_project_dir))
     if include_index_tts:
         project_specs.append(("index_tts", resolve_index_tts_dir()))
     state = _read_setup_state()
@@ -440,10 +523,11 @@ def _sha256_file(path: Path) -> str:
 
 def _read_setup_state() -> dict[str, Any]:
     """Read setup-state JSON; return empty mapping when absent/invalid."""
-    if not SETUP_STATE_PATH.exists():
+    setup_state_path = resolve_setup_state_path()
+    if not setup_state_path.exists():
         return {}
     try:
-        payload = json.loads(SETUP_STATE_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(setup_state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(payload, dict):
@@ -453,10 +537,11 @@ def _read_setup_state() -> dict[str, Any]:
 
 def _write_setup_state(payload: Mapping[str, Any]) -> None:
     """Persist setup-state JSON atomically."""
-    SETUP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = SETUP_STATE_PATH.with_suffix(".json.tmp")
+    setup_state_path = resolve_setup_state_path()
+    setup_state_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = setup_state_path.with_suffix(".json.tmp")
     temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(SETUP_STATE_PATH)
+    temp_path.replace(setup_state_path)
 
 
 def checkpoints_ready(checkpoints_dir: Path) -> tuple[bool, str]:
@@ -589,7 +674,7 @@ def resolve_audio_input(path_value: str) -> Path:
         raise BootstrapError(step="input", message="Audio path must not be empty.")
     candidate = Path(normalized).expanduser()
     if not candidate.is_absolute():
-        candidate = (REPO_ROOT / candidate).resolve()
+        candidate = (resolve_workspace_root() / candidate).resolve()
     if not candidate.exists():
         raise BootstrapError(step="input", message=f"Audio path does not exist: {candidate}")
     if not candidate.is_file():
@@ -637,7 +722,42 @@ def resolve_path_input(path_value: str, *, field_name: str) -> Path:
         raise BootstrapError(step="input", message=f"{field_name} must not be empty.")
     candidate = Path(normalized).expanduser()
     if not candidate.is_absolute():
-        candidate = (REPO_ROOT / candidate).resolve()
+        candidate = (resolve_workspace_root() / candidate).resolve()
+    if not candidate.exists():
+        raise BootstrapError(step="input", message=f"{field_name} does not exist: {candidate}")
+    if not candidate.is_file():
+        raise BootstrapError(step="input", message=f"{field_name} is not a file: {candidate}")
+    return candidate
+
+
+def resolve_directory_input(path_value: str, *, field_name: str) -> Path:
+    """Resolve one generic directory path, creating no files automatically."""
+    normalized = path_value.strip().strip('"').strip("'")
+    if not normalized:
+        raise BootstrapError(step="input", message=f"{field_name} must not be empty.")
+    candidate = Path(normalized).expanduser()
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
+    if not candidate.exists():
+        raise BootstrapError(step="input", message=f"{field_name} does not exist: {candidate}")
+    if not candidate.is_dir():
+        raise BootstrapError(step="input", message=f"{field_name} is not a directory: {candidate}")
+    return candidate
+
+
+def resolve_file_input(
+    path_value: str,
+    *,
+    field_name: str,
+    base_dir: Path,
+) -> Path:
+    """Resolve one file path relative to a supplied base directory."""
+    normalized = path_value.strip().strip('"').strip("'")
+    if not normalized:
+        raise BootstrapError(step="input", message=f"{field_name} must not be empty.")
+    candidate = Path(normalized).expanduser()
+    if not candidate.is_absolute():
+        candidate = (base_dir / candidate).resolve()
     if not candidate.exists():
         raise BootstrapError(step="input", message=f"{field_name} does not exist: {candidate}")
     if not candidate.is_file():
@@ -734,13 +854,13 @@ def _discover_existing_transcript_path() -> Path | None:
     2. The most recently modified ``*.transcript.json`` at the repo root.
     3. The most recently modified ``artifacts/transcripts/*.transcript.json``.
     """
-    return discover_reusable_transcript_path(REPO_ROOT)
+    return discover_reusable_transcript_path(resolve_workspace_root())
 
 
 def _discover_existing_audio_path() -> Path | None:
     """Return the preferred reusable root-level source audio path when present."""
     for filename in PREFERRED_ROOT_AUDIO_FILENAMES:
-        candidate = (REPO_ROOT / filename).resolve()
+        candidate = (resolve_workspace_root() / filename).resolve()
         if candidate.is_file():
             return candidate
     return None
@@ -748,7 +868,7 @@ def _discover_existing_audio_path() -> Path | None:
 
 def _discover_existing_summary_path() -> Path | None:
     """Return the preferred reusable root-level summary XML path when present."""
-    candidate = (REPO_ROOT / "summary.xml").resolve()
+    candidate = (resolve_workspace_root() / "summary.xml").resolve()
     if candidate.is_file():
         return candidate
     return None
@@ -762,7 +882,7 @@ def _find_latest_speaker_samples_manifest() -> Path:
         BootstrapError: If no manifest can be discovered.
     """
     manifests = sorted(
-        (REPO_ROOT / "artifacts" / "audio_stage" / "runs").glob(
+        (resolve_workspace_root() / "artifacts" / "audio_stage" / "runs").glob(
             "*/speaker_samples/manifest.json"
         ),
         key=lambda path: path.stat().st_mtime,
@@ -800,7 +920,7 @@ def _write_voiceclone_shortcut_transcript(
         BootstrapError: If output cannot be written.
     """
     output_path = (
-        REPO_ROOT
+        resolve_output_root()
         / "artifacts"
         / "bootstrap"
         / "voiceclone_shortcuts"
@@ -1154,9 +1274,17 @@ def build_run_overrides(
     Returns:
         Ordered list of Hydra override key-value strings.
     """
-    run_work_dir = (REPO_ROOT / "artifacts" / "audio_stage" / "runs" / run_id).resolve()
-    transcript_path = (REPO_ROOT / "artifacts" / "transcripts" / f"{run_id}.transcript.json")
-    transcript_path = transcript_path.resolve()
+    if has_explicit_output_root():
+        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
+        transcript_path = (resolve_output_root() / "transcript.json").resolve()
+    else:
+        workspace_root = resolve_workspace_root()
+        run_work_dir = (
+            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
+        ).resolve()
+        transcript_path = (
+            workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
+        ).resolve()
     overrides = [
         f"pipeline.start_stage={start_stage}",
         f"audio.work_dir={_path_for_override(run_work_dir)}",
@@ -1167,7 +1295,7 @@ def build_run_overrides(
         "logging.print_to_terminal=true",
     ]
     if enable_voice_clone:
-        index_tts_dir = resolve_index_tts_dir()
+        index_tts_dir = resolve_index_tts_runner_project_dir()
         checkpoints_dir = resolve_index_tts_checkpoints_dir()
         overrides.extend(
             [
@@ -1396,7 +1524,7 @@ def resolve_transcript_metadata_path(
         return None
     candidate = Path(raw_value).expanduser()
     if not candidate.is_absolute():
-        candidate = (REPO_ROOT / candidate).resolve()
+        candidate = (resolve_workspace_root() / candidate).resolve()
     return candidate
 
 
@@ -1452,11 +1580,27 @@ def run_pipeline(*, uv_executable: str, overrides: Sequence[str]) -> None:
     Raises:
         BootstrapError: If pipeline command exits non-zero.
     """
-    command = [uv_executable, "run", "python", "-m", MAIN_MODULE, *overrides]
+    config_path = resolve_repo_config_path()
+    command: list[str]
+    if is_repo_checkout_runtime():
+        command = [uv_executable, "run", "python", "-m", MAIN_MODULE]
+    else:
+        command = [sys.executable, "-m", MAIN_MODULE]
+    command.extend(
+        [
+            "--config-path",
+            str(config_path.parent),
+            "--config-name",
+            config_path.stem,
+            "hydra.run.dir=.",
+            "hydra.output_subdir=null",
+            *overrides,
+        ]
+    )
     run_cmd(
         step="pipeline_run",
         command=command,
-        cwd=REPO_ROOT,
+        cwd=resolve_output_root(),
         stream_output=True,
     )
 
@@ -1470,7 +1614,19 @@ def run_calibration(
     force: bool = False,
 ) -> None:
     """Run the dedicated calibration helper with resolved inputs."""
-    command = [uv_executable, "run", "python", "-m", CALIBRATE_MODULE]
+    command: list[str]
+    if is_repo_checkout_runtime():
+        command = [uv_executable, "run", "python", "-m", CALIBRATE_MODULE]
+    else:
+        command = [sys.executable, "-m", CALIBRATE_MODULE]
+    command.extend(
+        [
+            "--project-root",
+            str(resolve_output_root()),
+            "--config-file",
+            str(resolve_repo_config_path()),
+        ]
+    )
     if speaker_samples_manifest_path is not None:
         command.extend(
             [
@@ -1487,7 +1643,7 @@ def run_calibration(
     run_cmd(
         step="calibration",
         command=command,
-        cwd=REPO_ROOT,
+        cwd=resolve_output_root(),
         stream_output=True,
     )
 
@@ -1507,9 +1663,17 @@ def print_summary(
     if run_id is None:
         return
 
-    run_work_dir = (REPO_ROOT / "artifacts" / "audio_stage" / "runs" / run_id).resolve()
-    transcript_path = (REPO_ROOT / "artifacts" / "transcripts" / f"{run_id}.transcript.json")
-    transcript_path = transcript_path.resolve()
+    if has_explicit_output_root():
+        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
+        transcript_path = (resolve_output_root() / "transcript.json").resolve()
+    else:
+        workspace_root = resolve_workspace_root()
+        run_work_dir = (
+            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
+        ).resolve()
+        transcript_path = (
+            workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
+        ).resolve()
     speaker_manifest = run_work_dir / "speaker_samples" / "manifest.json"
     voice_clone_manifest = run_work_dir / "voice_clone" / "manifest.json"
     interjector_manifest = run_work_dir / "interjector" / "interjector_manifest.json"
@@ -1524,7 +1688,30 @@ def print_summary(
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run setup phases and, by default, execute the full pipeline."""
+    global CONFIG_FILE_PATH, WORKSPACE_ROOT, OUTPUT_ROOT
     args = parse_args(argv)
+    workspace_root = Path.cwd().resolve()
+    if args.workspace_root:
+        workspace_root = resolve_directory_input(
+            args.workspace_root,
+            field_name="Workspace root",
+        )
+    output_root = workspace_root
+    if args.output_root:
+        output_root_candidate = Path(args.output_root).expanduser()
+        if not output_root_candidate.is_absolute():
+            output_root_candidate = (workspace_root / output_root_candidate).resolve()
+        output_root = output_root_candidate.resolve()
+    config_file_path: Path | None = None
+    if args.config_file:
+        config_file_path = resolve_file_input(
+            args.config_file,
+            field_name="Config file",
+            base_dir=workspace_root,
+        )
+    WORKSPACE_ROOT = workspace_root
+    OUTPUT_ROOT = output_root if args.output_root else None
+    CONFIG_FILE_PATH = config_file_path
     records: list[StepRecord] = []
     run_id: str | None = None
 
@@ -1588,6 +1775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print("[1/6] Preflight checks")
         check_prerequisites(
+            uv_executable=args.uv_executable,
             git_executable=args.git_executable,
             require_git=synthesis_enabled,
             require_ffmpeg=ffmpeg_required,
@@ -1619,19 +1807,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         print("[3/6] Dependency sync")
-        synced_projects = smart_sync_projects(
-            uv_executable=args.uv_executable,
-            force_sync=bool(args.force_sync),
-            include_index_tts=synthesis_enabled,
-        )
-        if synced_projects:
-            detail = f"synced projects: {', '.join(synced_projects)}"
+        if synthesis_enabled and not is_repo_checkout_runtime():
+            layout = resolve_runtime_layout()
+            ensure_index_tts_runtime(
+                layout=layout,
+                uv_executable=args.uv_executable,
+                python_executable=sys.executable,
+                force_sync=bool(args.force_sync),
+                force_model_download=bool(args.force_model_download),
+            )
+            detail = f"packaged runtime ready at {layout.vendor_runtime_dir}"
         else:
-            detail = "sync skipped (fingerprints unchanged)"
+            synced_projects = smart_sync_projects(
+                uv_executable=args.uv_executable,
+                force_sync=bool(args.force_sync),
+                include_index_tts=synthesis_enabled,
+            )
+            if synced_projects:
+                detail = f"synced projects: {', '.join(synced_projects)}"
+            else:
+                detail = "sync skipped (fingerprints unchanged)"
         records.append(StepRecord(name="dependency_sync", status="ok", detail=detail))
 
         print("[4/6] Model provisioning")
-        if synthesis_enabled:
+        if synthesis_enabled and not is_repo_checkout_runtime():
+            records.append(
+                StepRecord(
+                    name="model_download",
+                    status="ok",
+                    detail=f"packaged checkpoints ready at {resolve_index_tts_checkpoints_dir()}",
+                )
+            )
+        elif synthesis_enabled:
             model_result = ensure_indextts_model(
                 uv_executable=args.uv_executable,
                 force_download=bool(args.force_model_download),
