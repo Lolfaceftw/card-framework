@@ -68,7 +68,11 @@ def test_normalize_messages_prunes_dangling_tool_calls() -> None:
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [_tool_call("call_x", "add_speaker_message", {"speaker_id": "SPEAKER_00"})],
+            "tool_calls": [
+                _tool_call(
+                    "call_x", "add_speaker_message", {"speaker_id": "SPEAKER_00"}
+                )
+            ],
         }
     ]
 
@@ -78,3 +82,21 @@ def test_normalize_messages_prunes_dangling_tool_calls() -> None:
     assert normalized[0]["role"] == "assistant"
     assert "tool_calls" not in normalized[0]
     assert normalized[0]["content"] == "[Tool call skipped or invalid]"
+
+
+def test_normalize_messages_drops_reasoning_content_from_history() -> None:
+    provider = DeepSeekProvider(api_key="test")
+    messages = [
+        {
+            "role": "assistant",
+            "content": "final answer",
+            "reasoning_content": "hidden chain of thought",
+        }
+    ]
+
+    normalized = provider._normalize_messages(messages)
+
+    assert len(normalized) == 1
+    assert normalized[0]["role"] == "assistant"
+    assert normalized[0]["content"] == "final answer"
+    assert "reasoning_content" not in normalized[0]

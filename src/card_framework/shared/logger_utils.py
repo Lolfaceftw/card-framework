@@ -1,6 +1,8 @@
-﻿import logging
 import json
+import logging
 from logging.handlers import RotatingFileHandler
+
+from rich.logging import RichHandler
 
 from card_framework.shared.events import event_bus
 
@@ -75,8 +77,15 @@ def configure_logger(cfg):
 
     # Console Handler (only if enabled)
     if cfg.get("print_to_terminal", False):
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
+        console_handler = RichHandler(
+            show_time=True,
+            omit_repeated_times=False,
+            show_level=True,
+            show_path=False,
+            markup=False,
+            rich_tracebacks=True,
+        )
+        console_handler.setFormatter(logging.Formatter("%(name)s - %(message)s"))
         logger.addHandler(console_handler)
 
     return logger
@@ -110,7 +119,9 @@ def _on_agent_thought(agent_name: str, thought: str, **kwargs):
 
 def _on_tool_invocation(tool_name: str, arguments: dict, **kwargs):
     logger.info(
-        _format_with_metadata(f"[Tool Invocation] {tool_name} with {arguments}", **kwargs)
+        _format_with_metadata(
+            f"[Tool Invocation] {tool_name} with {arguments}", **kwargs
+        )
     )
 
 
@@ -194,4 +205,3 @@ event_bus.subscribe("a2a_call_retry", _on_a2a_call_retry)
 event_bus.subscribe("a2a_call_succeeded", _on_a2a_call_succeeded)
 event_bus.subscribe("a2a_call_failed", _on_a2a_call_failed)
 event_bus.subscribe("llm_call_completed", _on_llm_call_completed)
-

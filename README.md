@@ -147,8 +147,12 @@ uv run python -m card_framework.cli.setup_and_run --help
 uv run python -m card_framework.cli.calibrate --help
 uv run python -m card_framework.cli.run_summary_matrix --help
 uv run python -m card_framework.benchmark.run --help
+uv run python -m card_framework.benchmark.watchdog --help
+uv run python -m card_framework.benchmark.summarizer_critic --help
+uv run python -m card_framework.benchmark.summarizer_critic.sporc --help
 uv run python -m card_framework.benchmark.diarization --help
 uv run python -m card_framework.benchmark.qa --help
+uv run python -m card_framework.benchmark.qa_supervisor --help
 uv run ruff check .
 uv run pytest
 ```
@@ -160,6 +164,52 @@ uv run python -m card_framework.cli.setup_and_run --audio-path <path-to-audio>
 uv run python -m card_framework.cli.main
 uv run python -m card_framework.cli.calibrate
 ```
+
+Benchmark helpers:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic prepare-dataset
+uv run python -m card_framework.benchmark.summarizer_critic execute --prepare-if-missing --summarizer-provider vllm_default
+uv run python -m card_framework.benchmark.summarizer_critic supervise --prepare-if-missing --max-runs 3
+uv run python -m card_framework.benchmark.summarizer_critic.sporc prepare-dataset --dataset-variant sample
+uv run python -m card_framework.benchmark.summarizer_critic.sporc prepare-dataset --dataset-variant full
+uv run python -m card_framework.benchmark.summarizer_critic.sporc curate-longform
+uv run python -m card_framework.benchmark.summarizer_critic.sporc execute --prepare-if-missing --max-samples 100 --summarizer-provider vllm_default
+uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --examples 10 --transcript-only --summarizer-provider vllm_default
+uv run python -m card_framework.benchmark.summarizer_critic.sporc supervise --prepare-if-missing --max-runs 3
+```
+
+The new `summarizer_critic` benchmark package uses the official QMSum repository
+as its real public dataset source, prepares the full `data/ALL/test`
+general-meeting-summary slice, derives each `target_seconds` value from the
+human reference summary length, runs the actual summarizer and critic agents,
+and writes JSON plus markdown artifacts under
+`artifacts/summarizer_critic_benchmark`.
+
+The SPoRC path lives at `card_framework.benchmark.summarizer_critic.sporc`.
+It prepares SPoRC episode and speaker-turn files, feeds transcript samples into
+the existing summarizer-critic loop, defaults to 100 examples per run, treats
+`--max-samples 0` as all prepared examples, and uses LLM-as-a-judge scoring for
+`Factualness`, `Naturalness`, and `Speaker Grammar Similarity`. Because the
+upstream `blitt/SPoRC` dataset is gated on Hugging Face, prepare runs need
+accepted data terms plus an authenticated `HF_TOKEN` or explicit local SPoRC
+file paths. The execute path still supports the repo's faithful combined
+stage-2/stage-3 voice-clone integration, but it now also supports
+`--transcript-only` for transcript-first summarizer-critic benchmarking that
+skips source-audio downloads, speaker-sample generation, and live-draft voice
+cloning. Sample preparation still defaults to
+`artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_sample`, while
+full-dataset preparation now defaults to
+`artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full`. The new
+`curate-longform` subcommand filters a prepared full manifest down to strict
+long-form multi-speaker episodes using the released Hugging Face speaker-turn
+table as the diarized transcript source, requiring `15,000+` spoken words,
+multiple substantial speakers, strong turn counts, and low music/noise-token
+ratios. The new `duration-sweep` subcommand exposes a non-interactive menu plus
+`--mode single` and `--mode batch-all` flows for preset duration benchmarking
+across `30s`, `1m`, `5m`, and `15m`, writes aggregate markdown and JSON sweep
+artifacts under `artifacts/summarizer_critic_benchmark/sweeps`, and keeps the
+default benchmark vLLM profile compatible with `VLLM_URL` overrides.
 
 ## Package Usage
 
@@ -312,6 +362,8 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
   manuscript
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current
   architecture, runtime flow, commands, and maintenance expectations
+- [`coder_docs/research_agents.md`](./coder_docs/research_agents.md):
+  authoritative Codex research-agent usage and delegated web-research workflow
 - [`coder_docs/memory/errors_and_notes.md`](./coder_docs/memory/errors_and_notes.md):
   repository memory for recurring pitfalls and prior fixes
 - [`coder_docs/fault_localization_workflow.md`](./coder_docs/fault_localization_workflow.md):
@@ -319,6 +371,11 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
 
 If you are changing behavior, prompts, workflows, or commands, start with
 `coder_docs/codebase_guide.md`.
+
+If you are working through Codex, follow `AGENTS.md` plus
+`coder_docs/research_agents.md` so delegated open-web research goes through the
+configured `researcher` agent while local repository work stays in the main
+thread.
 
 ## License
 

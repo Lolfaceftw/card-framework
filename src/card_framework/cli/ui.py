@@ -1,11 +1,11 @@
-﻿import io
+import io
 import json
 import os
 import re
 import time
 from typing import Any
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -165,6 +165,7 @@ class ConsoleManager:
                 "Summarizer": "green",
                 "Critic": "magenta",
                 "Corrector": "yellow",
+                "Judge": "bright_blue",
                 "tool_name": "bold yellow",
                 "tool_args": "dim cyan",
                 "tool_result": "dim green",
@@ -275,7 +276,7 @@ class ConsoleManager:
         # Pick color based on agent name, default to white
         border_style = (
             agent_name
-            if agent_name in ["Retrieval", "Summarizer", "Critic", "Corrector"]
+            if agent_name in ["Retrieval", "Summarizer", "Critic", "Corrector", "Judge"]
             else "white"
         )
 
@@ -308,7 +309,7 @@ class ConsoleManager:
         self._clear_inline_status()
         border_style = (
             agent_name
-            if agent_name in ["Retrieval", "Summarizer", "Critic", "Corrector"]
+            if agent_name in ["Retrieval", "Summarizer", "Critic", "Corrector", "Judge"]
             else "white"
         )
 
@@ -334,12 +335,15 @@ class ConsoleManager:
                     transient=True,
                 )
                 self.live.__enter__()
+                self._render(force=True)
                 return self
 
             def __exit__(self, exc_type, exc_val, exc_tb):
                 final_panel = self._build_panel()
                 self._render(force=True)
-                self.live.__exit__(exc_type, exc_val, exc_tb)
+                live = self.live
+                if live is not None:
+                    live.__exit__(exc_type, exc_val, exc_tb)
                 if self.full_content.strip() or self.full_thought.strip():
                     self.console.print(final_panel)
                     self.console.print()
@@ -350,27 +354,35 @@ class ConsoleManager:
                     encoding=getattr(self.console.file, "encoding", None),
                 )
                 if not self.full_thought.strip() and not display_content.strip():
-                    from rich.console import Group
+                    return Panel(
+                        Text("Waiting for first token...", style="dim italic"),
+                        title=Text(f"[ {self.agent_name} ]", style=self.border_style),
+                        title_align="left",
+                        border_style=self.border_style,
+                        padding=(1, 2),
+                    )
 
-                    return Group()
-
-                text = Text()
+                renderables: list[Any] = []
                 if self.full_thought.strip():
-                    text.append("[THINKING]\n", style="bold yellow")
-                    text.append(
+                    thought_text = Text()
+                    thought_text.append("[THINKING]\n", style="bold yellow")
+                    thought_text.append(
                         _sanitize_console_text(
                             self.full_thought,
                             encoding=getattr(self.console.file, "encoding", None),
                         ),
                         style="thought",
                     )
-                    text.append("\n" + "-" * 40 + "\n", style="dim")
+                    renderables.append(thought_text)
+
+                if self.full_thought.strip() and display_content:
+                    renderables.append(Text("-" * 40, style="dim"))
 
                 if display_content:
-                    text.append(display_content)
+                    renderables.append(Markdown(display_content))
 
                 return Panel(
-                    text,
+                    Group(*renderables),
                     title=Text(f"[ {self.agent_name} ]", style=self.border_style),
                     title_align="left",
                     border_style=self.border_style,
@@ -383,7 +395,10 @@ class ConsoleManager:
                     force
                     or (now - self._last_render_at) >= self._min_render_interval_seconds
                 ):
-                    self.live.update(self._build_panel(), refresh=True)
+                    live = self.live
+                    if live is None:
+                        return
+                    live.update(self._build_panel(), refresh=True)
                     self._last_render_at = now
 
             def update_thought(self, chunk: str):
@@ -483,6 +498,7 @@ def _capture_live_agent_message_output(
                 "Summarizer": "green",
                 "Critic": "magenta",
                 "Corrector": "yellow",
+                "Judge": "bright_blue",
             }
         ),
         width=100,
@@ -517,4 +533,3 @@ def _capture_tool_result_output(tool_name: str, result: str) -> str:
     finally:
         console_manager.console = original_console
     return stream.getvalue()
-

@@ -102,15 +102,15 @@ llm:
 #   _target_: providers.glm_provider.GLMProvider
 #   api_key: "YOUR_API_KEY"
 #   model: "glm-4.6"
-embedding:
-  _target_: providers.null_provider.NoOpEmbeddingProvider
-
 # embedding:
-#   _target_: providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider
-#   model_name: "Qwen/Qwen3-Embedding-4B"
-#   device: "cuda"
-#   torch_dtype: "float16"
-#   batch_size: 4
+#   _target_: providers.null_provider.NoOpEmbeddingProvider
+
+embedding:
+  _target_: providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider
+  model_name: "Qwen/Qwen3-Embedding-4B"
+  device: "cuda"
+  torch_dtype: "float16"
+  batch_size: 4
 
 # ── Application Settings ──────────────────────────────────────────────
 transcript_path: "summary.json"
@@ -249,11 +249,11 @@ agents:
     loop_guardrails:
       enabled: true
       target_models:
-        - "qwen"
+      - "qwen"
       target_providers:
-        - "vllmprovider"
-        - "transformersprovider"
-        - "huggingfaceprovider"
+      - "vllmprovider"
+      - "transformersprovider"
+      - "huggingfaceprovider"
       enable_stall_guidance: true
       enable_noop_edit_detection: true
       enable_extended_text_tool_parser: true
@@ -273,5 +273,3 @@ logging:
   level: "INFO"
   print_to_terminal: false
   summarizer_critic_print_to_terminal: ${logging.print_to_terminal}
-
-

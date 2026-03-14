@@ -33,7 +33,7 @@ dependencies = [
     "zai-sdk>=0.2.2",
     "jinja2",
     "datasets>=4.5.0",
-    "huggingface-hub>=0.34.0",
+    "huggingface-hub[xet]>=0.34.0",
     "hf-transfer>=0.1.9",
     "pydantic>=2.12.5",
     "platformdirs>=4.3.6",
@@ -50,6 +50,7 @@ dependencies = [
     "textual",
     "unidecode",
     "uv>=0.10.0",
+    "python-dotenv>=1.2.2",
 ]
 
 [project.urls]
@@ -64,7 +65,11 @@ card-framework-calibrate = "card_framework.cli.calibrate:main"
 card-framework-eval = "card_framework.cli.eval:main"
 card-framework-ui = "card_framework.cli.ui_cli:main"
 card-framework-benchmark = "card_framework.benchmark.run:main"
+card-framework-benchmark-watchdog = "card_framework.benchmark.watchdog:main"
+card-framework-benchmark-watch = "card_framework.benchmark.watchdog:main"
+card-framework-summarizer-critic = "card_framework.benchmark.summarizer_critic.cli:main"
 card-framework-qa = "card_framework.benchmark.qa:main"
+card-framework-qa-supervisor = "card_framework.benchmark.qa_supervisor:main"
 card-framework-diarization = "card_framework.benchmark.diarization:main"
 card-framework-summary-matrix = "card_framework.cli.run_summary_matrix:main"
 

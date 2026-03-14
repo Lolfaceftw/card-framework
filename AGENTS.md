@@ -2,10 +2,10 @@
 <repoEngineeringStandards repo="qa-eval" language="Python" pythonVersion="3.12+">
   <overview>
     <purpose>Define the engineering standards for contributors working in this repository.</purpose>
+    <time_first>Always check the current date and time today using scrapling MCP. Then, for all context, you are to assume today is that date as this is important for searching academic journals or data that changes fast.</time_first>
     <principles>
       <principle>Prefer explicit, maintainable Python over clever shortcuts.</principle>
       <principle>Assume configuration exists; do not hardcode deploy-varying values.</principle>
-      <principle>Prefer realistic pipeline confidence over toy examples.</principle>
       <principle>Write for the next developer who must read, debug, and extend the code.</principle>
     </principles>
   </overview>
@@ -132,6 +132,7 @@
   <section id="project-specific-guidelines" title="Project Specific Guidelines">
     <rule>Treat @coder_docs/* as the authoritative project-local guidance set for this repository.</rule>
     <rule>Read coder_docs/codebase_guide.md first at the start of every new coding-agent session before making assumptions about architecture, flow, or file ownership.</rule>
+    <rule>Use coder_docs/research_agents.md as the source of truth for Codex research-agent usage and delegated web-research workflow in this repository.</rule>
     <rule>Use coder_docs/memory/errors_and_notes.md as the running repository memory for captured errors, regressions, and notable pitfalls that future sessions should avoid repeating.</rule>
     <rule>When you encounter a meaningful error or fix a mistake worth preserving, prepend a brief entry to the top of coder_docs/memory/errors_and_notes.md with the date and time, a Problem field, and the Solution that resolved it.</rule>
     <rule>Use coder_docs/academic_standards.md as the source of truth for formulas, algorithms, heuristics, scoring rules, or other robustness-sensitive implementations that require academic backing.</rule>
@@ -144,13 +145,22 @@
     <rule>When code changes affect behavior, interfaces, setup, outputs, workflows, or operator expectations, update the relevant Markdown documentation in the same change, including files such as README.md, docs/*.md, and applicable coder_docs/*.md.</rule>
     <rule>Treat Markdown documentation review as part of every implementation, review, and verification pass so documentation updates are considered before concluding the task.</rule>
     <rule>When code, configuration, prompts, runtime flow, tooling, or developer workflow changes materially, update coder_docs/codebase_guide.md in the same change so it stays current.</rule>
+    <rule>When the Codex research-agent workflow or delegated web-research expectations change materially, update coder_docs/research_agents.md, coder_docs/codebase_guide.md, and AGENTS.md in the same change.</rule>
     <rule>When GitHub Actions release behavior, release verification, or build standards change materially, update coder_docs/github_actions_release_spec.md, coder_docs/git_github_workflow.md, and coder_docs/codebase_guide.md in the same change.</rule>
     <rule>When linting, dependency-management, Git and GitHub workflow, or academic-methodology policy changes materially, update the corresponding file in coder_docs in the same change.</rule>
     <rule>Keep coder_docs content specific to this repository's actual behavior, current commands, and constraints. Do not let it drift into generic Python advice.</rule>
     <rule>If AGENTS.md conflicts with a repo-specific operational detail documented in coder_docs, reconcile the documents immediately rather than ignoring the mismatch.</rule>
   </section>
+  <section id="research-agents" title="Research Agents">
+    <rule>Only support the configured research agent from `../.codex/config.toml`: `researcher`.</rule>
+    <rule>Use `researcher` for open-web search, documentation lookup, standards research, and direct source-page retrieval.</rule>
+    <rule>Handle repository reads, local command execution, validation, and write-capable implementation in the main thread with the repository's local tools.</rule>
+    <rule>Do not describe or depend on dedicated non-research agent roles in this repository's prompts or docs.</rule>
+    <rule>When delegating research, pass a scoped question or direct URL and let the research agent finish before acting on its result.</rule>
+  </section>
   <section id="scrapling-mcp-web-research" title="Scrapling MCP Web Research">
     <rule>Use coder_docs/scrapling.md as the source of truth for external web retrieval and page extraction workflow.</rule>
+    <rule>Delegate open-web search and browsing to the `researcher` research agent.</rule>
     <rule>Use Scrapling MCP as the required tool for external web search, page retrieval, and browsing in this repository whenever open-web information is needed.</rule>
     <rule>Treat generic non-Scrapling web-search and browsing tools as disallowed when Scrapling MCP can satisfy the task.</rule>
     <rule>If the user already provided a URL or the authoritative source URL is known, go directly to Scrapling MCP instead of another web tool.</rule>

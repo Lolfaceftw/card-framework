@@ -1,4 +1,4 @@
-﻿"""Critic executor for duration-aware summary evaluation."""
+"""Critic executor for duration-aware summary evaluation."""
 
 from __future__ import annotations
 
@@ -51,7 +51,9 @@ class CriticExecutor(BaseA2AExecutor):
         )
         self.event_bus = event_bus if event_bus is not None else get_event_bus()
 
-    def _resolve_target_seconds(self, *, target_seconds: int | None, min_words: int, max_words: int) -> int:
+    def _resolve_target_seconds(
+        self, *, target_seconds: int | None, min_words: int, max_words: int
+    ) -> int:
         """Resolve the intended duration target for the critic pass."""
         if target_seconds is not None and int(target_seconds) > 0:
             return int(target_seconds)
@@ -78,7 +80,9 @@ class CriticExecutor(BaseA2AExecutor):
                 state = load_live_draft_voice_clone_state(draft_audio_state_path)
             except Exception:
                 state = None
-            if state is not None and _snapshot_matches_summary_xml(state.current_snapshot, draft):
+            if state is not None and _snapshot_matches_summary_xml(
+                state.current_snapshot, draft
+            ):
                 total_seconds = round(
                     sum(
                         record.duration_ms / 1000.0
@@ -141,7 +145,9 @@ class CriticExecutor(BaseA2AExecutor):
                     "TRUNCATION: The last speaker block does not end with sentence-ending punctuation (. ! ?)."
                 )
         else:
-            failures.append("COHERENCE: No properly closed speaker-tagged XML blocks found.")
+            failures.append(
+                "COHERENCE: No properly closed speaker-tagged XML blocks found."
+            )
 
         open_tags = re.findall(r"<([A-Za-z0-9_.-]+)(?:\s[^>]*)?>", draft)
         close_tags = re.findall(r"</([A-Za-z0-9_.-]+)>", draft)
@@ -160,7 +166,6 @@ class CriticExecutor(BaseA2AExecutor):
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
         """Execute one critic task end to end."""
-        del context
         from card_framework.agents.dtos import CriticTaskRequest
 
         req = CriticTaskRequest.model_validate(task_data)
@@ -179,7 +184,9 @@ class CriticExecutor(BaseA2AExecutor):
         )
         full_transcript = req.full_transcript
 
-        self.event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
+        self.event_bus.publish(
+            "system_message", "Evaluating draft using LLM Critic Loop..."
+        )
 
         system_prompt = PromptManager.get_prompt(
             "critic_system",
@@ -297,7 +304,9 @@ class CriticExecutor(BaseA2AExecutor):
 
         result_json = json.dumps(final_verdict)
         if final_verdict.get("status") == "pass":
-            self.event_bus.publish("status_message", message=f"Final Verdict: {result_json}")
+            self.event_bus.publish(
+                "status_message", message=f"Final Verdict: {result_json}"
+            )
         else:
             self.event_bus.publish(
                 "agent_message",
@@ -305,7 +314,7 @@ class CriticExecutor(BaseA2AExecutor):
                 message=f"Final Verdict: {result_json}",
             )
 
-        await self.send_response(result_json, event_queue)
+        await self.send_response(result_json, context, event_queue)
 
     async def process_tool_calls(
         self, tool_calls: list[dict], messages: list, context_data: dict
@@ -383,4 +392,3 @@ class CriticExecutor(BaseA2AExecutor):
         if final_verdict:
             return True, final_verdict
         return False, None
-

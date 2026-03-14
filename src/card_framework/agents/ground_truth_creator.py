@@ -1,4 +1,4 @@
-﻿"""A2A executor for generating source-grounded QA benchmark questions."""
+"""A2A executor for generating source-grounded QA benchmark questions."""
 
 from __future__ import annotations
 
@@ -10,8 +10,14 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 
 from card_framework.agents.base import BaseA2AExecutor
-from card_framework.agents.corrector import CorrectionAdvisor, render_correction_guidance
-from card_framework.agents.dtos import CorrectorTaskRequest, GroundTruthCreatorTaskRequest
+from card_framework.agents.corrector import (
+    CorrectionAdvisor,
+    render_correction_guidance,
+)
+from card_framework.agents.dtos import (
+    CorrectorTaskRequest,
+    GroundTruthCreatorTaskRequest,
+)
 from card_framework.benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
 from card_framework.shared.events import EventBus, get_event_bus
 from card_framework.shared.llm_provider import LLMProvider
@@ -446,7 +452,6 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
         """Generate questions and return validated JSON payload to caller."""
-        del context
         request = GroundTruthCreatorTaskRequest.model_validate(task_data)
 
         source_text = request.source_text.strip()
@@ -496,5 +501,4 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
             "status_message",
             f"Generated QA ground truth: {len(question_set.questions)} questions.",
         )
-        await self.send_response(json.dumps(response_payload), event_queue)
-
+        await self.send_response(json.dumps(response_payload), context, event_queue)

@@ -22,16 +22,16 @@ providers:
     llm:
       _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
       api_key: "$ENV{DEEPSEEK_API_KEY}"
-      model: "deepseek-reasoner"
+      model: "deepseek-chat"
       base_url: "https://api.deepseek.com"
 
   - id: deepseek_judge
-    description: Dedicated DeepSeek judge backend for reference-free scoring.
+    description: Dedicated DeepSeek reasoner backend for reference-free scoring.
     required_env: ["DEEPSEEK_API_KEY"]
     llm:
       _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
       api_key: "$ENV{DEEPSEEK_API_KEY}"
-      model: "deepseek-chat"
+      model: "deepseek-reasoner"
       base_url: "https://api.deepseek.com"
 
   - id: glm_46

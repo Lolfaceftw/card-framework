@@ -1,4 +1,4 @@
-﻿"""Streaming callback adapters used by provider implementations."""
+"""Streaming callback adapters used by provider implementations."""
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ class RichConsoleResponseCallback(LLMResponseCallback):
             self._plain_started = False
             self._plain_thought_started = False
             self._plain_content_started = False
+            self._ensure_plain_header()
             return
 
         from card_framework.cli.ui import ui
@@ -116,4 +117,3 @@ class RichConsoleResponseCallback(LLMResponseCallback):
             self._live_context.__exit__(None, None, None)
         self._live_context = None
         self._live_message = None
-

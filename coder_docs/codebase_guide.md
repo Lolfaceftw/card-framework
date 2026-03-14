@@ -1,10 +1,11 @@
-<?xml version="1.0" encoding="UTF-8"?>
+﻿<?xml version="1.0" encoding="UTF-8"?>
 <codebaseGuide workspace="llm_test" package="card-framework" language="Python" pythonVersion="3.12+" packageManager="uv" linter="ruff">
   <overview>
     <purpose>Orient a new coding agent to the actual architecture, workflows, contracts, and maintenance expectations of this repository before code changes are made.</purpose>
     <repositoryIdentity>This workspace combines a Hydra-configured summarization runtime, an audio-to-transcript and voice-clone pipeline, multiple LLM and embedding provider adapters, and two benchmark systems: a matrix-style summarization benchmark and a source-grounded QA benchmark.</repositoryIdentity>
     <sessionStartChecklist>
       <step>Read this file first to understand subsystem boundaries, entrypoints, and data flow.</step>
+      <step>Use coder_docs/research_agents.md as the source of truth for Codex research-agent usage and delegated web-research workflow.</step>
       <step>Review coder_docs/memory/errors_and_notes.md for previously captured pitfalls before repeating work in an area.</step>
       <step>Use coder_docs/academic_standards.md for formulas, thresholds, scoring logic, or methodology-sensitive implementations.</step>
       <step>Use coder_docs/ruff.md for lint workflow, coder_docs/uv_package_manager.md for dependency and environment workflow, coder_docs/git_github_workflow.md for contributor Git and GitHub workflow, coder_docs/github_actions_release_spec.md for GitHub Actions release/build verification, and coder_docs/scrapling.md for external web retrieval workflow.</step>
@@ -22,13 +23,14 @@
       <principle>Treat configuration as authoritative; prefer overrides and config edits over hardcoded values.</principle>
       <principle>Preserve the separation between orchestration, provider adapters, prompts, and data-contract modules.</principle>
       <principle>Favor behavior-level understanding first: runtime pipeline, audio pipeline, and benchmark workflows are all first-class parts of this repo.</principle>
+      <principle>For Codex sessions, only the configured `researcher` research agent is part of the documented delegation model; keep repository reads, local commands, and implementation in the main thread.</principle>
     </agentOperatingPrinciples>
   </overview>
 
   <section id="repo-layout" title="Repository Layout">
     <directory path="src/card_framework/agents">A2A executor implementations, task DTOs, tool dispatch, loop control, parsing, correction guidance, and client transport helpers.</directory>
     <directory path="src/card_framework/audio_pipeline">Stage-1 and stage-3 use-case orchestration, contracts, ETA tracking, runtime helpers, gateways, runners, speaker-sample generation, voice-clone orchestration, and the live draft voice-clone session used by merged stage-2/stage-3 runs.</directory>
-    <directory path="src/card_framework/benchmark">Summarization benchmark CLI, reference-free evaluation pipeline, QA benchmark CLI, manifests, rubrics, metrics, matrix construction, and report artifact helpers.</directory>
+    <directory path="src/card_framework/benchmark">Summarization benchmark CLI, reference-free evaluation pipeline, QA benchmark CLI, diarization benchmark tooling, the duration-first `summarizer_critic` real-dataset benchmark package, manifests, rubrics, metrics, matrix construction, and report artifact helpers.</directory>
     <directory path="src/card_framework/cli">Operator-facing CLI modules for the runtime, calibration helper, setup bootstrap, summary-matrix runner, evaluation entrypoint, and terminal UI.</directory>
     <directory path="src/card_framework/providers">Concrete LLM and embedding adapters such as vLLM, Transformers, DeepSeek, GLM, Google GenAI, Hugging Face, Nanbeige, sentence-transformer embeddings, and logging wrappers.</directory>
     <directory path="src/card_framework/prompts/templates">Jinja2 prompt templates for summarizer, critic, QA ground-truth generation, QA evaluator, and corrector flows.</directory>
@@ -37,8 +39,8 @@
     <directory path="src/card_framework/_vendor/index_tts">Vendored third-party IndexTTS runtime source required by the voice-clone pipeline.</directory>
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
     <directory path=".github/workflows">Repository automation. `publish-pypi.yml` builds tagged release distributions, smoke-checks the built wheel and source distribution, and publishes them to PyPI through GitHub OIDC trusted publishing.</directory>
-    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
-    <file path="AGENTS.md">Repo-local coding-agent instructions, including the required Scrapling web-research policy and the rule to keep coder_docs aligned with prompt changes.</file>
+    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover Codex research-agent workflow, methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
+    <file path="AGENTS.md">Repo-local coding-agent instructions, including the required Codex research-agent guidance, Scrapling web-research policy, and the rule to keep coder_docs aligned with prompt changes.</file>
     <entrypoints>
       <entrypoint path="src/card_framework/api.py">Public installed-package entrypoint exposing `card_framework.infer(audio_wav, output_dir, target_duration_seconds, *, device, vllm_url=None, vllm_api_key=None)` and the typed `InferenceResult` artifact bundle.</entrypoint>
       <entrypoint path="src/card_framework/cli/main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
@@ -47,6 +49,10 @@
       <entrypoint path="src/card_framework/cli/run_summary_matrix.py">Batch helper that runs the standard setup-and-run summarizer workflow across ordered summarizer/critic model pairs, optionally adds a DeepSeek model to the pair pool, preserves the repo-default merged live-draft stage-2/stage-3 voice-clone flow, isolates loop-memory artifacts per model pair, streams each child run's live output back to the parent terminal, disables only stage-4 interjector output, and copies each resulting summary into `artifacts/summary_matrix` as `<summarizer>_<critic>-summary.xml`.</entrypoint>
       <entrypoint path="src/card_framework/benchmark/run.py">CLI for summarization benchmark matrix execution and manifest preparation.</entrypoint>
       <entrypoint path="src/card_framework/benchmark/qa.py">CLI for source-grounded QA benchmark execution against an existing summary and source transcript.</entrypoint>
+      <entrypoint path="src/card_framework/benchmark/watchdog.py">CLI for repeated benchmark execution under total-system RAM and GPU VRAM watchdog thresholds, with rolling notes, telemetry, and per-run result artifacts.</entrypoint>
+      <entrypoint path="src/card_framework/benchmark/qa_supervisor.py">Supervisor CLI that runs benchmark.qa in a child process, performs a telemetry smoke test, monitors host RAM plus NVIDIA VRAM, kills threshold-breaching runs, and writes notes/results artifacts for repeated QA benchmark sessions.</entrypoint>
+      <entrypoint path="src/card_framework/benchmark/summarizer_critic/cli.py">Backward-compatible root CLI for the QMSum duration-first real-dataset benchmark path.</entrypoint>
+      <entrypoint path="src/card_framework/benchmark/summarizer_critic/sporc/cli.py">SPoRC-specific real-dataset benchmark CLI that prepares gated SPoRC episode and speaker-turn files, runs the actual summarizer-critic runtime, and supervises repeated runs under RAM/GPU guardrails.</entrypoint>
       <entrypoint path="src/card_framework/cli/eval.py">Benchmark smoke entrypoint.</entrypoint>
       <entrypoint path="src/card_framework/cli/ui.py">Rich terminal presentation layer that subscribes to the shared event bus.</entrypoint>
     </entrypoints>
@@ -200,8 +206,19 @@
   <section id="benchmarking" title="Benchmarking">
     <summarizationBenchmark>
       <workflow>benchmark.run executes provider and embedding matrix cells over a manifest of transcript samples, then aggregates runtime and reference-free metrics. When every cell is skipped before any sample executes, the CLI now exits non-zero while still writing report artifacts for diagnosis.</workflow>
+      <watchdog>benchmark.watchdog supervises repeated benchmark subprocess runs, samples total-system RAM and GPU VRAM periodically, force-kills runs that cross configured thresholds, writes markdown notes plus per-run telemetry under `artifacts/benchmark_watchdog`, and defaults child uv cache usage to repo-local `.uv-cache` so smoke runs do not depend on the user profile cache directory.</watchdog>
+      <workflow>`benchmark/summarizer_critic` remains the duration-first QMSum real-dataset benchmark path. It prepares the official QMSum `data/ALL/test` general-summary slice into a reproducible manifest, derives `target_seconds` from each human reference summary, runs the actual summarizer and critic A2A agents through the runtime orchestrator with a synthetic benchmark calibration artifact, scores duration control plus reference-free quality and speaker attribution, and writes JSON plus markdown reports under `artifacts/summarizer_critic_benchmark`.</workflow>
+      <workflow>`benchmark/summarizer_critic/sporc` is the SPoRC-specific benchmark path. It prepares gated `blitt/SPoRC` episode-level and speaker-turn files, defaults execution to 100 prepared examples unless `--max-samples 0` is supplied, and now supports both the faithful live-draft voice-clone path and a transcript-only summarizer-critic mode. Transcript-only runs skip source-audio downloads, speaker-sample generation, and live-draft voice cloning, while the faithful path still downloads source episode audio when needed, generates speaker-sample manifests from the prepared transcript, runs the combined live-draft stage-2/stage-3 voice-clone flow, and archives per-sample voice-clone outputs. Sample preparation still writes to `datasets/sporc/prepared_sample` by default, while full-dataset preparation now writes to `datasets/sporc/prepared_full`. The dedicated `curate-longform` subcommand filters a prepared full manifest down to strict long-form dialogue episodes using the released Hugging Face speaker-turn table as the diarized transcript source, requiring `15,000+` spoken words, `120+` segments, multiple substantial speakers, low dominant-speaker share, and low music/noise-token ratios before writing a curated manifest plus audit JSON. The SPoRC judge now scores `Factualness`, `Naturalness`, and `Speaker Grammar Similarity` using a G-Eval-style rubric with transcript and summary per-speaker message lists plus alias notes. The package also auto-loads a repository-root `.env` when present and mirrors common aliases so entries such as `HF_ACCESS_TOKEN` and `VLLM_URL` satisfy the benchmark's Hugging Face and vLLM environment requirements without manual export steps. When benchmark `--embedding-mode enabled` is selected while `src/card_framework/config/config.yaml` still points at the no-op embedding provider, the benchmark matrix helper now checks the legacy repo-root `conf/config.yaml` embedding section before falling back to MiniLM so migration-era local Qwen embedding edits still take effect.</workflow>
       <subcommand name="execute">Runs the benchmark matrix with a preset, provider profiles, optional judge provider, and reference-free scoring controls.</subcommand>
       <subcommand name="prepare-manifest">Builds a frozen manifest from supported sources such as local, QMSum, or AMI. For the local source, the CLI now auto-discovers a reusable transcript from repo-root `transcript.json`, repo-root `*.transcript.json`, then `artifacts/transcripts/*.transcript.json` unless the operator passes `--local-transcript-path` explicitly.</subcommand>
+      <subcommand name="summarizer_critic prepare-dataset">Fetches the official `Yale-LILY/QMSum` repository when needed and prepares the full `data/ALL/test` general-summary slice for reproducible duration-first benchmarking.</subcommand>
+      <subcommand name="summarizer_critic execute">Runs the actual summarizer-critic stack against the prepared QMSum slice with duration-first targets and four scored dimensions. Concurrent execute runs can now take explicit `--retrieval-port`, `--summarizer-port`, and `--critic-port` overrides so parallel sweeps do not race on ephemeral A2A service ports.</subcommand>
+      <subcommand name="summarizer_critic supervise">Repeats the real summarizer-critic benchmark under default guardrails of `80%` RAM and `12 GiB` GPU VRAM, writing session markdown notes/results plus telemetry.</subcommand>
+      <subcommand name="summarizer_critic.sporc prepare-dataset">Downloads or reuses gated `blitt/SPoRC` sample or full files, then materializes transcript JSON plus a reproducible SPoRC manifest. Full-dataset prep now defaults to `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full` instead of the sample root.</subcommand>
+      <subcommand name="summarizer_critic.sporc curate-longform">Filters a prepared full SPoRC manifest into `benchmark_longform_15k_manifest.json`, keeping only strict multi-speaker long-form episodes and writing a sibling audit JSON with inclusion and exclusion reasons.</subcommand>
+      <subcommand name="summarizer_critic.sporc execute">Runs the actual summarizer-critic stack against prepared SPoRC transcript samples, defaulting to 100 examples and unbounded loop iterations with no per-stage request timeouts. It accepts duration overrides through `--duration-preset` or `--target-seconds-override`, and `--transcript-only` disables the audio-generation path for transcript-first summarizer-critic benchmarking.</subcommand>
+      <subcommand name="summarizer_critic.sporc duration-sweep">Prints a non-interactive preset menu by default, then can benchmark one preset or all presets (`30s`, `1m`, `5m`, `15m`) via `--mode single` or `--mode batch-all`, aggregating per-preset duration adherence and judge metrics into sweep artifacts under `artifacts/summarizer_critic_benchmark/sweeps`.</subcommand>
+      <subcommand name="summarizer_critic.sporc supervise">Repeats the SPoRC benchmark under the same RAM/GPU guardrails while logging telemetry and child-process output.</subcommand>
       <referenceFreeMetrics>Reference-free evaluation combines AlignScore-like scoring and LLM-as-judge scoring, including order-swap and repeat diagnostics.</referenceFreeMetrics>
     </summarizationBenchmark>
     <diarizationBenchmark>
@@ -213,13 +230,16 @@
     </diarizationBenchmark>
     <qaBenchmark>
       <workflow>src/card_framework/benchmark/qa.py evaluates an existing summary.xml against a source transcript by generating QA ground truth, then asking an evaluator agent to answer from the summary.</workflow>
+      <workflow>src/card_framework/benchmark/qa_supervisor.py wraps benchmark.qa in a child process, runs a telemetry smoke test first, samples host RAM and NVIDIA VRAM periodically, kills threshold-breaching runs, and writes session notes/results under artifacts/qa_supervisor.</workflow>
       <providerSelection>Creator and evaluator providers may share one provider profile or be split through explicit CLI overrides.</providerSelection>
       <runtimeConfig>QA-specific limits, quote-relevance behavior, timeouts, vLLM settings, and corrector settings live in src/card_framework/benchmark/qa_config.yaml and src/card_framework/benchmark/qa_settings.py.</runtimeConfig>
       <compatibilityGuard>The QA input guard checks that the supplied summary and source transcript appear compatible before expensive evaluation begins.</compatibilityGuard>
     </qaBenchmark>
     <outputs>
       <artifact>Summarization benchmark outputs are written under artifacts/benchmark and artifacts/quality.</artifact>
+      <artifact>The duration-first summarizer-critic benchmark writes prepared datasets, run reports, markdown notes/results, and supervised session telemetry under `artifacts/summarizer_critic_benchmark`, with the SPoRC path using `sporc_runs` and `sporc_supervisor` subtrees.</artifact>
       <artifact>QA benchmark outputs are written under artifacts/qa_benchmark.</artifact>
+      <artifact>QA supervisor outputs are written under artifacts/qa_supervisor, including markdown notes, markdown results, process logs, telemetry jsonl, and session summaries.</artifact>
       <artifact>Verification payloads capture command provenance, git info, and report hashes for benchmark runs.</artifact>
     </outputs>
   </section>
@@ -227,7 +247,7 @@
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
       <file path="src/card_framework/config/config.yaml">Main runtime configuration for pipeline stages, provider selection, stage_llm overrides, audio settings, live draft voice-clone toggles, voice-clone emotion presets, calibration artifact path, duration targets (`orchestrator.target_minutes` plus optional exact `orchestrator.target_seconds`), loop-memory artifact path, loop guardrails, and logging.</file>
-      <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa.</file>
+      <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa, including `deepseek_chat` for `deepseek-chat` and `deepseek_judge` for `deepseek-reasoner` when running reference-free judge sweeps.</file>
       <file path="src/card_framework/benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts.</file>
       <file path="pyproject.toml">Python version floor, dependencies, uv source/index policy, and pytest configuration.</file>
       <file path="uv.lock">Committed lockfile for the uv-managed environment.</file>
@@ -245,10 +265,12 @@
       <command>uv run python -m card_framework.cli.setup_and_run --audio-path &lt;path-to-audio&gt;</command>
       <command>uv run python -m card_framework.cli.run_summary_matrix --vllm-host &lt;host&gt; --transcript-path &lt;path-to-transcript.json&gt;</command>
       <command>uv run python -m card_framework.benchmark.run execute --preset hourly</command>
+      <command>uv run python -m card_framework.benchmark.watchdog --max-runs 3 --stop-on-success</command>
       <command>uv run python -m card_framework.benchmark.run prepare-manifest --sources local</command>
       <command>uv run python -m card_framework.benchmark.diarization prepare-manifest</command>
       <command>uv run python -m card_framework.benchmark.diarization execute</command>
       <command>uv run python -m card_framework.benchmark.qa --summary-xml &lt;path-to-summary.xml&gt; --source-transcript &lt;path-to-transcript&gt;</command>
+      <command>uv run python -m card_framework.benchmark.qa_supervisor --summary-xml &lt;path-to-summary.xml&gt; --source-transcript &lt;path-to-transcript&gt;</command>
       <command>uv run ruff check .</command>
       <command>uv run pytest</command>
       <command>git checkout -b release/vX.Y.Z</command>
@@ -277,9 +299,12 @@
       <note>`card_framework.cli.calibrate` is the project-level one-time calibration helper. It prints the persisted preset/WPM mapping and can bootstrap speaker samples from a manifest, transcript, or raw audio path.</note>
       <note>`card_framework.cli.setup_and_run` is the preferred convenience wrapper when the task involves IndexTTS setup and full end-to-end stage execution.</note>
       <note>When `card_framework.cli.setup_and_run` enables terminal logging, it now leaves `logging.summarizer_critic_print_to_terminal` unset so the live Summarizer and Critic reasoning/content stream follows the repo logging config unless the caller explicitly disables it.</note>
+      <note>`src/card_framework/shared/logger_utils.py` now uses Rich's `RichHandler` for the terminal logger path when `print_to_terminal` is enabled, so console logs are level-colored while the rotating file log remains plain structured text.</note>
       <note>The `LoggingLLMProvider` terminal path now logs concise message/tool/response summaries at `INFO` and reserves full prompt, tool-schema, and response payload dumps for `DEBUG`, so streamed runs stay readable while deeper payload inspection remains opt-in.</note>
       <note>The Rich UI now parses JSON-shaped `tool_result` payloads before printing them, so dict and list outputs render as structured multiline blocks and transcript excerpts keep their real line breaks instead of showing escaped `\n` sequences.</note>
-      <note>When stdout is not a real terminal, such as child runs launched through `card_framework.cli.run_summary_matrix`, the shared streamed-response callback path used by the repo's vLLM and DeepSeek providers falls back from Rich live panels to plain streamed `[THINKING]` and `[CONTENT]` text, while ignoring whitespace-only preambles so the parent pipe receives meaningful incremental model output instead of blank section headers.</note>
+      <note>When stdout is a real terminal, the shared streamed-response callback path now keeps live agent panels markdown-rendered, labels evaluator-style `generate(...)` calls as `Judge`, and shows a waiting placeholder panel immediately on stream start so long-prefill transcript-only SPoRC `execute` calls no longer look idle before the first token arrives. When stdout is not a real terminal, such as child runs launched through `card_framework.cli.run_summary_matrix`, the callback path still falls back to plain streamed `[THINKING]` and `[CONTENT]` text while ignoring whitespace-only preambles.</note>
+      <note>Non-blocking A2A calls in the summarizer-critic runtime must finish with a terminal task-status event that carries the final agent message. Emitting only a raw final `Message` leaves `tasks/get` stuck in `working`, which makes transcript-only SPoRC runs appear frozen immediately after the summarizer logs its result.</note>
+      <note>When `AgentClient` unwraps a completed A2A task, it must prefer artifact text, top-level parts, nested result payloads, and terminal `status.message` text before falling back to `history`. Otherwise final JSON replies can be concatenated with the original task payload from history, which makes SPoRC critic responses fail `CriticTaskResponse.model_validate_json(...)` with `trailing characters` errors.</note>
       <note>`card_framework.cli.run_summary_matrix` is the operator helper for ordered summarizer/critic pair comparisons, including self-pairs. It still drives `card_framework.cli.setup_and_run` so stage selection and summarizer/critic orchestration stay aligned with the repo default workflow, preserves the merged live-draft stage-2/stage-3 path, disables only stage-4 interjector output, streams live child output to the parent terminal, and writes one copied summary file per summarizer/critic pair under `artifacts/summary_matrix`.</note>
       <note>When no explicit start stage is provided, `card_framework.cli.setup_and_run` now auto-selects stage-2 if it finds a reusable transcript, preferring repo-root `transcript.json` or `*.transcript.json` before `artifacts/transcripts/*.transcript.json`.</note>
       <note>When stage-2 is auto-selected while a repo-root `summary.xml` already exists, `card_framework.cli.setup_and_run` prints that it will still rerun summarization before voice cloning and points operators at `--voiceclone-from-summary` for stage-3 clone-only runs.</note>
@@ -319,6 +344,7 @@
       <rule>When changing runtime flow, prompts, provider behavior, contracts, benchmark workflow, or operator-facing commands, update this guide in the same change.</rule>
       <rule>When a change affects tested behavior, add or update tests in the corresponding subsystem.</rule>
       <rule>When you fix a meaningful error, recurring pitfall, or debugging trap, prepend a short dated and timed Problem and Solution note to the top of coder_docs/memory/errors_and_notes.md.</rule>
+      <rule>When the Codex research-agent workflow or delegated web-research expectations change materially, update coder_docs/research_agents.md, AGENTS.md, and this guide in the same change.</rule>
       <rule>When contributor Git or GitHub workflow expectations change materially, update coder_docs/git_github_workflow.md and this guide in the same change.</rule>
       <rule>When the repository's bug-triage or fault-localization workflow changes materially, update coder_docs/fault_localization_workflow.md and this guide in the same change.</rule>
       <rule>Before commit or pull request, review staged diffs for secrets, private endpoints such as vLLM URLs, credentials, tokens, and other private data. Do not let them enter repo history.</rule>

@@ -26,6 +26,7 @@ class JudgeLLMProtocol(Protocol):
         max_tokens: int | None = None,
     ) -> str:
         """Generate text output for the provided prompts."""
+        raise NotImplementedError
 
 
 @dataclass(slots=True, frozen=True)
@@ -33,12 +34,12 @@ class LLMJudgeRunnerConfig:
     """Configuration for rubric-based LLM judge scoring.
 
     Args:
-        source_char_limit: Max characters of source transcript passed to judge.
-        max_tokens: Max output tokens requested from judge model.
+        source_char_limit: Optional max characters of source transcript passed to judge.
+        max_tokens: Optional max output tokens requested from judge model.
     """
 
-    source_char_limit: int = 30_000
-    max_tokens: int = 600
+    source_char_limit: int | None = 30_000
+    max_tokens: int | None = None
 
 
 class LLMJudgeRunner:
@@ -97,7 +98,9 @@ class LLMJudgeRunner:
             return " ".join(words[: max(5, len(words) // 2)])
         return " ".join(words[: max(20, len(words) // 2)])
 
-    def _build_direct_prompts(self, source_text: str, summary_text: str) -> tuple[str, str]:
+    def _build_direct_prompts(
+        self, source_text: str, summary_text: str
+    ) -> tuple[str, str]:
         """Build system and user prompts for direct rubric scoring."""
         dimensions_block = "\n".join(
             (
@@ -114,19 +117,23 @@ class LLMJudgeRunner:
             "and 'rationale'."
         )
 
-        truncated_source = source_text[: self._config.source_char_limit]
+        truncated_source = (
+            source_text[: self._config.source_char_limit]
+            if self._config.source_char_limit is not None
+            else source_text
+        )
 
         user_prompt = (
             f"Rubric ID: {self._rubric.rubric_id} v{self._rubric.version}\n"
             f"Dimensions:\n{dimensions_block}\n\n"
             "Output contract JSON:\n"
             "{\n"
-            "  \"factuality\": <float>,\n"
-            "  \"relevance\": <float>,\n"
-            "  \"coherence\": <float>,\n"
-            "  \"overall\": <float>,\n"
-            "  \"confidence\": <float>,\n"
-            "  \"rationale\": \"short explanation\"\n"
+            '  "factuality": <float>,\n'
+            '  "relevance": <float>,\n'
+            '  "coherence": <float>,\n'
+            '  "overall": <float>,\n'
+            '  "confidence": <float>,\n'
+            '  "rationale": "short explanation"\n'
             "}\n\n"
             "Source transcript:\n"
             f"{truncated_source}\n\n"
@@ -148,15 +155,19 @@ class LLMJudgeRunner:
             "Return JSON only with winner in {A,B,tie}, confidence, rationale."
         )
 
-        truncated_source = source_text[: self._config.source_char_limit]
+        truncated_source = (
+            source_text[: self._config.source_char_limit]
+            if self._config.source_char_limit is not None
+            else source_text
+        )
 
         user_prompt = (
             f"Pairwise dimension: {self._rubric.pairwise_dimension}\n"
             "Output contract JSON:\n"
             "{\n"
-            "  \"winner\": \"A\" | \"B\" | \"tie\",\n"
-            "  \"confidence\": <float>,\n"
-            "  \"rationale\": \"short explanation\"\n"
+            '  "winner": "A" | "B" | "tie",\n'
+            '  "confidence": <float>,\n'
+            '  "rationale": "short explanation"\n'
             "}\n\n"
             "Source transcript:\n"
             f"{truncated_source}\n\n"
@@ -178,7 +189,9 @@ class LLMJudgeRunner:
 
     def _parse_direct_scores(self, payload: dict[str, Any]) -> dict[str, float] | None:
         """Parse and clamp rubric scores from judge payload."""
-        dimension_map = {dimension.name: dimension for dimension in self._rubric.dimensions}
+        dimension_map = {
+            dimension.name: dimension for dimension in self._rubric.dimensions
+        }
         scores: dict[str, float] = {}
 
         for dimension_name, dimension in dimension_map.items():
@@ -199,7 +212,9 @@ class LLMJudgeRunner:
         summary_text: str,
     ) -> tuple[dict[str, float] | None, str | None]:
         """Run one direct rubric scoring pass."""
-        system_prompt, user_prompt = self._build_direct_prompts(source_text, summary_text)
+        system_prompt, user_prompt = self._build_direct_prompts(
+            source_text, summary_text
+        )
         response = self._judge_generate(system_prompt, user_prompt)
         parsed = self._extract_json_object(response)
         if parsed is None:
@@ -290,7 +305,11 @@ class LLMJudgeRunner:
 
         repeat_delta: float | None = None
         overall_key = "overall"
-        if repeats >= 2 and overall_key in per_pass_scores[0] and overall_key in per_pass_scores[-1]:
+        if (
+            repeats >= 2
+            and overall_key in per_pass_scores[0]
+            and overall_key in per_pass_scores[-1]
+        ):
             repeat_delta = round(
                 abs(per_pass_scores[0][overall_key] - per_pass_scores[-1][overall_key]),
                 4,
@@ -352,4 +371,3 @@ class LLMJudgeRunner:
             order_consistent=order_consistent,
             repeat_delta=repeat_delta,
         )
-

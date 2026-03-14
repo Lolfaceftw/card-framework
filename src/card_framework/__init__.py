@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from card_framework.shared.env import load_repo_dotenv
+
+load_repo_dotenv()
+
 __all__ = ["InferenceResult", "RuntimeBootstrapError", "infer"]
 
 

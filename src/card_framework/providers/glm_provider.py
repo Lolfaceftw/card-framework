@@ -1,10 +1,9 @@
-﻿"""
+"""
 GLM LLM Provider via ZAI SDK
 ============================
 Uses the official zai-sdk.
 """
 
-import sys
 from collections.abc import Sequence
 
 from zai import ZaiClient
@@ -12,14 +11,16 @@ from zai import ZaiClient
 from card_framework.shared.events import event_bus
 from card_framework.shared.llm_provider import (
     LLMProvider,
+    LLMResponseCallback,
     MessageInput,
+    NullLLMResponseCallback,
     ToolChoice,
     ToolInput,
     infer_agent_name,
+    infer_agent_name_from_text,
     normalize_messages,
     normalize_tools,
 )
-from card_framework.cli.ui import ui
 
 
 class GLMProvider(LLMProvider):
@@ -39,10 +40,15 @@ class GLMProvider(LLMProvider):
         self.api_key = api_key
         self.model = model
         self._client = ZaiClient(api_key=self.api_key)
+        self._response_callback: LLMResponseCallback = NullLLMResponseCallback()
 
         event_bus.publish(
             "system_message", f"Connected to GLM (ZAI) -> model={self.model}"
         )
+
+    def set_response_callback(self, response_callback: LLMResponseCallback) -> None:
+        """Replace the streaming callback sink at runtime."""
+        self._response_callback = response_callback
 
     # â”€â”€ LLMProvider interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -70,27 +76,25 @@ class GLMProvider(LLMProvider):
 
         full_content = ""
         full_reasoning = ""
+        self._response_callback.on_start(infer_agent_name_from_text(system_prompt))
 
-        # Stream chunks to console
-        # According to ZAI SDK: chunk.choices[0].delta.reasoning_content and chunk.choices[0].delta.content
-        for chunk in response_stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
+        try:
+            for chunk in response_stream:
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = choices[0].delta
 
-            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                # Print reasoning in gray
-                sys.stdout.write(f"\033[90m{delta.reasoning_content}\033[0m")
-                sys.stdout.flush()
-                full_reasoning += delta.reasoning_content
+                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                    self._response_callback.on_thought_token(delta.reasoning_content)
+                    full_reasoning += delta.reasoning_content
 
-            if hasattr(delta, "content") and delta.content:
-                sys.stdout.write(delta.content)
-                sys.stdout.flush()
-                full_content += delta.content
+                if hasattr(delta, "content") and delta.content:
+                    self._response_callback.on_content_token(delta.content)
+                    full_content += delta.content
+        finally:
+            self._response_callback.on_complete()
 
-        sys.stdout.write("\n")
-        sys.stdout.flush()
         return full_content.strip()
 
     def chat(
@@ -130,20 +134,22 @@ class GLMProvider(LLMProvider):
         # Find agent name from messages or context
         agent_name = infer_agent_name(messages)
 
-        with ui.live_agent_message(agent_name) as live_msg:
+        self._response_callback.on_start(agent_name)
+        try:
             for chunk in response_stream:
-                if not chunk.choices:
+                choices = getattr(chunk, "choices", None)
+                if not choices:
                     continue
-                delta = chunk.choices[0].delta
+                delta = choices[0].delta
 
                 # Handle Thinking/Reasoning
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    live_msg.update_thought(delta.reasoning_content)
+                    self._response_callback.on_thought_token(delta.reasoning_content)
                     full_thought += delta.reasoning_content
 
                 # Handle Content
                 if hasattr(delta, "content") and delta.content:
-                    live_msg.update_content(delta.content)
+                    self._response_callback.on_content_token(delta.content)
                     full_content += delta.content
 
                 # Handle Tool Calls (GLM might stream these differently, but we'll try to collect them)
@@ -159,10 +165,13 @@ class GLMProvider(LLMProvider):
                             )
 
                         tc = tool_calls[tc_delta.index]
-                        if tc_delta.function.name:
-                            tc["function"]["name"] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tc["function"]["arguments"] += tc_delta.function.arguments
+                        function_delta = getattr(tc_delta, "function", None)
+                        if function_delta is not None and function_delta.name:
+                            tc["function"]["name"] += function_delta.name
+                        if function_delta is not None and function_delta.arguments:
+                            tc["function"]["arguments"] += function_delta.arguments
+        finally:
+            self._response_callback.on_complete()
 
         # Mock an OpenAI response compatible message to keep internal A2A logic happy
         class Function:
@@ -213,4 +222,3 @@ class GLMProvider(LLMProvider):
                 return d
 
         return AssistantMessage(full_content, tool_calls, full_thought)
-

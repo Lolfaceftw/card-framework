@@ -1,4 +1,4 @@
-﻿"""A2A executor for QA-based summary benchmark scoring."""
+"""A2A executor for QA-based summary benchmark scoring."""
 
 from __future__ import annotations
 
@@ -12,7 +12,10 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 
 from card_framework.agents.base import BaseA2AExecutor
-from card_framework.agents.corrector import CorrectionAdvisor, render_correction_guidance
+from card_framework.agents.corrector import (
+    CorrectionAdvisor,
+    render_correction_guidance,
+)
 from card_framework.agents.dtos import CorrectorTaskRequest, QAEvaluatorTaskRequest
 from card_framework.benchmark.qa_contracts import (
     EvaluatorAnswerRecord,
@@ -20,7 +23,10 @@ from card_framework.benchmark.qa_contracts import (
     GroundTruthSet,
     build_score,
 )
-from card_framework.benchmark.qa_settings import EvaluatorRuntimeConfig, QuoteRelevanceConfig
+from card_framework.benchmark.qa_settings import (
+    EvaluatorRuntimeConfig,
+    QuoteRelevanceConfig,
+)
 from card_framework.shared.events import EventBus, get_event_bus
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import logger
@@ -805,7 +811,6 @@ class QAEvaluatorExecutor(BaseA2AExecutor):
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
         """Run strict QA evaluator loop and return score and answer trace."""
-        del context
         request = QAEvaluatorTaskRequest.model_validate(task_data)
         validated_questions = self._validate_request_questions(request.questions)
 
@@ -866,7 +871,7 @@ class QAEvaluatorExecutor(BaseA2AExecutor):
             self._append_missing_answers(context_data)
             final_result = self._build_result_payload(context_data)
 
-        await self.send_response(json.dumps(final_result), event_queue)
+        await self.send_response(json.dumps(final_result), context, event_queue)
 
     async def process_tool_calls(
         self,
@@ -1137,4 +1142,3 @@ class QAEvaluatorExecutor(BaseA2AExecutor):
             return True, self._build_result_payload(context_data)
 
         return False, None
-

@@ -1,7 +1,18 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from card_framework.benchmark.matrix import build_cells
-from card_framework.benchmark.types import BenchmarkPreset, EmbeddingProfile, ProviderProfile
+from omegaconf import OmegaConf
+
+import card_framework.benchmark.matrix as matrix_module
+from card_framework.benchmark.matrix import (
+    build_cells,
+    build_embedding_profiles,
+    resolve_provider_config,
+)
+from card_framework.benchmark.types import (
+    BenchmarkPreset,
+    EmbeddingProfile,
+    ProviderProfile,
+)
 
 
 def test_build_cells_prunes_with_provider_coverage() -> None:
@@ -9,17 +20,29 @@ def test_build_cells_prunes_with_provider_coverage() -> None:
         ProviderProfile(
             provider_id="p1",
             description="Provider 1",
-            llm_config={"_target_": "card_framework.providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
+            llm_config={
+                "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+                "base_url": "http://x",
+                "api_key": "EMPTY",
+            },
         ),
         ProviderProfile(
             provider_id="p2",
             description="Provider 2",
-            llm_config={"_target_": "card_framework.providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
+            llm_config={
+                "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+                "base_url": "http://x",
+                "api_key": "EMPTY",
+            },
         ),
         ProviderProfile(
             provider_id="p3",
             description="Provider 3",
-            llm_config={"_target_": "card_framework.providers.vllm_provider.VLLMProvider", "base_url": "http://x", "api_key": "EMPTY"},
+            llm_config={
+                "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+                "base_url": "http://x",
+                "api_key": "EMPTY",
+            },
         ),
     ]
 
@@ -60,9 +83,105 @@ def test_build_cells_prunes_with_provider_coverage() -> None:
         sample_count=5,
     )
 
-    covered = {(cell.provider_id, cell.embedding_id, cell.repeat_index) for cell in cells}
+    covered = {
+        (cell.provider_id, cell.embedding_id, cell.repeat_index) for cell in cells
+    }
     assert ("p1", "disabled", 1) in covered
     assert ("p2", "disabled", 1) in covered
     assert ("p3", "disabled", 1) in covered
     assert len(cells) <= 3
 
+
+def test_resolve_provider_config_prefers_vllm_url_env(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_URL", "vllm.example.test:8000/v1")
+    profile = ProviderProfile(
+        provider_id="vllm_default",
+        description="Provider 1",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+        },
+    )
+
+    resolved = resolve_provider_config(profile)
+
+    assert resolved["base_url"] == "http://vllm.example.test:8000/v1"
+
+
+def test_build_embedding_profiles_uses_legacy_repo_config_when_base_is_noop(
+    monkeypatch, tmp_path
+) -> None:
+    legacy_config = tmp_path / "config.yaml"
+    legacy_config.write_text(
+        """
+embedding:
+  _target_: providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider
+  model_name: Qwen/Qwen3-Embedding-4B
+  device: cuda
+  torch_dtype: float16
+  batch_size: 4
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(matrix_module, "_LEGACY_CONFIG_PATH", legacy_config)
+
+    base_cfg = OmegaConf.create(
+        {
+            "embedding": {
+                "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+            }
+        }
+    )
+
+    profiles = build_embedding_profiles(base_cfg)
+
+    assert profiles["enabled"].embedding_config == {
+        "_target_": (
+            "card_framework.providers.sentence_transformer_provider."
+            "SentenceTransformerEmbeddingProvider"
+        ),
+        "model_name": "Qwen/Qwen3-Embedding-4B",
+        "device": "cuda",
+        "torch_dtype": "float16",
+        "batch_size": 4,
+    }
+
+
+def test_build_embedding_profiles_keeps_base_embedding_when_already_enabled(
+    monkeypatch, tmp_path
+) -> None:
+    legacy_config = tmp_path / "config.yaml"
+    legacy_config.write_text(
+        """
+embedding:
+  _target_: providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider
+  model_name: Qwen/Qwen3-Embedding-4B
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(matrix_module, "_LEGACY_CONFIG_PATH", legacy_config)
+
+    base_cfg = OmegaConf.create(
+        {
+            "embedding": {
+                "_target_": (
+                    "card_framework.providers.sentence_transformer_provider."
+                    "SentenceTransformerEmbeddingProvider"
+                ),
+                "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+                "device": "cpu",
+            }
+        }
+    )
+
+    profiles = build_embedding_profiles(base_cfg)
+
+    assert profiles["enabled"].embedding_config == {
+        "_target_": (
+            "card_framework.providers.sentence_transformer_provider."
+            "SentenceTransformerEmbeddingProvider"
+        ),
+        "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+        "device": "cpu",
+    }

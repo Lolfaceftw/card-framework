@@ -1,4 +1,100 @@
+### 2026-03-14T17:38:55.6184697+08:00 - SPoRC Long-Form Benchmarks Must Curate From Full Speaker-Turn Data, Not The Sample Manifest
+- Problem: The default SPoRC prepared sample manifest mixes teaser-length, music-heavy, and otherwise benchmark-incompatible episodes with genuinely long ones. Treating that sample manifest as the source for `5m` or `15m` runs causes retrieval and discovery to chase content that is not present in the released diarized transcript, especially for intro-plus-music episodes.
+- Solution: Keep full-dataset preparation separate under `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full`, add a dedicated `curate-longform` step that filters the prepared full manifest using the released Hugging Face speaker-turn table as the diarized transcript source, and require strict long-form gates such as `15,000+` spoken words, multiple substantial speakers, strong turn counts, low dominant-speaker share, and low music/noise-token ratios before writing the curated benchmark manifest.
+
+### 2026-03-14T07:41:21+00:00 - Benchmark Embedding Enablement Could Ignore Legacy Repo Config And Miss The Intended Qwen Model
+- Problem: The benchmark matrix helper built its `enabled` embedding profile from `src/card_framework/config/config.yaml`, but during the src-layout migration some local runs still kept their embedding edits in the legacy repo-root `conf/config.yaml`. When the packaged config still pointed at `NoOpEmbeddingProvider`, `--embedding-mode enabled` silently fell back to MiniLM instead of the user's intended Qwen embedding model.
+- Solution: Teach benchmark embedding-profile resolution to check the legacy repo-root embedding section before falling back to MiniLM, normalizing old `providers.*` targets into current `card_framework.providers.*` paths so SPoRC and other benchmark runs can honor legacy Qwen embedding edits during the migration window.
+
+### 2026-03-14T07:20:00+00:00 - Research-Agent-Only Docs Must Not Reintroduce Non-Research Delegation Roles
+- Problem: Repo-local Markdown guidance still described multiple non-research delegated roles even though the intended documentation model is research-agent-only. That left `AGENTS.md`, `README.md`, and `coder_docs/*` with conflicting guidance about how delegation should work.
+- Solution: Replace the old multi-role guidance with `coder_docs/research_agents.md`, rewrite the docs around the lone `researcher` agent, and keep local repository reads, commands, and implementation in the main thread.
+
+### 2026-03-14T15:00:00+00:00 - Completed A2A Task History Can Corrupt SPoRC Critic JSON Results
+- Problem: After fixing the stuck-at-summarizer issue, transcript-only SPoRC runs could still loop forever because `AgentClient` extracted text from a completed task by concatenating the terminal `status.message` JSON with `history` text that still contained the original user task payload. The critic therefore returned strings that looked like `{"status": ...}\n{"draft": ...}`, which failed `CriticTaskResponse.model_validate_json(...)` with `trailing characters at line 2`.
+- Solution: Change `AgentClient._extract_text_result(...)` to prefer artifact text, top-level parts, nested result payloads, and terminal `status.message` text before falling back to `history`, and add a regression test that exercises a completed-task response carrying both a final message and historical request text.
+
+### 2026-03-14T14:05:00+00:00 - Non-Blocking A2A Agent Replies Must Complete The Task, Not Just Emit A Final Message
+- Problem: Transcript-only SPoRC `execute` runs could appear frozen for minutes immediately after `[Summarizer] Result: ...` because the agent executor enqueued a final raw `Message` but never emitted a terminal `completed` task-status event. The local `AgentClient` polls `tasks/get`, so it kept seeing the summarizer task stuck in `working` and never advanced to the critic.
+- Solution: Change `BaseA2AExecutor.send_response(...)` to complete the current A2A task with a terminal status update carrying the final agent message whenever `task_id` and `context_id` are present, while preserving the raw-message fallback only for contexts without task metadata.
+
+### 2026-03-13T15:10:02+00:00 - SPoRC Transcript-Only Judge Runs On Qwen vLLM Need The Explicit Chat-Template Thinking Override
+- Problem: The new SPoRC transcript-only duration benchmark could converge successfully, but the G-Eval judge still returned empty content on the remote Qwen3.5 vLLM endpoint when the default vLLM provider config was used. That zeroed the SPoRC judge metrics even though the summarizer-critic loop itself succeeded.
+- Solution: When instantiating the SPoRC judge on `card_framework.providers.vllm_provider.VLLMProvider`, keep `enable_thinking=True` so `extra_body` is sent, but override `thinking_extra_body` to `{"chat_template_kwargs": {"enable_thinking": false}}` so the server emits normal JSON content for judge prompts.
+
+### 2026-03-13T11:54:04+00:00 - DeepSeek Reasoning History Must Exclude `reasoning_content`
+- Problem: DeepSeek's reasoning-model docs state that sending prior `reasoning_content` back in message history causes a `400` error, but the provider normalization path preserved assistant `reasoning_content` fields when rebuilding chat history.
+- Solution: Drop `reasoning_content` from normalized outbound history, keep reasoning only for local display/inspection, and use `deepseek-reasoner` with omitted `max_tokens` plus untruncated source text for judge-only sweeps.
+
+### 2026-03-13T08:27:19+00:00 - Concurrent QMSum Sweeps Need Explicit Internal Service Ports
+- Problem: Running multiple `summarizer_critic execute` processes in parallel relied on a bind-and-release ephemeral-port probe for retrieval, summarizer, and critic A2A servers. Under concurrent sweeps that could race and make separate runs contend for the same local ports.
+- Solution: Add optional `--retrieval-port`, `--summarizer-port`, and `--critic-port` overrides to the QMSum execute parser, validate that the three ports are distinct per run, and use explicit unique port trios from sweep harnesses.
+
+### 2026-03-13T07:46:13+00:00 - SPoRC Voice-Clone Benchmarks Need Transcript Milliseconds, Source-Audio Downloads, And Live-Draft Archiving
+- Problem: The first SPoRC benchmark path only fed transcript text into the summarizer-critic loop, so it never exercised the repo's faithful combined stage-2/stage-3 voice-clone flow. SPoRC transcript segments were also stored in raw seconds, which breaks speaker-sample extraction because the audio pipeline expects transcript `start_time` and `end_time` values in milliseconds.
+- Solution: Normalize SPoRC transcript segment timings to milliseconds during dataset preparation, persist each sample's source-audio URL in transcript metadata, download source episode audio on demand during execution, generate transcript-derived speaker-sample manifests before the loop, run live-draft voice cloning during summarization, and archive per-sample voice-clone outputs plus paths in `report.json`.
+
+### 2026-03-13T07:46:13+00:00 - SPoRC Judge Benchmarks Must Score Only Judge Dimensions And Persist Speaker Comparison Payloads
+- Problem: The first SPoRC benchmark implementation still carried a QMSum-style `duration_control` metric into the composite score even though the requested evaluation dimensions were only `Naturalness`, `Factualness`, and `Speaker Replication`. It also built transcript-versus-summary per-speaker message lists for the judge prompt without persisting those lists in the sample report, which weakened traceability for speaker-replication audits.
+- Solution: Keep duration telemetry separate from judge scoring, compute the SPoRC composite from only the three judge dimensions, and persist transcript per-speaker messages, summary per-speaker messages, alias maps, and speaker notes in each sample result written to `report.json`.
+
+### 2026-03-13T07:21:49+00:00 - SPoRC Benchmark Wiring Needed Root QMSum Shims And Unbounded Loop Support
+- Problem: The new SPoRC benchmark path needed its own package under `benchmark/summarizer_critic/sporc`, but the existing QMSum package still imported nonexistent root modules such as `card_framework.benchmark.summarizer_critic.runner`. That broke imports during test collection and also blocked a clean SPoRC implementation. The SPoRC benchmark also needed true unbounded summarizer-critic loops and no per-stage request timeouts, which the runtime previously modeled only as positive numeric values.
+- Solution: Add backward-compatible root shim modules that forward to the QMSum implementation, point the QMSum package at its own CLI to avoid circular imports, and teach the runtime orchestrator plus agent client to accept `None` for unbounded `max_iterations` and no-timeout stage requests.
+
+### 2026-03-13T04:55:00+00:00 - Remote vLLM Streaming Can Fail Mid-Benchmark But Non-Streaming Often Recovers
+- Problem: During the full QMSum run, some remote OpenAI-compatible stream requests failed inside the OpenAI client with `list index out of range`, which surfaced as hard summarizer failures even though the endpoint itself could still answer the same prompt.
+- Solution: Add a `VLLMProvider` fallback that retries failed streaming `chat(...)` and `generate(...)` requests in non-streaming mode before surfacing an error. Keep the streamed path as the default fast path, but use non-streaming as a resilience path for unstable remote servers.
+
+### 2026-03-13T01:10:00+00:00 - Constrained Benchmark Caps Must Still Score The Last Draft
+- Problem: The duration-constrained benchmark can intentionally cap `max_iterations`, but `run_loop_with_diagnostics(...)` discarded the latest draft and zeroed the final estimate whenever the cap was reached. That made constrained runs look like hard failures instead of scoring the best draft produced within budget.
+- Solution: Preserve the latest draft, word count, and estimated seconds in the `max_iterations_reached` diagnostics payload so benchmark code can evaluate the capped run fairly while still marking it as non-converged.
+
+### 2026-03-12T23:47:00+00:00 - Qwen vLLM Judge Runs Need An Explicit `enable_thinking: false` Chat Template Override
+- Problem: The first live benchmark smoke run reached the reference-free judge, but the remote Qwen vLLM endpoint either streamed empty content or emitted long reasoning traces instead of contract JSON when the provider merely set `enable_thinking=False`. That zeroed naturalness and reduced factualness coverage.
+- Solution: For this vLLM/Qwen endpoint, keep `enable_thinking=True` on the provider and pass `thinking_extra_body.chat_template_kwargs.enable_thinking=false` so the server applies the explicit chat-template override and returns usable JSON for judge-style prompts.
+
+### 2026-03-12T23:36:00+00:00 - Malformed Summarizer Drafts Must Not Crash Benchmark Revise Iterations
+- Problem: The first live QMSum smoke run reached critic feedback, but the summarizer's revise path tried to parse the previous draft as strict XML and crashed on malformed model output instead of recovering. That turned one bad draft into a hard benchmark failure before the loop could self-correct.
+- Solution: Make `SummarizerExecutor._load_draft_into_registry(...)` ignore malformed XML drafts and continue with an empty registry so subsequent iterations can recover from critic feedback instead of aborting the run.
+
+### 2026-03-13T12:30:00+00:00 - Real Summarizer-Critic Benchmarks Need A Stub Calibration And Duration-First Runner Contract
+- Problem: The older summarization benchmark path still assumed word-budget orchestrator calls and did not pass the now-required `calibration` dependency into the actual Summarizer and Critic executors. That made it a poor fit for a real duration-first QMSum benchmark even before dataset work started.
+- Solution: Add a dedicated `benchmark/summarizer_critic` package that prepares QMSum separately, derives `target_seconds` from human references, runs the real A2A agents with a synthetic benchmark calibration artifact, and keeps the duration-first integration fix scoped to the new package.
+
+### 2026-03-13T01:25:21+08:00 - QA Supervisor Must Preflight Child Imports And Preserve Repo-Local Source Paths
+- Problem: The new telemetry supervisor could loop on the QA benchmark even when the child process was dead on arrival from environment issues. In repo-local source runs, the child import also needed src forwarded into PYTHONPATH; otherwise the preflight could misdiagnose a missing package as ModuleNotFoundError: card_framework instead of the real dependency failure.
+- Solution: Add a lightweight QA import preflight before benchmark loops begin, forward repo-local src into child-process PYTHONPATH, and stop after the smoke test with recorded notes/results when the benchmark environment is not importable.
+
+### 2026-03-13T01:25:21+08:00 - Malformed Script Entry Newlines In pyproject.toml Can Break The Entire Benchmark Toolchain
+- Problem: The new benchmark watchdog and QA supervisor script entries were introduced with literal PowerShell newline text plus a duplicate [project.scripts] header, which made uv reject pyproject.toml before any benchmark or test command could start.
+- Solution: Normalize the script entries onto separate lines, remove the duplicate header, and verify repo command discovery again before debugging benchmark behavior.
+
+### 2026-03-13T01:24:00+08:00 - QA Supervisor Threshold Kills Need A Direct Process Fallback After Windows `taskkill`
+- Problem: The new QA supervisor correctly detected RAM threshold breaches, but on Windows the child process could survive long enough after `taskkill /T /F` for `process.wait(timeout=5.0)` to raise `TimeoutExpired`. That left the threshold-kill verification hanging onto an open child and log handle instead of completing cleanly.
+- Solution: After issuing `taskkill`, wait briefly for the child and fall back to `process.kill()` plus a final `wait()` when the process is still alive. This keeps threshold-killed runs deterministic and lets telemetry/result artifacts close cleanly.
+
+ï»¿### 2026-03-13T01:22:43+08:00 - Benchmark Supervisors Need A Synced Runtime Environment And Clean Script Metadata
+- Problem: The supervised benchmark tooling could not be exercised reliably because `pyproject.toml` had a malformed `[project.scripts]` block with literal newline text and a duplicate header, and the first real benchmark attempts in this offline workspace showed two separate runtime blockers: `benchmark.qa` failed immediately with `ModuleNotFoundError: hydra`, while `benchmark.run` failed under `uv run` before execution because Git-backed dependencies could not be fetched without network access.
+- Solution: Normalize the `[project.scripts]` block so repo tooling parses again, keep the QA and generic benchmark supervisors as the resource-watch entrypoints, and treat real supervised benchmark runs as requiring a pre-synced environment with the runtime dependencies already installed or cached locally before looping the actual benchmark commands.
+
+
+### 2026-03-13T01:20:00+08:00 - QA Benchmark Runs Need A Supervisor To Preserve Telemetry And Logs When The Local Env Is Unsynced
+- Problem: In this workspace the real `card_framework.benchmark.qa` command can fail before benchmark execution starts when the active Python environment is missing repo dependencies such as `hydra-core`. A plain failing run loses the resource-usage context and forces the next session to rediscover whether the crash came from RAM/VRAM pressure or from an import-time environment problem.
+- Solution: Add a supervised QA benchmark wrapper that performs a telemetry smoke test first, samples host RAM and NVIDIA VRAM during child-process execution, kills threshold breaches, and always writes session notes, markdown results, logs, and telemetry artifacts even when the child dies on an import-time dependency error.
 # Errors And Notes
+
+### 2026-03-13T01:20:00+08:00 - Benchmark Smoke Runs Need Repo-Local uv Cache And Preseeded Offline Dependencies
+- Problem: The first monitored smoke benchmark failed before runtime startup because the default user-profile uv cache path raised an access-denied error in this environment, and switching to a fresh repo-local uv cache then failed again because outbound network was disabled and the child environment could not fetch git or CUDA wheel dependencies on demand.
+- Solution: Make the benchmark watchdog force a repo-local `UV_CACHE_DIR` and offline uv mode for reproducible child runs, and treat a hydrated `.uv-cache` or prebuilt environment as a prerequisite for full benchmark execution in sandboxed/offline sessions.
+
+### 2026-03-13T01:18:14.0985768+08:00 - Broken Benchmark Supervision Entry Points Must Not Block Nightly Runs
+- Problem: The repo's benchmark supervision path had two separate blockers: `pyproject.toml` could invalidate `uv` script discovery when the QA and QA-supervisor script declarations were malformed, and `src/card_framework/benchmark/watchdog.py` contained a split string literal that raised a syntax error on import. That combination broke the operator path for guarded repeated benchmark runs before any real telemetry loop could start.
+- Solution: Keep the QA and QA-supervisor script declarations valid TOML, repair the newline join in `watchdog.py`, and add regression coverage that parses `pyproject.toml` with `tomllib` so the benchmark scripts stay importable and runnable.
+
+### 2026-03-13T00:08:40+08:00 - Codex Docs Must Match The Configured Research-Agent Workflow
+- Problem: The repository documented Scrapling and other contributor workflows, but it did not reflect the configured research-agent guidance. That drift encouraged inconsistent delegation for external research and left repo-local docs out of sync.
+- Solution: Add `coder_docs/research_agents.md` as the authoritative research-agent workflow, align `AGENTS.md`, `coder_docs/codebase_guide.md`, `coder_docs/scrapling.md`, and `README.md` around `researcher`, and keep repository reads, commands, and implementation in the main thread.
 
 ### 2026-03-10T17:44:52+08:00 - Packaged `setup_and_run` Must Separate Caller Workspace Paths From Package Resources And Infer Output Root
 - Problem: Switching pip-installed `infer(...)` from a direct `card_framework.cli.main` subprocess to `card_framework.cli.setup_and_run` restored the desired live prints, but the wrapper still resolved mutable paths from `shared.paths.REPO_ROOT`. Inside a wheel install that made reusable transcripts, `audio.wav`, calibration discovery, and artifact summaries point into `.venv\\Lib`, while `infer(output_dir=...)` also needed to keep its flat output contract instead of falling back to repo-style `artifacts/*` paths.
@@ -117,7 +213,7 @@
 - Solution: Build one shared model pool, add the optional DeepSeek model to that pool, and generate ordered distinct summarizer/critic pairs with `itertools.permutations(..., 2)` so the reported counts and executed runs match real permutation semantics.
 
 ### 2026-03-07T23:08:31+08:00 - IndexTTS Worker Log Streaming Must Sanitize Unicode Before Printing On Windows
-- Problem: The warm IndexTTS subprocess worker streamed raw log lines back through `print(...)`, and a Windows `cp1252` stdout encoding crashed on characters such as `👉` before the parent run could finish.
+- Problem: The warm IndexTTS subprocess worker streamed raw log lines back through `print(...)`, and a Windows `cp1252` stdout encoding crashed on characters such as `ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ¢â‚¬Â°` before the parent run could finish.
 - Solution: Sanitize streamed worker log lines for the active stdout encoding before printing so unsupported Unicode is replaced safely instead of raising `UnicodeEncodeError`.
 
 ### 2026-03-07T22:40:46+08:00 - Summarizer Tool Handlers Must Reject Empty Required Args Without Crashing
@@ -186,7 +282,7 @@ Add new entries at the top so the newest lessons are visible first.
 Record each entry with both the date and time, preferably in ISO 8601 format with timezone information.
 
 ### 2026-03-07T17:29:41+08:00 - UI Console Output Must Sanitize Unicode For Windows cp1252 Terminals
-- Problem: A real `setup_and_run.py` stage-2 run reached the pipeline, but Rich UI subscribers started throwing `UnicodeEncodeError` on Windows because system messages included characters such as `→` that the active `cp1252` console could not encode.
+- Problem: A real `setup_and_run.py` stage-2 run reached the pipeline, but Rich UI subscribers started throwing `UnicodeEncodeError` on Windows because system messages included characters such as `ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢` that the active `cp1252` console could not encode.
 - Solution: Sanitize operator-facing console text before printing, replacing common Unicode punctuation with ASCII and falling back to encoding-safe replacement for the active terminal encoding.
 
 ### 2026-03-07T17:27:11+08:00 - Bootstrap Transcript Metadata Readers Must Tolerate UTF-8 BOM Files
