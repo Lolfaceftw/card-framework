@@ -64,6 +64,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
 )
 from card_framework.benchmark.summarizer_critic.sporc.dataset import (
     DatasetPreparationError,
+    iter_prepared_dataset_samples,
     load_prepared_dataset_manifest,
     prepare_sporc_benchmark,
 )
@@ -1076,9 +1077,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             reference_wpm=float(args.reference_wpm),
             force_download=bool(args.force_download_dataset),
         )
-        dataset_manifest = prepared
-    else:
-        dataset_manifest = load_prepared_dataset_manifest(dataset_manifest_path)
+        dataset_manifest_path = prepared.manifest_path
+
+    dataset_manifest = load_prepared_dataset_manifest(
+        dataset_manifest_path,
+        include_samples=False,
+    )
 
     run_id = _make_run_id()
     run_root = Path(args.output_root).resolve() / run_id
@@ -1090,9 +1094,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     duration_preset = str(getattr(args, "duration_preset", "") or "").strip()
     override_target_seconds = _resolve_override_target_seconds(args)
     duration_tolerance_ratio = float(base_cfg.orchestrator.duration_tolerance_ratio)
-    samples_to_run = _select_samples(
-        dataset_manifest.samples,
-        max_samples=int(args.max_samples),
+    sample_limit = None if int(args.max_samples) == 0 else int(args.max_samples)
+    samples_to_run = list(
+        iter_prepared_dataset_samples(
+            dataset_manifest.manifest_path,
+            max_samples=sample_limit,
+        )
     )
     total_samples = len(samples_to_run)
     active_target_seconds_by_sample_id: dict[str, int] = {}

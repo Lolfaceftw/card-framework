@@ -7,10 +7,12 @@ import json
 from pathlib import Path
 
 from card_framework.benchmark.summarizer_critic.sporc.dataset import (
+    DatasetPreparationError,
     build_prepared_dataset_manifest,
     curate_longform_sporc_manifest,
     derive_sporc_target_seconds,
     derive_target_seconds,
+    iter_prepared_dataset_samples,
     load_prepared_dataset_manifest,
 )
 
@@ -203,6 +205,187 @@ def test_build_prepared_dataset_manifest_supports_real_sporc_field_names(
     assert transcript_payload["segments"][0]["end_time"] == 5000
     assert transcript_payload["metadata"]["source_audio_url"] == episode_key
     assert sample.target_seconds == 12
+
+
+def test_build_prepared_dataset_manifest_full_variant_uses_sidecar_and_episode_order(
+    tmp_path: Path,
+) -> None:
+    episode_path = tmp_path / "episodeLevelData.jsonl.gz"
+    turn_path = tmp_path / "speakerTurnData.jsonl.gz"
+    episode_key_a = "https://example.com/episode-a.mp3"
+    episode_key_b = "https://example.com/episode-b.mp3"
+    _write_jsonl_gz(
+        episode_path,
+        [
+            {
+                "mp3url": episode_key_a,
+                "epDescription": "Episode A summary.",
+                "epTitle": "Episode A",
+            },
+            {
+                "mp3url": episode_key_b,
+                "epDescription": "Episode B summary.",
+                "epTitle": "Episode B",
+            },
+        ],
+    )
+    _write_jsonl_gz(
+        turn_path,
+        [
+            {
+                "mp3url": episode_key_b,
+                "startTime": 0.0,
+                "endTime": 5.0,
+                "speaker": ["SPEAKER_01"],
+                "turnText": "This is episode B.",
+            },
+            {
+                "mp3url": episode_key_a,
+                "startTime": 0.0,
+                "endTime": 5.0,
+                "speaker": ["SPEAKER_00"],
+                "turnText": "This is episode A.",
+            },
+        ],
+    )
+
+    manifest = build_prepared_dataset_manifest(
+        episode_data_path=episode_path,
+        turn_data_path=turn_path,
+        prepared_root=tmp_path / "prepared_full",
+        dataset_variant="full",
+    )
+
+    assert manifest.sample_count == 2
+    assert manifest.samples == ()
+    assert manifest.samples_path is not None
+    assert manifest.samples_path.exists()
+    loaded_samples = list(iter_prepared_dataset_samples(manifest.manifest_path))
+    assert [sample.sample_id for sample in loaded_samples] == [
+        "sporc_00001_https_example_com_episode_a_mp3",
+        "sporc_00002_https_example_com_episode_b_mp3",
+    ]
+    payload = json.loads(manifest.manifest_path.read_text(encoding="utf-8"))
+    assert payload["samples_path"] == str(manifest.samples_path)
+    assert "samples" not in payload
+
+
+def test_build_prepared_dataset_manifest_rejects_repeated_turn_groups(
+    tmp_path: Path,
+) -> None:
+    episode_path = tmp_path / "episodeLevelData.jsonl.gz"
+    turn_path = tmp_path / "speakerTurnData.jsonl.gz"
+    episode_key_a = "https://example.com/episode-a.mp3"
+    episode_key_b = "https://example.com/episode-b.mp3"
+    _write_jsonl_gz(
+        episode_path,
+        [
+            {
+                "mp3url": episode_key_a,
+                "epDescription": "Episode A summary.",
+                "epTitle": "Episode A",
+            },
+            {
+                "mp3url": episode_key_b,
+                "epDescription": "Episode B summary.",
+                "epTitle": "Episode B",
+            },
+        ],
+    )
+    _write_jsonl_gz(
+        turn_path,
+        [
+            {
+                "mp3url": episode_key_a,
+                "startTime": 0.0,
+                "endTime": 5.0,
+                "speaker": ["SPEAKER_00"],
+                "turnText": "First A block.",
+            },
+            {
+                "mp3url": episode_key_b,
+                "startTime": 0.0,
+                "endTime": 5.0,
+                "speaker": ["SPEAKER_01"],
+                "turnText": "B block.",
+            },
+            {
+                "mp3url": episode_key_a,
+                "startTime": 5.0,
+                "endTime": 10.0,
+                "speaker": ["SPEAKER_00"],
+                "turnText": "Second A block.",
+            },
+        ],
+    )
+
+    try:
+        build_prepared_dataset_manifest(
+            episode_data_path=episode_path,
+            turn_data_path=turn_path,
+            prepared_root=tmp_path / "prepared_full",
+            dataset_variant="full",
+        )
+    except DatasetPreparationError as exc:
+        assert "repeated episode key" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("expected DatasetPreparationError")
+
+
+def test_load_prepared_dataset_manifest_supports_bounded_sidecar_loading(
+    tmp_path: Path,
+) -> None:
+    prepared_root = tmp_path / "prepared_full"
+    prepared_root.mkdir(parents=True, exist_ok=True)
+    samples_path = prepared_root / "samples.jsonl.gz"
+    with gzip.open(samples_path, "wt", encoding="utf-8") as handle:
+        for index in range(3):
+            handle.write(
+                json.dumps(
+                    {
+                        "sample_id": f"sample_{index}",
+                        "dataset": "sporc_full",
+                        "episode_key": f"episode://{index}",
+                        "transcript_path": str(prepared_root / f"{index}.json"),
+                        "reference_summary": "reference",
+                        "target_seconds": 45,
+                        "metadata": {},
+                    }
+                )
+            )
+            handle.write("\n")
+    manifest_path = prepared_root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_full",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "full",
+                "episode_data_path": str(tmp_path / "episodeLevelData.jsonl.gz"),
+                "turn_data_path": str(tmp_path / "speakerTurnData.jsonl.gz"),
+                "sample_count": 3,
+                "samples_path": str(samples_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = load_prepared_dataset_manifest(
+        manifest_path,
+        max_samples=2,
+    )
+    iterated = list(iter_prepared_dataset_samples(manifest_path, max_samples=2))
+
+    assert manifest.sample_count == 3
+    assert manifest.samples_path == samples_path.resolve()
+    assert [sample.sample_id for sample in manifest.samples] == [
+        "sample_0",
+        "sample_1",
+    ]
+    assert [sample.sample_id for sample in iterated] == [
+        "sample_0",
+        "sample_1",
+    ]
 
 
 def test_curate_longform_sporc_manifest_filters_to_strict_multi_speaker_examples(

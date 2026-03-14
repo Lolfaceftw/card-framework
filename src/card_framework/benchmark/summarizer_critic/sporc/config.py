@@ -80,7 +80,8 @@ class PreparedDatasetManifest:
     episode_data_path: Path
     turn_data_path: Path
     sample_count: int
-    samples: tuple[PreparedBenchmarkSample, ...]
+    samples: tuple[PreparedBenchmarkSample, ...] = field(default_factory=tuple)
+    samples_path: Path | None = None
 
 
 @dataclass(slots=True, frozen=True)

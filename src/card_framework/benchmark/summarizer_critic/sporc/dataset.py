@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import asdict
 import gzip
 import json
+import logging
 import os
 from pathlib import Path
 import re
+import sqlite3
 from typing import Any
 
 from card_framework.agents.utils import count_words
@@ -43,6 +45,11 @@ _SPORC_TRANSCRIPT_SUMMARY_RATIO = 0.25
 _SPORC_MIN_TARGET_SECONDS = 12
 _SPORC_MAX_TARGET_SECONDS = 45
 _LONGFORM_CURATION_PROFILE = "longform_15k_v1"
+_EPISODE_METADATA_CACHE_FILENAME = "sporc_episode_metadata_v1.sqlite3"
+_FULL_SAMPLES_FILENAME = "samples.jsonl.gz"
+_EPISODE_CACHE_SCHEMA_VERSION = "sporc_episode_metadata_v1"
+_EPISODE_INDEX_PROGRESS_INTERVAL = 50_000
+_TURN_STREAM_PROGRESS_INTERVAL = 500_000
 _WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9']+")
 _NON_LEXICAL_TOKENS = frozenset(
     {
@@ -58,6 +65,7 @@ _NON_LEXICAL_TOKENS = frozenset(
         "silence",
     }
 )
+LOGGER = logging.getLogger(__name__)
 
 
 def derive_target_seconds(
@@ -301,8 +309,7 @@ def _speaker_notes(record: dict[str, Any]) -> list[str]:
     return notes
 
 
-def _iter_jsonl_gz(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def _iter_jsonl_gz(path: Path) -> Iterator[dict[str, Any]]:
     with gzip.open(path, "rt", encoding="utf-8") as handle:
         for raw_line in handle:
             line = raw_line.strip()
@@ -310,8 +317,346 @@ def _iter_jsonl_gz(path: Path) -> list[dict[str, Any]]:
                 continue
             payload = json.loads(line)
             if isinstance(payload, dict):
-                rows.append(payload)
-    return rows
+                yield payload
+
+
+def _episode_metadata_cache_path(prepared_root: Path) -> Path:
+    return (prepared_root / ".cache" / _EPISODE_METADATA_CACHE_FILENAME).resolve()
+
+
+def _episode_cache_signature(episode_data_path: Path) -> str:
+    stat_result = episode_data_path.stat()
+    return json.dumps(
+        {
+            "schema_version": _EPISODE_CACHE_SCHEMA_VERSION,
+            "episode_data_path": str(episode_data_path.resolve()),
+            "size_bytes": stat_result.st_size,
+            "mtime_ns": stat_result.st_mtime_ns,
+        },
+        sort_keys=True,
+    )
+
+
+def _open_episode_metadata_connection(cache_path: Path) -> sqlite3.Connection:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(cache_path))
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    return connection
+
+
+def _initialize_episode_metadata_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS episodes (
+            episode_key TEXT PRIMARY KEY,
+            episode_index INTEGER NOT NULL,
+            reference_summary TEXT NOT NULL,
+            episode_title TEXT NOT NULL,
+            source_audio_url TEXT NOT NULL,
+            speaker_alias_map_json TEXT NOT NULL,
+            speaker_notes_json TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS episodes_episode_index_idx
+        ON episodes (episode_index);
+        """
+    )
+
+
+def _prepare_sample_spool_table(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP TABLE IF EXISTS prepared_samples_spool")
+    connection.execute(
+        """
+        CREATE TABLE prepared_samples_spool (
+            episode_index INTEGER PRIMARY KEY,
+            sample_json TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _metadata_value(connection: sqlite3.Connection, key: str) -> str | None:
+    row = connection.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _coerce_text(row["value"])
+
+
+def _set_metadata_value(connection: sqlite3.Connection, key: str, value: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO metadata (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+
+
+def _clear_episode_metadata_cache(connection: sqlite3.Connection) -> None:
+    connection.execute("DELETE FROM episodes")
+    connection.execute("DELETE FROM metadata")
+
+
+def _ensure_episode_metadata_cache(
+    connection: sqlite3.Connection,
+    *,
+    episode_data_path: Path,
+) -> None:
+    _initialize_episode_metadata_schema(connection)
+    expected_signature = _episode_cache_signature(episode_data_path)
+    cached_signature = _metadata_value(connection, "episode_source_signature")
+    cached_count = int(
+        connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+    )
+    if cached_signature == expected_signature and cached_count > 0:
+        LOGGER.info(
+            "Reusing cached SPoRC episode metadata index with %s rows from %s.",
+            cached_count,
+            episode_data_path,
+        )
+        return
+
+    LOGGER.info("Building SPoRC episode metadata index from %s.", episode_data_path)
+    _clear_episode_metadata_cache(connection)
+    rows_since_commit = 0
+    with connection:
+        for episode_index, episode_record in enumerate(
+            _iter_jsonl_gz(episode_data_path),
+            start=1,
+        ):
+            episode_key = _episode_key(episode_record)
+            if not episode_key:
+                continue
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO episodes (
+                        episode_key,
+                        episode_index,
+                        reference_summary,
+                        episode_title,
+                        source_audio_url,
+                        speaker_alias_map_json,
+                        speaker_notes_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        episode_key,
+                        episode_index,
+                        _episode_reference_summary(episode_record),
+                        _episode_title(episode_record),
+                        _episode_source_audio_url(
+                            episode_record,
+                            episode_key=episode_key,
+                        ),
+                        json.dumps(
+                            _speaker_alias_map(episode_record, []),
+                            sort_keys=True,
+                        ),
+                        json.dumps(_speaker_notes(episode_record)),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise DatasetPreparationError(
+                    "SPoRC episode metadata contained a duplicate episode key. "
+                    f"Unable to build a stable cache for {episode_key!r}."
+                ) from exc
+            rows_since_commit += 1
+            if episode_index % _EPISODE_INDEX_PROGRESS_INTERVAL == 0:
+                LOGGER.info(
+                    "Indexed %s SPoRC episode rows into %s.",
+                    episode_index,
+                    connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
+                )
+            if rows_since_commit >= _EPISODE_INDEX_PROGRESS_INTERVAL:
+                connection.commit()
+                rows_since_commit = 0
+        _set_metadata_value(connection, "episode_source_signature", expected_signature)
+    LOGGER.info(
+        "Finished SPoRC episode metadata index with %s rows.",
+        connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
+    )
+
+
+def _iter_turn_groups(
+    turn_data_path: Path,
+) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+    current_episode_key = ""
+    current_turns: list[dict[str, Any]] = []
+    completed_episode_keys: set[str] = set()
+    turn_row_count = 0
+    group_count = 0
+    for record in _iter_jsonl_gz(turn_data_path):
+        turn_row_count += 1
+        if turn_row_count % _TURN_STREAM_PROGRESS_INTERVAL == 0:
+            LOGGER.info(
+                "Streamed %s SPoRC turn rows across %s contiguous episode groups.",
+                turn_row_count,
+                group_count,
+            )
+        episode_key = _episode_key(record)
+        if not episode_key:
+            continue
+        if not current_episode_key:
+            current_episode_key = episode_key
+            current_turns = [record]
+            continue
+        if episode_key == current_episode_key:
+            current_turns.append(record)
+            continue
+        if episode_key in completed_episode_keys:
+            raise DatasetPreparationError(
+                "SPoRC turn rows are no longer grouped contiguously by episode. "
+                f"Encountered a repeated episode key after its block ended: {episode_key!r}."
+            )
+        yield current_episode_key, current_turns
+        completed_episode_keys.add(current_episode_key)
+        group_count += 1
+        current_episode_key = episode_key
+        current_turns = [record]
+    if current_episode_key:
+        yield current_episode_key, current_turns
+
+
+def _augment_speaker_alias_map(
+    *,
+    base_alias_map: dict[str, str],
+    unique_speakers: list[str],
+) -> dict[str, str]:
+    alias_map = dict(base_alias_map)
+    for speaker in unique_speakers:
+        alias_map[speaker] = speaker
+        alias_map[speaker.lower()] = speaker
+    return alias_map
+
+
+def _parse_prepared_sample(raw_sample: dict[str, Any]) -> PreparedBenchmarkSample:
+    return PreparedBenchmarkSample(
+        sample_id=_coerce_text(raw_sample.get("sample_id")),
+        dataset=_coerce_text(raw_sample.get("dataset")),
+        episode_key=_coerce_text(raw_sample.get("episode_key")),
+        transcript_path=_coerce_text(raw_sample.get("transcript_path")),
+        reference_summary=_coerce_text(raw_sample.get("reference_summary")),
+        target_seconds=int(raw_sample.get("target_seconds", 0)),
+        metadata=(
+            dict(raw_sample.get("metadata", {}))
+            if isinstance(raw_sample.get("metadata"), dict)
+            else {}
+        ),
+    )
+
+
+def _build_prepared_sample(
+    *,
+    episode_index: int,
+    episode_key: str,
+    reference_summary: str,
+    episode_title: str,
+    source_audio_url: str,
+    base_speaker_alias_map: dict[str, str],
+    speaker_notes: list[str],
+    raw_turns: list[dict[str, Any]],
+    transcript_root: Path,
+    dataset_variant: str,
+    reference_wpm: float,
+    episode_data_path: Path,
+    turn_data_path: Path,
+) -> PreparedBenchmarkSample | None:
+    if not reference_summary:
+        return None
+
+    segments: list[dict[str, Any]] = []
+    unique_speakers: list[str] = []
+    seen_speakers: set[str] = set()
+    for turn_index, raw_turn in enumerate(
+        sorted(
+            raw_turns,
+            key=lambda item: _turn_float(item, "start", "startTime", "start_time"),
+        ),
+        start=1,
+    ):
+        text = _turn_text(raw_turn)
+        speakers = _turn_speakers(raw_turn)
+        if not text or not speakers:
+            continue
+        canonical_speaker = speakers[0]
+        if canonical_speaker not in seen_speakers:
+            unique_speakers.append(canonical_speaker)
+            seen_speakers.add(canonical_speaker)
+        overlap_speakers = [speaker for speaker in speakers[1:] if speaker]
+        start_time_seconds = _turn_float(raw_turn, "start", "startTime", "start_time")
+        end_time_seconds = _turn_float(raw_turn, "end", "endTime", "end_time")
+        if end_time_seconds <= start_time_seconds:
+            end_time_seconds = start_time_seconds + 1.0
+        start_time = max(0, int(round(start_time_seconds * 1000.0)))
+        end_time = max(start_time + 1, int(round(end_time_seconds * 1000.0)))
+        segments.append(
+            {
+                "speaker": canonical_speaker,
+                "text": text,
+                "start_time": start_time,
+                "end_time": end_time,
+                "overlap_speakers": overlap_speakers,
+                "source_turn_index": turn_index,
+            }
+        )
+    if not segments:
+        return None
+
+    speaker_alias_map = _augment_speaker_alias_map(
+        base_alias_map=base_speaker_alias_map,
+        unique_speakers=unique_speakers,
+    )
+    transcript_word_count = sum(count_words(str(segment["text"])) for segment in segments)
+    transcript_payload = {
+        "segments": segments,
+        "metadata": {
+            "dataset": "sporc",
+            "episode_key": episode_key,
+            "episode_title": episode_title,
+            "speaker_alias_map": speaker_alias_map,
+            "speaker_notes": speaker_notes,
+            "source_audio_url": source_audio_url,
+            "source_episode_data_path": str(episode_data_path),
+            "source_turn_data_path": str(turn_data_path),
+        },
+    }
+    transcript_path = (
+        transcript_root / f"{episode_index:05d}_{_slugify(episode_key)}.transcript.json"
+    ).resolve()
+    transcript_path.write_text(
+        json.dumps(transcript_payload, indent=2),
+        encoding="utf-8",
+    )
+    return PreparedBenchmarkSample(
+        sample_id=f"sporc_{episode_index:05d}_{_slugify(episode_key)}",
+        dataset=f"sporc_{dataset_variant}",
+        episode_key=episode_key,
+        transcript_path=str(transcript_path),
+        reference_summary=reference_summary,
+        target_seconds=derive_sporc_target_seconds(
+            reference_summary,
+            transcript_word_count=transcript_word_count,
+            reference_wpm=reference_wpm,
+        ),
+        metadata={
+            "episode_title": episode_title,
+            "reference_word_count": count_words(reference_summary),
+            "source_audio_url": source_audio_url,
+            "speaker_alias_map": speaker_alias_map,
+            "speaker_notes": speaker_notes,
+        },
+    )
 
 
 def resolve_sporc_source_files(
@@ -409,157 +754,143 @@ def build_prepared_dataset_manifest(
             f"SPoRC turn data file does not exist: {turn_data_path}"
         )
 
+    resolved_episode_path = episode_data_path.resolve()
+    resolved_turn_path = turn_data_path.resolve()
+    prepared_root = prepared_root.resolve()
     prepared_root.mkdir(parents=True, exist_ok=True)
-    transcript_root = prepared_root / "transcripts"
+    transcript_root = (prepared_root / "transcripts").resolve()
     transcript_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = (prepared_root / DEFAULT_DATASET_MANIFEST_PATH.name).resolve()
+    samples_path = (
+        (prepared_root / _FULL_SAMPLES_FILENAME).resolve()
+        if dataset_variant == "full"
+        else None
+    )
+    cache_path = _episode_metadata_cache_path(prepared_root)
+    samples: tuple[PreparedBenchmarkSample, ...] = ()
 
-    episode_rows = _iter_jsonl_gz(episode_data_path)
-    turn_rows = _iter_jsonl_gz(turn_data_path)
-
-    turns_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in turn_rows:
-        episode_key = _episode_key(record)
-        if not episode_key:
-            continue
-        turns_by_episode[episode_key].append(record)
-
-    samples: list[PreparedBenchmarkSample] = []
-    transcript_cache: dict[str, Path] = {}
-    for episode_index, episode_record in enumerate(episode_rows, start=1):
-        episode_key = _episode_key(episode_record)
-        if not episode_key:
-            continue
-        reference_summary = _episode_reference_summary(episode_record)
-        if not reference_summary:
-            continue
-        raw_turns = turns_by_episode.get(episode_key, [])
-        if not raw_turns:
-            continue
-
-        segments: list[dict[str, Any]] = []
-        unique_speakers: list[str] = []
-        seen_speakers: set[str] = set()
-        for turn_index, raw_turn in enumerate(
-            sorted(
-                raw_turns,
-                key=lambda item: _turn_float(item, "start", "startTime", "start_time"),
-            ),
-            start=1,
-        ):
-            text = _turn_text(raw_turn)
-            speakers = _turn_speakers(raw_turn)
-            if not text or not speakers:
-                continue
-            canonical_speaker = speakers[0]
-            if canonical_speaker not in seen_speakers:
-                unique_speakers.append(canonical_speaker)
-                seen_speakers.add(canonical_speaker)
-            overlap_speakers = [speaker for speaker in speakers[1:] if speaker]
-            start_time_seconds = _turn_float(
-                raw_turn, "start", "startTime", "start_time"
-            )
-            end_time_seconds = _turn_float(raw_turn, "end", "endTime", "end_time")
-            if end_time_seconds <= start_time_seconds:
-                end_time_seconds = start_time_seconds + 1.0
-            start_time = max(0, int(round(start_time_seconds * 1000.0)))
-            end_time = max(start_time + 1, int(round(end_time_seconds * 1000.0)))
-            segments.append(
-                {
-                    "speaker": canonical_speaker,
-                    "text": text,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "overlap_speakers": overlap_speakers,
-                    "source_turn_index": turn_index,
-                }
-            )
-        if not segments:
-            continue
-
-        speaker_alias_map = _speaker_alias_map(episode_record, unique_speakers)
-        speaker_notes = _speaker_notes(episode_record)
-        transcript_word_count = sum(
-            count_words(str(segment["text"])) for segment in segments
+    with _open_episode_metadata_connection(cache_path) as connection:
+        _ensure_episode_metadata_cache(
+            connection,
+            episode_data_path=resolved_episode_path,
         )
-        source_audio_url = _episode_source_audio_url(
-            episode_record,
-            episode_key=episode_key,
-        )
-        transcript_payload = {
-            "segments": segments,
-            "metadata": {
-                "dataset": "sporc",
-                "episode_key": episode_key,
-                "episode_title": _episode_title(episode_record),
-                "speaker_alias_map": speaker_alias_map,
-                "speaker_notes": speaker_notes,
-                "source_audio_url": source_audio_url,
-                "source_episode_data_path": str(episode_data_path.resolve()),
-                "source_turn_data_path": str(turn_data_path.resolve()),
-            },
-        }
-        transcript_path = transcript_cache.get(episode_key)
-        if transcript_path is None:
-            transcript_path = (
-                transcript_root
-                / f"{episode_index:05d}_{_slugify(episode_key)}.transcript.json"
-            ).resolve()
-            transcript_path.write_text(
-                json.dumps(transcript_payload, indent=2),
-                encoding="utf-8",
-            )
-            transcript_cache[episode_key] = transcript_path
-
-        sample_id = f"sporc_{episode_index:05d}_{_slugify(episode_key)}"
-        samples.append(
-            PreparedBenchmarkSample(
-                sample_id=sample_id,
-                dataset=f"sporc_{dataset_variant}",
-                episode_key=episode_key,
-                transcript_path=str(transcript_path),
-                reference_summary=reference_summary,
-                target_seconds=derive_sporc_target_seconds(
-                    reference_summary,
-                    transcript_word_count=transcript_word_count,
+        _prepare_sample_spool_table(connection)
+        try:
+            for episode_key, raw_turns in _iter_turn_groups(resolved_turn_path):
+                episode_row = connection.execute(
+                    """
+                    SELECT
+                        episode_index,
+                        reference_summary,
+                        episode_title,
+                        source_audio_url,
+                        speaker_alias_map_json,
+                        speaker_notes_json
+                    FROM episodes
+                    WHERE episode_key = ?
+                    """,
+                    (episode_key,),
+                ).fetchone()
+                if episode_row is None:
+                    continue
+                sample = _build_prepared_sample(
+                    episode_index=int(episode_row["episode_index"]),
+                    episode_key=episode_key,
+                    reference_summary=_coerce_text(episode_row["reference_summary"]),
+                    episode_title=_coerce_text(episode_row["episode_title"]),
+                    source_audio_url=_coerce_text(episode_row["source_audio_url"]),
+                    base_speaker_alias_map=(
+                        json.loads(_coerce_text(episode_row["speaker_alias_map_json"]))
+                        if _coerce_text(episode_row["speaker_alias_map_json"])
+                        else {}
+                    ),
+                    speaker_notes=(
+                        json.loads(_coerce_text(episode_row["speaker_notes_json"]))
+                        if _coerce_text(episode_row["speaker_notes_json"])
+                        else []
+                    ),
+                    raw_turns=raw_turns,
+                    transcript_root=transcript_root,
+                    dataset_variant=dataset_variant,
                     reference_wpm=reference_wpm,
-                ),
-                metadata={
-                    "episode_title": _episode_title(episode_record),
-                    "reference_word_count": count_words(reference_summary),
-                    "source_audio_url": source_audio_url,
-                    "speaker_alias_map": speaker_alias_map,
-                    "speaker_notes": speaker_notes,
-                },
+                    episode_data_path=resolved_episode_path,
+                    turn_data_path=resolved_turn_path,
+                )
+                if sample is None:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO prepared_samples_spool (episode_index, sample_json)
+                    VALUES (?, ?)
+                    """,
+                    (
+                        int(episode_row["episode_index"]),
+                        json.dumps(asdict(sample), separators=(",", ":")),
+                    ),
+                )
+
+            sample_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM prepared_samples_spool"
+                ).fetchone()[0]
             )
-        )
+            if sample_count <= 0:
+                raise DatasetPreparationError(
+                    "No usable SPoRC samples were prepared from the supplied files."
+                )
 
-    if not samples:
-        raise DatasetPreparationError(
-            "No usable SPoRC samples were prepared from the supplied files."
-        )
+            if samples_path is not None:
+                with gzip.open(samples_path, "wt", encoding="utf-8") as handle:
+                    for row in connection.execute(
+                        """
+                        SELECT sample_json
+                        FROM prepared_samples_spool
+                        ORDER BY episode_index
+                        """
+                    ):
+                        handle.write(_coerce_text(row["sample_json"]))
+                        handle.write("\n")
+            else:
+                samples = tuple(
+                    _parse_prepared_sample(json.loads(_coerce_text(row["sample_json"])))
+                    for row in connection.execute(
+                        """
+                        SELECT sample_json
+                        FROM prepared_samples_spool
+                        ORDER BY episode_index
+                        """
+                    )
+                )
+        finally:
+            connection.execute("DROP TABLE IF EXISTS prepared_samples_spool")
+            connection.commit()
 
-    manifest_path = prepared_root / DEFAULT_DATASET_MANIFEST_PATH.name
     manifest_payload = {
         "dataset_id": f"sporc_{dataset_variant}",
         "created_at_utc": utc_now_iso(),
         "sporc_dataset_id": SPORC_DATASET_ID,
         "dataset_variant": dataset_variant,
-        "episode_data_path": str(episode_data_path.resolve()),
-        "turn_data_path": str(turn_data_path.resolve()),
+        "episode_data_path": str(resolved_episode_path),
+        "turn_data_path": str(resolved_turn_path),
         "reference_wpm": reference_wpm,
-        "sample_count": len(samples),
-        "samples": [asdict(sample) for sample in samples],
+        "sample_count": sample_count,
     }
+    if samples_path is not None:
+        manifest_payload["samples_path"] = str(samples_path)
+    else:
+        manifest_payload["samples"] = [asdict(sample) for sample in samples]
+
     manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
     return PreparedDatasetManifest(
-        manifest_path=manifest_path.resolve(),
+        manifest_path=manifest_path,
         dataset_id=f"sporc_{dataset_variant}",
         sporc_dataset_id=SPORC_DATASET_ID,
         dataset_variant=dataset_variant,
-        episode_data_path=episode_data_path.resolve(),
-        turn_data_path=turn_data_path.resolve(),
-        sample_count=len(samples),
-        samples=tuple(samples),
+        episode_data_path=resolved_episode_path,
+        turn_data_path=resolved_turn_path,
+        sample_count=sample_count,
+        samples=samples,
+        samples_path=samples_path,
     )
 
 
@@ -725,7 +1056,10 @@ def curate_longform_sporc_manifest(
     audit_path: Path = DEFAULT_LONGFORM_AUDIT_PATH,
 ) -> tuple[PreparedDatasetManifest, Path]:
     """Filter a prepared SPoRC manifest down to strict long-form dialogue episodes."""
-    source_manifest = load_prepared_dataset_manifest(source_manifest_path)
+    source_manifest = load_prepared_dataset_manifest(
+        source_manifest_path,
+        include_samples=False,
+    )
     output_manifest_path = output_manifest_path.resolve()
     audit_path = audit_path.resolve()
     output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -733,7 +1067,7 @@ def curate_longform_sporc_manifest(
 
     selected_samples: list[PreparedBenchmarkSample] = []
     audit_rows: list[dict[str, Any]] = []
-    for sample in source_manifest.samples:
+    for sample in iter_prepared_dataset_samples(source_manifest.manifest_path):
         transcript_path = Path(sample.transcript_path).resolve()
         transcript_payload = _load_transcript_payload(transcript_path)
         stats = _collect_longform_curation_stats(transcript_payload)
@@ -808,6 +1142,7 @@ def curate_longform_sporc_manifest(
             turn_data_path=source_manifest.turn_data_path,
             sample_count=len(selected_samples),
             samples=tuple(selected_samples),
+            samples_path=None,
         ),
         audit_path,
     )
@@ -839,8 +1174,7 @@ def prepare_sporc_benchmark(
     )
 
 
-def load_prepared_dataset_manifest(manifest_path: Path) -> PreparedDatasetManifest:
-    """Load a previously prepared SPoRC dataset manifest from disk."""
+def _load_prepared_manifest_payload(manifest_path: Path) -> dict[str, Any]:
     if not manifest_path.exists():
         raise DatasetPreparationError(
             f"Prepared dataset manifest does not exist: {manifest_path}"
@@ -850,29 +1184,103 @@ def load_prepared_dataset_manifest(manifest_path: Path) -> PreparedDatasetManife
         raise DatasetPreparationError(
             "Prepared dataset manifest must contain an object."
         )
-    raw_samples = payload.get("samples", [])
-    if not isinstance(raw_samples, list) or not raw_samples:
-        raise DatasetPreparationError(
-            "Prepared dataset manifest must contain a non-empty samples list."
-        )
-    samples = tuple(
-        PreparedBenchmarkSample(
-            sample_id=_coerce_text(raw_sample.get("sample_id")),
-            dataset=_coerce_text(raw_sample.get("dataset")),
-            episode_key=_coerce_text(raw_sample.get("episode_key")),
-            transcript_path=_coerce_text(raw_sample.get("transcript_path")),
-            reference_summary=_coerce_text(raw_sample.get("reference_summary")),
-            target_seconds=int(raw_sample.get("target_seconds", 0)),
-            metadata=(
-                dict(raw_sample.get("metadata", {}))
-                if isinstance(raw_sample.get("metadata"), dict)
-                else {}
-            ),
-        )
-        for raw_sample in raw_samples
+    return payload
+
+
+def _resolve_manifest_samples_path(
+    payload: dict[str, Any],
+    *,
+    manifest_path: Path,
+) -> Path | None:
+    raw_samples_path = _coerce_text(payload.get("samples_path"))
+    if not raw_samples_path:
+        return None
+    candidate = Path(raw_samples_path)
+    if not candidate.is_absolute():
+        candidate = (manifest_path.parent / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def iter_prepared_dataset_samples(
+    manifest_path: Path,
+    *,
+    max_samples: int | None = None,
+) -> Iterator[PreparedBenchmarkSample]:
+    """Iterate prepared SPoRC samples without materializing the full manifest."""
+    resolved_manifest_path = manifest_path.resolve()
+    payload = _load_prepared_manifest_payload(resolved_manifest_path)
+    raw_samples = payload.get("samples")
+    samples_path = _resolve_manifest_samples_path(
+        payload,
+        manifest_path=resolved_manifest_path,
     )
+    emitted = 0
+    limit = None if max_samples is None or int(max_samples) <= 0 else int(max_samples)
+    if isinstance(raw_samples, list):
+        for raw_sample in raw_samples:
+            if limit is not None and emitted >= limit:
+                break
+            if not isinstance(raw_sample, dict):
+                continue
+            yield _parse_prepared_sample(raw_sample)
+            emitted += 1
+        return
+    if samples_path is None or not samples_path.exists():
+        raise DatasetPreparationError(
+            "Prepared dataset manifest must contain inline samples or a valid samples_path."
+        )
+    with gzip.open(samples_path, "rt", encoding="utf-8") as handle:
+        for raw_line in handle:
+            if limit is not None and emitted >= limit:
+                break
+            line = raw_line.strip()
+            if not line:
+                continue
+            payload_line = json.loads(line)
+            if not isinstance(payload_line, dict):
+                continue
+            yield _parse_prepared_sample(payload_line)
+            emitted += 1
+
+
+def load_prepared_dataset_manifest(
+    manifest_path: Path,
+    *,
+    include_samples: bool = True,
+    max_samples: int | None = None,
+) -> PreparedDatasetManifest:
+    """Load a previously prepared SPoRC dataset manifest from disk."""
+    resolved_manifest_path = manifest_path.resolve()
+    payload = _load_prepared_manifest_payload(resolved_manifest_path)
+    raw_samples = payload.get("samples")
+    samples_path = _resolve_manifest_samples_path(
+        payload,
+        manifest_path=resolved_manifest_path,
+    )
+    if not isinstance(raw_samples, list) and samples_path is None:
+        raise DatasetPreparationError(
+            "Prepared dataset manifest must contain inline samples or a valid samples_path."
+        )
+
+    samples: tuple[PreparedBenchmarkSample, ...] = ()
+    if include_samples:
+        samples = tuple(
+            iter_prepared_dataset_samples(
+                resolved_manifest_path,
+                max_samples=max_samples,
+            )
+        )
+    resolved_sample_count = payload.get("sample_count")
+    if resolved_sample_count is None:
+        if isinstance(raw_samples, list):
+            resolved_sample_count = len(raw_samples)
+        else:
+            resolved_sample_count = len(samples)
+
     return PreparedDatasetManifest(
-        manifest_path=manifest_path.resolve(),
+        manifest_path=resolved_manifest_path,
         dataset_id=_coerce_text(payload.get("dataset_id")) or "sporc_sample",
         sporc_dataset_id=_coerce_text(payload.get("sporc_dataset_id"))
         or SPORC_DATASET_ID,
@@ -882,6 +1290,7 @@ def load_prepared_dataset_manifest(manifest_path: Path) -> PreparedDatasetManife
             _coerce_text(payload.get("episode_data_path"))
         ).resolve(),
         turn_data_path=Path(_coerce_text(payload.get("turn_data_path"))).resolve(),
-        sample_count=int(payload.get("sample_count", len(samples))),
+        sample_count=int(resolved_sample_count),
         samples=samples,
+        samples_path=samples_path,
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 from pathlib import Path
 
@@ -365,6 +366,77 @@ def test_execute_benchmark_short_circuits_when_all_samples_fail_preflight(
     assert report.summary.skipped_count == 1
     assert report.samples[0].status == "skipped"
     assert report.samples[0].final_status == "preflight_failed"
+
+
+def test_execute_benchmark_reads_only_requested_sidecar_samples(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    transcript_path = tmp_path / "sample.transcript.json"
+    _write_transcript(
+        transcript_path,
+        text=" ".join(["word"] * 124),
+    )
+    samples_path = tmp_path / "samples.jsonl.gz"
+    with gzip.open(samples_path, "wt", encoding="utf-8") as handle:
+        for sample_id in ("sporc_00001_example", "sporc_00002_unused"):
+            handle.write(
+                json.dumps(
+                    {
+                        "sample_id": sample_id,
+                        "dataset": "sporc_full",
+                        "episode_key": f"{sample_id}.mp3",
+                        "transcript_path": str(transcript_path),
+                        "reference_summary": "reference",
+                        "target_seconds": 12,
+                        "metadata": {},
+                    }
+                )
+            )
+            handle.write("\n")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_full",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "full",
+                "episode_data_path": str(tmp_path / "episode.jsonl.gz"),
+                "turn_data_path": str(tmp_path / "turn.jsonl.gz"),
+                "sample_count": 2,
+                "samples_path": str(samples_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(manifest_path),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--target-seconds-override",
+            "300",
+            "--max-samples",
+            "1",
+        ]
+    )
+
+    def _unexpected_instantiate(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("provider startup should not happen for all-skipped runs")
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.hydra.utils.instantiate",
+        _unexpected_instantiate,
+    )
+
+    report = execute_benchmark(args)
+
+    assert report.summary.sample_count == 1
+    assert [sample.sample_id for sample in report.samples] == ["sporc_00001_example"]
+    assert report.samples[0].status == "skipped"
 
 
 def test_prepare_provider_config_applies_judge_specific_vllm_overrides() -> None:

@@ -85,6 +85,7 @@ Default roots:
 - sample manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_sample/manifest.json`
 - full prepared dataset root: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full`
 - full manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/manifest.json`
+- full samples sidecar: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/samples.jsonl.gz`
 - curated long-form manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json`
 - curated long-form audit: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_audit.json`
 - execute runs: `artifacts/summarizer_critic_benchmark/sporc_runs`
@@ -117,7 +118,13 @@ HF_TOKEN="$HF_ACCESS_TOKEN" uv run python -m card_framework.benchmark.summarizer
 ```
 
 The full split now writes to `prepared_full` by default so it does not collide with
-sample-manifest artifacts.
+sample-manifest artifacts. Full prepares now keep `manifest.json` as a compact
+header and stream sample rows through `samples.jsonl.gz`, so the post-download
+prepare step does not have to hold the entire episode table and turn table in RAM.
+
+If Hugging Face prints the `hf_xet` fallback warning, installing `hf_xet` only
+improves download throughput. It does not change how the local prepare step
+parses and joins the downloaded SPoRC files.
 
 Curate a strict long-form multi-speaker manifest from the prepared full data:
 

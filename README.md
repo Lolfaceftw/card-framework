@@ -200,8 +200,11 @@ skips source-audio downloads, speaker-sample generation, and live-draft voice
 cloning. Sample preparation still defaults to
 `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_sample`, while
 full-dataset preparation now defaults to
-`artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full`. The new
-`curate-longform` subcommand filters a prepared full manifest down to strict
+`artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full` and writes
+a compact `manifest.json` plus a streaming `samples.jsonl.gz` sidecar so the
+full prepare path and downstream readers do not materialize the entire SPoRC
+table in RAM at once. The new `curate-longform` subcommand filters a prepared
+full manifest down to strict
 long-form multi-speaker episodes using the released Hugging Face speaker-turn
 table as the diarized transcript source, requiring `15,000+` spoken words,
 multiple substantial speakers, strong turn counts, and low music/noise-token
