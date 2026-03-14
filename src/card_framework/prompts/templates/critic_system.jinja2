@@ -67,6 +67,7 @@ Ensure that the draft is natural and flows well. When you read the draft, from t
 {% if is_embedding_enabled %}
 Strictly use `verify_against_transcript` to find specific details to add or remove.
 {% endif %}
+If you catch yourself re-checking the same transcript passage or repeating the same verification phrasing, stop and call `submit_verdict` with a fail verdict instead of narrating more re-checks.
 
 If Phase 3 and Phase 2 pass, submit a pass.
 </phase_3_naturalness_check>

@@ -14,12 +14,6 @@ import threading
 import time
 from typing import TextIO
 
-from card_framework.benchmark.summarizer_critic.qmsum.telemetry import (
-    collect_telemetry_sample,
-    detect_threshold_breach,
-    sleep_with_poll,
-    write_telemetry_line,
-)
 from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_FULL_DATASET_MANIFEST_PATH,
     DEFAULT_GPU_THRESHOLD_GIB,
@@ -37,23 +31,127 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     DurationSweepReport,
     SupervisedRunRecord,
 )
-from card_framework.benchmark.summarizer_critic.sporc.dataset import (
-    curate_longform_sporc_manifest,
-    prepare_sporc_benchmark,
-)
-from card_framework.benchmark.summarizer_critic.sporc.reporting import (
-    write_duration_sweep_artifacts,
-    write_supervisor_session_artifacts,
-)
-from card_framework.benchmark.summarizer_critic.sporc.runner import (
-    BenchmarkExecutionError,
-    build_execute_parser,
-    execute_benchmark,
-)
+from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.paths import REPO_ROOT
 
 
-def _build_parser() -> argparse.ArgumentParser:
+_DATASET_HELPERS: tuple[object, object] | None = None
+_RUNNER_HELPERS: tuple[object, object, object] | None = None
+_TELEMETRY_HELPERS: tuple[object, object, object, object] | None = None
+_REPORTING_HELPERS: tuple[object, object] | None = None
+
+
+def _emit_cli_status(message: str) -> None:
+    """Emit one operator-facing status line for CLI progress."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def _load_dataset_helpers(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> tuple[object, object]:
+    """Load SPoRC dataset helpers lazily for CLI commands."""
+    global _DATASET_HELPERS
+    if _DATASET_HELPERS is None:
+        with report_loading_duration(
+            "SPoRC dataset helpers",
+            reporter=status_reporter,
+        ):
+            from card_framework.benchmark.summarizer_critic.sporc.dataset import (
+                curate_longform_sporc_manifest,
+                prepare_sporc_benchmark,
+            )
+
+        _DATASET_HELPERS = (curate_longform_sporc_manifest, prepare_sporc_benchmark)
+    return _DATASET_HELPERS
+
+
+def _load_runner_helpers(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> tuple[object, object, object]:
+    """Load SPoRC execute-path helpers lazily for CLI commands."""
+    global _RUNNER_HELPERS
+    if _RUNNER_HELPERS is None:
+        with report_loading_duration(
+            "SPoRC runner helpers",
+            reporter=status_reporter,
+        ):
+            from card_framework.benchmark.summarizer_critic.sporc.runner import (
+                BenchmarkExecutionError,
+                build_execute_parser,
+                execute_benchmark,
+            )
+
+        _RUNNER_HELPERS = (
+            BenchmarkExecutionError,
+            build_execute_parser,
+            execute_benchmark,
+        )
+    return _RUNNER_HELPERS
+
+
+def _load_telemetry_helpers(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> tuple[object, object, object, object]:
+    """Load shared telemetry helpers lazily for supervise flows."""
+    global _TELEMETRY_HELPERS
+    if _TELEMETRY_HELPERS is None:
+        with report_loading_duration(
+            "SPoRC telemetry helpers",
+            reporter=status_reporter,
+        ):
+            from card_framework.benchmark.summarizer_critic.qmsum.telemetry import (
+                collect_telemetry_sample,
+                detect_threshold_breach,
+                sleep_with_poll,
+                write_telemetry_line,
+            )
+
+        _TELEMETRY_HELPERS = (
+            collect_telemetry_sample,
+            detect_threshold_breach,
+            sleep_with_poll,
+            write_telemetry_line,
+        )
+    return _TELEMETRY_HELPERS
+
+
+def _load_reporting_helpers(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> tuple[object, object]:
+    """Load SPoRC reporting helpers lazily for CLI commands."""
+    global _REPORTING_HELPERS
+    if _REPORTING_HELPERS is None:
+        with report_loading_duration(
+            "SPoRC reporting helpers",
+            reporter=status_reporter,
+        ):
+            from card_framework.benchmark.summarizer_critic.sporc.reporting import (
+                write_duration_sweep_artifacts,
+                write_supervisor_session_artifacts,
+            )
+
+        _REPORTING_HELPERS = (
+            write_duration_sweep_artifacts,
+            write_supervisor_session_artifacts,
+        )
+    return _REPORTING_HELPERS
+
+
+def _benchmark_execution_error_type() -> type[Exception]:
+    """Return the lazily imported benchmark execution error type."""
+    benchmark_execution_error, _, _ = _load_runner_helpers()
+    return benchmark_execution_error
+
+
+def _build_parser(
+    *,
+    target_command: str | None = None,
+    status_reporter: StatusReporter | None = None,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="SPoRC real-dataset benchmark for the summarizer-critic framework."
     )
@@ -88,57 +186,62 @@ def _build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_LONGFORM_AUDIT_PATH),
     )
 
-    execute = subparsers.add_parser(
-        "execute", help="Run the SPoRC summarizer-critic benchmark"
-    )
-    build_execute_parser(execute)
+    if target_command in {None, "execute", "supervise", "duration-sweep"}:
+        _, build_execute_parser, _ = _load_runner_helpers(
+            status_reporter=status_reporter,
+        )
 
-    supervise = subparsers.add_parser(
-        "supervise", help="Loop execute runs under RAM/GPU guardrails"
-    )
-    build_execute_parser(supervise)
-    supervise.add_argument("--session-root", default=str(DEFAULT_SUPERVISOR_ROOT))
-    supervise.add_argument("--max-runs", type=int, default=1)
-    supervise.add_argument("--between-runs-seconds", type=float, default=3.0)
-    supervise.add_argument("--sample-interval-seconds", type=float, default=5.0)
-    supervise.add_argument(
-        "--ram-threshold-percent", type=float, default=DEFAULT_RAM_THRESHOLD_PERCENT
-    )
-    supervise.add_argument(
-        "--gpu-threshold-gibibytes", type=float, default=DEFAULT_GPU_THRESHOLD_GIB
-    )
+        execute = subparsers.add_parser(
+            "execute", help="Run the SPoRC summarizer-critic benchmark"
+        )
+        build_execute_parser(execute)
 
-    duration_sweep = subparsers.add_parser(
-        "duration-sweep",
-        help="Run SPoRC duration presets in transcript-only or voice-clone mode",
-    )
-    build_execute_parser(duration_sweep)
-    duration_sweep.add_argument(
-        "--mode",
-        choices=("menu", "single", "batch-all"),
-        default="menu",
-    )
-    duration_sweep.add_argument(
-        "--examples",
-        type=int,
-        default=10,
-        help="How many prepared SPoRC examples to run per duration preset.",
-    )
-    duration_sweep.add_argument(
-        "--duration-presets",
-        default=",".join(DURATION_PRESET_SECONDS.keys()),
-        help="Comma-separated duration presets for batch-all mode.",
-    )
-    duration_sweep.add_argument(
-        "--sweep-root",
-        default=str(DEFAULT_SWEEP_ROOT),
-        help="Root directory for aggregated duration-sweep artifacts.",
-    )
-    duration_sweep.add_argument(
-        "--enable-voice-clone",
-        action="store_true",
-        help="Use the faithful live-draft voice-clone path instead of transcript-only mode.",
-    )
+        supervise = subparsers.add_parser(
+            "supervise", help="Loop execute runs under RAM/GPU guardrails"
+        )
+        build_execute_parser(supervise)
+        supervise.add_argument("--session-root", default=str(DEFAULT_SUPERVISOR_ROOT))
+        supervise.add_argument("--max-runs", type=int, default=1)
+        supervise.add_argument("--between-runs-seconds", type=float, default=3.0)
+        supervise.add_argument("--sample-interval-seconds", type=float, default=5.0)
+        supervise.add_argument(
+            "--ram-threshold-percent", type=float, default=DEFAULT_RAM_THRESHOLD_PERCENT
+        )
+        supervise.add_argument(
+            "--gpu-threshold-gibibytes", type=float, default=DEFAULT_GPU_THRESHOLD_GIB
+        )
+
+        duration_sweep = subparsers.add_parser(
+            "duration-sweep",
+            help="Run SPoRC duration presets in transcript-only or voice-clone mode",
+        )
+        build_execute_parser(duration_sweep)
+        duration_sweep.add_argument(
+            "--mode",
+            choices=("menu", "single", "batch-all"),
+            default="menu",
+        )
+        duration_sweep.add_argument(
+            "--examples",
+            type=int,
+            default=10,
+            help="How many prepared SPoRC examples to run per duration preset.",
+        )
+        duration_sweep.add_argument(
+            "--duration-presets",
+            default=",".join(DURATION_PRESET_SECONDS.keys()),
+            help="Comma-separated duration presets for batch-all mode.",
+        )
+        duration_sweep.add_argument(
+            "--sweep-root",
+            default=str(DEFAULT_SWEEP_ROOT),
+            help="Root directory for aggregated duration-sweep artifacts.",
+        )
+        duration_sweep.add_argument(
+            "--enable-voice-clone",
+            action="store_true",
+            help="Use the faithful live-draft voice-clone path instead of transcript-only mode.",
+        )
     return parser
 
 
@@ -171,10 +274,12 @@ def _parse_duration_preset_list(raw_value: str) -> list[str]:
     """Parse and validate a comma-separated duration preset list."""
     presets = [item.strip() for item in raw_value.split(",") if item.strip()]
     if not presets:
-        raise BenchmarkExecutionError("At least one duration preset is required.")
+        raise _benchmark_execution_error_type()(
+            "At least one duration preset is required."
+        )
     invalid = [item for item in presets if item not in DURATION_PRESET_SECONDS]
     if invalid:
-        raise BenchmarkExecutionError(
+        raise _benchmark_execution_error_type()(
             f"Unsupported duration preset(s): {', '.join(invalid)}"
         )
     return presets
@@ -317,7 +422,14 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
     )
     examples = int(args.examples)
     if examples <= 0:
-        raise BenchmarkExecutionError("--examples must be positive.")
+        raise _benchmark_execution_error_type()("--examples must be positive.")
+
+    _, _, execute_benchmark = _load_runner_helpers(
+        status_reporter=_emit_cli_status,
+    )
+    write_duration_sweep_artifacts, _ = _load_reporting_helpers(
+        status_reporter=_emit_cli_status,
+    )
 
     sweep_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     sweep_root = Path(args.sweep_root).resolve() / sweep_id
@@ -331,7 +443,7 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
         )
         try:
             report = execute_benchmark(execute_args)
-        except BenchmarkExecutionError as exc:
+        except _benchmark_execution_error_type() as exc:
             preset_summaries.append(
                 _build_failed_preset_summary(
                     duration_preset=duration_preset,
@@ -544,6 +656,15 @@ def _discover_report_paths(log_path: Path) -> tuple[str | None, str | None, str 
 
 
 def _run_supervised_session(args: argparse.Namespace) -> int:
+    (
+        collect_telemetry_sample,
+        detect_threshold_breach,
+        sleep_with_poll,
+        write_telemetry_line,
+    ) = _load_telemetry_helpers(status_reporter=_emit_cli_status)
+    _, write_supervisor_session_artifacts = _load_reporting_helpers(
+        status_reporter=_emit_cli_status,
+    )
     started_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     session_root = Path(args.session_root).resolve() / started_at
     session_root.mkdir(parents=True, exist_ok=True)
@@ -686,77 +807,100 @@ def _run_supervised_session(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    target_command = next(
+        (value for value in raw_argv if not str(value).startswith("-")),
+        None,
+    )
+    parser = _build_parser(
+        target_command=target_command,
+        status_reporter=_emit_cli_status,
+    )
     args = parser.parse_args(argv)
-    if args.command == "prepare-dataset":
-        prepared_root = _resolve_prepare_root(
-            dataset_variant=str(args.dataset_variant),
-            prepared_root=str(args.prepared_root or ""),
-        )
-        manifest = prepare_sporc_benchmark(
-            prepared_root=prepared_root,
-            dataset_variant=str(args.dataset_variant),
-            episode_data_path=str(args.episode_data_path or ""),
-            turn_data_path=str(args.turn_data_path or ""),
-            reference_wpm=float(args.reference_wpm),
-            force_download=bool(args.force_download),
-        )
-        print(
-            json.dumps(
-                {
-                    "status": "completed",
-                    "dataset_manifest": str(manifest.manifest_path),
-                    "sample_count": manifest.sample_count,
-                    "dataset_variant": manifest.dataset_variant,
-                    "prepared_root": str(prepared_root),
-                    "episode_data_path": str(manifest.episode_data_path),
-                    "turn_data_path": str(manifest.turn_data_path),
-                }
+    try:
+        if args.command == "prepare-dataset":
+            _, prepare_sporc_benchmark = _load_dataset_helpers(
+                status_reporter=_emit_cli_status,
             )
-        )
-        return 0
-    if args.command == "curate-longform":
-        manifest, audit_path = curate_longform_sporc_manifest(
-            source_manifest_path=Path(args.source_manifest).resolve(),
-            output_manifest_path=Path(args.output_manifest).resolve(),
-            audit_path=Path(args.audit_path).resolve(),
-        )
-        print(
-            json.dumps(
-                {
-                    "status": "completed",
-                    "source_manifest": str(Path(args.source_manifest).resolve()),
-                    "dataset_manifest": str(manifest.manifest_path),
-                    "audit_path": str(audit_path),
-                    "sample_count": manifest.sample_count,
-                    "dataset_variant": manifest.dataset_variant,
-                }
+            prepared_root = _resolve_prepare_root(
+                dataset_variant=str(args.dataset_variant),
+                prepared_root=str(args.prepared_root or ""),
             )
-        )
-        return 0
-    if args.command == "execute":
-        try:
-            report = execute_benchmark(args)
-        except BenchmarkExecutionError as exc:
-            print(json.dumps({"status": "failed", "error": str(exc)}))
-            return 1
-        print(
-            json.dumps(
-                {
-                    "status": report.status,
-                    "report_path": report.report_path,
-                    "notes_path": report.notes_path,
-                    "results_path": report.results_path,
-                    "run_id": report.run_id,
-                    "mean_composite": round(report.summary.mean_composite, 4),
-                }
+            manifest = prepare_sporc_benchmark(
+                prepared_root=prepared_root,
+                dataset_variant=str(args.dataset_variant),
+                episode_data_path=str(args.episode_data_path or ""),
+                turn_data_path=str(args.turn_data_path or ""),
+                reference_wpm=float(args.reference_wpm),
+                force_download=bool(args.force_download),
+                status_reporter=_emit_cli_status,
             )
-        )
-        return 0 if report.status == "completed" else 1
-    if args.command == "duration-sweep":
-        try:
-            return _run_duration_sweep(args)
-        except BenchmarkExecutionError as exc:
-            print(json.dumps({"status": "failed", "error": str(exc)}))
-            return 1
-    return _run_supervised_session(args)
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "dataset_manifest": str(manifest.manifest_path),
+                        "sample_count": manifest.sample_count,
+                        "dataset_variant": manifest.dataset_variant,
+                        "prepared_root": str(prepared_root),
+                        "episode_data_path": str(manifest.episode_data_path),
+                        "turn_data_path": str(manifest.turn_data_path),
+                    }
+                )
+            )
+            return 0
+        if args.command == "curate-longform":
+            curate_longform_sporc_manifest, _ = _load_dataset_helpers(
+                status_reporter=_emit_cli_status,
+            )
+            manifest, audit_path = curate_longform_sporc_manifest(
+                source_manifest_path=Path(args.source_manifest).resolve(),
+                output_manifest_path=Path(args.output_manifest).resolve(),
+                audit_path=Path(args.audit_path).resolve(),
+                status_reporter=_emit_cli_status,
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "source_manifest": str(Path(args.source_manifest).resolve()),
+                        "dataset_manifest": str(manifest.manifest_path),
+                        "audit_path": str(audit_path),
+                        "sample_count": manifest.sample_count,
+                        "dataset_variant": manifest.dataset_variant,
+                    }
+                )
+            )
+            return 0
+        if args.command == "execute":
+            benchmark_execution_error, _, execute_benchmark = _load_runner_helpers(
+                status_reporter=_emit_cli_status,
+            )
+            try:
+                report = execute_benchmark(args)
+            except benchmark_execution_error as exc:
+                print(json.dumps({"status": "failed", "error": str(exc)}))
+                return 1
+            print(
+                json.dumps(
+                    {
+                        "status": report.status,
+                        "report_path": report.report_path,
+                        "notes_path": report.notes_path,
+                        "results_path": report.results_path,
+                        "run_id": report.run_id,
+                        "mean_composite": round(report.summary.mean_composite, 4),
+                    }
+                )
+            )
+            return 0 if report.status == "completed" else 1
+        if args.command == "duration-sweep":
+            try:
+                return _run_duration_sweep(args)
+            except _benchmark_execution_error_type() as exc:
+                print(json.dumps({"status": "failed", "error": str(exc)}))
+                return 1
+        return _run_supervised_session(args)
+    except KeyboardInterrupt:
+        _emit_cli_status("Cancelled.")
+        return 130

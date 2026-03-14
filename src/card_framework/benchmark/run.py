@@ -438,6 +438,12 @@ async def _run_cell(
                 .get("max_tool_turns", 5),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=is_embedding_enabled,
+                reasoning_loop_guard=OmegaConf.to_container(
+                    base_cfg.get("agents", {})
+                    .get("critic", {})
+                    .get("reasoning_loop_guard", {}),
+                    resolve=True,
+                ),
                 agent_client=shared_agent_client,
                 event_bus=shared_event_bus,
             ),

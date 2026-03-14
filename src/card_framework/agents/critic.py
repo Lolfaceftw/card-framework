@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from pathlib import Path
 import re
+from typing import Any
 
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
@@ -28,6 +30,13 @@ class CriticExecutor(BaseA2AExecutor):
     """Evaluate a draft summary using deterministic checks plus an LLM critic."""
 
     _DEFAULT_NEUTRAL_WPM = 150.0
+    _DEFAULT_REASONING_LOOP_GUARD = {
+        "enabled": True,
+        "max_consecutive_no_tool_turns": 2,
+        "single_response_repeat_threshold": 3,
+        "min_repeated_sentence_words": 8,
+        "cross_turn_similarity_threshold": 0.96,
+    }
 
     def __init__(
         self,
@@ -36,6 +45,7 @@ class CriticExecutor(BaseA2AExecutor):
         max_tool_turns: int = 5,
         retrieval_port: int = 9012,
         is_embedding_enabled: bool = True,
+        reasoning_loop_guard: Mapping[str, Any] | None = None,
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
     ) -> None:
@@ -46,10 +56,28 @@ class CriticExecutor(BaseA2AExecutor):
         self.max_tool_turns = max_tool_turns
         self.retrieval_port = retrieval_port
         self.is_embedding_enabled = is_embedding_enabled
+        self.reasoning_loop_guard = self._resolve_reasoning_loop_guard(
+            reasoning_loop_guard
+        )
         self.agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
         )
         self.event_bus = event_bus if event_bus is not None else get_event_bus()
+
+    def _resolve_reasoning_loop_guard(
+        self,
+        reasoning_loop_guard: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Resolve critic no-tool repetition guard settings for the shared loop."""
+        resolved = dict(self._DEFAULT_REASONING_LOOP_GUARD)
+        if isinstance(reasoning_loop_guard, Mapping):
+            resolved.update(
+                {
+                    str(key): value
+                    for key, value in reasoning_loop_guard.items()
+                }
+            )
+        return self._coerce_reasoning_loop_guard_config(resolved)
 
     def _resolve_target_seconds(
         self, *, target_seconds: int | None, min_words: int, max_words: int
@@ -282,6 +310,7 @@ class CriticExecutor(BaseA2AExecutor):
             "target_seconds": target_seconds,
             "duration_tolerance_ratio": duration_tolerance_ratio,
             "draft_audio_state_path": draft_audio_state_path,
+            "reasoning_loop_guard": dict(self.reasoning_loop_guard),
         }
         final_verdict = await self.run_agent_loop(
             messages, tools, self.max_tool_turns, context_data
@@ -294,11 +323,27 @@ class CriticExecutor(BaseA2AExecutor):
                 duration_tolerance_ratio=duration_tolerance_ratio,
                 draft_audio_state_path=draft_audio_state_path,
             )
+            loop_stop_category = str(context_data.get("loop_stop_category", "")).strip()
+            loop_stop_reason = str(context_data.get("loop_stop_reason", "")).strip()
+            if loop_stop_category == "reasoning_loop_guard":
+                feedback_prefix = "CRITIC LOOP GUARD: "
+                feedback_body = (
+                    loop_stop_reason
+                    if loop_stop_reason
+                    else "Stopped repetitive no-tool reasoning before verdict."
+                )
+            else:
+                feedback_prefix = (
+                    "CRITIC ERROR: LLM failed to submit a structured verdict. "
+                )
+                feedback_body = ""
             final_verdict = {
                 "status": stats["status"],
                 "word_count": stats["actual_word_count"],
                 "estimated_seconds": stats["actual_estimated_seconds"],
-                "feedback": "CRITIC ERROR: LLM failed to submit a structured verdict. "
+                "feedback": feedback_prefix
+                + feedback_body
+                + (" | " if feedback_body and stats["failures"] else "")
                 + " | ".join(stats["failures"]),
             }
 

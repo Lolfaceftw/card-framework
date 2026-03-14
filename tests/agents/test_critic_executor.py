@@ -6,8 +6,11 @@ import asyncio
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import types
 from typing import Any
+
+from tests.support.a2a import extract_agent_text_message
 
 # Provide minimal `numpy` module stub for llm_provider typing imports.
 if "numpy" not in sys.modules:
@@ -66,7 +69,7 @@ if "a2a.server.agent_execution" not in sys.modules:
         async def enqueue_event(self, _event: object) -> None:
             return None
 
-    def _new_agent_text_message(text: str) -> str:
+    def _new_agent_text_message(text: str, **_kwargs: object) -> str:
         return text
 
     agent_execution_module.AgentExecutor = _AgentExecutor
@@ -80,6 +83,7 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.server.events"] = events_module
     sys.modules["a2a.utils"] = utils_module
 
+from card_framework.agents.base import BaseA2AExecutor
 from card_framework.agents.critic import CriticExecutor
 from card_framework.agents.utils import count_words
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
@@ -125,6 +129,76 @@ class _FakeAgentClient:
         del task_data, max_retries, metadata
         self.calls.append({"port": port, "timeout": timeout})
         return json.dumps({"segments": [], "total_words": 0})
+
+
+class _LoopResponse:
+    """Minimal assistant response payload for tool-loop tests."""
+
+    def __init__(
+        self,
+        *,
+        content: str = "",
+        tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
+    ) -> None:
+        self._content = content
+        self._tool_calls = tool_calls
+        self._reasoning_content = reasoning_content
+
+    def model_dump(self) -> dict[str, Any]:
+        payload = {
+            "role": "assistant",
+            "content": self._content,
+            "tool_calls": self._tool_calls,
+        }
+        if self._reasoning_content is not None:
+            payload["reasoning_content"] = self._reasoning_content
+        return payload
+
+
+class _LoopLLM:
+    """Deterministic LLM for shared-loop and critic integration tests."""
+
+    def __init__(self, responses: list[_LoopResponse]) -> None:
+        self._responses = list(responses)
+        self._index = 0
+        self.calls = 0
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | str | None = None,
+        max_tokens: int | None = None,
+    ) -> _LoopResponse:
+        del messages, tools, tool_choice, max_tokens
+        self.calls += 1
+        if self._index >= len(self._responses):
+            return _LoopResponse(content="")
+        response = self._responses[self._index]
+        self._index += 1
+        return response
+
+
+class _LoopGuardExecutor(BaseA2AExecutor):
+    """Tiny concrete executor used to exercise the shared loop guard."""
+
+    def __init__(self, llm: _LoopLLM) -> None:
+        super().__init__("LoopGuard")
+        self.llm = llm
+
+    async def handle_task(self, task_data, context, event_queue) -> None:  # noqa: ANN001
+        del task_data, context, event_queue
+
+
+class _RecordingQueue:
+    """Collect response events emitted by send_response."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    async def enqueue_event(self, event: object) -> None:
+        self.events.append(event)
 
 
 def _build_calibration() -> VoiceCloneCalibration:
@@ -343,4 +417,204 @@ def test_run_deterministic_checks_prefers_live_draft_audio_state(tmp_path: Path)
     assert payload["duration_source"] == "actual_audio"
     assert payload["actual_estimated_seconds"] == 2.4
     assert payload["status"] == "pass"
+
+
+def test_run_agent_loop_stops_on_repeated_no_tool_span() -> None:
+    """Trip the shared loop guard when one assistant turn repeats itself."""
+    repeated_text = (
+        "Wait, the transcript says Ashley said the line already. "
+        "Wait, the transcript says Ashley said the line already. "
+        "Wait, the transcript says Ashley said the line already."
+    )
+    llm = _LoopLLM([_LoopResponse(content=repeated_text)])
+    executor = _LoopGuardExecutor(llm)
+    runtime_context = {
+        "reasoning_loop_guard": {
+            "enabled": True,
+            "single_response_repeat_threshold": 3,
+            "min_repeated_sentence_words": 8,
+        }
+    }
+
+    result = asyncio.run(
+        executor.run_agent_loop(
+            messages=[{"role": "system", "content": "Critic"}],
+            tools=[],
+            max_turns=3,
+            context_data=runtime_context,
+        )
+    )
+
+    assert result is None
+    assert llm.calls == 1
+    assert runtime_context["loop_stop_category"] == "reasoning_loop_guard"
+    assert "single-response repetition" in runtime_context["loop_stop_reason"]
+
+
+def test_run_agent_loop_stops_on_repeated_no_tool_turns() -> None:
+    """Trip the shared loop guard when consecutive no-tool turns stay near-identical."""
+    llm = _LoopLLM(
+        [
+            _LoopResponse(
+                content=(
+                    "Let me re-check the transcript for whether Ashley said the line "
+                    "about everybody loving that movie so much."
+                )
+            ),
+            _LoopResponse(
+                content=(
+                    "Let me re-check the transcript for whether Ashley said the line "
+                    "about everybody loving that movie so much."
+                )
+            ),
+        ]
+    )
+    executor = _LoopGuardExecutor(llm)
+    runtime_context = {
+        "reasoning_loop_guard": {
+            "enabled": True,
+            "max_consecutive_no_tool_turns": 2,
+            "min_repeated_sentence_words": 8,
+            "cross_turn_similarity_threshold": 0.96,
+        }
+    }
+
+    result = asyncio.run(
+        executor.run_agent_loop(
+            messages=[{"role": "system", "content": "Critic"}],
+            tools=[],
+            max_turns=4,
+            context_data=runtime_context,
+        )
+    )
+
+    assert result is None
+    assert llm.calls == 2
+    assert runtime_context["loop_stop_category"] == "reasoning_loop_guard"
+    assert "cross-turn repetition" in runtime_context["loop_stop_reason"]
+
+
+def test_handle_task_falls_back_with_loop_guard_prefix() -> None:
+    """Prefix fallback feedback when the critic loop guard stops repetitive text."""
+    llm = _LoopLLM(
+        [
+            _LoopResponse(
+                content=(
+                    "Wait, the transcript says Ashley said this sentence already. "
+                    "Wait, the transcript says Ashley said this sentence already. "
+                    "Wait, the transcript says Ashley said this sentence already."
+                )
+            )
+        ]
+    )
+    executor = CriticExecutor(
+        llm=llm,
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
+    queue = _RecordingQueue()
+    original_get_prompt = PromptManager.__dict__["get_prompt"]
+
+    def _fake_get_prompt(cls, key: str, **kwargs: Any) -> str:
+        if key == "critic_user":
+            return str(kwargs.get("draft", ""))
+        return f"{key} prompt"
+
+    PromptManager.get_prompt = classmethod(_fake_get_prompt)
+    try:
+        asyncio.run(
+            executor.handle_task(
+                {
+                    "draft": "<SPEAKER_00>Short finalized draft.</SPEAKER_00>",
+                    "target_seconds": 60,
+                    "duration_tolerance_ratio": 0.05,
+                    "full_transcript": "[E0001] [SPEAKER_00] Source text",
+                },
+                context=SimpleNamespace(task_id=None, context_id=None),
+                event_queue=queue,  # type: ignore[arg-type]
+            )
+        )
+    finally:
+        PromptManager.get_prompt = original_get_prompt
+
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
+    assert payload["feedback"].startswith("CRITIC LOOP GUARD:")
+    assert "single-response repetition" in payload["feedback"]
+
+
+def test_handle_task_preserves_normal_tool_flow() -> None:
+    """Keep the standard structured critic loop behavior unchanged."""
+    draft = "<SPEAKER_00>Short finalized draft.</SPEAKER_00>"
+    llm = _LoopLLM(
+        [
+            _LoopResponse(
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_deterministic_checks",
+                            "arguments": json.dumps({"draft_text": draft}),
+                        },
+                    }
+                ]
+            ),
+            _LoopResponse(
+                tool_calls=[
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "submit_verdict",
+                            "arguments": json.dumps(
+                                {
+                                    "status": "pass",
+                                    "actual_word_count": 3,
+                                    "estimated_seconds": 1.5,
+                                    "feedback": "ok",
+                                }
+                            ),
+                        },
+                    }
+                ]
+            ),
+        ]
+    )
+    executor = CriticExecutor(
+        llm=llm,
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
+    queue = _RecordingQueue()
+    original_get_prompt = PromptManager.__dict__["get_prompt"]
+
+    def _fake_get_prompt(cls, key: str, **kwargs: Any) -> str:
+        if key == "critic_user":
+            return str(kwargs.get("draft", ""))
+        return f"{key} prompt"
+
+    PromptManager.get_prompt = classmethod(_fake_get_prompt)
+    try:
+        asyncio.run(
+            executor.handle_task(
+                {
+                    "draft": draft,
+                    "target_seconds": 60,
+                    "duration_tolerance_ratio": 0.05,
+                    "full_transcript": "[E0001] [SPEAKER_00] Source text",
+                },
+                context=SimpleNamespace(task_id=None, context_id=None),
+                event_queue=queue,  # type: ignore[arg-type]
+            )
+        )
+    finally:
+        PromptManager.get_prompt = original_get_prompt
+
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
+    assert payload == {
+        "status": "pass",
+        "word_count": 3,
+        "estimated_seconds": 1.5,
+        "feedback": "ok",
+    }
 

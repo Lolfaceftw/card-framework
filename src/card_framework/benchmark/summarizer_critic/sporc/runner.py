@@ -1076,6 +1076,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             turn_data_path=str(args.turn_data_path or ""),
             reference_wpm=float(args.reference_wpm),
             force_download=bool(args.force_download_dataset),
+            status_reporter=(
+                lambda message: event_bus.publish("status_message", message)
+            ),
         )
         dataset_manifest_path = prepared.manifest_path
 
@@ -1337,6 +1340,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 max_tool_turns=int(base_cfg.agents.critic.max_tool_turns),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=retrieval_enabled,
+                reasoning_loop_guard=_coerce_mapping(
+                    OmegaConf.to_container(
+                        base_cfg.agents.critic.get("reasoning_loop_guard", {}),
+                        resolve=True,
+                    )
+                ),
                 agent_client=shared_agent_client,
                 event_bus=event_bus,
             ),

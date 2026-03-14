@@ -209,12 +209,19 @@ full-dataset preparation now defaults to
 `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full` and writes
 a compact `manifest.json` plus a streaming `samples.jsonl.gz` sidecar so the
 full prepare path and downstream readers do not materialize the entire SPoRC
-table in RAM at once. The new `curate-longform` subcommand filters a prepared
-full manifest down to strict
-long-form multi-speaker episodes using the released Hugging Face speaker-turn
-table as the diarized transcript source, requiring `15,000+` spoken words,
-multiple substantial speakers, strong turn counts, and low music/noise-token
-ratios. The new `duration-sweep` subcommand exposes a non-interactive menu plus
+table in RAM at once. The SPoRC CLI also now prints timed stderr loading lines
+during long prepare phases so full prepares no longer appear blank after the
+Hugging Face download progress bars finish. The `curate-longform` subcommand
+now emits the same timed status lines while it loads the source manifest,
+evaluates stored curation stats, and writes the curated manifest plus audit
+JSON. Fresh `prepare-dataset` outputs now persist reusable long-form curation
+stats in each prepared sample, so `curate-longform` no longer needs to reopen
+every transcript JSON unless it is filtering an older manifest that predates
+those stats. It filters a prepared full manifest down to strict long-form
+multi-speaker episodes using the released Hugging Face speaker-turn table as
+the diarized transcript source, requiring `15,000+` spoken words, multiple
+substantial speakers, strong turn counts, and low music/noise-token ratios.
+The new `duration-sweep` subcommand exposes a non-interactive menu plus
 `--mode single` and `--mode batch-all` flows for preset duration benchmarking
 across `30s`, `1m`, `5m`, and `15m`, writes aggregate markdown and JSON sweep
 artifacts under `artifacts/summarizer_critic_benchmark/sweeps`, and keeps the

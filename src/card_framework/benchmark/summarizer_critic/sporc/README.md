@@ -77,6 +77,27 @@ Available subcommands:
 - `duration-sweep`
 - `supervise`
 
+## Choose The Right Command
+
+Use `execute` when you want one benchmark configuration:
+
+- one transcript-only or voice-clone run,
+- one optional `--duration-preset` value or one `--target-seconds-override`,
+- one sample cap controlled by `--max-samples`.
+
+Use `duration-sweep` when you want multiple duration targets in one invocation:
+
+- `--mode single` runs one preset and uses `--duration-preset`,
+- `--mode batch-all` runs multiple presets and uses `--duration-presets`,
+- `--examples` controls how many prepared samples run per preset,
+- `duration-sweep` is transcript-only by default unless you add `--enable-voice-clone`.
+
+Common flag mix-ups:
+
+- `execute` does not accept a comma-separated list in `--duration-preset`.
+- `duration-sweep --mode batch-all` should use `--duration-presets`, not `--duration-preset`.
+- `duration-sweep` uses `--examples`, not `--max-samples`.
+
 ## Artifact Locations
 
 Default roots:
@@ -103,6 +124,11 @@ Each `duration-sweep` run writes:
 - `report.json`
 - `results.md`
 
+Each preset inside a `duration-sweep` still launches a normal `execute` run, so
+the aggregate sweep artifacts live under `artifacts/summarizer_critic_benchmark/sweeps`
+while the detailed per-preset run artifacts still appear under
+`artifacts/summarizer_critic_benchmark/sporc_runs`.
+
 ## Step 1: Prepare The Dataset
 
 Prepare the default sample split:
@@ -121,6 +147,11 @@ The full split now writes to `prepared_full` by default so it does not collide w
 sample-manifest artifacts. Full prepares now keep `manifest.json` as a compact
 header and stream sample rows through `samples.jsonl.gz`, so the post-download
 prepare step does not have to hold the entire episode table and turn table in RAM.
+The CLI now also prints timed stderr status lines such as `Loading ...` and
+`Loaded ... in X.XX seconds.` while it imports the SPoRC helpers, downloads
+source files, loads or rebuilds the episode cache, and streams the speaker-turn
+table, so long full prepares no longer look idle after the Hugging Face
+download bars disappear.
 
 If Hugging Face prints the `hf_xet` fallback warning, installing `hf_xet` only
 improves download throughput. It does not change how the local prepare step
@@ -142,6 +173,13 @@ transcript source and keeps only episodes that satisfy all of these gates:
 - `2+` substantial speakers with `1,000+` spoken words and `20+` segments each
 - dominant-speaker spoken-word share `<= 0.90`
 - non-lexical token ratio `<= 0.10`
+
+The command now also prints timed stderr status lines while it loads the source
+manifest, evaluates stored curation stats, and writes the curated manifest plus
+audit JSON, so long curation passes no longer look idle. Fresh
+`prepare-dataset` outputs now persist reusable curation stats in sample
+metadata, so `curate-longform` only falls back to reopening transcript JSON for
+older manifests that were prepared before that optimization.
 
 Use local gated files instead of downloading:
 
@@ -236,7 +274,6 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
   --critic-provider vllm_default \
   --judge-provider vllm_default \
   --embedding-mode disabled \
-  --transcript-only \
   --max-iterations 50
 ```
 
@@ -250,7 +287,21 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
   --critic-provider vllm_default \
   --judge-provider vllm_default \
   --embedding-mode disabled \
-  --transcript-only \
+  --max-iterations 50
+```
+
+Run a custom subset such as `30s`, `1m`, and `5m` for `10` examples each:
+
+```bash
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+  --mode batch-all \
+  --duration-presets "30s,1m,5m" \
+  --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --examples 10 \
+  --summarizer-provider vllm_default \
+  --critic-provider vllm_default \
+  --judge-provider vllm_default \
+  --embedding-mode disabled \
   --max-iterations 50
 ```
 
@@ -273,6 +324,10 @@ Important behavior:
 
 - `duration-sweep` is transcript-only by default.
 - add `--enable-voice-clone` to switch the sweep to the faithful audio path.
+- `--mode single` expects one `--duration-preset` such as `5m`.
+- `--mode batch-all` expects `--duration-presets "30s,1m,5m"` when you want a subset.
+- quote the comma-separated `--duration-presets` value in PowerShell to keep it as one argument.
+- `--examples` is the per-preset sample count for sweeps; `--max-samples` belongs to `execute`.
 
 ## Running A Custom Manifest
 
@@ -281,9 +336,12 @@ If you already prepared or curated a subset manifest, pass it directly:
 ```bash
 HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
+  --duration-presets "30s,1m,5m" \
   --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
   --examples 10 \
-  --transcript-only \
+  --summarizer-provider vllm_default \
+  --critic-provider vllm_default \
+  --judge-provider vllm_default \
   --embedding-mode disabled \
   --max-iterations 50
 ```
@@ -300,9 +358,13 @@ Shared execution flags users usually need:
 - `--critic-provider <provider_id>`
 - `--judge-provider <provider_id>`
 - `--embedding-mode disabled|enabled`
-- `--max-samples <int>` where `0` means all prepared examples
 - `--max-iterations <int>`
 - `--output-root <path>`
+- `execute`: `--max-samples <int>` where `0` means all prepared examples
+- `execute`: `--duration-preset <30s|1m|5m|15m>`
+- `execute`: `--target-seconds-override <int>`
+- `duration-sweep`: `--examples <int>`
+- `duration-sweep`: `--duration-presets 30s,1m,5m,15m`
 
 ## Timeouts
 

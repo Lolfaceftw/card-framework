@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import tempfile
 from typing import Any
 
 from card_framework.agents.utils import count_words
@@ -35,6 +36,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     SPORC_DATASET_ID,
     SPORC_VARIANT_FILES,
 )
+from card_framework.shared.perf import StatusReporter, report_loading_duration
 
 
 class DatasetPreparationError(RuntimeError):
@@ -50,6 +52,8 @@ _FULL_SAMPLES_FILENAME = "samples.jsonl.gz"
 _EPISODE_CACHE_SCHEMA_VERSION = "sporc_episode_metadata_v1"
 _EPISODE_INDEX_PROGRESS_INTERVAL = 50_000
 _TURN_STREAM_PROGRESS_INTERVAL = 500_000
+_LONGFORM_CURATION_PROGRESS_INTERVAL = 500
+_LONGFORM_CURATION_CANDIDATE_METADATA_KEY = "longform_curation_candidate"
 _WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9']+")
 _NON_LEXICAL_TOKENS = frozenset(
     {
@@ -410,6 +414,7 @@ def _ensure_episode_metadata_cache(
     connection: sqlite3.Connection,
     *,
     episode_data_path: Path,
+    status_reporter: StatusReporter | None = None,
 ) -> None:
     _initialize_episode_metadata_schema(connection)
     expected_signature = _episode_cache_signature(episode_data_path)
@@ -478,6 +483,11 @@ def _ensure_episode_metadata_cache(
                     episode_index,
                     connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
                 )
+                if status_reporter is not None:
+                    status_reporter(
+                        "Loading SPoRC episode metadata cache... indexed "
+                        f"{episode_index:,} episode rows so far."
+                    )
             if rows_since_commit >= _EPISODE_INDEX_PROGRESS_INTERVAL:
                 connection.commit()
                 rows_since_commit = 0
@@ -490,6 +500,8 @@ def _ensure_episode_metadata_cache(
 
 def _iter_turn_groups(
     turn_data_path: Path,
+    *,
+    status_reporter: StatusReporter | None = None,
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     current_episode_key = ""
     current_turns: list[dict[str, Any]] = []
@@ -504,6 +516,12 @@ def _iter_turn_groups(
                 turn_row_count,
                 group_count,
             )
+            if status_reporter is not None:
+                status_reporter(
+                    "Loading SPoRC speaker-turn groups... streamed "
+                    f"{turn_row_count:,} rows across {group_count:,} episode "
+                    "groups so far."
+                )
         episode_key = _episode_key(record)
         if not episode_key:
             continue
@@ -617,7 +635,6 @@ def _build_prepared_sample(
         base_alias_map=base_speaker_alias_map,
         unique_speakers=unique_speakers,
     )
-    transcript_word_count = sum(count_words(str(segment["text"])) for segment in segments)
     transcript_payload = {
         "segments": segments,
         "metadata": {
@@ -631,6 +648,9 @@ def _build_prepared_sample(
             "source_turn_data_path": str(turn_data_path),
         },
     }
+    longform_curation_candidate = _collect_longform_curation_stats_from_segments(segments)
+    transcript_word_count = int(longform_curation_candidate["raw_word_count"])
+    reference_word_count = count_words(reference_summary)
     transcript_path = (
         transcript_root / f"{episode_index:05d}_{_slugify(episode_key)}.transcript.json"
     ).resolve()
@@ -651,10 +671,11 @@ def _build_prepared_sample(
         ),
         metadata={
             "episode_title": episode_title,
-            "reference_word_count": count_words(reference_summary),
+            "reference_word_count": reference_word_count,
             "source_audio_url": source_audio_url,
             "speaker_alias_map": speaker_alias_map,
             "speaker_notes": speaker_notes,
+            _LONGFORM_CURATION_CANDIDATE_METADATA_KEY: longform_curation_candidate,
         },
     )
 
@@ -666,6 +687,7 @@ def resolve_sporc_source_files(
     episode_data_path: str = "",
     turn_data_path: str = "",
     force_download: bool = False,
+    status_reporter: StatusReporter | None = None,
 ) -> tuple[Path, Path]:
     """Resolve local or gated-download SPoRC source files."""
     explicit_episode = Path(episode_data_path).resolve() if episode_data_path else None
@@ -682,7 +704,11 @@ def resolve_sporc_source_files(
         return explicit_episode, explicit_turn
 
     try:
-        from huggingface_hub import hf_hub_download
+        with report_loading_duration(
+            "huggingface_hub",
+            reporter=status_reporter,
+        ):
+            from huggingface_hub import hf_hub_download
     except ImportError as exc:  # pragma: no cover - import guard
         raise DatasetPreparationError(
             "huggingface_hub is required to download gated SPoRC files. "
@@ -706,26 +732,34 @@ def resolve_sporc_source_files(
         or None
     )
     try:
-        episode_path = Path(
-            hf_hub_download(
-                repo_id=SPORC_DATASET_ID,
-                repo_type="dataset",
-                filename=variant_files["episode"],
-                local_dir=str(dataset_root / dataset_variant),
-                token=token,
-                force_download=force_download,
-            )
-        ).resolve()
-        turn_path = Path(
-            hf_hub_download(
-                repo_id=SPORC_DATASET_ID,
-                repo_type="dataset",
-                filename=variant_files["turn"],
-                local_dir=str(dataset_root / dataset_variant),
-                token=token,
-                force_download=force_download,
-            )
-        ).resolve()
+        with report_loading_duration(
+            f"SPoRC {dataset_variant} episode source file",
+            reporter=status_reporter,
+        ):
+            episode_path = Path(
+                hf_hub_download(
+                    repo_id=SPORC_DATASET_ID,
+                    repo_type="dataset",
+                    filename=variant_files["episode"],
+                    local_dir=str(dataset_root / dataset_variant),
+                    token=token,
+                    force_download=force_download,
+                )
+            ).resolve()
+        with report_loading_duration(
+            f"SPoRC {dataset_variant} speaker-turn source file",
+            reporter=status_reporter,
+        ):
+            turn_path = Path(
+                hf_hub_download(
+                    repo_id=SPORC_DATASET_ID,
+                    repo_type="dataset",
+                    filename=variant_files["turn"],
+                    local_dir=str(dataset_root / dataset_variant),
+                    token=token,
+                    force_download=force_download,
+                )
+            ).resolve()
     except Exception as exc:
         raise DatasetPreparationError(
             "Unable to download gated SPoRC files. Accept the dataset terms on "
@@ -743,6 +777,7 @@ def build_prepared_dataset_manifest(
     prepared_root: Path = DEFAULT_PREPARED_ROOT,
     dataset_variant: str = DEFAULT_DATASET_VARIANT,
     reference_wpm: float = DEFAULT_REFERENCE_WPM,
+    status_reporter: StatusReporter | None = None,
 ) -> PreparedDatasetManifest:
     """Build the prepared SPoRC benchmark manifest from raw episode and turn files."""
     if not episode_data_path.exists():
@@ -770,64 +805,76 @@ def build_prepared_dataset_manifest(
     samples: tuple[PreparedBenchmarkSample, ...] = ()
 
     with _open_episode_metadata_connection(cache_path) as connection:
-        _ensure_episode_metadata_cache(
-            connection,
-            episode_data_path=resolved_episode_path,
-        )
+        with report_loading_duration(
+            "SPoRC episode metadata cache",
+            reporter=status_reporter,
+        ):
+            _ensure_episode_metadata_cache(
+                connection,
+                episode_data_path=resolved_episode_path,
+                status_reporter=status_reporter,
+            )
         _prepare_sample_spool_table(connection)
         try:
-            for episode_key, raw_turns in _iter_turn_groups(resolved_turn_path):
-                episode_row = connection.execute(
-                    """
-                    SELECT
-                        episode_index,
-                        reference_summary,
-                        episode_title,
-                        source_audio_url,
-                        speaker_alias_map_json,
-                        speaker_notes_json
-                    FROM episodes
-                    WHERE episode_key = ?
-                    """,
-                    (episode_key,),
-                ).fetchone()
-                if episode_row is None:
-                    continue
-                sample = _build_prepared_sample(
-                    episode_index=int(episode_row["episode_index"]),
-                    episode_key=episode_key,
-                    reference_summary=_coerce_text(episode_row["reference_summary"]),
-                    episode_title=_coerce_text(episode_row["episode_title"]),
-                    source_audio_url=_coerce_text(episode_row["source_audio_url"]),
-                    base_speaker_alias_map=(
-                        json.loads(_coerce_text(episode_row["speaker_alias_map_json"]))
-                        if _coerce_text(episode_row["speaker_alias_map_json"])
-                        else {}
-                    ),
-                    speaker_notes=(
-                        json.loads(_coerce_text(episode_row["speaker_notes_json"]))
-                        if _coerce_text(episode_row["speaker_notes_json"])
-                        else []
-                    ),
-                    raw_turns=raw_turns,
-                    transcript_root=transcript_root,
-                    dataset_variant=dataset_variant,
-                    reference_wpm=reference_wpm,
-                    episode_data_path=resolved_episode_path,
-                    turn_data_path=resolved_turn_path,
-                )
-                if sample is None:
-                    continue
-                connection.execute(
-                    """
-                    INSERT INTO prepared_samples_spool (episode_index, sample_json)
-                    VALUES (?, ?)
-                    """,
-                    (
-                        int(episode_row["episode_index"]),
-                        json.dumps(asdict(sample), separators=(",", ":")),
-                    ),
-                )
+            with report_loading_duration(
+                "SPoRC prepared samples from speaker turns",
+                reporter=status_reporter,
+            ):
+                for episode_key, raw_turns in _iter_turn_groups(
+                    resolved_turn_path,
+                    status_reporter=status_reporter,
+                ):
+                    episode_row = connection.execute(
+                        """
+                        SELECT
+                            episode_index,
+                            reference_summary,
+                            episode_title,
+                            source_audio_url,
+                            speaker_alias_map_json,
+                            speaker_notes_json
+                        FROM episodes
+                        WHERE episode_key = ?
+                        """,
+                        (episode_key,),
+                    ).fetchone()
+                    if episode_row is None:
+                        continue
+                    sample = _build_prepared_sample(
+                        episode_index=int(episode_row["episode_index"]),
+                        episode_key=episode_key,
+                        reference_summary=_coerce_text(episode_row["reference_summary"]),
+                        episode_title=_coerce_text(episode_row["episode_title"]),
+                        source_audio_url=_coerce_text(episode_row["source_audio_url"]),
+                        base_speaker_alias_map=(
+                            json.loads(_coerce_text(episode_row["speaker_alias_map_json"]))
+                            if _coerce_text(episode_row["speaker_alias_map_json"])
+                            else {}
+                        ),
+                        speaker_notes=(
+                            json.loads(_coerce_text(episode_row["speaker_notes_json"]))
+                            if _coerce_text(episode_row["speaker_notes_json"])
+                            else []
+                        ),
+                        raw_turns=raw_turns,
+                        transcript_root=transcript_root,
+                        dataset_variant=dataset_variant,
+                        reference_wpm=reference_wpm,
+                        episode_data_path=resolved_episode_path,
+                        turn_data_path=resolved_turn_path,
+                    )
+                    if sample is None:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT INTO prepared_samples_spool (episode_index, sample_json)
+                        VALUES (?, ?)
+                        """,
+                        (
+                            int(episode_row["episode_index"]),
+                            json.dumps(asdict(sample), separators=(",", ":")),
+                        ),
+                    )
 
             sample_count = int(
                 connection.execute(
@@ -840,27 +887,37 @@ def build_prepared_dataset_manifest(
                 )
 
             if samples_path is not None:
-                with gzip.open(samples_path, "wt", encoding="utf-8") as handle:
-                    for row in connection.execute(
-                        """
-                        SELECT sample_json
-                        FROM prepared_samples_spool
-                        ORDER BY episode_index
-                        """
-                    ):
-                        handle.write(_coerce_text(row["sample_json"]))
-                        handle.write("\n")
+                with report_loading_duration(
+                    "SPoRC full samples sidecar",
+                    reporter=status_reporter,
+                ):
+                    with gzip.open(samples_path, "wt", encoding="utf-8") as handle:
+                        for row in connection.execute(
+                            """
+                            SELECT sample_json
+                            FROM prepared_samples_spool
+                            ORDER BY episode_index
+                            """
+                        ):
+                            handle.write(_coerce_text(row["sample_json"]))
+                            handle.write("\n")
             else:
-                samples = tuple(
-                    _parse_prepared_sample(json.loads(_coerce_text(row["sample_json"])))
-                    for row in connection.execute(
-                        """
-                        SELECT sample_json
-                        FROM prepared_samples_spool
-                        ORDER BY episode_index
-                        """
+                with report_loading_duration(
+                    "prepared SPoRC manifest samples",
+                    reporter=status_reporter,
+                ):
+                    samples = tuple(
+                        _parse_prepared_sample(
+                            json.loads(_coerce_text(row["sample_json"]))
+                        )
+                        for row in connection.execute(
+                            """
+                            SELECT sample_json
+                            FROM prepared_samples_spool
+                            ORDER BY episode_index
+                            """
+                        )
                     )
-                )
         finally:
             connection.execute("DROP TABLE IF EXISTS prepared_samples_spool")
             connection.commit()
@@ -907,10 +964,9 @@ def _longform_curation_thresholds() -> dict[str, int | float | str]:
     }
 
 
-def _collect_longform_curation_stats(
-    transcript_payload: dict[str, Any],
+def _collect_longform_curation_stats_from_segments(
+    raw_segments: Any,
 ) -> dict[str, Any]:
-    raw_segments = transcript_payload.get("segments", [])
     speaker_stats: dict[str, dict[str, int]] = {}
     raw_word_count = 0
     spoken_word_count = 0
@@ -919,6 +975,8 @@ def _collect_longform_curation_stats(
     min_start_time: int | None = None
     max_end_time: int | None = None
 
+    if not isinstance(raw_segments, list):
+        raw_segments = []
     for raw_segment in raw_segments:
         if not isinstance(raw_segment, dict):
             continue
@@ -983,7 +1041,11 @@ def _collect_longform_curation_stats(
         and speaker["segment_count"] >= LONGFORM_MIN_SPEAKER_SEGMENTS
     )
     timestamp_span_seconds = 0.0
-    if min_start_time is not None and max_end_time is not None and max_end_time > min_start_time:
+    if (
+        min_start_time is not None
+        and max_end_time is not None
+        and max_end_time > min_start_time
+    ):
         timestamp_span_seconds = (max_end_time - min_start_time) / 1000.0
 
     ordered_speaker_stats = {
@@ -1010,6 +1072,14 @@ def _collect_longform_curation_stats(
         "timestamp_span_seconds": round(timestamp_span_seconds, 3),
         "speaker_stats": ordered_speaker_stats,
     }
+
+
+def _collect_longform_curation_stats(
+    transcript_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return _collect_longform_curation_stats_from_segments(
+        transcript_payload.get("segments", [])
+    )
 
 
 def _evaluate_longform_curation_stats(
@@ -1049,103 +1119,244 @@ def _load_transcript_payload(transcript_path: Path) -> dict[str, Any]:
     return payload
 
 
+def _precomputed_longform_curation_stats(
+    sample: PreparedBenchmarkSample,
+) -> dict[str, Any] | None:
+    for metadata_key in (
+        _LONGFORM_CURATION_CANDIDATE_METADATA_KEY,
+        "longform_curation",
+    ):
+        raw_stats = sample.metadata.get(metadata_key)
+        if isinstance(raw_stats, dict):
+            return dict(raw_stats)
+    return None
+
+
+def _emit_longform_curation_progress(
+    *,
+    evaluated_count: int,
+    total_samples: int,
+    selected_count: int,
+    transcript_fallback_count: int,
+    status_reporter: StatusReporter | None,
+) -> None:
+    if status_reporter is None:
+        return
+    status_reporter(
+        "Loading SPoRC long-form curation sample stats... evaluated "
+        f"{evaluated_count:,} / {total_samples:,} prepared samples; selected "
+        f"{selected_count:,} so far; transcript fallbacks "
+        f"{transcript_fallback_count:,}."
+    )
+
+
+def _write_streamed_longform_audit_payload(
+    *,
+    audit_path: Path,
+    source_manifest: PreparedDatasetManifest,
+    output_manifest_path: Path,
+    evaluated_sample_count: int,
+    selected_sample_count: int,
+    audit_rows_path: Path,
+) -> None:
+    header_fields = (
+        ("created_at_utc", utc_now_iso()),
+        ("source_manifest_path", str(source_manifest.manifest_path)),
+        ("output_manifest_path", str(output_manifest_path)),
+        ("curation_profile", _LONGFORM_CURATION_PROFILE),
+        ("curation_thresholds", _longform_curation_thresholds()),
+        ("evaluated_sample_count", evaluated_sample_count),
+        ("selected_sample_count", selected_sample_count),
+    )
+    with audit_path.open("w", encoding="utf-8") as handle:
+        handle.write("{\n")
+        for field_name, field_value in header_fields:
+            handle.write(f"  {json.dumps(field_name)}: {json.dumps(field_value)},\n")
+        handle.write('  "samples": [\n')
+        first_row = True
+        with audit_rows_path.open("r", encoding="utf-8") as rows_handle:
+            for raw_line in rows_handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if not first_row:
+                    handle.write(",\n")
+                handle.write("    ")
+                handle.write(line)
+                first_row = False
+        if not first_row:
+            handle.write("\n")
+        handle.write("  ]\n")
+        handle.write("}\n")
+
+
 def curate_longform_sporc_manifest(
     *,
     source_manifest_path: Path,
     output_manifest_path: Path = DEFAULT_LONGFORM_MANIFEST_PATH,
     audit_path: Path = DEFAULT_LONGFORM_AUDIT_PATH,
+    status_reporter: StatusReporter | None = None,
 ) -> tuple[PreparedDatasetManifest, Path]:
     """Filter a prepared SPoRC manifest down to strict long-form dialogue episodes."""
-    source_manifest = load_prepared_dataset_manifest(
-        source_manifest_path,
-        include_samples=False,
-    )
+    with report_loading_duration(
+        "prepared SPoRC source manifest",
+        reporter=status_reporter,
+    ):
+        source_manifest = load_prepared_dataset_manifest(
+            source_manifest_path,
+            include_samples=False,
+        )
     output_manifest_path = output_manifest_path.resolve()
     audit_path = audit_path.resolve()
     output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
     selected_samples: list[PreparedBenchmarkSample] = []
-    audit_rows: list[dict[str, Any]] = []
-    for sample in iter_prepared_dataset_samples(source_manifest.manifest_path):
-        transcript_path = Path(sample.transcript_path).resolve()
-        transcript_payload = _load_transcript_payload(transcript_path)
-        stats = _collect_longform_curation_stats(transcript_payload)
-        excluded_reasons = _evaluate_longform_curation_stats(stats)
-        audit_rows.append(
-            {
-                "sample_id": sample.sample_id,
-                "episode_key": sample.episode_key,
-                "transcript_path": str(transcript_path),
-                "included": not excluded_reasons,
-                "excluded_reasons": excluded_reasons,
-                "curation_stats": stats,
-            }
-        )
-        if excluded_reasons:
-            continue
-        metadata = dict(sample.metadata)
-        metadata["longform_curation"] = stats
-        selected_samples.append(
-            PreparedBenchmarkSample(
-                sample_id=sample.sample_id,
-                dataset=sample.dataset,
-                episode_key=sample.episode_key,
-                transcript_path=sample.transcript_path,
-                reference_summary=sample.reference_summary,
-                target_seconds=sample.target_seconds,
-                metadata=metadata,
+    total_samples = max(0, int(source_manifest.sample_count))
+    evaluated_count = 0
+    transcript_fallback_count = 0
+    audit_rows_temp_path: Path | None = None
+    try:
+        with report_loading_duration(
+            "SPoRC long-form curation sample stats",
+            reporter=status_reporter,
+        ):
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+                dir=audit_path.parent,
+                prefix=f"{audit_path.stem}.",
+                suffix=".rows.jsonl",
+            ) as audit_rows_handle:
+                audit_rows_temp_path = Path(audit_rows_handle.name)
+                for evaluated_count, sample in enumerate(
+                    iter_prepared_dataset_samples(source_manifest.manifest_path),
+                    start=1,
+                ):
+                    transcript_path = Path(sample.transcript_path).resolve()
+                    stats = _precomputed_longform_curation_stats(sample)
+                    if stats is None:
+                        transcript_fallback_count += 1
+                        transcript_payload = _load_transcript_payload(transcript_path)
+                        stats = _collect_longform_curation_stats(transcript_payload)
+                    excluded_reasons = _evaluate_longform_curation_stats(stats)
+                    audit_rows_handle.write(
+                        json.dumps(
+                            {
+                                "sample_id": sample.sample_id,
+                                "episode_key": sample.episode_key,
+                                "transcript_path": str(transcript_path),
+                                "included": not excluded_reasons,
+                                "excluded_reasons": excluded_reasons,
+                                "curation_stats": stats,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                    audit_rows_handle.write("\n")
+                    if excluded_reasons:
+                        if evaluated_count % _LONGFORM_CURATION_PROGRESS_INTERVAL == 0:
+                            _emit_longform_curation_progress(
+                                evaluated_count=evaluated_count,
+                                total_samples=total_samples,
+                                selected_count=len(selected_samples),
+                                transcript_fallback_count=transcript_fallback_count,
+                                status_reporter=status_reporter,
+                            )
+                        continue
+                    metadata = dict(sample.metadata)
+                    metadata.pop(_LONGFORM_CURATION_CANDIDATE_METADATA_KEY, None)
+                    metadata["longform_curation"] = stats
+                    selected_samples.append(
+                        PreparedBenchmarkSample(
+                            sample_id=sample.sample_id,
+                            dataset=sample.dataset,
+                            episode_key=sample.episode_key,
+                            transcript_path=sample.transcript_path,
+                            reference_summary=sample.reference_summary,
+                            target_seconds=sample.target_seconds,
+                            metadata=metadata,
+                        )
+                    )
+                    if evaluated_count % _LONGFORM_CURATION_PROGRESS_INTERVAL == 0:
+                        _emit_longform_curation_progress(
+                            evaluated_count=evaluated_count,
+                            total_samples=total_samples,
+                            selected_count=len(selected_samples),
+                            transcript_fallback_count=transcript_fallback_count,
+                            status_reporter=status_reporter,
+                        )
+        if evaluated_count > 0 and (
+            evaluated_count % _LONGFORM_CURATION_PROGRESS_INTERVAL != 0
+        ):
+            _emit_longform_curation_progress(
+                evaluated_count=evaluated_count,
+                total_samples=total_samples,
+                selected_count=len(selected_samples),
+                transcript_fallback_count=transcript_fallback_count,
+                status_reporter=status_reporter,
             )
+        if not selected_samples:
+            raise DatasetPreparationError(
+                "No SPoRC samples satisfied the long-form curation thresholds."
+            )
+
+        manifest_payload = {
+            "dataset_id": f"{source_manifest.dataset_id}_longform_15k",
+            "created_at_utc": utc_now_iso(),
+            "source_manifest_path": str(source_manifest.manifest_path),
+            "sporc_dataset_id": source_manifest.sporc_dataset_id,
+            "dataset_variant": source_manifest.dataset_variant,
+            "episode_data_path": str(source_manifest.episode_data_path),
+            "turn_data_path": str(source_manifest.turn_data_path),
+            "sample_count": len(selected_samples),
+            "curation_profile": _LONGFORM_CURATION_PROFILE,
+            "curation_thresholds": _longform_curation_thresholds(),
+            "samples": [asdict(sample) for sample in selected_samples],
+        }
+        with report_loading_duration(
+            "curated SPoRC long-form manifest",
+            reporter=status_reporter,
+        ):
+            output_manifest_path.write_text(
+                json.dumps(manifest_payload, indent=2),
+                encoding="utf-8",
+            )
+
+        with report_loading_duration(
+            "SPoRC long-form curation audit",
+            reporter=status_reporter,
+        ):
+            if audit_rows_temp_path is None:
+                raise DatasetPreparationError(
+                    "SPoRC long-form curation audit rows were not captured."
+                )
+            _write_streamed_longform_audit_payload(
+                audit_path=audit_path,
+                source_manifest=source_manifest,
+                output_manifest_path=output_manifest_path,
+                evaluated_sample_count=evaluated_count,
+                selected_sample_count=len(selected_samples),
+                audit_rows_path=audit_rows_temp_path,
+            )
+        return (
+            PreparedDatasetManifest(
+                manifest_path=output_manifest_path,
+                dataset_id=str(manifest_payload["dataset_id"]),
+                sporc_dataset_id=source_manifest.sporc_dataset_id,
+                dataset_variant=source_manifest.dataset_variant,
+                episode_data_path=source_manifest.episode_data_path,
+                turn_data_path=source_manifest.turn_data_path,
+                sample_count=len(selected_samples),
+                samples=tuple(selected_samples),
+                samples_path=None,
+            ),
+            audit_path,
         )
-
-    if not selected_samples:
-        raise DatasetPreparationError(
-            "No SPoRC samples satisfied the long-form curation thresholds."
-        )
-
-    manifest_payload = {
-        "dataset_id": f"{source_manifest.dataset_id}_longform_15k",
-        "created_at_utc": utc_now_iso(),
-        "source_manifest_path": str(source_manifest.manifest_path),
-        "sporc_dataset_id": source_manifest.sporc_dataset_id,
-        "dataset_variant": source_manifest.dataset_variant,
-        "episode_data_path": str(source_manifest.episode_data_path),
-        "turn_data_path": str(source_manifest.turn_data_path),
-        "sample_count": len(selected_samples),
-        "curation_profile": _LONGFORM_CURATION_PROFILE,
-        "curation_thresholds": _longform_curation_thresholds(),
-        "samples": [asdict(sample) for sample in selected_samples],
-    }
-    output_manifest_path.write_text(
-        json.dumps(manifest_payload, indent=2),
-        encoding="utf-8",
-    )
-
-    audit_payload = {
-        "created_at_utc": utc_now_iso(),
-        "source_manifest_path": str(source_manifest.manifest_path),
-        "output_manifest_path": str(output_manifest_path),
-        "curation_profile": _LONGFORM_CURATION_PROFILE,
-        "curation_thresholds": _longform_curation_thresholds(),
-        "evaluated_sample_count": len(audit_rows),
-        "selected_sample_count": len(selected_samples),
-        "samples": audit_rows,
-    }
-    audit_path.write_text(json.dumps(audit_payload, indent=2), encoding="utf-8")
-    return (
-        PreparedDatasetManifest(
-            manifest_path=output_manifest_path,
-            dataset_id=str(manifest_payload["dataset_id"]),
-            sporc_dataset_id=source_manifest.sporc_dataset_id,
-            dataset_variant=source_manifest.dataset_variant,
-            episode_data_path=source_manifest.episode_data_path,
-            turn_data_path=source_manifest.turn_data_path,
-            sample_count=len(selected_samples),
-            samples=tuple(selected_samples),
-            samples_path=None,
-        ),
-        audit_path,
-    )
+    finally:
+        if audit_rows_temp_path is not None and audit_rows_temp_path.exists():
+            audit_rows_temp_path.unlink(missing_ok=True)
 
 
 def prepare_sporc_benchmark(
@@ -1156,6 +1367,7 @@ def prepare_sporc_benchmark(
     turn_data_path: str = "",
     reference_wpm: float = DEFAULT_REFERENCE_WPM,
     force_download: bool = False,
+    status_reporter: StatusReporter | None = None,
 ) -> PreparedDatasetManifest:
     """Download or reuse SPoRC data, then build a reproducible benchmark slice."""
     resolved_episode_path, resolved_turn_path = resolve_sporc_source_files(
@@ -1164,6 +1376,7 @@ def prepare_sporc_benchmark(
         episode_data_path=episode_data_path,
         turn_data_path=turn_data_path,
         force_download=force_download,
+        status_reporter=status_reporter,
     )
     return build_prepared_dataset_manifest(
         episode_data_path=resolved_episode_path,
@@ -1171,6 +1384,7 @@ def prepare_sporc_benchmark(
         prepared_root=prepared_root,
         dataset_variant=dataset_variant,
         reference_wpm=reference_wpm,
+        status_reporter=status_reporter,
     )
 
 

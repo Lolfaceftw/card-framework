@@ -613,6 +613,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 max_tool_turns=int(base_cfg.agents.critic.max_tool_turns),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=retrieval_enabled,
+                reasoning_loop_guard=_coerce_mapping(
+                    OmegaConf.to_container(
+                        base_cfg.agents.critic.get("reasoning_loop_guard", {}),
+                        resolve=True,
+                    )
+                ),
                 agent_client=shared_agent_client,
                 event_bus=event_bus,
             ),

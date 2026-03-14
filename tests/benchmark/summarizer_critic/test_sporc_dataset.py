@@ -156,6 +156,8 @@ def test_build_prepared_dataset_manifest_uses_sporc_episode_and_turn_files(
     )
     assert transcript_payload["metadata"]["source_audio_url"] == episode_key
     assert sample.target_seconds == 12
+    assert sample.metadata["longform_curation_candidate"]["segment_count"] == 2
+    assert sample.metadata["longform_curation_candidate"]["unique_speaker_count"] == 2
 
 
 def test_build_prepared_dataset_manifest_supports_real_sporc_field_names(
@@ -265,6 +267,9 @@ def test_build_prepared_dataset_manifest_full_variant_uses_sidecar_and_episode_o
         "sporc_00001_https_example_com_episode_a_mp3",
         "sporc_00002_https_example_com_episode_b_mp3",
     ]
+    assert (
+        loaded_samples[0].metadata["longform_curation_candidate"]["segment_count"] == 1
+    )
     payload = json.loads(manifest.manifest_path.read_text(encoding="utf-8"))
     assert payload["samples_path"] == str(manifest.samples_path)
     assert "samples" not in payload
@@ -557,6 +562,108 @@ def test_curate_longform_sporc_manifest_filters_to_strict_multi_speaker_examples
     assert (
         "dominant_speaker_word_share>0.90"
         in audit_rows["dominant"]["excluded_reasons"]
+    )
+
+
+def test_curate_longform_sporc_manifest_reuses_precomputed_stats_and_reports_status_progress(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    samples: list[dict[str, object]] = []
+    for sample_index in range(2):
+        samples.append(
+            {
+                "sample_id": f"passing_{sample_index}",
+                "dataset": "sporc_full",
+                "episode_key": f"episode://passing_{sample_index}",
+                "transcript_path": str(
+                    tmp_path / "transcripts" / f"passing_{sample_index}.transcript.json"
+                ),
+                "reference_summary": "Passing long-form summary.",
+                "target_seconds": 45,
+                "metadata": {
+                    "longform_curation_candidate": {
+                        "profile": "longform_15k_v1",
+                        "raw_word_count": 16_500,
+                        "spoken_word_count": 16_500,
+                        "non_lexical_word_count": 0,
+                        "non_lexical_word_ratio": 0.0,
+                        "segment_count": 150,
+                        "unique_speaker_count": 2,
+                        "strong_speaker_count": 2,
+                        "dominant_speaker_word_share": 0.5,
+                        "timestamp_span_seconds": 9000.0,
+                        "speaker_stats": {
+                            "SPEAKER_00": {
+                                "raw_word_count": 8250,
+                                "spoken_word_count": 8250,
+                                "segment_count": 75,
+                            },
+                            "SPEAKER_01": {
+                                "raw_word_count": 8250,
+                                "spoken_word_count": 8250,
+                                "segment_count": 75,
+                            },
+                        },
+                    }
+                },
+            }
+        )
+
+    source_manifest_path = tmp_path / "prepared_full" / "manifest.json"
+    _write_prepared_manifest(source_manifest_path, samples=samples)
+    status_messages: list[str] = []
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.dataset._LONGFORM_CURATION_PROGRESS_INTERVAL",
+        1,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.dataset._load_transcript_payload",
+        lambda transcript_path: (_ for _ in ()).throw(
+            AssertionError("precomputed curation stats should avoid transcript reloads")
+        ),
+    )
+
+    curate_longform_sporc_manifest(
+        source_manifest_path=source_manifest_path,
+        output_manifest_path=tmp_path / "prepared_full" / "benchmark_longform_15k_manifest.json",
+        audit_path=tmp_path / "prepared_full" / "benchmark_longform_15k_audit.json",
+        status_reporter=status_messages.append,
+    )
+
+    assert any(
+        message == "Loading prepared SPoRC source manifest..."
+        for message in status_messages
+    )
+    assert any(
+        message.startswith("Loaded prepared SPoRC source manifest in ")
+        for message in status_messages
+    )
+    assert any(
+        message == "Loading SPoRC long-form curation sample stats..."
+        for message in status_messages
+    )
+    assert any(
+        "evaluated 1 / 2 prepared samples; selected 1 so far; transcript fallbacks 0."
+        in message
+        for message in status_messages
+    )
+    assert any(
+        "evaluated 2 / 2 prepared samples; selected 2 so far; transcript fallbacks 0."
+        in message
+        for message in status_messages
+    )
+    assert any(
+        message.startswith("Loaded SPoRC long-form curation sample stats in ")
+        for message in status_messages
+    )
+    assert any(
+        message == "Loading curated SPoRC long-form manifest..."
+        for message in status_messages
+    )
+    assert any(
+        message == "Loading SPoRC long-form curation audit..."
+        for message in status_messages
     )
 
 

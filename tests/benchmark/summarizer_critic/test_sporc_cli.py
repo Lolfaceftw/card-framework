@@ -8,6 +8,7 @@ from pathlib import Path
 
 from card_framework.benchmark.summarizer_critic.sporc.cli import (
     _child_environment,
+    _build_parser,
     _parse_duration_preset_list,
     _render_duration_sweep_menu,
     _resolve_prepare_root,
@@ -16,6 +17,7 @@ from card_framework.benchmark.summarizer_critic.sporc.cli import (
 from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_PREPARED_FULL_ROOT,
     DEFAULT_PREPARED_ROOT,
+    PreparedDatasetManifest,
 )
 from card_framework.shared.paths import REPO_ROOT
 
@@ -49,6 +51,105 @@ def test_resolve_prepare_root_defaults_by_dataset_variant() -> None:
     assert _resolve_prepare_root(dataset_variant="full", prepared_root="") == (
         DEFAULT_PREPARED_FULL_ROOT.resolve()
     )
+
+
+def test_build_parser_skips_runner_import_for_prepare_dataset(monkeypatch) -> None:
+    def _unexpected_runner_load(**kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepare parser should not load execute runner helpers")
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_runner_helpers",
+        _unexpected_runner_load,
+    )
+
+    parser = _build_parser(target_command="prepare-dataset")
+
+    args = parser.parse_args(["prepare-dataset"])
+    assert args.command == "prepare-dataset"
+
+
+def test_main_prepare_dataset_reports_progress_to_stderr(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    manifest = PreparedDatasetManifest(
+        manifest_path=(tmp_path / "prepared" / "manifest.json").resolve(),
+        dataset_id="sporc_full",
+        sporc_dataset_id="blitt/SPoRC",
+        dataset_variant="full",
+        episode_data_path=(tmp_path / "episodeLevelData.jsonl.gz").resolve(),
+        turn_data_path=(tmp_path / "speakerTurnData.jsonl.gz").resolve(),
+        sample_count=1,
+        samples=(),
+        samples_path=(tmp_path / "prepared" / "samples.jsonl.gz").resolve(),
+    )
+
+    def _unexpected_runner_load(**kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepare command should not load execute runner helpers")
+
+    def _fake_prepare_sporc_benchmark(**kwargs):  # type: ignore[no-untyped-def]
+        reporter = kwargs["status_reporter"]
+        reporter("Loading SPoRC episode metadata cache...")
+        reporter("Loaded SPoRC episode metadata cache in 0.10 seconds.")
+        return manifest
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_runner_helpers",
+        _unexpected_runner_load,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_dataset_helpers",
+        lambda **kwargs: (lambda **inner_kwargs: (None, None), _fake_prepare_sporc_benchmark),
+    )
+
+    exit_code = main(
+        [
+            "prepare-dataset",
+            "--dataset-variant",
+            "full",
+            "--prepared-root",
+            str(tmp_path / "prepared"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Loading SPoRC episode metadata cache..." in captured.err
+    assert "Loaded SPoRC episode metadata cache in 0.10 seconds." in captured.err
+    payload = json.loads(captured.out)
+    assert payload["status"] == "completed"
+    assert payload["sample_count"] == 1
+
+
+def test_main_prepare_dataset_handles_keyboard_interrupt(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    def _fake_prepare_sporc_benchmark(**kwargs):  # type: ignore[no-untyped-def]
+        reporter = kwargs["status_reporter"]
+        reporter("Loading SPoRC prepared samples from speaker turns...")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_dataset_helpers",
+        lambda **kwargs: (lambda **inner_kwargs: (None, None), _fake_prepare_sporc_benchmark),
+    )
+
+    exit_code = main(
+        [
+            "prepare-dataset",
+            "--dataset-variant",
+            "full",
+            "--prepared-root",
+            str(tmp_path / "prepared"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 130
+    assert "Cancelled." in captured.err
 
 
 def test_main_curate_longform_writes_manifest_and_audit(
@@ -124,3 +225,66 @@ def test_main_curate_longform_writes_manifest_and_audit(
     assert payload["status"] == "completed"
     assert Path(payload["dataset_manifest"]).exists()
     assert Path(payload["audit_path"]).exists()
+
+
+def test_main_curate_longform_reports_progress_to_stderr(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    manifest = PreparedDatasetManifest(
+        manifest_path=(tmp_path / "prepared_full" / "benchmark_longform_15k_manifest.json").resolve(),
+        dataset_id="sporc_full_longform_15k",
+        sporc_dataset_id="blitt/SPoRC",
+        dataset_variant="full",
+        episode_data_path=(tmp_path / "episodeLevelData.jsonl.gz").resolve(),
+        turn_data_path=(tmp_path / "speakerTurnData.jsonl.gz").resolve(),
+        sample_count=2,
+        samples=(),
+        samples_path=None,
+    )
+    audit_path = (tmp_path / "prepared_full" / "benchmark_longform_15k_audit.json").resolve()
+
+    def _fake_curate_longform_sporc_manifest(**kwargs):  # type: ignore[no-untyped-def]
+        reporter = kwargs["status_reporter"]
+        reporter("Loading prepared SPoRC source manifest...")
+        reporter("Loading SPoRC long-form curation sample stats...")
+        reporter(
+            "Loading SPoRC long-form curation sample stats... evaluated 2 / 2 prepared samples; selected 1 so far; transcript fallbacks 0."
+        )
+        reporter("Loaded SPoRC long-form curation sample stats in 0.20 seconds.")
+        reporter("Loading curated SPoRC long-form manifest...")
+        reporter("Loaded curated SPoRC long-form manifest in 0.01 seconds.")
+        reporter("Loading SPoRC long-form curation audit...")
+        reporter("Loaded SPoRC long-form curation audit in 0.01 seconds.")
+        return manifest, audit_path
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_dataset_helpers",
+        lambda **kwargs: (_fake_curate_longform_sporc_manifest, lambda **inner_kwargs: manifest),
+    )
+
+    exit_code = main(
+        [
+            "curate-longform",
+            "--source-manifest",
+            str(tmp_path / "prepared_full" / "manifest.json"),
+            "--output-manifest",
+            str(manifest.manifest_path),
+            "--audit-path",
+            str(audit_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Loading prepared SPoRC source manifest..." in captured.err
+    assert "Loading SPoRC long-form curation sample stats..." in captured.err
+    assert (
+        "evaluated 2 / 2 prepared samples; selected 1 so far; transcript fallbacks 0."
+        in captured.err
+    )
+    assert "Loaded SPoRC long-form curation audit in 0.01 seconds." in captured.err
+    payload = json.loads(captured.out)
+    assert payload["status"] == "completed"
+    assert payload["sample_count"] == 2

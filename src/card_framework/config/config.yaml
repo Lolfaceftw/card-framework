@@ -323,6 +323,12 @@ agents:
       stall_guidance_cooldown_turns: 2
   critic:
     max_tool_turns: 50
+    reasoning_loop_guard:
+      enabled: true
+      max_consecutive_no_tool_turns: 2
+      single_response_repeat_threshold: 3
+      min_repeated_sentence_words: 8
+      cross_turn_similarity_threshold: 0.96
 
 # ── Logging Settings ──────────────────────────────────────────────────
 logging:

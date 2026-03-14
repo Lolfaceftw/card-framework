@@ -1735,6 +1735,9 @@ def main(cfg: DictConfig) -> None:
                 max_tool_turns=int(critic_cfg.get("max_tool_turns", 5)),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=is_embedding_enabled,
+                reasoning_loop_guard=_to_plain_dict(
+                    critic_cfg.get("reasoning_loop_guard")
+                ),
                 agent_client=shared_agent_client,
                 event_bus=event_bus,
             ),

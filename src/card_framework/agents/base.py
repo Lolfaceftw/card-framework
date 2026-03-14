@@ -1,8 +1,11 @@
 import asyncio
 import ast
 import hashlib
+import html
 import json
+import re
 from abc import ABC, abstractmethod
+from difflib import SequenceMatcher
 from typing import Any
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -22,6 +25,9 @@ class BaseA2AExecutor(AgentExecutor, ABC):
 
     def __init__(self, name: str):
         self.name = name
+
+    _NON_ALNUM_PATTERN = re.compile(r"[^a-z0-9\s]+")
+    _REPEATED_SPAN_SPLIT_PATTERN = re.compile(r"(?:\n+|(?<=[.!?])\s+)")
 
     @staticmethod
     async def _emit_working_task_event(
@@ -170,6 +176,180 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         msg_dict["tool_calls"] = sanitized_tool_calls if sanitized_tool_calls else None
         return msg_dict
 
+    @classmethod
+    def _normalize_reasoning_loop_text(cls, raw_text: str) -> str:
+        """Normalize assistant text for repetition and similarity checks."""
+        normalized = html.unescape(raw_text).lower()
+        normalized = cls._NON_ALNUM_PATTERN.sub(" ", normalized)
+        return " ".join(normalized.split()).strip()
+
+    @staticmethod
+    def _count_words(raw_text: str) -> int:
+        """Return a loose word count for repetition guard thresholds."""
+        return len(re.findall(r"\b\w+\b", raw_text))
+
+    @classmethod
+    def _extract_repeated_response_span(
+        cls,
+        raw_text: str,
+        *,
+        min_words: int,
+        repeat_threshold: int,
+    ) -> tuple[str, int] | None:
+        """Return a repeated sentence-like span when one dominates a response."""
+        counts: dict[str, tuple[int, str]] = {}
+        for segment in cls._REPEATED_SPAN_SPLIT_PATTERN.split(raw_text):
+            candidate = " ".join(segment.split()).strip(" -*\u2022")
+            if not candidate:
+                continue
+            if cls._count_words(candidate) < min_words:
+                continue
+            normalized = cls._normalize_reasoning_loop_text(candidate)
+            if not normalized:
+                continue
+            current_count, current_preview = counts.get(normalized, (0, candidate))
+            counts[normalized] = (current_count + 1, current_preview)
+
+        best_match: tuple[str, int] | None = None
+        for count, preview in counts.values():
+            if count < repeat_threshold:
+                continue
+            if best_match is None or count > best_match[1]:
+                best_match = (preview, count)
+        return best_match
+
+    @staticmethod
+    def _coerce_reasoning_loop_guard_config(
+        raw_guard: Any,
+    ) -> dict[str, Any]:
+        """Normalize the opt-in no-tool repetition guard configuration."""
+        guard_payload = dict(raw_guard) if isinstance(raw_guard, dict) else {}
+
+        def _bool(name: str, default: bool) -> bool:
+            raw_value = guard_payload.get(name, default)
+            return raw_value if isinstance(raw_value, bool) else default
+
+        def _int(name: str, default: int, minimum: int) -> int:
+            raw_value = guard_payload.get(name, default)
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, parsed)
+
+        def _ratio(name: str, default: float) -> float:
+            raw_value = guard_payload.get(name, default)
+            try:
+                parsed = float(raw_value)
+            except (TypeError, ValueError):
+                return default
+            return max(0.0, min(1.0, parsed))
+
+        return {
+            "enabled": _bool("enabled", False),
+            "max_consecutive_no_tool_turns": _int(
+                "max_consecutive_no_tool_turns",
+                default=2,
+                minimum=1,
+            ),
+            "single_response_repeat_threshold": _int(
+                "single_response_repeat_threshold",
+                default=3,
+                minimum=2,
+            ),
+            "min_repeated_sentence_words": _int(
+                "min_repeated_sentence_words",
+                default=8,
+                minimum=1,
+            ),
+            "cross_turn_similarity_threshold": _ratio(
+                "cross_turn_similarity_threshold",
+                default=0.96,
+            ),
+        }
+
+    @staticmethod
+    def _reasoning_loop_guard_state(
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return mutable runtime state for the reasoning-loop guard."""
+        raw_state = runtime_context.get("reasoning_loop_guard_state")
+        if isinstance(raw_state, dict):
+            return raw_state
+        state = {
+            "consecutive_no_tool_turns": 0,
+            "last_no_tool_response_normalized": "",
+            "last_no_tool_response_word_count": 0,
+        }
+        runtime_context["reasoning_loop_guard_state"] = state
+        return state
+
+    @classmethod
+    def _build_reasoning_loop_guard_stop_reason(
+        cls,
+        *,
+        runtime_context: dict[str, Any],
+        guard_config: dict[str, Any],
+        assistant_text: str,
+    ) -> str | None:
+        """Return a stop reason when repetitive no-tool reasoning is detected."""
+        if not guard_config["enabled"]:
+            return None
+
+        normalized_text = cls._normalize_reasoning_loop_text(assistant_text)
+        state = cls._reasoning_loop_guard_state(runtime_context)
+        consecutive_no_tool_turns = (
+            int(state.get("consecutive_no_tool_turns", 0)) + 1
+        )
+        state["consecutive_no_tool_turns"] = consecutive_no_tool_turns
+
+        repeated_span = cls._extract_repeated_response_span(
+            assistant_text,
+            min_words=int(guard_config["min_repeated_sentence_words"]),
+            repeat_threshold=int(guard_config["single_response_repeat_threshold"]),
+        )
+        if repeated_span is not None:
+            preview, repeat_count = repeated_span
+            return (
+                f"single-response repetition detected ({repeat_count} repeats): "
+                f"{cls._summarize_json_text(preview)}"
+            )
+
+        current_word_count = cls._count_words(normalized_text)
+        previous_text = str(state.get("last_no_tool_response_normalized", ""))
+        previous_word_count = int(state.get("last_no_tool_response_word_count", 0))
+        if (
+            previous_text
+            and normalized_text
+            and current_word_count
+            >= int(guard_config["min_repeated_sentence_words"])
+            and previous_word_count
+            >= int(guard_config["min_repeated_sentence_words"])
+            and consecutive_no_tool_turns
+            >= int(guard_config["max_consecutive_no_tool_turns"])
+        ):
+            similarity = SequenceMatcher(
+                a=previous_text,
+                b=normalized_text,
+            ).ratio()
+            if similarity >= float(guard_config["cross_turn_similarity_threshold"]):
+                return (
+                    "cross-turn repetition detected "
+                    f"(similarity={similarity:.2f}, turns={consecutive_no_tool_turns})"
+                )
+
+        state["last_no_tool_response_normalized"] = normalized_text
+        state["last_no_tool_response_word_count"] = current_word_count
+        return None
+
+    @staticmethod
+    def _reset_reasoning_loop_guard_state(runtime_context: dict[str, Any]) -> None:
+        """Clear no-tool repetition history after a successful tool-call turn."""
+        state = BaseA2AExecutor._reasoning_loop_guard_state(runtime_context)
+        state["consecutive_no_tool_turns"] = 0
+        state["last_no_tool_response_normalized"] = ""
+        state["last_no_tool_response_word_count"] = 0
+
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         raw_input = context.get_user_input()
         logger.info(
@@ -281,9 +461,15 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         runtime_context["seen_tool_signature_turns"] = seen_tool_signature_turns
         runtime_context.setdefault("tool_replay_window", "run")
         runtime_context["no_tool_call_count"] = 0
+        runtime_context.pop("loop_stop_category", None)
+        runtime_context.pop("loop_stop_reason", None)
         enable_extended_text_tool_parser = bool(
             runtime_context.get("enable_extended_text_tool_parser", False)
         )
+        reasoning_loop_guard = self._coerce_reasoning_loop_guard_config(
+            runtime_context.get("reasoning_loop_guard")
+        )
+        runtime_context["reasoning_loop_guard"] = reasoning_loop_guard
 
         total_parsed_calls = 0
         total_executed_calls = 0
@@ -334,14 +520,26 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             if chat_max_tokens is not None:
                 chat_kwargs["max_tokens"] = chat_max_tokens
             response_message = await asyncio.to_thread(self.llm.chat, **chat_kwargs)
+            reasoning_content = ""
             if hasattr(response_message, "model_dump"):
-                msg_dict = response_message.model_dump()
+                raw_response_payload = response_message.model_dump()
+                raw_reasoning = raw_response_payload.get("reasoning_content")
+                reasoning_content = (
+                    str(raw_reasoning).strip() if raw_reasoning is not None else ""
+                )
+                msg_dict = raw_response_payload
                 msg_dict = {
                     k: v
                     for k, v in msg_dict.items()
                     if k in ("role", "content", "tool_calls")
                 }
             else:
+                raw_reasoning = getattr(response_message, "reasoning_content", None)
+                if raw_reasoning is None:
+                    raw_reasoning = getattr(response_message, "reasoning", None)
+                reasoning_content = (
+                    str(raw_reasoning).strip() if raw_reasoning is not None else ""
+                )
                 msg_dict = {
                     "role": response_message.role,
                     "content": response_message.content,
@@ -382,6 +580,34 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                         ),
                     )
                     break
+                assistant_text = str(msg_dict.get("content") or "").strip()
+                if reasoning_content and reasoning_content != assistant_text:
+                    assistant_text = (
+                        f"{assistant_text}\n{reasoning_content}".strip()
+                        if assistant_text
+                        else reasoning_content
+                    )
+                guard_stop_reason = self._build_reasoning_loop_guard_stop_reason(
+                    runtime_context=runtime_context,
+                    guard_config=reasoning_loop_guard,
+                    assistant_text=assistant_text,
+                )
+                if guard_stop_reason is not None:
+                    runtime_context["loop_stop_category"] = "reasoning_loop_guard"
+                    runtime_context["loop_stop_reason"] = guard_stop_reason
+                    logger.warning(
+                        "[%s] Reasoning-loop guard stopped no-tool response: %s",
+                        self.name,
+                        guard_stop_reason,
+                    )
+                    event_bus.publish(
+                        "status_message",
+                        message=(
+                            f"{self.name} reasoning-loop guard stopped a "
+                            f"repetitive no-tool response: {guard_stop_reason}"
+                        ),
+                    )
+                    break
                 if no_tool_call_patience is not None:
                     no_tool_call_count = (
                         int(runtime_context.get("no_tool_call_count", 0)) + 1
@@ -396,6 +622,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                         break
                 continue
             runtime_context["no_tool_call_count"] = 0
+            self._reset_reasoning_loop_guard_state(runtime_context)
 
             executable_tool_calls: list[dict[str, Any]] = []
             executable_call_metadata: list[dict[str, Any]] = []
