@@ -2,24 +2,44 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 
 from card_framework.benchmark.summarizer_critic.sporc.cli import (
+    _DurationSweepChildState,
+    _build_execute_child_command,
     _child_environment,
     _build_parser,
     _parse_duration_preset_list,
     _render_duration_sweep_menu,
+    _resolve_duration_sweep_examples,
     _resolve_prepare_root,
+    _run_duration_sweep,
     main,
 )
 from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_PREPARED_FULL_ROOT,
     DEFAULT_PREPARED_ROOT,
+    DurationSweepPresetSummary,
     PreparedDatasetManifest,
 )
 from card_framework.shared.paths import REPO_ROOT
+
+
+class _CompletedProcessStub:
+    """Minimal completed process stub for duration-sweep tests."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
 
 
 def test_sporc_child_environment_enables_unbuffered_python_output(monkeypatch) -> None:
@@ -51,6 +71,76 @@ def test_resolve_prepare_root_defaults_by_dataset_variant() -> None:
     assert _resolve_prepare_root(dataset_variant="full", prepared_root="") == (
         DEFAULT_PREPARED_FULL_ROOT.resolve()
     )
+
+
+def test_resolve_duration_sweep_examples_falls_back_to_max_samples() -> None:
+    args = argparse.Namespace(examples=None, max_samples=100)
+
+    assert _resolve_duration_sweep_examples(args) == 100
+
+
+def test_resolve_duration_sweep_examples_prefers_explicit_examples() -> None:
+    args = argparse.Namespace(examples=12, max_samples=100)
+
+    assert _resolve_duration_sweep_examples(args) == 12
+
+
+def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
+    args = argparse.Namespace(
+        dataset_manifest="manifest.json",
+        dataset_variant="full",
+        episode_data_path="episode.jsonl.gz",
+        turn_data_path="turn.jsonl.gz",
+        reference_wpm=150.0,
+        output_root="runs",
+        provider_profiles="profiles.yaml",
+        config="config.yaml",
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="disabled",
+        judge_source_char_limit=30000,
+        duration_preset="",
+        target_seconds_override=90,
+        max_samples=25,
+        max_iterations=3,
+        summarizer_timeout_seconds=None,
+        critic_timeout_seconds=None,
+        retrieval_timeout_seconds=None,
+        index_timeout_seconds=None,
+        prepare_if_missing=True,
+        force_download_dataset=False,
+        force_download_audio=False,
+        transcript_only=False,
+    )
+
+    command = _build_execute_child_command(
+        args,
+        duration_preset="5m",
+        target_seconds_override=None,
+        max_samples=100,
+        transcript_only=True,
+        retrieval_port=5001,
+        summarizer_port=5002,
+        critic_port=5003,
+        disable_stream_output=True,
+        emit_progress_events=True,
+    )
+
+    assert "--duration-preset" in command
+    assert "5m" in command
+    assert "--max-samples" in command
+    assert "100" in command
+    assert "--transcript-only" in command
+    assert "--disable-stream-output" in command
+    assert "--emit-progress-events" in command
+    assert "--retrieval-port" in command
+    assert "5001" in command
+    assert "--summarizer-port" in command
+    assert "5002" in command
+    assert "--critic-port" in command
+    assert "5003" in command
+    assert "--target-seconds-override" not in command
 
 
 def test_build_parser_skips_runner_import_for_prepare_dataset(monkeypatch) -> None:
@@ -120,6 +210,114 @@ def test_main_prepare_dataset_reports_progress_to_stderr(
     payload = json.loads(captured.out)
     assert payload["status"] == "completed"
     assert payload["sample_count"] == 1
+
+
+def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    launched: list[tuple[str, int]] = []
+    finalized: list[tuple[str, int]] = []
+    written_reports = []
+
+    def _fake_launch_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        duration_preset = kwargs["duration_preset"]
+        max_samples = kwargs["max_samples"]
+        launched.append((duration_preset, max_samples))
+        log_path = tmp_path / f"{duration_preset}.log"
+        log_handle = log_path.open("w", encoding="utf-8")
+        return _DurationSweepChildState(
+            duration_preset=duration_preset,
+            process=_CompletedProcessStub(pid=1000 + len(launched)),
+            log_path=log_path,
+            log_handle=log_handle,
+            reader_thread=None,
+            retrieval_port=5100 + len(launched) * 3,
+            summarizer_port=5101 + len(launched) * 3,
+            critic_port=5102 + len(launched) * 3,
+            max_samples=max_samples,
+        )
+
+    def _fake_finalize_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        state = kwargs["state"]
+        fallback_sample_count = kwargs["fallback_sample_count"]
+        finalized.append((state.duration_preset, fallback_sample_count))
+        if not state.log_handle.closed:
+            state.log_handle.close()
+        return DurationSweepPresetSummary(
+            duration_preset=state.duration_preset,
+            target_seconds={"30s": 30, "1m": 60, "5m": 300}[state.duration_preset],
+            status="completed",
+            sample_count=fallback_sample_count,
+            executed_count=fallback_sample_count,
+            skipped_count=0,
+            success_count=fallback_sample_count,
+            failure_count=0,
+            within_tolerance_count=fallback_sample_count,
+            within_tolerance_rate=1.0,
+            mean_candidate_seconds=30.0,
+            mean_absolute_duration_delta_seconds=0.0,
+            mean_factualness=0.9,
+            mean_naturalness=0.9,
+            mean_speaker_grammar_similarity=0.9,
+            mean_composite=0.9,
+            report_path=str(tmp_path / f"{state.duration_preset}.report.json"),
+            notes_path=str(tmp_path / f"{state.duration_preset}.notes.md"),
+            results_path=str(tmp_path / f"{state.duration_preset}.results.md"),
+            mean_composite_ci95_lower=None,
+            mean_composite_ci95_upper=None,
+            error_message=None,
+        )
+
+    def _fake_write_duration_sweep_artifacts(**kwargs):  # type: ignore[no-untyped-def]
+        report = kwargs["report"]
+        written_reports.append(report)
+        sweep_root = kwargs["sweep_root"]
+        return sweep_root / "report.json", sweep_root / "results.md"
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._launch_duration_sweep_child",
+        _fake_launch_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._finalize_duration_sweep_child",
+        _fake_finalize_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_reporting_helpers",
+        lambda **kwargs: (_fake_write_duration_sweep_artifacts, None),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._emit_cli_status",
+        lambda message: None,
+    )
+
+    args = argparse.Namespace(
+        mode="batch-all",
+        duration_preset="",
+        duration_presets="30s,1m,5m",
+        examples=None,
+        max_samples=100,
+        parallelism=0,
+        sweep_root=str(tmp_path),
+        enable_voice_clone=False,
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="disabled",
+    )
+
+    exit_code = _run_duration_sweep(args)
+
+    assert exit_code == 0
+    assert launched == [("30s", 100), ("1m", 100), ("5m", 100)]
+    assert finalized == [("30s", 100), ("1m", 100), ("5m", 100)]
+    assert written_reports[-1].examples_per_preset == 100
+    assert [summary.duration_preset for summary in written_reports[-1].preset_summaries] == [
+        "30s",
+        "1m",
+        "5m",
+    ]
 
 
 def test_main_prepare_dataset_handles_keyboard_interrupt(

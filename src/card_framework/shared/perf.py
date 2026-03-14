@@ -4,9 +4,27 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 import time
 
 type StatusReporter = Callable[[str], None]
+
+
+@dataclass(slots=True)
+class PerfTimer:
+    """Track elapsed wall-clock time from a captured `perf_counter` start."""
+
+    started: float
+
+    def elapsed_seconds(self) -> float:
+        """Return the current elapsed wall-clock seconds."""
+        return max(time.perf_counter() - self.started, 0.0)
+
+
+@contextmanager
+def measure_elapsed_time() -> Iterator[PerfTimer]:
+    """Yield a timer object backed by `time.perf_counter`."""
+    yield PerfTimer(started=time.perf_counter())
 
 
 @contextmanager

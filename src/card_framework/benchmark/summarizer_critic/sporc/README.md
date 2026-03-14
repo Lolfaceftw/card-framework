@@ -89,14 +89,16 @@ Use `duration-sweep` when you want multiple duration targets in one invocation:
 
 - `--mode single` runs one preset and uses `--duration-preset`,
 - `--mode batch-all` runs multiple presets and uses `--duration-presets`,
-- `--examples` controls how many prepared samples run per preset,
+- `--max-samples` controls how many prepared samples run per preset by default,
+- `--examples` remains available as a sweep-only override for `--max-samples`,
+- `--parallelism 0` runs every selected preset concurrently,
 - `duration-sweep` is transcript-only by default unless you add `--enable-voice-clone`.
 
 Common flag mix-ups:
 
 - `execute` does not accept a comma-separated list in `--duration-preset`.
 - `duration-sweep --mode batch-all` should use `--duration-presets`, not `--duration-preset`.
-- `duration-sweep` uses `--examples`, not `--max-samples`.
+- `duration-sweep` now honors `--max-samples`; use `--examples` only when you want a sweep-only override.
 
 ## Artifact Locations
 
@@ -127,7 +129,9 @@ Each `duration-sweep` run writes:
 Each preset inside a `duration-sweep` still launches a normal `execute` run, so
 the aggregate sweep artifacts live under `artifacts/summarizer_critic_benchmark/sweeps`
 while the detailed per-preset run artifacts still appear under
-`artifacts/summarizer_critic_benchmark/sporc_runs`.
+`artifacts/summarizer_critic_benchmark/sporc_runs`. Sweep children suppress token
+stream rendering and report sample progress back to the parent, so the sweep
+terminal view stays on aggregate sample positions and combined ETA.
 
 ## Step 1: Prepare The Dataset
 
@@ -269,7 +273,7 @@ Run one preset for `10` examples:
 HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode single \
   --duration-preset 5m \
-  --examples 10 \
+  --max-samples 10 \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
   --judge-provider vllm_default \
@@ -282,7 +286,8 @@ Run all built-in presets for `10` examples each:
 ```bash
 HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
-  --examples 10 \
+  --max-samples 10 \
+  --parallelism 0 \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
   --judge-provider vllm_default \
@@ -297,7 +302,8 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
   --mode batch-all \
   --duration-presets "30s,1m,5m" \
   --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
-  --examples 10 \
+  --max-samples 10 \
+  --parallelism 0 \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
   --judge-provider vllm_default \
@@ -315,7 +321,9 @@ Built-in presets:
 Sweep-specific flags:
 
 - `--mode menu|single|batch-all`
-- `--examples <int>`
+- `--max-samples <int>` where `0` means all prepared examples per preset
+- `--examples <int>` to override `--max-samples` only for the sweep
+- `--parallelism <int>` where `0` means run all selected presets concurrently
 - `--duration-presets 30s,1m,5m,15m`
 - `--sweep-root <path>`
 - `--enable-voice-clone`
@@ -327,7 +335,8 @@ Important behavior:
 - `--mode single` expects one `--duration-preset` such as `5m`.
 - `--mode batch-all` expects `--duration-presets "30s,1m,5m"` when you want a subset.
 - quote the comma-separated `--duration-presets` value in PowerShell to keep it as one argument.
-- `--examples` is the per-preset sample count for sweeps; `--max-samples` belongs to `execute`.
+- `duration-sweep` defaults to `--max-samples` for per-preset sample count, and `--examples` overrides it only for the sweep.
+- `duration-sweep` defaults to aggregate progress output with combined ETA instead of child token streams.
 
 ## Running A Custom Manifest
 
@@ -338,7 +347,8 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
   --mode batch-all \
   --duration-presets "30s,1m,5m" \
   --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
-  --examples 10 \
+  --max-samples 10 \
+  --parallelism 0 \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
   --judge-provider vllm_default \
@@ -363,7 +373,9 @@ Shared execution flags users usually need:
 - `execute`: `--max-samples <int>` where `0` means all prepared examples
 - `execute`: `--duration-preset <30s|1m|5m|15m>`
 - `execute`: `--target-seconds-override <int>`
-- `duration-sweep`: `--examples <int>`
+- `duration-sweep`: `--max-samples <int>` where `0` means all prepared examples per preset
+- `duration-sweep`: `--examples <int>` as a sweep-only override
+- `duration-sweep`: `--parallelism <int>`
 - `duration-sweep`: `--duration-presets 30s,1m,5m,15m`
 
 ## Timeouts
@@ -415,7 +427,8 @@ For the duration-constraint study described in this repository, the most direct 
 ```bash
 HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
-  --examples 10 \
+  --max-samples 10 \
+  --parallelism 0 \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
   --judge-provider vllm_default \
@@ -426,7 +439,9 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 
 ## Reading The Outputs
 
-Start with `results.md` for a human-readable table.
+Start with `results.md` for native Markdown tables. Run reports now include
+95% confidence intervals for aggregate metric means, and duration-sweep reports
+also include a composite-score CI column per preset.
 
 Use `report.json` when you need:
 

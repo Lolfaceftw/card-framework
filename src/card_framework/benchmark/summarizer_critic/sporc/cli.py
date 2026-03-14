@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -26,12 +28,23 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_SUPERVISOR_ROOT,
     DEFAULT_SWEEP_ROOT,
     BenchmarkExecutionReport,
+    BenchmarkSummary,
     DURATION_PRESET_SECONDS,
     DurationSweepPresetSummary,
     DurationSweepReport,
+    SampleBenchmarkResult,
+    SampleMetricBundle,
     SupervisedRunRecord,
 )
-from card_framework.shared.perf import StatusReporter, report_loading_duration
+from card_framework.benchmark.summarizer_critic.reporting_utils import (
+    mean_confidence_interval_95,
+)
+from card_framework.shared.perf import (
+    PerfTimer,
+    StatusReporter,
+    measure_elapsed_time,
+    report_loading_duration,
+)
 from card_framework.shared.paths import REPO_ROOT
 
 
@@ -39,6 +52,34 @@ _DATASET_HELPERS: tuple[object, object] | None = None
 _RUNNER_HELPERS: tuple[object, object, object] | None = None
 _TELEMETRY_HELPERS: tuple[object, object, object, object] | None = None
 _REPORTING_HELPERS: tuple[object, object] | None = None
+_PROGRESS_EVENT_KEY = "sporc_progress_event"
+_SWEEP_PROGRESS_HEARTBEAT_SECONDS = 15.0
+
+
+@dataclass(slots=True)
+class _DurationSweepChildState:
+    """Track one preset child process inside a duration sweep."""
+
+    duration_preset: str
+    process: subprocess.Popen[str]
+    log_path: Path
+    log_handle: TextIO
+    reader_thread: threading.Thread | None
+    retrieval_port: int
+    summarizer_port: int
+    critic_port: int
+    max_samples: int
+    sample_count: int | None = None
+    completed_samples: int = 0
+    active_sample_index: int | None = None
+    active_sample_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _DurationSweepProgressState:
+    """Snapshot aggregate sweep progress for operator-facing status lines."""
+
+    rendered: str
 
 
 def _emit_cli_status(message: str) -> None:
@@ -224,8 +265,11 @@ def _build_parser(
         duration_sweep.add_argument(
             "--examples",
             type=int,
-            default=10,
-            help="How many prepared SPoRC examples to run per duration preset.",
+            default=None,
+            help=(
+                "Optional per-preset sample cap for duration sweeps. "
+                "Overrides --max-samples when provided; use 0 to run all prepared examples."
+            ),
         )
         duration_sweep.add_argument(
             "--duration-presets",
@@ -241,6 +285,15 @@ def _build_parser(
             "--enable-voice-clone",
             action="store_true",
             help="Use the faithful live-draft voice-clone path instead of transcript-only mode.",
+        )
+        duration_sweep.add_argument(
+            "--parallelism",
+            type=int,
+            default=0,
+            help=(
+                "How many preset runs to execute concurrently. "
+                "Use 0 to run all selected presets in parallel."
+            ),
         )
     return parser
 
@@ -258,12 +311,13 @@ def _render_duration_sweep_menu() -> str:
         [
             "",
             "Recommended commands:",
-            "- Single preset: uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode single --duration-preset 5m --examples 10 --transcript-only",
-            "- All presets: uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --examples 10 --transcript-only",
+            "- Single preset: uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode single --duration-preset 5m --max-samples 10 --transcript-only",
+            "- All presets: uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --max-samples 10 --parallelism 0 --transcript-only",
             "",
             "Notes:",
             "- The sweep defaults to a non-interactive menu because this CLI is automation-friendly.",
             "- Use --mode batch-all to bypass the menu and benchmark every preset.",
+            "- Use --parallelism 0 to run all selected presets concurrently.",
             "- Use --enable-voice-clone only when audio synthesis is part of the experiment.",
         ]
     )
@@ -285,6 +339,48 @@ def _parse_duration_preset_list(raw_value: str) -> list[str]:
     return presets
 
 
+def _format_eta(seconds: float | None) -> str:
+    """Format a compact ETA string."""
+    if seconds is None or seconds < 0:
+        return "n/a"
+    rounded_seconds = int(round(seconds))
+    hours, remainder = divmod(rounded_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def _progress_snapshot(
+    *,
+    completed_samples: int,
+    total_samples: int,
+    elapsed_seconds: float,
+) -> tuple[int, str, str]:
+    """Return remaining-count, throughput, and ETA strings."""
+    remaining_samples = max(total_samples - completed_samples, 0)
+    if completed_samples <= 0 or elapsed_seconds <= 0:
+        average_examples_per_minute = None
+    else:
+        average_examples_per_minute = completed_samples / (elapsed_seconds / 60.0)
+    average_text = (
+        f"{average_examples_per_minute:.2f} ex/min"
+        if average_examples_per_minute is not None
+        else "n/a"
+    )
+    if remaining_samples <= 0:
+        eta_text = "0s"
+    elif average_examples_per_minute is None or average_examples_per_minute <= 0:
+        eta_text = "n/a"
+    else:
+        eta_text = _format_eta(
+            (remaining_samples / average_examples_per_minute) * 60.0
+        )
+    return remaining_samples, average_text, eta_text
+
+
 def _resolve_prepare_root(
     *,
     dataset_variant: str,
@@ -298,19 +394,58 @@ def _resolve_prepare_root(
     return DEFAULT_PREPARED_ROOT.resolve()
 
 
-def _build_duration_execute_args(
-    args: argparse.Namespace,
+def _resolve_duration_sweep_examples(args: argparse.Namespace) -> int:
+    """Resolve the per-preset sample cap for a duration sweep."""
+    raw_value = args.examples if args.examples is not None else args.max_samples
+    try:
+        examples = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise _benchmark_execution_error_type()(
+            "Duration sweep examples must be an integer."
+        ) from exc
+    if examples < 0:
+        raise _benchmark_execution_error_type()(
+            "Duration sweep examples must be zero or greater."
+        )
+    return examples
+
+
+def _resolve_duration_sweep_parallelism(
     *,
-    duration_preset: str,
-) -> argparse.Namespace:
-    """Translate duration-sweep CLI args into execute-compatible args."""
-    execute_args = argparse.Namespace(**vars(args))
-    execute_args.command = "execute"
-    execute_args.duration_preset = duration_preset
-    execute_args.target_seconds_override = None
-    execute_args.max_samples = int(args.examples)
-    execute_args.transcript_only = not bool(args.enable_voice_clone)
-    return execute_args
+    requested_parallelism: int,
+    preset_count: int,
+) -> int:
+    """Resolve an effective sweep concurrency from the selected presets."""
+    if preset_count <= 0:
+        raise _benchmark_execution_error_type()(
+            "At least one duration preset is required."
+        )
+    if requested_parallelism < 0:
+        raise _benchmark_execution_error_type()(
+            "Duration sweep parallelism must be zero or greater."
+        )
+    if requested_parallelism == 0:
+        return preset_count
+    return min(requested_parallelism, preset_count)
+
+
+def _reserve_port() -> int:
+    """Reserve one localhost port number for a child benchmark process."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as handle:
+        handle.bind(("127.0.0.1", 0))
+        return int(handle.getsockname()[1])
+
+
+def _reserve_distinct_port_triplet(used_ports: set[int]) -> tuple[int, int, int]:
+    """Reserve three distinct localhost ports not yet used in this sweep."""
+    ports: list[int] = []
+    while len(ports) < 3:
+        port = _reserve_port()
+        if port in used_ports:
+            continue
+        used_ports.add(port)
+        ports.append(port)
+    return ports[0], ports[1], ports[2]
 
 
 def _build_failed_preset_summary(
@@ -340,7 +475,45 @@ def _build_failed_preset_summary(
         report_path=None,
         notes_path=None,
         results_path=None,
+        mean_composite_ci95_lower=None,
+        mean_composite_ci95_upper=None,
         error_message=error_message,
+    )
+
+
+def _load_execution_report(report_path: Path) -> BenchmarkExecutionReport:
+    """Load one SPoRC execute report from JSON into benchmark dataclasses."""
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid SPoRC report payload in {report_path}.")
+
+    raw_summary = payload.pop("summary", None)
+    if not isinstance(raw_summary, dict):
+        raise ValueError(f"Missing summary payload in {report_path}.")
+
+    raw_samples = payload.pop("samples", None)
+    if not isinstance(raw_samples, list):
+        raise ValueError(f"Missing sample payload in {report_path}.")
+
+    samples: list[SampleBenchmarkResult] = []
+    for raw_sample in raw_samples:
+        if not isinstance(raw_sample, dict):
+            raise ValueError(f"Invalid sample payload in {report_path}.")
+        sample_payload = dict(raw_sample)
+        raw_metrics = sample_payload.pop("metrics", None)
+        if not isinstance(raw_metrics, dict):
+            raise ValueError(f"Missing sample metrics in {report_path}.")
+        samples.append(
+            SampleBenchmarkResult(
+                metrics=SampleMetricBundle(**raw_metrics),
+                **sample_payload,
+            )
+        )
+
+    return BenchmarkExecutionReport(
+        summary=BenchmarkSummary(**raw_summary),
+        samples=samples,
+        **payload,
     )
 
 
@@ -376,6 +549,9 @@ def _summarize_duration_report(
         if executed_count
         else 0.0
     )
+    composite_ci95 = mean_confidence_interval_95(
+        [sample.metrics.composite for sample in executed_samples]
+    )
     return DurationSweepPresetSummary(
         duration_preset=duration_preset,
         target_seconds=int(DURATION_PRESET_SECONDS[duration_preset]),
@@ -405,7 +581,269 @@ def _summarize_duration_report(
         report_path=report.report_path,
         notes_path=report.notes_path,
         results_path=report.results_path,
+        mean_composite_ci95_lower=(
+            round(composite_ci95[0], 4) if composite_ci95 is not None else None
+        ),
+        mean_composite_ci95_upper=(
+            round(composite_ci95[1], 4) if composite_ci95 is not None else None
+        ),
         error_message=None,
+    )
+
+
+def _parse_duration_sweep_progress_line(line: str) -> dict[str, object] | None:
+    """Parse one machine-readable child progress event line."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    event_name = payload.get(_PROGRESS_EVENT_KEY)
+    return payload if isinstance(event_name, str) else None
+
+
+def _update_duration_sweep_child_state(
+    state: _DurationSweepChildState,
+    payload: dict[str, object],
+) -> None:
+    """Apply one parsed progress event to the tracked child state."""
+    event_name = str(payload.get(_PROGRESS_EVENT_KEY, ""))
+    raw_sample_count = payload.get("sample_count")
+    if isinstance(raw_sample_count, int) and raw_sample_count >= 0:
+        state.sample_count = raw_sample_count
+
+    if event_name == "sample_start":
+        raw_sample_index = payload.get("sample_index")
+        if isinstance(raw_sample_index, int) and raw_sample_index > 0:
+            state.active_sample_index = raw_sample_index
+        raw_sample_id = payload.get("sample_id")
+        state.active_sample_id = (
+            str(raw_sample_id) if isinstance(raw_sample_id, str) and raw_sample_id else None
+        )
+        return
+
+    if event_name == "sample_done":
+        raw_sample_index = payload.get("sample_index")
+        if isinstance(raw_sample_index, int) and raw_sample_index >= 0:
+            state.completed_samples = max(state.completed_samples, raw_sample_index)
+        state.active_sample_index = None
+        state.active_sample_id = None
+
+
+def _format_duration_sweep_progress(
+    *,
+    presets: list[str],
+    running_children: dict[str, _DurationSweepChildState],
+    completed_summaries: dict[str, DurationSweepPresetSummary],
+    timer: PerfTimer,
+    examples_per_preset: int,
+) -> _DurationSweepProgressState:
+    """Render one aggregate duration-sweep progress line."""
+    active_labels: list[str] = []
+    total_completed = 0
+    total_samples = 0
+    total_known = True
+
+    for duration_preset in presets:
+        completed_summary = completed_summaries.get(duration_preset)
+        if completed_summary is not None:
+            total_completed += completed_summary.sample_count
+            total_samples += completed_summary.sample_count
+            continue
+
+        state = running_children.get(duration_preset)
+        if state is None:
+            if examples_per_preset > 0:
+                total_samples += examples_per_preset
+            else:
+                total_known = False
+            continue
+
+        total_completed += state.completed_samples
+        planned_samples = state.sample_count
+        if planned_samples is None:
+            if examples_per_preset > 0:
+                planned_samples = examples_per_preset
+            else:
+                total_known = False
+        if planned_samples is not None:
+            total_samples += planned_samples
+
+        if state.process.poll() is not None:
+            continue
+
+        if state.active_sample_index is not None and planned_samples is not None:
+            label = f"{duration_preset}:{state.active_sample_index}/{planned_samples}"
+        elif state.active_sample_index is not None:
+            label = f"{duration_preset}:{state.active_sample_index}/?"
+        elif planned_samples is not None:
+            label = f"{duration_preset}:{state.completed_samples}/{planned_samples}"
+        else:
+            label = f"{duration_preset}:starting"
+        active_labels.append(label)
+
+    if total_known and total_samples > 0:
+        _, average_text, eta_text = _progress_snapshot(
+            completed_samples=total_completed,
+            total_samples=total_samples,
+            elapsed_seconds=timer.elapsed_seconds(),
+        )
+        overall_text = f"{total_completed}/{total_samples}"
+    else:
+        average_text = "n/a"
+        eta_text = "n/a"
+        overall_text = f"{total_completed}/?"
+
+    active_text = ", ".join(active_labels) if active_labels else "idle"
+    return _DurationSweepProgressState(
+        rendered=(
+            f"Sweep progress: overall={overall_text} "
+            f"active=[{active_text}] "
+            f"completed_presets={len(completed_summaries)}/{len(presets)} "
+            f"rolling_avg={average_text} eta={eta_text} "
+            f"elapsed={timer.elapsed_seconds():.1f}s"
+        )
+    )
+
+
+def _start_duration_sweep_reader(
+    *,
+    state: _DurationSweepChildState,
+    event_queue: queue.Queue[tuple[str, dict[str, object]]],
+) -> threading.Thread | None:
+    """Start a background line pump for one duration-sweep child."""
+    stream = state.process.stdout
+    if stream is None:
+        return None
+
+    def _pump() -> None:
+        for line in stream:
+            state.log_handle.write(line)
+            state.log_handle.flush()
+            payload = _parse_duration_sweep_progress_line(line)
+            if payload is not None:
+                event_queue.put((state.duration_preset, payload))
+
+    thread = threading.Thread(
+        target=_pump,
+        name=f"sporc-duration-sweep-{state.duration_preset}-{state.process.pid}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _launch_duration_sweep_child(
+    *,
+    args: argparse.Namespace,
+    sweep_root: Path,
+    duration_preset: str,
+    max_samples: int,
+    used_ports: set[int],
+    event_queue: queue.Queue[tuple[str, dict[str, object]]],
+) -> _DurationSweepChildState:
+    """Launch one preset child execute process for the duration sweep."""
+    logs_root = sweep_root / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+    log_path = logs_root / f"{duration_preset}.log"
+    log_handle = log_path.open("w", encoding="utf-8")
+    retrieval_port, summarizer_port, critic_port = _reserve_distinct_port_triplet(
+        used_ports
+    )
+    child_command = _build_execute_child_command(
+        args,
+        duration_preset=duration_preset,
+        target_seconds_override=None,
+        max_samples=max_samples,
+        transcript_only=not bool(args.enable_voice_clone),
+        retrieval_port=retrieval_port,
+        summarizer_port=summarizer_port,
+        critic_port=critic_port,
+        disable_stream_output=True,
+        emit_progress_events=True,
+    )
+    log_handle.write(
+        (
+            f"[Sweep] Starting preset {duration_preset}\n"
+            f"[Sweep] Command: {' '.join(child_command)}\n"
+            f"[Sweep] Ports: retrieval={retrieval_port} "
+            f"summarizer={summarizer_port} critic={critic_port}\n"
+        )
+    )
+    log_handle.flush()
+    try:
+        process = subprocess.Popen(
+            child_command,
+            cwd=str(REPO_ROOT),
+            env=_child_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except Exception:
+        log_handle.close()
+        raise
+    state = _DurationSweepChildState(
+        duration_preset=duration_preset,
+        process=process,
+        log_path=log_path,
+        log_handle=log_handle,
+        reader_thread=None,
+        retrieval_port=retrieval_port,
+        summarizer_port=summarizer_port,
+        critic_port=critic_port,
+        max_samples=max_samples,
+    )
+    state.reader_thread = _start_duration_sweep_reader(
+        state=state,
+        event_queue=event_queue,
+    )
+    return state
+
+
+def _finalize_duration_sweep_child(
+    *,
+    state: _DurationSweepChildState,
+    fallback_sample_count: int,
+) -> DurationSweepPresetSummary:
+    """Finalize one duration-sweep child process into a preset summary."""
+    exit_code = state.process.wait(timeout=5.0)
+    if state.reader_thread is not None:
+        state.reader_thread.join(timeout=5.0)
+    state.log_handle.write(f"[Sweep] Child exited with code {exit_code}\n")
+    state.log_handle.flush()
+    state.log_handle.close()
+
+    terminal_payload = _discover_terminal_payload(state.log_path)
+    report_path_value = terminal_payload.get("report_path")
+    if isinstance(report_path_value, str) and report_path_value.strip():
+        report_path = Path(report_path_value).resolve()
+        if report_path.exists():
+            return _summarize_duration_report(
+                _load_execution_report(report_path),
+                duration_preset=state.duration_preset,
+            )
+
+    error_message = terminal_payload.get("error")
+    if not isinstance(error_message, str) or not error_message.strip():
+        error_message = (
+            f"Preset {state.duration_preset} exited with code {exit_code} "
+            "without writing a report."
+        )
+    resolved_sample_count = (
+        state.sample_count if state.sample_count is not None else fallback_sample_count
+    )
+    return _build_failed_preset_summary(
+        duration_preset=state.duration_preset,
+        sample_count=max(resolved_sample_count, 0),
+        error_message=error_message,
     )
 
 
@@ -415,17 +853,19 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
         print(_render_duration_sweep_menu())
         return 0
 
-    presets = (
-        [str(args.duration_preset)]
-        if args.mode == "single"
-        else _parse_duration_preset_list(str(args.duration_presets))
-    )
-    examples = int(args.examples)
-    if examples <= 0:
-        raise _benchmark_execution_error_type()("--examples must be positive.")
-
-    _, _, execute_benchmark = _load_runner_helpers(
-        status_reporter=_emit_cli_status,
+    if args.mode == "single":
+        single_preset = str(args.duration_preset or "").strip()
+        if single_preset not in DURATION_PRESET_SECONDS:
+            raise _benchmark_execution_error_type()(
+                "--mode single requires one valid --duration-preset value."
+            )
+        presets = [single_preset]
+    else:
+        presets = _parse_duration_preset_list(str(args.duration_presets))
+    examples = _resolve_duration_sweep_examples(args)
+    effective_parallelism = _resolve_duration_sweep_parallelism(
+        requested_parallelism=int(args.parallelism),
+        preset_count=len(presets),
     )
     write_duration_sweep_artifacts, _ = _load_reporting_helpers(
         status_reporter=_emit_cli_status,
@@ -434,27 +874,122 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
     sweep_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     sweep_root = Path(args.sweep_root).resolve() / sweep_id
     sweep_root.mkdir(parents=True, exist_ok=True)
+    pending_presets = list(presets)
+    running_children: dict[str, _DurationSweepChildState] = {}
+    preset_summaries_by_preset: dict[str, DurationSweepPresetSummary] = {}
+    used_ports: set[int] = set()
+    event_queue: queue.Queue[tuple[str, dict[str, object]]] = queue.Queue()
+    last_progress: str | None = None
+    next_heartbeat_at = 0.0
 
-    preset_summaries: list[DurationSweepPresetSummary] = []
-    for duration_preset in presets:
-        execute_args = _build_duration_execute_args(
-            args,
-            duration_preset=duration_preset,
+    _emit_cli_status(
+        (
+            f"Starting duration sweep {sweep_id} with presets={', '.join(presets)} "
+            f"parallelism={effective_parallelism} "
+            f"examples_per_preset={examples if examples > 0 else 'all'} "
+            f"transcript_only={not bool(args.enable_voice_clone)}."
         )
-        try:
-            report = execute_benchmark(execute_args)
-        except _benchmark_execution_error_type() as exc:
-            preset_summaries.append(
-                _build_failed_preset_summary(
-                    duration_preset=duration_preset,
-                    sample_count=examples,
-                    error_message=str(exc),
-                )
-            )
-            continue
-        preset_summaries.append(
-            _summarize_duration_report(report, duration_preset=duration_preset)
-        )
+    )
+
+    try:
+        with measure_elapsed_time() as sweep_timer:
+            while pending_presets or running_children:
+                while (
+                    pending_presets
+                    and len(running_children) < effective_parallelism
+                ):
+                    duration_preset = pending_presets.pop(0)
+                    child_state = _launch_duration_sweep_child(
+                        args=args,
+                        sweep_root=sweep_root,
+                        duration_preset=duration_preset,
+                        max_samples=examples,
+                        used_ports=used_ports,
+                        event_queue=event_queue,
+                    )
+                    running_children[duration_preset] = child_state
+                    _emit_cli_status(
+                        (
+                            f"Started preset {duration_preset} "
+                            f"(retrieval={child_state.retrieval_port}, "
+                            f"summarizer={child_state.summarizer_port}, "
+                            f"critic={child_state.critic_port})."
+                        )
+                    )
+
+                progress_changed = False
+                try:
+                    duration_preset, payload = event_queue.get(timeout=0.5)
+                except queue.Empty:
+                    pass
+                else:
+                    child_state = running_children.get(duration_preset)
+                    if child_state is not None:
+                        _update_duration_sweep_child_state(child_state, payload)
+                        progress_changed = True
+                    while True:
+                        try:
+                            duration_preset, payload = event_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        child_state = running_children.get(duration_preset)
+                        if child_state is not None:
+                            _update_duration_sweep_child_state(child_state, payload)
+                            progress_changed = True
+
+                for duration_preset, child_state in list(running_children.items()):
+                    if child_state.process.poll() is None:
+                        continue
+                    preset_summaries_by_preset[duration_preset] = (
+                        _finalize_duration_sweep_child(
+                            state=child_state,
+                            fallback_sample_count=examples,
+                        )
+                    )
+                    del running_children[duration_preset]
+                    progress_changed = True
+                    _emit_cli_status(
+                        (
+                            f"Finished preset {duration_preset} "
+                            f"status={preset_summaries_by_preset[duration_preset].status}."
+                        )
+                    )
+
+                elapsed_seconds = sweep_timer.elapsed_seconds()
+                if (
+                    progress_changed
+                    or elapsed_seconds >= next_heartbeat_at
+                    or last_progress is None
+                ):
+                    progress_state = _format_duration_sweep_progress(
+                        presets=presets,
+                        running_children=running_children,
+                        completed_summaries=preset_summaries_by_preset,
+                        timer=sweep_timer,
+                        examples_per_preset=examples,
+                    )
+                    if progress_state.rendered != last_progress:
+                        _emit_cli_status(progress_state.rendered)
+                        last_progress = progress_state.rendered
+                    next_heartbeat_at = (
+                        elapsed_seconds + _SWEEP_PROGRESS_HEARTBEAT_SECONDS
+                    )
+    except KeyboardInterrupt:
+        for child_state in running_children.values():
+            _terminate_process_tree(child_state.process)
+        raise
+    finally:
+        for child_state in running_children.values():
+            if child_state.process.poll() is None:
+                _terminate_process_tree(child_state.process)
+            if child_state.reader_thread is not None:
+                child_state.reader_thread.join(timeout=5.0)
+            if not child_state.log_handle.closed:
+                child_state.log_handle.close()
+
+    preset_summaries = [
+        preset_summaries_by_preset[duration_preset] for duration_preset in presets
+    ]
 
     aggregate_report = DurationSweepReport(
         sweep_id=sweep_id,
@@ -570,7 +1105,20 @@ def _stream_process_output(
     return thread
 
 
-def _build_supervised_child_command(args: argparse.Namespace) -> list[str]:
+def _build_execute_child_command(
+    args: argparse.Namespace,
+    *,
+    duration_preset: str | None = None,
+    target_seconds_override: int | None | str = "",
+    max_samples: int | None = None,
+    transcript_only: bool | None = None,
+    retrieval_port: int | None = None,
+    summarizer_port: int | None = None,
+    critic_port: int | None = None,
+    disable_stream_output: bool = False,
+    emit_progress_events: bool = False,
+) -> list[str]:
+    """Build a child execute command with optional sweep-specific overrides."""
     command = [
         sys.executable,
         "-m",
@@ -591,14 +1139,23 @@ def _build_supervised_child_command(args: argparse.Namespace) -> list[str]:
         "--judge-provider": args.judge_provider,
         "--embedding-mode": args.embedding_mode,
         "--judge-source-char-limit": args.judge_source_char_limit,
-        "--duration-preset": args.duration_preset,
-        "--target-seconds-override": args.target_seconds_override,
-        "--max-samples": args.max_samples,
+        "--duration-preset": (
+            duration_preset if duration_preset is not None else args.duration_preset
+        ),
+        "--target-seconds-override": (
+            target_seconds_override
+            if target_seconds_override != ""
+            else args.target_seconds_override
+        ),
+        "--max-samples": max_samples if max_samples is not None else args.max_samples,
         "--max-iterations": args.max_iterations,
         "--summarizer-timeout-seconds": args.summarizer_timeout_seconds,
         "--critic-timeout-seconds": args.critic_timeout_seconds,
         "--retrieval-timeout-seconds": args.retrieval_timeout_seconds,
         "--index-timeout-seconds": args.index_timeout_seconds,
+        "--retrieval-port": retrieval_port,
+        "--summarizer-port": summarizer_port,
+        "--critic-port": critic_port,
     }
     if args.prepare_if_missing:
         command.append("--prepare-if-missing")
@@ -606,13 +1163,25 @@ def _build_supervised_child_command(args: argparse.Namespace) -> list[str]:
         command.append("--force-download-dataset")
     if args.force_download_audio:
         command.append("--force-download-audio")
-    if args.transcript_only:
+    resolved_transcript_only = (
+        transcript_only if transcript_only is not None else args.transcript_only
+    )
+    if resolved_transcript_only:
         command.append("--transcript-only")
+    if disable_stream_output:
+        command.append("--disable-stream-output")
+    if emit_progress_events:
+        command.append("--emit-progress-events")
     for flag, value in forwarded.items():
         if value in (None, ""):
             continue
         command.extend([flag, str(value)])
     return command
+
+
+def _build_supervised_child_command(args: argparse.Namespace) -> list[str]:
+    """Build the execute child command for a supervisor session."""
+    return _build_execute_child_command(args)
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
@@ -636,22 +1205,28 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     process.kill()
 
 
-def _discover_report_paths(log_path: Path) -> tuple[str | None, str | None, str | None]:
+def _discover_terminal_payload(log_path: Path) -> dict[str, object]:
+    """Return the last JSON object emitted in a child log, if any."""
     if not log_path.exists():
-        return None, None, None
+        return {}
     text = log_path.read_text(encoding="utf-8", errors="replace")
     for line in reversed([item.strip() for item in text.splitlines() if item.strip()]):
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(payload, dict):
-            continue
-        report_path = payload.get("report_path")
-        notes_path = payload.get("notes_path")
-        results_path = payload.get("results_path")
-        if isinstance(report_path, str):
-            return report_path, str(notes_path or ""), str(results_path or "")
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _discover_report_paths(log_path: Path) -> tuple[str | None, str | None, str | None]:
+    terminal_payload = _discover_terminal_payload(log_path)
+    report_path = terminal_payload.get("report_path")
+    notes_path = terminal_payload.get("notes_path")
+    results_path = terminal_payload.get("results_path")
+    if isinstance(report_path, str):
+        return report_path, str(notes_path or ""), str(results_path or "")
     return None, None, None
 
 

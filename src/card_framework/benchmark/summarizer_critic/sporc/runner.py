@@ -45,8 +45,8 @@ from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     _load_base_config,
     _make_run_id,
     _progress_snapshot,
-    _reserve_port,
     _resolve_embedding_profile,
+    _resolve_benchmark_ports,
     _run_server_in_thread,
     _stop_server,
 )
@@ -119,6 +119,7 @@ _SOURCE_AUDIO_HEADERS = {
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
+_PROGRESS_EVENT_KEY = "sporc_progress_event"
 
 
 def _resolve_orchestrator_timeouts(args: argparse.Namespace) -> dict[str, float | None]:
@@ -146,6 +147,24 @@ def _normalize_max_iterations(raw_value: int | None) -> int | None:
     if int(raw_value) <= 0:
         return None
     return int(raw_value)
+
+
+def _emit_progress_event(
+    args: argparse.Namespace,
+    *,
+    event: str,
+    duration_preset: str,
+    payload: dict[str, Any],
+) -> None:
+    """Emit one machine-readable progress event for sweep supervisors."""
+    if not bool(getattr(args, "emit_progress_events", False)):
+        return
+    event_payload = {
+        _PROGRESS_EVENT_KEY: event,
+        "duration_preset": duration_preset,
+        **payload,
+    }
+    print(json.dumps(event_payload), flush=True)
 
 
 def _prepare_provider_config(
@@ -1264,9 +1283,10 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             )
         )
     )
-    _attach_stream_callback(llm_summarizer)
-    _attach_stream_callback(llm_critic)
-    _attach_stream_callback(llm_judge)
+    if not bool(args.disable_stream_output):
+        _attach_stream_callback(llm_summarizer)
+        _attach_stream_callback(llm_critic)
+        _attach_stream_callback(llm_judge)
     if logging_enabled:
         llm_summarizer = LoggingLLMProvider(inner_provider=llm_summarizer)
         llm_critic = LoggingLLMProvider(inner_provider=llm_critic)
@@ -1289,9 +1309,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     shared_agent_client = AgentClient(event_bus=event_bus)
     servers: list[ManagedServer] = []
     try:
-        retrieval_port = _reserve_port()
-        summarizer_port = _reserve_port()
-        critic_port = _reserve_port()
+        retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(args)
 
         if retrieval_enabled:
             retrieval_app = _build_a2a_app(
@@ -1382,6 +1400,16 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 f"target_override={override_target_seconds if override_target_seconds is not None else 'dataset_default'}."
             ),
         )
+        _emit_progress_event(
+            args,
+            event="run_start",
+            duration_preset=str(duration_preset or "dataset_default"),
+            payload={
+                "run_id": run_id,
+                "sample_count": total_samples,
+                "transcript_only": transcript_only,
+            },
+        )
 
         results: list[SampleBenchmarkResult] = []
         benchmark_started = time.perf_counter()
@@ -1394,6 +1422,18 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             )
             iteration_label = (
                 "unbounded" if max_iterations is None else str(max_iterations)
+            )
+            _emit_progress_event(
+                args,
+                event="sample_start",
+                duration_preset=str(duration_preset or "dataset_default"),
+                payload={
+                    "sample_index": sample_index,
+                    "sample_count": total_samples,
+                    "sample_id": sample.sample_id,
+                    "target_seconds": active_target_seconds,
+                    "max_iterations": iteration_label,
+                },
             )
             event_bus.publish(
                 "status_message",
@@ -1431,6 +1471,19 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 total_samples=total_samples,
                 elapsed_seconds=time.perf_counter() - benchmark_started,
             )
+            _emit_progress_event(
+                args,
+                event="sample_done",
+                duration_preset=str(duration_preset or "dataset_default"),
+                payload={
+                    "sample_index": sample_index,
+                    "sample_count": total_samples,
+                    "sample_id": sample.sample_id,
+                    "final_status": result.final_status,
+                    "composite": round(result.metrics.composite, 4),
+                    "duration_seconds": round(result.duration_seconds, 3),
+                },
+            )
             event_bus.publish(
                 "status_message",
                 (
@@ -1465,6 +1518,18 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             results_path=str(results_path),
         )
         write_execution_artifacts(run_root=run_root, report=final_report)
+        _emit_progress_event(
+            args,
+            event="run_complete",
+            duration_preset=str(duration_preset or "dataset_default"),
+            payload={
+                "run_id": run_id,
+                "status": final_report.status,
+                "sample_count": total_samples,
+                "report_path": str(report_path),
+                "results_path": str(results_path),
+            },
+        )
         return final_report
     finally:
         event_capture.stop()
@@ -1568,4 +1633,17 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Optional indexing request timeout. Omit for no timeout.",
+    )
+    parser.add_argument("--retrieval-port", type=int, default=None)
+    parser.add_argument("--summarizer-port", type=int, default=None)
+    parser.add_argument("--critic-port", type=int, default=None)
+    parser.add_argument(
+        "--disable-stream-output",
+        action="store_true",
+        help="Suppress streamed token rendering for this execute run.",
+    )
+    parser.add_argument(
+        "--emit-progress-events",
+        action="store_true",
+        help="Emit machine-readable sample progress events on stdout.",
     )

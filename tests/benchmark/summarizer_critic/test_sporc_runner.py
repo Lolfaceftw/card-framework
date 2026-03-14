@@ -368,6 +368,30 @@ def test_execute_benchmark_short_circuits_when_all_samples_fail_preflight(
     assert report.samples[0].final_status == "preflight_failed"
 
 
+def test_build_execute_parser_accepts_sweep_child_progress_flags() -> None:
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+
+    args = parser.parse_args(
+        [
+            "--retrieval-port",
+            "5001",
+            "--summarizer-port",
+            "5002",
+            "--critic-port",
+            "5003",
+            "--disable-stream-output",
+            "--emit-progress-events",
+        ]
+    )
+
+    assert args.retrieval_port == 5001
+    assert args.summarizer_port == 5002
+    assert args.critic_port == 5003
+    assert args.disable_stream_output is True
+    assert args.emit_progress_events is True
+
+
 def test_execute_benchmark_reads_only_requested_sidecar_samples(
     monkeypatch,
     tmp_path: Path,

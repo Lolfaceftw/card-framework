@@ -1,3 +1,15 @@
+### 2026-03-15T00:02:10+08:00 - SPoRC Duration Sweeps Should Fan Out Presets Concurrently And Show Aggregate Progress
+- Problem: `sporc duration-sweep` still ran presets serially, ignored `--max-samples` unless `--examples` was also set, and mirrored child token streams into the terminal. That made sweeps unnecessarily slow on vLLM-backed runs and buried the useful operator signal under per-token output.
+- Solution: Make duration sweeps honor `--max-samples` by default with `--examples` as a sweep-only override, launch preset `execute` children concurrently with explicit retrieval/summarizer/critic ports, suppress child token streaming during sweeps, emit machine-readable sample progress from child runs, and show only aggregate sample positions plus a combined ETA in the parent sweep process.
+
+### 2026-03-14T21:11:11+08:00 - Benchmark Results Tables Should Be Native Markdown And Show Aggregate 95% CIs
+- Problem: The summarizer-critic benchmark reports wrote fixed-width ASCII tables inside fenced code blocks, which made `results.md` harder to reuse in GitHub or docs views. They also showed only point estimates for aggregate means, so sweep and run summaries gave no quick sense of sampling uncertainty.
+- Solution: Switch the QMSum and SPoRC report writers to native Markdown tables, add a shared reporting helper for Markdown rendering, and compute two-sided 95% Student-`t` confidence intervals for aggregate metric means when `n >= 2` while leaving the CI undefined for `n < 2`.
+
+### 2026-03-14T21:11:11+08:00 - Critic Loop Guards Must Stop Repetition During Streaming, Not Only After A Full Turn
+- Problem: The initial critic reasoning-loop guard only evaluated completed assistant turns. When the critic started streaming a repetitive "let me re-read the transcript" loop, operators still had to watch the bad text stream until the provider finished the turn or stalled.
+- Solution: Add a stream-time repetition callback that aborts the critic response as soon as repeated long spans emerge, retry the critic once with an explicit "do not repeat that mistake" instruction, and fall back to the deterministic `CRITIC LOOP GUARD:` verdict path only if the retried stream loops again.
+
 ### 2026-03-14T21:22:44.0732130+08:00 - Critic Semantic-Alignment Checks Need A No-Tool Repetition Guard
 - Problem: The critic could get stuck narrating the same transcript re-check over and over during semantic-alignment evaluation without emitting another tool call or a final verdict. That let repetitive "let me re-read the transcript" content burn critic turns until the generic loop cap, producing noisy failures and hiding the actual fallback cause.
 - Solution: Add a shared opt-in no-tool reasoning-loop guard in `BaseA2AExecutor`, enable it for `Critic` through `agents.critic.reasoning_loop_guard`, stop single-turn or cross-turn repetitive no-tool responses early, and fall back through the deterministic critic verdict path with a `CRITIC LOOP GUARD:` feedback prefix.
