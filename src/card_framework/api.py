@@ -27,6 +27,7 @@ from card_framework.runtime.bootstrap import (
     resolve_uv_executable,
 )
 from card_framework.shared.paths import DEFAULT_CONFIG_PATH
+from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.runtime_layout import resolve_runtime_layout
 
 _CONFIG_ENV_VAR = "CARD_FRAMEWORK_CONFIG"
@@ -76,6 +77,11 @@ _PROVIDER_API_KEY_REQUIREMENTS: dict[str, dict[str, object]] = {
         ),
     },
 }
+
+
+def _emit_infer_status(message: str) -> None:
+    """Emit one operator-facing infer status line to stderr."""
+    print(message, file=sys.stderr, flush=True)
 
 
 @dataclass(slots=True, frozen=True)
@@ -192,6 +198,7 @@ def infer(
         device=resolved_device,
         vllm_url=vllm_url,
         vllm_api_key=vllm_api_key,
+        reporter=_emit_infer_status,
     ) as (config_path, config):
         audio_cfg = _as_mapping(config.get("audio", {}))
         voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
@@ -224,6 +231,7 @@ def infer(
                 layout=layout,
                 uv_executable=uv_executable,
                 python_executable=sys.executable,
+                reporter=_emit_infer_status,
             )
 
         command = _build_pipeline_command(
@@ -265,37 +273,46 @@ def _prepared_inference_config(
     device: Literal["cpu", "cuda"],
     vllm_url: str | None,
     vllm_api_key: str | None,
+    reporter: StatusReporter | None = None,
 ) -> Iterator[tuple[Path, dict[str, Any]]]:
     """Prepare an effective config for one inference call and clean it up."""
     effective_config = deepcopy(dict(base_config))
-    config_modified = _apply_device_override(effective_config, device=device)
+    with report_loading_duration(
+        "packaged infer runtime config",
+        reporter=reporter,
+    ):
+        config_modified = _apply_device_override(effective_config, device=device)
 
-    resolved_vllm_url = _resolve_optional_text(vllm_url) or _resolve_optional_env(
-        (_VLLM_URL_ENV_VAR, "VLLM_BASE_URL")
-    )
-    resolved_vllm_api_key = _resolve_optional_text(
-        vllm_api_key
-    ) or _resolve_optional_env((_VLLM_API_KEY_ENV_VAR, "VLLM_API_KEY"))
-
-    if resolved_vllm_url:
-        _apply_vllm_first_override(
-            effective_config,
-            base_url=resolved_vllm_url,
-            api_key=resolved_vllm_api_key or _DEFAULT_VLLM_API_KEY,
+        resolved_vllm_url = _resolve_optional_text(vllm_url) or _resolve_optional_env(
+            (_VLLM_URL_ENV_VAR, "VLLM_BASE_URL")
         )
-        config_modified = True
-    elif resolved_vllm_api_key:
-        config_modified = _apply_optional_vllm_api_key(
-            effective_config,
-            api_key=resolved_vllm_api_key,
-        ) or config_modified
+        resolved_vllm_api_key = _resolve_optional_text(
+            vllm_api_key
+        ) or _resolve_optional_env((_VLLM_API_KEY_ENV_VAR, "VLLM_API_KEY"))
 
-    config_modified = (
-        _resolve_runtime_credentials(effective_config) or config_modified
-    )
-    config_modified = (
-        _prepare_forced_alignment_runtime(effective_config) or config_modified
-    )
+        if resolved_vllm_url:
+            _apply_vllm_first_override(
+                effective_config,
+                base_url=resolved_vllm_url,
+                api_key=resolved_vllm_api_key or _DEFAULT_VLLM_API_KEY,
+            )
+            config_modified = True
+        elif resolved_vllm_api_key:
+            config_modified = _apply_optional_vllm_api_key(
+                effective_config,
+                api_key=resolved_vllm_api_key,
+            ) or config_modified
+
+        config_modified = (
+            _resolve_runtime_credentials(effective_config) or config_modified
+        )
+        config_modified = (
+            _prepare_forced_alignment_runtime(
+                effective_config,
+                reporter=reporter,
+            )
+            or config_modified
+        )
 
     if not config_modified:
         yield base_config_path, effective_config
@@ -413,7 +430,11 @@ def _resolve_runtime_credentials(config: dict[str, Any]) -> bool:
     return modified
 
 
-def _prepare_forced_alignment_runtime(config: dict[str, Any]) -> bool:
+def _prepare_forced_alignment_runtime(
+    config: dict[str, Any],
+    *,
+    reporter: StatusReporter | None = None,
+) -> bool:
     """Bootstrap forced alignment when possible and fall back cleanly when not."""
     audio_cfg = _as_mapping(config.get("audio", {}))
     asr_cfg = _as_mapping(audio_cfg.get("asr", {}))
@@ -426,7 +447,10 @@ def _prepare_forced_alignment_runtime(config: dict[str, Any]) -> bool:
         return False
 
     try:
-        ensure_ctc_forced_aligner_runtime(python_executable=sys.executable)
+        ensure_ctc_forced_aligner_runtime(
+            python_executable=sys.executable,
+            reporter=reporter,
+        )
         return False
     except RuntimeBootstrapError as exc:
         modified = False

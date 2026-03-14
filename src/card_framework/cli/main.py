@@ -12,27 +12,9 @@ import time
 from typing import Any, cast
 
 import hydra
-import uvicorn
-from a2a.server.agent_execution import AgentExecutor
-from a2a.server.apps import A2AStarletteApplication
-from a2a.server.events import InMemoryQueueManager
-from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 from omegaconf import DictConfig, OmegaConf
 
-from card_framework.agents.client import AgentClient
-from card_framework.agents.critic import CriticExecutor
-from card_framework.agents.health import AgentHealthChecker
-from card_framework.agents.retrieval import InfoRetrievalExecutor
-from card_framework.agents.summarizer import SummarizerExecutor
 from card_framework.agents.utils import load_transcript
-from card_framework.audio_pipeline import (
-    build_audio_to_script_orchestrator,
-    build_interjector_orchestrator,
-    build_speaker_sample_generator,
-    build_voice_clone_orchestrator,
-)
 from card_framework.audio_pipeline.calibration import (
     DEFAULT_DURATION_TOLERANCE_RATIO,
     bootstrap_speaker_samples_from_audio,
@@ -59,10 +41,10 @@ from card_framework.audio_pipeline.gpu_heartbeat import (
 from card_framework.audio_pipeline.io import write_transcript_atomic
 from card_framework.audio_pipeline.runtime import resolve_device, resolve_path
 from card_framework.audio_pipeline.speaker_samples import resolve_sample_source_audio_path
-from card_framework.retrieval.embeddings import TranscriptIndex
 from card_framework.shared.events import event_bus
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import configure_logger
+from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.orchestration import StageOrchestrator
 from card_framework.runtime.loop_orchestrator import Orchestrator
 from card_framework.runtime.pipeline_plan import build_pipeline_stage_plan
@@ -107,6 +89,9 @@ _STAGE_TWO_BOOTSTRAP_STOPWORDS = {
     "will",
     "with",
 }
+_AUDIO_PIPELINE_BUILDERS: tuple[object, object, object, object] | None = None
+_A2A_SERVER_HELPERS: tuple[object, ...] | None = None
+_AGENT_RUNTIME_HELPERS: tuple[object, object, object, object, object, object] | None = None
 
 
 def _suppress_chatty_logger_propagation() -> None:
@@ -115,8 +100,110 @@ def _suppress_chatty_logger_propagation() -> None:
         logging.getLogger(logger_name).propagate = False
 
 
-def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecutor):
+def _emit_runtime_loading_status(message: str) -> None:
+    """Emit one operator-facing runtime loading status message."""
+    event_bus.publish("system_message", message)
+
+
+def _load_audio_pipeline_builders(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> tuple[object, object, object, object]:
+    """Load heavy audio-pipeline builder helpers only when runtime needs them."""
+    global _AUDIO_PIPELINE_BUILDERS
+    if _AUDIO_PIPELINE_BUILDERS is None:
+        with report_loading_duration(
+            "audio pipeline helpers",
+            reporter=status_reporter,
+        ):
+            from card_framework.audio_pipeline import (
+                build_audio_to_script_orchestrator,
+                build_interjector_orchestrator,
+                build_speaker_sample_generator,
+                build_voice_clone_orchestrator,
+            )
+
+        _AUDIO_PIPELINE_BUILDERS = (
+            build_audio_to_script_orchestrator,
+            build_interjector_orchestrator,
+            build_speaker_sample_generator,
+            build_voice_clone_orchestrator,
+        )
+    return _AUDIO_PIPELINE_BUILDERS
+
+
+def _load_a2a_server_helpers(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> tuple[object, ...]:
+    """Load A2A server runtime modules lazily to reduce CLI cold start."""
+    global _A2A_SERVER_HELPERS
+    if _A2A_SERVER_HELPERS is None:
+        with report_loading_duration(
+            "A2A server helpers",
+            reporter=status_reporter,
+        ):
+            import uvicorn as uvicorn_module
+            from a2a.server.apps import A2AStarletteApplication
+            from a2a.server.events import InMemoryQueueManager
+            from a2a.server.request_handlers import DefaultRequestHandler
+            from a2a.server.tasks import InMemoryTaskStore
+            from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+
+        _A2A_SERVER_HELPERS = (
+            uvicorn_module,
+            A2AStarletteApplication,
+            InMemoryQueueManager,
+            DefaultRequestHandler,
+            InMemoryTaskStore,
+            AgentCapabilities,
+            AgentCard,
+            AgentSkill,
+        )
+    return _A2A_SERVER_HELPERS
+
+
+def _load_agent_runtime_helpers(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> tuple[object, object, object, object, object, object]:
+    """Load agent/runtime helpers lazily to reduce CLI cold start."""
+    global _AGENT_RUNTIME_HELPERS
+    if _AGENT_RUNTIME_HELPERS is None:
+        with report_loading_duration(
+            "pipeline agent helpers",
+            reporter=status_reporter,
+        ):
+            from card_framework.agents.client import AgentClient
+            from card_framework.agents.critic import CriticExecutor
+            from card_framework.agents.health import AgentHealthChecker
+            from card_framework.agents.retrieval import InfoRetrievalExecutor
+            from card_framework.agents.summarizer import SummarizerExecutor
+            from card_framework.retrieval.embeddings import TranscriptIndex
+
+        _AGENT_RUNTIME_HELPERS = (
+            AgentClient,
+            CriticExecutor,
+            AgentHealthChecker,
+            InfoRetrievalExecutor,
+            SummarizerExecutor,
+            TranscriptIndex,
+        )
+    return _AGENT_RUNTIME_HELPERS
+
+
+def _build_a2a_app(name: str, description: str, port: int, executor: Any):
     """Build a Starlette A2A application from an executor."""
+    (
+        _,
+        A2AStarletteApplication,
+        InMemoryQueueManager,
+        DefaultRequestHandler,
+        InMemoryTaskStore,
+        AgentCapabilities,
+        AgentCard,
+        AgentSkill,
+    ) = _load_a2a_server_helpers(status_reporter=_emit_runtime_loading_status)
     agent_card = AgentCard(
         name=name,
         description=description,
@@ -148,14 +235,17 @@ def _build_a2a_app(name: str, description: str, port: int, executor: AgentExecut
 
 def _run_server_in_thread(name: str, app, port: int) -> threading.Thread:
     """Run a uvicorn server in a daemon thread."""
-    config = uvicorn.Config(
+    uvicorn_module = _load_a2a_server_helpers(
+        status_reporter=_emit_runtime_loading_status
+    )[0]
+    config = uvicorn_module.Config(
         app,
         host="127.0.0.1",
         port=port,
         log_level="warning",
         access_log=False,
     )
-    server = uvicorn.Server(config)
+    server = uvicorn_module.Server(config)
 
     def _serve() -> None:
         loop = asyncio.new_event_loop()
@@ -359,13 +449,17 @@ def _run_post_transcript_speaker_sample_step(
         raise ValueError("audio.speaker_samples.output_dir_name must be non-empty.")
     samples_output_dir = resolve_path(output_dir_name, base_dir=work_dir)
     if stage_start == "stage-2":
-        return _bootstrap_stage_two_speaker_samples_from_audio(
-            audio_cfg_dict=audio_cfg_dict,
-            project_root=project_root,
-            transcript_path=transcript_path,
-            transcript=transcript,
-            samples_output_dir=samples_output_dir,
-        )
+        with report_loading_duration(
+            "stage-2 speaker-sample bootstrap",
+            reporter=_emit_runtime_loading_status,
+        ):
+            return _bootstrap_stage_two_speaker_samples_from_audio(
+                audio_cfg_dict=audio_cfg_dict,
+                project_root=project_root,
+                transcript_path=transcript_path,
+                transcript=transcript,
+                samples_output_dir=samples_output_dir,
+            )
     # Prefer the vocals stem when transcript metadata provides it, but fall back
     # to configured audio for reusable transcripts that do not carry stem paths.
     source_audio_path = resolve_sample_source_audio_path(
@@ -373,6 +467,9 @@ def _run_post_transcript_speaker_sample_step(
         transcript_metadata=transcript.metadata,
         configured_audio_path=str(audio_cfg_dict.get("audio_path", "")),
         base_dir=project_root,
+    )
+    (_, _, build_speaker_sample_generator, _) = _load_audio_pipeline_builders(
+        status_reporter=_emit_runtime_loading_status
     )
     sample_generator = build_speaker_sample_generator(audio_cfg_dict)
     expected_sample_count = len(
@@ -469,12 +566,16 @@ def _run_post_transcript_speaker_sample_step(
             ticker_thread.start()
 
     try:
-        sample_result = sample_generator.generate(
-            transcript_payload=transcript.to_payload(),
-            source_audio_path=source_audio_path,
-            output_dir=samples_output_dir,
-            progress_callback=progress_callback,
-        )
+        with report_loading_duration(
+            "speaker samples from transcript audio",
+            reporter=_emit_runtime_loading_status,
+        ):
+            sample_result = sample_generator.generate(
+                transcript_payload=transcript.to_payload(),
+                source_audio_path=source_audio_path,
+                output_dir=samples_output_dir,
+                progress_callback=progress_callback,
+            )
     finally:
         stop_event.set()
         if ticker_thread is not None:
@@ -917,14 +1018,18 @@ def _bootstrap_stage_two_speaker_samples_from_audio(
         ),
     )
     started_at = time.monotonic()
-    bootstrap_result = bootstrap_speaker_samples_from_audio(
-        project_root=project_root,
-        audio_cfg=audio_cfg_dict,
-        audio_path=bootstrap_audio_path,
-        bootstrap_transcript_path=bootstrap_transcript_path,
-        bootstrap_audio_work_dir=bootstrap_audio_work_dir,
-        speaker_samples_output_dir=samples_output_dir,
-    )
+    with report_loading_duration(
+        "stage-2 speaker samples from source audio",
+        reporter=_emit_runtime_loading_status,
+    ):
+        bootstrap_result = bootstrap_speaker_samples_from_audio(
+            project_root=project_root,
+            audio_cfg=audio_cfg_dict,
+            audio_path=bootstrap_audio_path,
+            bootstrap_transcript_path=bootstrap_transcript_path,
+            bootstrap_audio_work_dir=bootstrap_audio_work_dir,
+            speaker_samples_output_dir=samples_output_dir,
+        )
     elapsed_seconds = max(0.0, time.monotonic() - started_at)
     bootstrap_transcript = _load_bootstrap_transcript(
         bootstrap_result.transcript_path
@@ -1027,7 +1132,7 @@ def _resolve_stage_two_speaker_sample_bootstrap_audio_path(
 
 def _wait_for_agent_servers(
     *,
-    checker: AgentHealthChecker,
+    checker: Any,
     servers: Sequence[tuple[str, int]],
     overall_timeout_seconds: float = 10.0,
     poll_interval_seconds: float = 0.2,
@@ -1036,15 +1141,21 @@ def _wait_for_agent_servers(
     """Block until required A2A servers are healthy or terminate the process."""
     if not servers:
         return
-    event_bus.publish("system_message", "Waiting for A2A servers to start...")
-    if checker.wait_for_many(
-        servers,
-        overall_timeout_seconds=overall_timeout_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-        request_timeout_seconds=request_timeout_seconds,
-    ):
-        return
-    sys.exit(1)
+    try:
+        with report_loading_duration(
+            "A2A server readiness",
+            reporter=_emit_runtime_loading_status,
+        ):
+            if checker.wait_for_many(
+                servers,
+                overall_timeout_seconds=overall_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                request_timeout_seconds=request_timeout_seconds,
+            ):
+                return
+            raise RuntimeError("A2A servers did not become healthy in time.")
+    except RuntimeError:
+        sys.exit(1)
 
 
 def _resolve_duration_targets(
@@ -1102,6 +1213,12 @@ def main(cfg: DictConfig) -> None:
         str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
         base_dir=project_root,
     )
+    (
+        build_audio_to_script_orchestrator,
+        build_interjector_orchestrator,
+        _,
+        build_voice_clone_orchestrator,
+    ) = _load_audio_pipeline_builders(status_reporter=_emit_runtime_loading_status)
     audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg_dict)
     eta_profile_path = work_dir / audio_orchestrator.eta_profile_filename
     eta_profile_context = audio_orchestrator._build_eta_profile_context(device=runtime_device)
@@ -1195,9 +1312,12 @@ def main(cfg: DictConfig) -> None:
             )
 
         transcript_path = str(resolved_transcript_path)
-        event_bus.publish("system_message", f"Loading transcript from {transcript_path}...")
-        transcript_payload = load_transcript(transcript_path)
-        transcript = Transcript.from_mapping(transcript_payload)
+        with report_loading_duration(
+            f"transcript from {transcript_path}",
+            reporter=_emit_runtime_loading_status,
+        ):
+            transcript_payload = load_transcript(transcript_path)
+            transcript = Transcript.from_mapping(transcript_payload)
         event_bus.publish(
             "system_message",
             f"Loaded {len(transcript.segments)} segments",
@@ -1272,17 +1392,21 @@ def main(cfg: DictConfig) -> None:
             "system_message",
             "Ensuring voice-clone calibration artifact is available...",
         )
-        calibration = ensure_voice_clone_calibration(
-            project_root=project_root,
-            audio_cfg=audio_cfg_dict,
-            speaker_samples_manifest_path=speaker_manifest_path,
-            transcript_path=(
-                resolve_path(transcript_path, base_dir=project_root)
-                if stage_plan.start_stage != "stage-4"
-                else None
-            ),
-            audio_path=input_audio_path,
-        )
+        with report_loading_duration(
+            "voice-clone calibration artifact",
+            reporter=_emit_runtime_loading_status,
+        ):
+            calibration = ensure_voice_clone_calibration(
+                project_root=project_root,
+                audio_cfg=audio_cfg_dict,
+                speaker_samples_manifest_path=speaker_manifest_path,
+                transcript_path=(
+                    resolve_path(transcript_path, base_dir=project_root)
+                    if stage_plan.start_stage != "stage-4"
+                    else None
+                ),
+                audio_path=input_audio_path,
+            )
         event_bus.publish(
             "status_message",
             (
@@ -1312,27 +1436,50 @@ def main(cfg: DictConfig) -> None:
             if not stage_terminal_logging:
                 _suppress_chatty_logger_propagation()
 
-    event_bus.publish("system_message", "Instantiating LLM providers...")
-    shared_agent_client = AgentClient(event_bus=event_bus)
-    logging_enabled = bool(cfg.get("logging", {}).get("enabled", False))
-    shared_llm = _instantiate_llm_provider(cfg.llm, enable_logging=logging_enabled)
+    shared_agent_client: Any | None = None
+    if (
+        stage_plan.run_summarizer_stage
+        or stage_plan.run_critic_stage
+        or stage_plan.requires_retrieval_tools
+    ):
+        (
+            AgentClient,
+            CriticExecutor,
+            AgentHealthChecker,
+            InfoRetrievalExecutor,
+            SummarizerExecutor,
+            TranscriptIndex,
+        ) = _load_agent_runtime_helpers(
+            status_reporter=_emit_runtime_loading_status,
+        )
+        shared_agent_client = AgentClient(event_bus=event_bus)
 
-    stage_llm_cfg = _to_plain_dict(cfg.get("stage_llm", {}))
-    summarizer_llm, summarizer_llm_source = _resolve_stage_llm(
-        stage_llm_cfg.get("summarizer"),
-        shared_llm=shared_llm,
-        enable_logging=logging_enabled,
-    )
-    critic_llm, critic_llm_source = _resolve_stage_llm(
-        stage_llm_cfg.get("critic"),
-        shared_llm=shared_llm,
-        enable_logging=logging_enabled,
-    )
-    interjector_llm, interjector_llm_source = _resolve_stage_llm(
-        stage_llm_cfg.get("interjector"),
-        shared_llm=shared_llm,
-        enable_logging=logging_enabled,
-    )
+    with report_loading_duration(
+        "LLM providers",
+        reporter=_emit_runtime_loading_status,
+    ):
+        logging_enabled = bool(cfg.get("logging", {}).get("enabled", False))
+        shared_llm = _instantiate_llm_provider(
+            cfg.llm,
+            enable_logging=logging_enabled,
+        )
+
+        stage_llm_cfg = _to_plain_dict(cfg.get("stage_llm", {}))
+        summarizer_llm, summarizer_llm_source = _resolve_stage_llm(
+            stage_llm_cfg.get("summarizer"),
+            shared_llm=shared_llm,
+            enable_logging=logging_enabled,
+        )
+        critic_llm, critic_llm_source = _resolve_stage_llm(
+            stage_llm_cfg.get("critic"),
+            shared_llm=shared_llm,
+            enable_logging=logging_enabled,
+        )
+        interjector_llm, interjector_llm_source = _resolve_stage_llm(
+            stage_llm_cfg.get("interjector"),
+            shared_llm=shared_llm,
+            enable_logging=logging_enabled,
+        )
 
     event_bus.publish(
         "system_message", f"Default LLM provider: {type(shared_llm).__name__}"
@@ -1495,12 +1642,15 @@ def main(cfg: DictConfig) -> None:
 
     transcript_index = None
     if is_embedding_enabled and stage_plan.requires_retrieval_tools:
-        event_bus.publish("system_message", "Instantiating Embedding provider...")
-        embedding: EmbeddingProvider = hydra.utils.instantiate(cfg.embedding)
+        with report_loading_duration(
+            "embedding provider",
+            reporter=_emit_runtime_loading_status,
+        ):
+            embedding: EmbeddingProvider = hydra.utils.instantiate(cfg.embedding)
+            transcript_index = TranscriptIndex(embedding_provider=embedding)
         event_bus.publish(
             "system_message", f"Embedding provider: {type(embedding).__name__}"
         )
-        transcript_index = TranscriptIndex(embedding_provider=embedding)
     else:
         event_bus.publish(
             "system_message",
@@ -1601,14 +1751,15 @@ def main(cfg: DictConfig) -> None:
     if stage_plan.run_critic_stage:
         servers_to_check.append(("Critic", critic_port))
 
-    checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
-    _wait_for_agent_servers(
-        checker=checker,
-        servers=servers_to_check,
-        overall_timeout_seconds=10.0,
-        poll_interval_seconds=0.2,
-        request_timeout_seconds=1.0,
-    )
+    if servers_to_check:
+        checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
+        _wait_for_agent_servers(
+            checker=checker,
+            servers=servers_to_check,
+            overall_timeout_seconds=10.0,
+            poll_interval_seconds=0.2,
+            request_timeout_seconds=1.0,
+        )
 
     loop_memory_cfg = _to_plain_dict(orchestrator_cfg_dict.get("loop_memory", {}))
     loop_memory_artifact_path: Path | None = None

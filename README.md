@@ -165,6 +165,12 @@ uv run python -m card_framework.cli.main
 uv run python -m card_framework.cli.calibrate
 ```
 
+These runtime entrypoints now emit timed `Loading ...` and
+`Loaded ... in X.XX seconds.` status lines around slow startup and bootstrap
+phases such as packaged runtime setup, transcript loading, calibration,
+provider setup, retrieval indexing, and A2A readiness so cold starts no longer
+look idle.
+
 Benchmark helpers:
 
 ```bash
@@ -260,7 +266,9 @@ Packaged `infer(...)` now delegates through `card_framework.cli.setup_and_run`
 so live operator output streams again during pip-installed runs. Relative input
 discovery in that wrapper follows the caller workspace, while the packaged
 `infer(...)` contract still keeps final run artifacts under the explicit
-`output_dir`.
+`output_dir`. The packaged entrypoint and wrapper now also emit timed stderr
+loading lines during runtime-config preparation, packaged IndexTTS bootstrap,
+and later runtime startup phases.
 
 Installed-package runtime notes:
 

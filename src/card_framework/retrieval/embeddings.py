@@ -14,6 +14,7 @@ import numpy as np
 
 from card_framework.shared.llm_provider import EmbeddingProvider
 from card_framework.shared.events import event_bus
+from card_framework.shared.perf import report_loading_duration
 
 
 class TranscriptIndex:
@@ -30,9 +31,13 @@ class TranscriptIndex:
         texts = [seg.get("text", "") for seg in segments]
 
         event_bus.publish("system_message", f"Embedding {len(texts)} segments...")
-        self.embeddings = self.provider.encode(
-            texts, normalize=True, show_progress=True
-        )
+        with report_loading_duration(
+            "transcript embeddings",
+            reporter=lambda message: event_bus.publish("system_message", message),
+        ):
+            self.embeddings = self.provider.encode(
+                texts, normalize=True, show_progress=True
+            )
         event_bus.publish("system_message", f"Embedded {len(texts)} segments")
         return len(texts)
 

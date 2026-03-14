@@ -13,6 +13,7 @@ import pytest
 import card_framework.api as infer_api
 from card_framework.api import InferenceResult, infer
 from card_framework.runtime.bootstrap import RuntimeBootstrapError
+from card_framework.shared.perf import report_loading_duration
 from card_framework.shared.runtime_layout import RuntimeLayout
 
 
@@ -38,6 +39,26 @@ def _stub_ctc_forced_aligner_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
         "card_framework.api.ensure_ctc_forced_aligner_runtime",
         lambda **_: None,
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_runtime_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep infer API tests deterministic against host credential env vars."""
+    for env_var in (
+        "CARD_FRAMEWORK_VLLM_URL",
+        "VLLM_BASE_URL",
+        "CARD_FRAMEWORK_VLLM_API_KEY",
+        "VLLM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "ZAI_API_KEY",
+        "GLM_API_KEY",
+        "HUGGINGFACE_TOKEN",
+        "HF_TOKEN",
+        "HUGGINGFACEHUB_API_TOKEN",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
 
 
 def test_infer_rejects_missing_audio(tmp_path: Path) -> None:
@@ -340,6 +361,69 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
     assert "orchestrator.target_seconds=300" in recorded_command
 
 
+def test_infer_reports_timed_loading_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Emit timed operator-facing status lines during packaged infer bootstrap."""
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"RIFF")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "audio:",
+                "  voice_clone:",
+                "    enabled: false",
+                "    live_drafting:",
+                "      enabled: false",
+                "  interjector:",
+                "    enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CARD_FRAMEWORK_CONFIG", str(config_path))
+    monkeypatch.setattr("card_framework.api.ensure_runtime_requirements", lambda **_: None)
+    monkeypatch.setattr(
+        "card_framework.api.resolve_runtime_layout",
+        lambda: _runtime_layout(tmp_path),
+    )
+
+    def _fake_bootstrap(**kwargs: Any) -> None:
+        reporter = kwargs["reporter"]
+        with report_loading_duration(
+            "packaged IndexTTS runtime",
+            reporter=reporter,
+        ):
+            return None
+
+    monkeypatch.setattr("card_framework.api.ensure_index_tts_runtime", _fake_bootstrap)
+    monkeypatch.setattr(
+        "card_framework.api.subprocess.run",
+        lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
+            _write_success_outputs(
+                _command_output_root(
+                    command,
+                    Path(cwd) if cwd is not None else tmp_path,
+                )
+            )
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+
+    infer(audio_path, tmp_path / "outputs", 180, device="cpu")
+
+    captured = capsys.readouterr()
+    assert "Loading packaged infer runtime config..." in captured.err
+    assert "Loaded packaged infer runtime config in" in captured.err
+    assert "Loading packaged IndexTTS runtime..." in captured.err
+    assert "Loaded packaged IndexTTS runtime in" in captured.err
+
+
 def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -372,7 +456,9 @@ def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
     bootstrap_calls: list[str] = []
     monkeypatch.setattr(
         "card_framework.api.ensure_ctc_forced_aligner_runtime",
-        lambda *, python_executable: bootstrap_calls.append(python_executable),
+        lambda *, python_executable, reporter=None: bootstrap_calls.append(
+            python_executable
+        ),
     )
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
@@ -499,7 +585,9 @@ def test_infer_skips_ctc_forced_aligner_bootstrap_when_alignment_and_interjector
     bootstrap_calls: list[str] = []
     monkeypatch.setattr(
         "card_framework.api.ensure_ctc_forced_aligner_runtime",
-        lambda *, python_executable: bootstrap_calls.append(python_executable),
+        lambda *, python_executable, reporter=None: bootstrap_calls.append(
+            python_executable
+        ),
     )
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",

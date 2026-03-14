@@ -125,3 +125,77 @@ def test_run_pipeline_uses_output_root_for_packaged_mode(
     assert "hydra.run.dir=." in command
     assert "hydra.output_subdir=null" in command
     assert "orchestrator.target_seconds=180" in command
+
+
+def test_main_setup_only_reports_timed_loading_status(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """Emit timed setup status lines for long bootstrap phases."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_and_run, "normalize_cli_overrides", lambda _: ())
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_bootstrap_start_stage",
+        lambda **_: "stage-1",
+    )
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del overrides, repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": True,
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": True,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+
+    exit_code = setup_and_run.main(["--setup-only"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Loading vendored IndexTTS runtime..." in captured.err
+    assert "Loaded vendored IndexTTS runtime in" in captured.err
+    assert "Loading runtime dependency sync..." in captured.err
+    assert "Loaded runtime dependency sync in" in captured.err
+    assert "Loading IndexTTS model provisioning..." in captured.err
+    assert "Loaded IndexTTS model provisioning in" in captured.err
