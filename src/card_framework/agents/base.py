@@ -1,4 +1,5 @@
-﻿import ast
+import asyncio
+import ast
 import hashlib
 import json
 from abc import ABC, abstractmethod
@@ -6,6 +7,7 @@ from typing import Any
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
+from a2a.types import Task, TaskState, TaskStatus
 from a2a.utils import new_agent_text_message
 
 from card_framework.agents.tool_call_utils import build_tool_signature
@@ -20,6 +22,34 @@ class BaseA2AExecutor(AgentExecutor, ABC):
 
     def __init__(self, name: str):
         self.name = name
+
+    @staticmethod
+    async def _emit_working_task_event(
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        """Publish an early working-task event so non-blocking A2A calls can poll."""
+        if (
+            context.task_id is None
+            or context.context_id is None
+            or context.message is None
+        ):
+            return
+
+        existing_task = context.current_task
+        if existing_task is None:
+            task_event = Task(
+                id=context.task_id,
+                context_id=context.context_id,
+                status=TaskStatus(state=TaskState.working),
+                history=[context.message],
+            )
+        else:
+            task_event = existing_task.model_copy(
+                update={"status": TaskStatus(state=TaskState.working)}
+            )
+        context.current_task = task_event
+        await event_queue.enqueue_event(task_event)
 
     @staticmethod
     def _summarize_json_text(raw_text: str, *, max_preview_chars: int = 160) -> str:
@@ -156,6 +186,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             raise ValueError(f"{self.name} received non-JSON task: {raw_input[:200]}")
 
         try:
+            await self._emit_working_task_event(context, event_queue)
+            await asyncio.sleep(0)
             await self.handle_task(task_data, context, event_queue)
         except Exception as e:
             logger.error(f"[{self.name}] Error handling task: {e}")
@@ -168,11 +200,40 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         """Subclasses implement this to handle the parsed JSON task."""
         pass
 
-    async def send_response(self, result: str, event_queue: EventQueue) -> None:
+    async def send_response(
+        self,
+        result: str,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
         """Helper to send a text response back."""
         logger.info(f"[{self.name}] Result: {self._summarize_json_text(result)}")
         logger.debug(f"[{self.name}] Result payload: {result}")
-        await event_queue.enqueue_event(new_agent_text_message(result))
+        task_id = getattr(context, "task_id", None)
+        context_id = getattr(context, "context_id", None)
+        response_message = new_agent_text_message(
+            result,
+            context_id=context_id,
+            task_id=task_id,
+        )
+
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and isinstance(context_id, str)
+            and context_id
+        ):
+            from a2a.server.tasks import TaskUpdater
+
+            task_updater = TaskUpdater(
+                event_queue=event_queue,
+                task_id=task_id,
+                context_id=context_id,
+            )
+            await task_updater.complete(message=response_message)
+            return
+
+        await event_queue.enqueue_event(response_message)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         pass
@@ -272,7 +333,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                 chat_kwargs["tool_choice"] = tool_choice
             if chat_max_tokens is not None:
                 chat_kwargs["max_tokens"] = chat_max_tokens
-            response_message = self.llm.chat(**chat_kwargs)
+            response_message = await asyncio.to_thread(self.llm.chat, **chat_kwargs)
             if hasattr(response_message, "model_dump"):
                 msg_dict = response_message.model_dump()
                 msg_dict = {
@@ -483,4 +544,3 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             f"[{self.name}] Tool loop summary parsed={total_parsed_calls} executed={total_executed_calls} skipped_duplicates={total_skipped_calls}"
         )
         return None
-

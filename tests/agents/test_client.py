@@ -79,10 +79,164 @@ def test_send_task_reads_text_parts_from_live_a2a_response(
                     "role": "user",
                     "parts": [{"kind": "text", "text": '{"x": 1}'}],
                     "messageId": posted_payloads[0]["params"]["message"]["messageId"],
-                }
+                },
+                "configuration": {"blocking": False},
             },
         }
     ]
+
+
+def test_send_task_polls_non_blocking_task_until_completion(
+    free_tcp_port: int,
+) -> None:
+    """Start non-blocking A2A work, then poll tasks/get until completion."""
+    requests_seen: list[dict[str, Any]] = []
+    poll_count = 0
+
+    async def _handle(request: Request) -> JSONResponse:
+        nonlocal poll_count
+        payload = await request.json()
+        requests_seen.append(payload)
+        method = payload.get("method")
+        if method == "message/send":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "id": "task_123",
+                        "kind": "task",
+                        "status": {"state": "working"},
+                        "artifacts": [],
+                    },
+                }
+            )
+        if method == "tasks/get":
+            poll_count += 1
+            if poll_count == 1:
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "id": "task_123",
+                            "kind": "task",
+                            "status": {"state": "working"},
+                            "artifacts": [],
+                        },
+                    }
+                )
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "id": "task_123",
+                        "kind": "task",
+                        "status": {"state": "completed"},
+                        "artifacts": [
+                            {
+                                "parts": [
+                                    {"kind": "text", "text": "done"},
+                                ]
+                            }
+                        ],
+                    },
+                }
+            )
+        raise AssertionError(f"Unexpected method: {method}")
+
+    app = Starlette(routes=[Route("/", _handle, methods=["POST"])])
+
+    with run_starlette_server(app, port=free_tcp_port):
+        result = asyncio.run(
+            _send_and_close(
+                port=free_tcp_port,
+                task_data={"x": 1},
+                timeout=1.0,
+            )
+        )
+
+    assert result == "done"
+    assert requests_seen[0]["method"] == "message/send"
+    assert requests_seen[1]["method"] == "tasks/get"
+
+
+def test_send_task_prefers_completed_status_message_over_task_history(
+    free_tcp_port: int,
+) -> None:
+    """Return the final task message without appending request history text."""
+    requests_seen: list[dict[str, Any]] = []
+
+    async def _handle(request: Request) -> JSONResponse:
+        payload = await request.json()
+        requests_seen.append(payload)
+        method = payload.get("method")
+        if method == "message/send":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "id": "task_123",
+                        "kind": "task",
+                        "status": {"state": "working"},
+                        "history": [
+                            {
+                                "parts": [
+                                    {
+                                        "kind": "text",
+                                        "text": '{"draft":"source transcript"}',
+                                    }
+                                ]
+                            }
+                        ],
+                    },
+                }
+            )
+        if method == "tasks/get":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "id": "task_123",
+                        "kind": "task",
+                        "status": {
+                            "state": "completed",
+                            "message": {
+                                "parts": [{"kind": "text", "text": '{"status":"ok"}'}]
+                            },
+                        },
+                        "history": [
+                            {
+                                "parts": [
+                                    {
+                                        "kind": "text",
+                                        "text": '{"draft":"source transcript"}',
+                                    }
+                                ]
+                            }
+                        ],
+                    },
+                }
+            )
+        raise AssertionError(f"Unexpected method: {method}")
+
+    app = Starlette(routes=[Route("/", _handle, methods=["POST"])])
+
+    with run_starlette_server(app, port=free_tcp_port):
+        result = asyncio.run(
+            _send_and_close(
+                port=free_tcp_port,
+                task_data={"x": 1},
+                timeout=1.0,
+            )
+        )
+
+    assert result == '{"status":"ok"}'
+    assert requests_seen[0]["method"] == "message/send"
+    assert requests_seen[1]["method"] == "tasks/get"
 
 
 def test_send_task_read_timeout_warns_against_retries(free_tcp_port: int) -> None:
@@ -110,8 +264,8 @@ def test_send_task_read_timeout_warns_against_retries(free_tcp_port: int) -> Non
                 )
             )
 
-    assert "timed out after 0.05s" in str(excinfo.value)
-    assert isinstance(excinfo.value.__cause__, httpx.ReadTimeout)
+    assert "Per-request timeout hit after 0.1s" in str(excinfo.value)
+    assert "ReadTimeout" in str(excinfo.value)
 
 
 def test_send_task_connection_error_includes_exception_type(

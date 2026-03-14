@@ -1,4 +1,4 @@
-﻿"""Summarizer-critic orchestration for duration-aware convergence."""
+"""Summarizer-critic orchestration for duration-aware convergence."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class LoopDiagnostics(TypedDict):
 
     converged: bool
     iterations_run: int
-    max_iterations: int
+    max_iterations: int | None
     draft: str
     final_status: str
     final_word_count: int
@@ -71,7 +71,7 @@ class Orchestrator:
         retrieval_port: int,
         summarizer_port: int,
         critic_port: int,
-        timeouts: dict | None = None,
+        timeouts: dict[str, float | None] | None = None,
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
     ) -> None:
@@ -91,7 +91,9 @@ class Orchestrator:
         target_seconds: int,
     ) -> float:
         """Resolve the live-draft summarizer timeout floor in seconds."""
-        target_floor = float(target_seconds) * self._LIVE_DRAFT_SUMMARIZER_TIMEOUT_MULTIPLIER
+        target_floor = (
+            float(target_seconds) * self._LIVE_DRAFT_SUMMARIZER_TIMEOUT_MULTIPLIER
+        )
         full_transcript_floor = self._FULL_TRANSCRIPT_TIMEOUT_FLOORS["summarizer"]
         return max(full_transcript_floor, target_floor)
 
@@ -102,9 +104,12 @@ class Orchestrator:
         *,
         target_seconds: int | None = None,
         live_draft_audio_requested: bool = False,
-    ) -> float:
+    ) -> float | None:
         """Resolve per-stage timeout with runtime-aware safety floors."""
-        timeout = float(self.timeouts.get(stage, self._DEFAULT_TIMEOUTS[stage]))
+        raw_timeout = self.timeouts.get(stage, self._DEFAULT_TIMEOUTS[stage])
+        if raw_timeout is None:
+            return None
+        timeout = float(raw_timeout)
         if full_transcript_text.strip():
             floor = self._FULL_TRANSCRIPT_TIMEOUT_FLOORS.get(stage)
             if floor is not None and timeout < floor:
@@ -151,7 +156,7 @@ class Orchestrator:
         self,
         target_seconds: int,
         duration_tolerance_ratio: float,
-        max_iterations: int,
+        max_iterations: int | None,
         full_transcript_text: str = "",
         loop_memory_artifact_path: Path | None = None,
         loop_memory_context: Mapping[str, str] | None = None,
@@ -181,7 +186,9 @@ class Orchestrator:
         full_transcript_text: str = "",
     ) -> str:
         """Run a single summarizer pass without critic feedback iterations."""
-        self.event_bus.publish("system_message", "Running single-pass summarizer stage...")
+        self.event_bus.publish(
+            "system_message", "Running single-pass summarizer stage..."
+        )
         summarizer_timeout = self._resolve_stage_timeout(
             "summarizer",
             full_transcript_text,
@@ -212,7 +219,9 @@ class Orchestrator:
         full_transcript_text: str = "",
     ) -> CriticTaskResponse:
         """Evaluate one existing draft with the critic."""
-        self.event_bus.publish("system_message", "Running critic-only evaluation stage...")
+        self.event_bus.publish(
+            "system_message", "Running critic-only evaluation stage..."
+        )
         critic_timeout = self._resolve_stage_timeout("critic", full_transcript_text)
         critic_task = CriticTaskRequest(
             draft=draft,
@@ -235,7 +244,7 @@ class Orchestrator:
         self,
         target_seconds: int,
         duration_tolerance_ratio: float,
-        max_iterations: int,
+        max_iterations: int | None,
         full_transcript_text: str = "",
         loop_memory_artifact_path: Path | None = None,
         loop_memory_context: Mapping[str, str] | None = None,
@@ -246,16 +255,15 @@ class Orchestrator:
         feedback = ""
         draft = ""
         iteration_details: list[IterationDiagnostic] = []
+        last_word_count = 0
+        last_estimated_seconds = 0.0
         loop_memory = SummarizerLoopMemory(
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
         )
-        if (
-            loop_memory_artifact_path is not None
-            and loop_memory.load_artifact(
-                loop_memory_artifact_path,
-                context=loop_memory_context,
-            )
+        if loop_memory_artifact_path is not None and loop_memory.load_artifact(
+            loop_memory_artifact_path,
+            context=loop_memory_context,
         ):
             self.event_bus.publish(
                 "system_message",
@@ -287,9 +295,15 @@ class Orchestrator:
                     f"Loop memory persistence skipped: {exc}",
                 )
 
-        for iteration in range(1, max_iterations + 1):
+        max_iterations_label = (
+            "unbounded" if max_iterations is None else str(max_iterations)
+        )
+        iteration = 0
+        while max_iterations is None or iteration < max_iterations:
+            iteration += 1
             self.event_bus.publish(
-                "system_message", f"--- Iteration {iteration}/{max_iterations} ---"
+                "system_message",
+                f"--- Iteration {iteration}/{max_iterations_label} ---",
             )
             self.event_bus.publish(
                 "orchestrator_iteration_started",
@@ -418,14 +432,17 @@ class Orchestrator:
                     "Previous attempt could not be evaluated due to a system error. "
                     "Please try again."
                 )
-                if memory_update.stagnation_detected and memory_update.strategy_shift_hint:
+                if (
+                    memory_update.stagnation_detected
+                    and memory_update.strategy_shift_hint
+                ):
                     feedback = f"{feedback}\n\n{memory_update.strategy_shift_hint}"
                 if memory_update.early_stop_recommended:
                     self.event_bus.publish(
                         "error_message",
                         (
                             "Detected persistent loop stagnation. Ending before "
-                            f"max_iterations ({max_iterations})."
+                            f"max_iterations ({max_iterations_label})."
                         ),
                     )
                     return {
@@ -445,9 +462,15 @@ class Orchestrator:
             word_count = critic_verdict.word_count
             estimated_seconds = float(critic_verdict.estimated_seconds)
             critic_feedback = critic_verdict.feedback
+            last_word_count = word_count
+            last_estimated_seconds = estimated_seconds
             unresolved_issue_count = 0
             persisted_issue_signatures: list[str] = []
             stagnation_detected = False
+            repeated_remedy_detected = False
+            repeated_remedy_signatures: list[str] = []
+            strategy_shift_hint = ""
+            early_stop_recommended = False
             if status != "pass":
                 memory_update = loop_memory.update_from_critic(
                     iteration=iteration,
@@ -458,15 +481,19 @@ class Orchestrator:
                 unresolved_issue_count = memory_update.unresolved_issue_count
                 persisted_issue_signatures = memory_update.persisted_issue_signatures
                 stagnation_detected = memory_update.stagnation_detected
+                repeated_remedy_detected = memory_update.repeated_remedy_detected
+                repeated_remedy_signatures = memory_update.repeated_remedy_signatures
+                strategy_shift_hint = memory_update.strategy_shift_hint or ""
+                early_stop_recommended = memory_update.early_stop_recommended
                 self.event_bus.publish(
                     "orchestrator_loop_memory_updated",
                     iteration=iteration,
                     unresolved_issue_count=unresolved_issue_count,
                     persisted_issue_signatures=persisted_issue_signatures,
                     stagnation_detected=stagnation_detected,
-                    early_stop_recommended=memory_update.early_stop_recommended,
-                    repeated_remedy_detected=memory_update.repeated_remedy_detected,
-                    repeated_remedy_signatures=memory_update.repeated_remedy_signatures,
+                    early_stop_recommended=early_stop_recommended,
+                    repeated_remedy_detected=repeated_remedy_detected,
+                    repeated_remedy_signatures=repeated_remedy_signatures,
                 )
                 _persist_loop_memory()
                 for signature in persisted_issue_signatures:
@@ -487,12 +514,8 @@ class Orchestrator:
                     "unresolved_issue_count": unresolved_issue_count,
                     "persisted_issue_signatures": persisted_issue_signatures,
                     "stagnation_detected": stagnation_detected,
-                    "repeated_remedy_detected": (
-                        memory_update.repeated_remedy_detected if status != "pass" else False
-                    ),
-                    "repeated_remedy_signatures": (
-                        memory_update.repeated_remedy_signatures if status != "pass" else []
-                    ),
+                    "repeated_remedy_detected": repeated_remedy_detected,
+                    "repeated_remedy_signatures": repeated_remedy_signatures,
                 }
             )
 
@@ -527,14 +550,14 @@ class Orchestrator:
                 }
 
             feedback = critic_feedback
-            if memory_update.stagnation_detected and memory_update.strategy_shift_hint:
-                feedback = f"{feedback}\n\n{memory_update.strategy_shift_hint}"
-            if memory_update.early_stop_recommended:
+            if stagnation_detected and strategy_shift_hint:
+                feedback = f"{feedback}\n\n{strategy_shift_hint}"
+            if early_stop_recommended:
                 self.event_bus.publish(
                     "error_message",
                     (
                         "Detected persistent loop stagnation. Ending before "
-                        f"max_iterations ({max_iterations})."
+                        f"max_iterations ({max_iterations_label})."
                     ),
                 )
                 return {
@@ -564,16 +587,17 @@ class Orchestrator:
                 critic_latency_seconds=critic_latency,
             )
 
-        self.event_bus.publish("error_message", f"Max iterations ({max_iterations}) reached.")
+        self.event_bus.publish(
+            "error_message", f"Max iterations ({max_iterations_label}) reached."
+        )
         return {
             "converged": False,
-            "iterations_run": max_iterations,
+            "iterations_run": iteration,
             "max_iterations": max_iterations,
-            "draft": "",
+            "draft": draft,
             "final_status": "max_iterations_reached",
-            "final_word_count": 0,
-            "final_estimated_seconds": 0.0,
+            "final_word_count": last_word_count,
+            "final_estimated_seconds": last_estimated_seconds,
             "final_feedback": feedback,
             "iteration_details": iteration_details,
         }
-
