@@ -23,6 +23,7 @@ wheels/
 # Outputs and Reports
 outputs/
 artifacts/
+neo4j_data/
 summary.json
 summary.xml
 eval_report.json
