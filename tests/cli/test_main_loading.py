@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
+import pytest
 
 import card_framework.cli.main as runtime_main
 from card_framework.shared.events import event_bus
@@ -59,6 +60,14 @@ class _FakeHealthChecker:
     def wait_for_many(self, *args, **kwargs) -> bool:
         del args, kwargs
         return True
+
+
+class _FakeUnreadyHealthChecker:
+    """Minimal health checker that never reaches readiness."""
+
+    def wait_for_many(self, *args, **kwargs) -> bool:
+        del args, kwargs
+        return False
 
 
 class _FakeTranscriptIndex:
@@ -202,3 +211,18 @@ def test_main_emits_timed_loading_messages_for_startup_phases(
         message.startswith("Loaded A2A server readiness in ")
         for message in system_messages
     )
+
+
+def test_wait_for_agent_servers_raises_runtime_error_when_readiness_times_out() -> None:
+    """Raise the readiness failure instead of terminating the process."""
+    with pytest.raises(
+        RuntimeError,
+        match="A2A servers did not become healthy in time.",
+    ):
+        runtime_main._wait_for_agent_servers(
+            checker=_FakeUnreadyHealthChecker(),
+            servers=[("Summarizer", 9102)],
+            overall_timeout_seconds=0.01,
+            poll_interval_seconds=0.01,
+            request_timeout_seconds=0.01,
+        )

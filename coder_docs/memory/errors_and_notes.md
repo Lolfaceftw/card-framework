@@ -1,3 +1,7 @@
+### 2026-03-15T16:35:00+08:00 - Runtime A2A Readiness Failures Must Propagate Their Actual Exception
+- Problem: `card_framework.cli.main._wait_for_agent_servers()` caught its own `RuntimeError` and immediately called `sys.exit(1)`, which hid the readiness failure from tests and any caller that needed the real exception details.
+- Solution: Remove the local `sys.exit(1)` conversion so the timeout `RuntimeError` propagates naturally, and add a regression test that asserts the helper raises when A2A servers never become healthy.
+
 ### 2026-03-15T16:20:00+08:00 - PR Follow-Ups Needed Benchmark-Compatibility, Safe QMSum Prep, And Callback-Swap Serialization
 - Problem: The `v1.1.0` PR left several review regressions behind: `benchmark.run` still required removed `orchestrator.min_words`/`max_words`, vendored JudgeArena modules used package-fragile imports and eager optional dependencies, QMSum preparation could delete or extract outside an approved root, the QMSum runner still used racy ephemeral-port reservation, and `BaseA2AExecutor` temporarily swapped shared provider callbacks without per-call serialization.
 - Solution: Add a legacy word-budget fallback in `benchmark.run`, convert JudgeArena imports to package-relative fallbacks with lazy optional dependency errors, constrain QMSum repo preparation under `artifacts/` and validate ZIP members before extraction, keep reserved sockets open until uvicorn consumes them, and move temporary callback swaps into the worker-thread chat call under a per-provider lock so concurrent critic streams cannot cross-wire.

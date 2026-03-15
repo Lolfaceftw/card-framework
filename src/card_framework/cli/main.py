@@ -6,7 +6,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import sys
 import threading
 import time
 from typing import Any, cast
@@ -1143,24 +1142,21 @@ def _wait_for_agent_servers(
     poll_interval_seconds: float = 0.2,
     request_timeout_seconds: float = 1.0,
 ) -> None:
-    """Block until required A2A servers are healthy or terminate the process."""
+    """Block until required A2A servers are healthy or raise on timeout."""
     if not servers:
         return
-    try:
-        with report_loading_duration(
-            "A2A server readiness",
-            reporter=_emit_runtime_loading_status,
+    with report_loading_duration(
+        "A2A server readiness",
+        reporter=_emit_runtime_loading_status,
+    ):
+        if checker.wait_for_many(
+            servers,
+            overall_timeout_seconds=overall_timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            request_timeout_seconds=request_timeout_seconds,
         ):
-            if checker.wait_for_many(
-                servers,
-                overall_timeout_seconds=overall_timeout_seconds,
-                poll_interval_seconds=poll_interval_seconds,
-                request_timeout_seconds=request_timeout_seconds,
-            ):
-                return
-            raise RuntimeError("A2A servers did not become healthy in time.")
-    except RuntimeError:
-        sys.exit(1)
+            return
+        raise RuntimeError("A2A servers did not become healthy in time.")
 
 
 def _resolve_duration_targets(
