@@ -137,7 +137,10 @@ while the detailed per-preset run artifacts still appear under
 stream rendering, report sample progress back to the parent, and persist
 checkpoint state after every terminal sample, so the sweep terminal view stays
 on aggregate sample positions and combined ETA while stalled children can be
-restarted without rerunning completed samples.
+restarted without rerunning completed samples. When a child stalls, the resumed
+`execute` run records only the orphaned active sample failed with
+`sweep_watchdog_stalled` and then continues the rest of that preset from the
+checkpoint instead of aborting the whole preset.
 
 ## Step 1: Prepare The Dataset
 
@@ -334,7 +337,7 @@ Sweep-specific flags:
 - `--sweep-root <path>`
 - `--enable-voice-clone`
 - `--child-stall-seconds <float>` to restart a child when its active sample reports no new activity for too long
-- `--max-child-restarts <int>` to cap parent-driven checkpoint resumes per preset
+- `--max-child-restarts <int>` as the warning threshold for repeated parent-driven checkpoint resumes; stalled samples are still failed individually and later samples continue
 - `--progress-heartbeat-seconds <float>` to control sweep-child heartbeat cadence
 
 Important behavior:

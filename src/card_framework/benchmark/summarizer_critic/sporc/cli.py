@@ -321,7 +321,10 @@ def _build_parser(
             "--max-child-restarts",
             type=int,
             default=2,
-            help="Maximum watchdog restarts per preset child before the preset is marked failed.",
+            help=(
+                "Warning threshold for watchdog checkpoint resumes per preset child. "
+                "Stalled samples are still marked failed and later samples continue."
+            ),
         )
     return parser
 
@@ -1208,36 +1211,13 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                     if stall_reason is not None:
                         if child_state.restart_count >= max_child_restarts:
                             child_state.log_handle.write(
-                                "[Sweep] Watchdog terminating preset "
-                                f"{duration_preset} after exhausting "
-                                f"{max_child_restarts} restart(s): "
+                                "[Sweep] Watchdog exceeded the configured restart "
+                                f"threshold for preset {duration_preset}; "
+                                "marking the stalled sample failed and "
+                                f"continuing the preset from checkpoint: "
                                 f"{stall_reason}\n"
                             )
                             child_state.log_handle.flush()
-                            if child_state.process.poll() is None:
-                                _terminate_process_tree(child_state.process)
-                            preset_summaries_by_preset[duration_preset] = (
-                                _finalize_duration_sweep_child(
-                                    state=child_state,
-                                    fallback_sample_count=examples,
-                                    forced_status="failed",
-                                    forced_error_message=(
-                                        "Sweep watchdog exceeded "
-                                        f"{max_child_restarts} restart(s) for "
-                                        f"preset {duration_preset}: {stall_reason}"
-                                    ),
-                                )
-                            )
-                            del running_children[duration_preset]
-                            progress_changed = True
-                            _emit_cli_status(
-                                (
-                                    f"Failed preset {duration_preset} after "
-                                    f"{child_state.restart_count} restart(s): "
-                                    f"{stall_reason}"
-                                )
-                            )
-                            continue
                         restarted_state = _restart_duration_sweep_child(
                             state=child_state,
                             args=args,
@@ -1248,14 +1228,24 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                         )
                         running_children[duration_preset] = restarted_state
                         progress_changed = True
-                        _emit_cli_status(
-                            (
-                                f"Restarted preset {duration_preset} "
-                                f"restart={restarted_state.restart_count}/"
-                                f"{max_child_restarts} "
-                                f"reason={stall_reason}"
+                        if child_state.restart_count >= max_child_restarts:
+                            _emit_cli_status(
+                                (
+                                    f"Continuing preset {duration_preset} after "
+                                    "stalled sample exceeded the configured "
+                                    f"restart threshold ({max_child_restarts}): "
+                                    f"{stall_reason}"
+                                )
                             )
-                        )
+                        else:
+                            _emit_cli_status(
+                                (
+                                    f"Restarted preset {duration_preset} "
+                                    f"restart={restarted_state.restart_count}/"
+                                    f"{max_child_restarts} "
+                                    f"reason={stall_reason}"
+                                )
+                            )
                         continue
                     if child_state.process.poll() is None:
                         continue

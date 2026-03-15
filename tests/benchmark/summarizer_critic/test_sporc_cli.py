@@ -599,6 +599,192 @@ def test_run_duration_sweep_restarts_stalled_child_and_records_recovery(
     assert written_reports[-1].preset_summaries[0].recovered_stall_count == 1
 
 
+def test_run_duration_sweep_continues_after_multiple_stalled_samples(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    launched: list[tuple[bool, int]] = []
+    status_messages: list[str] = []
+    written_reports = []
+
+    def _fake_launch_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        duration_preset = kwargs["duration_preset"]
+        resume_from_checkpoint = bool(kwargs.get("resume_from_checkpoint", False))
+        restart_count = int(kwargs.get("restart_count", 0))
+        recovered_stall_count = int(kwargs.get("recovered_stall_count", 0))
+        launched.append((resume_from_checkpoint, restart_count))
+        process = _MutableProcessStub(
+            pid=3000 + len(launched),
+            returncode=0 if restart_count >= 2 else None,
+        )
+        log_path = tmp_path / f"{duration_preset}.multi-stall.log"
+        log_handle = log_path.open("a" if resume_from_checkpoint else "w", encoding="utf-8")
+        state = _DurationSweepChildState(
+            duration_preset=duration_preset,
+            process=process,
+            log_path=log_path,
+            log_handle=log_handle,
+            reader_thread=None,
+            retrieval_port=6100 + len(launched) * 3,
+            summarizer_port=6101 + len(launched) * 3,
+            critic_port=6102 + len(launched) * 3,
+            max_samples=kwargs["max_samples"],
+            checkpoint_path=tmp_path / f"{duration_preset}.multi-stall.checkpoint.json",
+            output_root=tmp_path / "runs",
+            sample_count=100,
+            completed_samples=7 + max(restart_count - 1, 0),
+            restart_count=restart_count,
+            recovered_stall_count=recovered_stall_count,
+        )
+        if not resume_from_checkpoint:
+            now_monotonic = time.monotonic()
+            state.active_sample_index = 8
+            state.active_sample_id = "sample-8"
+            state.active_stage = "summarizer"
+            state.last_heartbeat_at = now_monotonic - 100.0
+            state.last_activity_at = now_monotonic - 650.0
+            state.last_activity_age_seconds = 650.0
+            return state
+
+        if restart_count == 1:
+            kwargs["event_queue"].put(
+                (
+                    duration_preset,
+                    process.pid,
+                    {
+                        "sporc_progress_event": "sample_done",
+                        "sample_index": 8,
+                        "sample_count": 100,
+                        "sample_id": "sample-8",
+                        "final_status": "sweep_watchdog_stalled",
+                    },
+                )
+            )
+            kwargs["event_queue"].put(
+                (
+                    duration_preset,
+                    process.pid,
+                    {
+                        "sporc_progress_event": "sample_heartbeat",
+                        "sample_index": 9,
+                        "sample_count": 100,
+                        "sample_id": "sample-9",
+                        "stage": "critic",
+                        "iteration": 1,
+                        "last_activity_age_seconds": 650.0,
+                    },
+                )
+            )
+            return state
+
+        kwargs["event_queue"].put(
+            (
+                duration_preset,
+                process.pid,
+                {
+                    "sporc_progress_event": "sample_done",
+                    "sample_index": 9,
+                    "sample_count": 100,
+                    "sample_id": "sample-9",
+                    "final_status": "sweep_watchdog_stalled",
+                },
+            )
+        )
+        return state
+
+    def _fake_finalize_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        state = kwargs["state"]
+        if not state.log_handle.closed:
+            state.log_handle.close()
+        return DurationSweepPresetSummary(
+            duration_preset=state.duration_preset,
+            target_seconds=300,
+            status="completed",
+            sample_count=100,
+            executed_count=9,
+            skipped_count=0,
+            success_count=7,
+            failure_count=2,
+            within_tolerance_count=7,
+            within_tolerance_rate=0.7778,
+            mean_candidate_seconds=300.0,
+            mean_absolute_duration_delta_seconds=0.0,
+            mean_factualness=0.9,
+            mean_naturalness=0.9,
+            mean_speaker_grammar_similarity=0.9,
+            mean_composite=0.9,
+            report_path=str(tmp_path / "5m.multi-stall.report.json"),
+            notes_path=str(tmp_path / "5m.multi-stall.notes.md"),
+            results_path=str(tmp_path / "5m.multi-stall.results.md"),
+            mean_composite_ci95_lower=None,
+            mean_composite_ci95_upper=None,
+            error_message=None,
+            restart_count=state.restart_count,
+            recovered_stall_count=state.recovered_stall_count,
+        )
+
+    def _fake_write_duration_sweep_artifacts(**kwargs):  # type: ignore[no-untyped-def]
+        report = kwargs["report"]
+        written_reports.append(report)
+        sweep_root = kwargs["sweep_root"]
+        return sweep_root / "report.json", sweep_root / "results.md"
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._launch_duration_sweep_child",
+        _fake_launch_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._finalize_duration_sweep_child",
+        _fake_finalize_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_reporting_helpers",
+        lambda **kwargs: (_fake_write_duration_sweep_artifacts, None),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._emit_cli_status",
+        status_messages.append,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._terminate_process_tree",
+        lambda process: setattr(process, "returncode", -9),
+    )
+
+    args = argparse.Namespace(
+        mode="single",
+        duration_preset="5m",
+        duration_presets="5m",
+        examples=None,
+        max_samples=100,
+        sample_seed=None,
+        parallelism=1,
+        sweep_root=str(tmp_path),
+        enable_voice_clone=False,
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="disabled",
+        child_stall_seconds=600.0,
+        max_child_restarts=1,
+        progress_heartbeat_seconds=30.0,
+        output_root=str(tmp_path / "runs"),
+    )
+
+    exit_code = _run_duration_sweep(args)
+
+    assert exit_code == 0
+    assert launched == [(False, 0), (True, 1), (True, 2)]
+    assert any(
+        "Continuing preset 5m after stalled sample exceeded the configured "
+        "restart threshold (1):"
+        in message
+        for message in status_messages
+    )
+    assert all("Failed preset 5m" not in message for message in status_messages)
+    assert written_reports[-1].preset_summaries[0].restart_count == 2
+    assert written_reports[-1].preset_summaries[0].recovered_stall_count == 2
+
+
 def test_main_prepare_dataset_handles_keyboard_interrupt(
     tmp_path: Path,
     capsys,
