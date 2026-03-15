@@ -295,10 +295,9 @@ and later runtime startup phases.
 
 Installed-package runtime notes:
 
-- Supported public packaged-runtime platform as of March 9, 2026: Windows only.
-  macOS and Linux are not yet validated for the public `pip install
-  card-framework` whole-pipeline path, and `infer(...)` now fails fast on those
-  platforms instead of attempting a partial run.
+- Supported packaged `infer(...)` CPU platforms as of March 15, 2026:
+  Windows x86_64, Linux x86_64, and macOS arm64. macOS Intel is out of scope
+  for the public whole-pipeline contract.
 - `CARD_FRAMEWORK_CONFIG`: optional path to a full YAML config file when you
   need to override the default packaged provider/runtime config for `infer(...)`.
 - `CARD_FRAMEWORK_HOME`: optional writable runtime home used for extracted
@@ -309,12 +308,13 @@ Installed-package runtime notes:
 - `CARD_FRAMEWORK_VLLM_API_KEY`: optional environment-variable equivalent of
   the `vllm_api_key=` argument. If omitted for vLLM, the packaged runtime uses
   `EMPTY`, which matches the common local keyless vLLM setup.
-- If you choose `device="cuda"`, the packaged runtime currently supports only
-  CUDA 12.6. `infer(...)` now inspects the installed PyTorch build first and,
-  when the host itself reports CUDA 12.6, automatically replaces CPU-only or
-  mismatched `torch` and `torchaudio` wheels with the CUDA 12.6 build before it
-  proceeds. In a uv-managed project it uses `uv pip`; otherwise it falls back
-  to `python -m pip`.
+- If you choose `device="cuda"`, the packaged runtime supports only Windows
+  x86_64 and Linux x86_64, and it still requires CUDA 12.6. macOS remains
+  CPU-only for the packaged runtime. `infer(...)` inspects the installed
+  PyTorch build first and, when the host itself reports CUDA 12.6,
+  automatically replaces CPU-only or mismatched `torch` and `torchaudio`
+  wheels with the CUDA 12.6 build before it proceeds. In a uv-managed project
+  it uses `uv pip`; otherwise it falls back to `python -m pip`.
 - The packaged default is now vLLM-first. If the effective config selects
   another provider, `infer(...)` resolves required credentials before it starts
   the subprocess runtime:
@@ -327,6 +327,11 @@ Installed-package runtime notes:
   `DEEPSEEK_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `ZAI_API_KEY`,
   `HUGGINGFACE_TOKEN` or `HF_TOKEN`, and the configured
   `audio.diarization.pyannote.auth_token_env` value.
+- If the effective config selects a NeMo-derived diarization backend on an
+  unsupported platform or when `nemo-toolkit[asr]` is not installed,
+  `infer(...)` now warns and falls back to
+  `audio.diarization.provider=single_speaker` instead of hard-failing during
+  bootstrap.
 - `CARD_FRAMEWORK_FFMPEG_EXECUTABLE`: optional path to a custom `ffmpeg`
   binary. When unset, packaged `infer(...)` falls back to the bundled
   `imageio-ffmpeg` executable and prepends its directory to `PATH` for nested
@@ -340,6 +345,10 @@ Installed-package runtime notes:
   demand when stage-1 forced alignment needs it. If that bootstrap cannot
   complete, packaged inference falls back to approximate segment-derived timing
   instead of failing the whole run.
+- `.github/workflows/ci.yml` now enforces targeted package-import, CLI-smoke,
+  supervisor, and runtime-layout coverage across `windows-2025`,
+  `ubuntu-24.04`, and `macos-14` so the supported CPU platform set stays
+  validated in CI.
 
 ## Public PyPI Release
 

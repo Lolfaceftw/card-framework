@@ -1,3 +1,7 @@
+### 2026-03-15T11:08:55+08:00 - Packaged Infer Imports Must Stay Dependency-Light For Wheel Smoke
+- Problem: The clean-wheel smoke test installs `card-framework` with `--no-deps` before importing `from card_framework import infer`. That import path was still eager enough to fail immediately on optional runtime modules such as `python-dotenv`, which meant the built wheel could not prove its advertised public export in a minimal environment.
+- Solution: Make repository-root dotenv loading a graceful no-op when `python-dotenv` is unavailable and keep `card_framework.api` dependency-light by lazy-loading runtime config normalization inside the packaged `infer(...)` call path instead of at module import time.
+
 ### 2026-03-15T10:54:38.7152585+08:00 - Runtime Config Drift And Inline Secrets Needed One Canonical Selector-Based Workflow
 - Problem: The repo had two different runtime config entrypoints, a root `conf/config.yaml` full of commented provider blocks, and inline API-key fields spread across tracked YAML. That made normal configuration noisy, let repo-local and packaged defaults drift, and encouraged users to keep secrets in config files instead of `.env`.
 - Solution: Make `conf/config.yaml` the canonical source-checkout config, keep `src/card_framework/config/config.yaml` as a bundled mirror, normalize the new `selection` plus `profiles` schema into explicit runtime sections in shared code, and move secret values to `.env`-backed fields with documented alias support.

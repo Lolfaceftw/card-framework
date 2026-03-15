@@ -54,13 +54,16 @@ Preferred workflow:
 
 ## Repo-Specific PyTorch Rule
 
-This repo pins `torch` and `torchaudio` to the explicit `pytorch-cu126` index through `tool.uv.sources` and `[[tool.uv.index]]`. The repository's packaged CUDA contract is now CUDA 12.6 only.
+This repo pins `torch` and `torchaudio` to the explicit `pytorch-cu126` index through `tool.uv.sources` and `[[tool.uv.index]]` only on Windows and Linux. On macOS arm64, `uv` now resolves the default PyPI CPU wheels instead. The repository's packaged CUDA contract remains CUDA 12.6 only on Windows/Linux, while packaged CPU support now covers Windows x86_64, Linux x86_64, and macOS arm64.
+
+`nemo-toolkit[asr]` is now a Linux-only runtime dependency in `pyproject.toml`. Windows and macOS rely on the runtime platform-fallback path that downgrades NeMo diarization configs to `single_speaker` when NeMo is unsupported or not installed.
 
 For the published `card_framework.infer(..., device="cuda")` path, packaged runtime self-repair now prefers `uv pip uninstall/install --python <active-interpreter> --torch-backend cu126` when the caller is inside a uv-managed project. If no uv-managed project can be confirmed, it falls back to `python -m pip` with the explicit CUDA 12.6 PyTorch index. Keep that uv-first packaged repair path aligned with any future PyTorch source-strategy changes.
 
 When changing any of those packages:
 
 - Preserve the explicit index mapping unless the task intentionally changes the PyTorch source strategy.
+- Keep the marker-scoped `tool.uv.sources` entries aligned with the supported platform contract. CUDA-indexed `torch` and `torchaudio` belong on Windows/Linux only; macOS arm64 should continue using the default index.
 - Review both the dependency declaration and the `tool.uv.sources` or index configuration together.
 - Update this document if the project switches to a different CUDA build, CPU wheels, or a different source layout.
 

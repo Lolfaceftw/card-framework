@@ -9,12 +9,15 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import time
 from typing import Literal
 
 from card_framework.benchmark.artifacts import utc_now_iso
+from card_framework.benchmark.process_utils import (
+    detached_popen_kwargs,
+    terminate_process_tree,
+)
 from card_framework.shared.paths import REPO_ROOT
 
 _DEFAULT_COMMAND: tuple[str, ...] = (
@@ -447,18 +450,7 @@ def _telemetry_sample() -> TelemetrySample:
 
 def _kill_process_tree(process: subprocess.Popen[str]) -> None:
     """Terminate a benchmark subprocess and its children."""
-
-    if process.poll() is not None:
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return
-    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    terminate_process_tree(process, timeout_seconds=5.0)
 
 
 def _extract_summary_payload(
@@ -555,11 +547,6 @@ def _run_one(
     )
     env.setdefault("PYTHONUNBUFFERED", "1")
 
-    if os.name == "nt":
-        popen_kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    else:
-        popen_kwargs = {"start_new_session": True}
-
     peak_ram = 0.0
     peak_gpu_gib = 0.0
     exit_code: int | None = None
@@ -580,7 +567,7 @@ def _run_one(
             text=True,
             encoding="utf-8",
             errors="replace",
-            **popen_kwargs,
+            **detached_popen_kwargs(),
         )
         while process.poll() is None:
             sample = _telemetry_sample()

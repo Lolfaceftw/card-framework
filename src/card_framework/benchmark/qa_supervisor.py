@@ -14,6 +14,10 @@ import sys
 import time
 
 from card_framework.audio_pipeline.gpu_heartbeat import GpuDeviceSnapshot
+from card_framework.benchmark.process_utils import (
+    detached_popen_kwargs,
+    terminate_process_tree,
+)
 from card_framework.shared.paths import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_PROVIDER_PROFILES_PATH,
@@ -226,30 +230,7 @@ def _sample_exceeds_threshold(
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Terminate a child process tree aggressively."""
-    if process.poll() is not None:
-        return
-
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5.0)
-        return
-
-    process.terminate()
-    try:
-        process.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        process.kill()
+    terminate_process_tree(process, timeout_seconds=5.0)
 
 
 def _read_log_excerpt(log_path: Path, *, max_lines: int = 20) -> str | None:
@@ -409,6 +390,7 @@ def _supervise_command(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **detached_popen_kwargs(),
         )
         while True:
             if process.poll() is not None:

@@ -18,9 +18,27 @@ from card_framework.shared.runtime_layout import RuntimeLayout
 
 
 @pytest.fixture(autouse=True)
-def _force_windows_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+def _force_supported_packaged_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep infer API tests on the supported packaged-runtime platform by default."""
-    monkeypatch.setattr("card_framework.api.platform.system", lambda: "Windows")
+    _set_runtime_platform(monkeypatch, system="Linux", machine="x86_64")
+
+
+@pytest.fixture(autouse=True)
+def _stub_optional_nemo_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep default infer tests from falling back due to a missing optional NeMo install."""
+    from card_framework.shared import platform_support
+
+    real_find_spec = platform_support.importlib.util.find_spec
+
+    def _fake_find_spec(module_name: str):  # type: ignore[no-untyped-def]
+        if module_name == "nemo":
+            return object()
+        return real_find_spec(module_name)
+
+    monkeypatch.setattr(
+        "card_framework.shared.platform_support.importlib.util.find_spec",
+        _fake_find_spec,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -72,9 +90,20 @@ def test_infer_rejects_unsupported_platform(
     tmp_path: Path,
 ) -> None:
     """Reject packaged whole-pipeline runs outside the supported OS contract."""
-    monkeypatch.setattr("card_framework.api.platform.system", lambda: "Linux")
+    _set_runtime_platform(monkeypatch, system="Linux", machine="arm64")
 
-    with pytest.raises(RuntimeError, match="Windows only"):
+    with pytest.raises(RuntimeError, match="Windows x86_64, Linux x86_64, and macOS arm64"):
+        infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cpu")
+
+
+def test_infer_allows_cpu_on_macos_arm64(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Allow CPU packaged runs on Apple Silicon macOS hosts."""
+    _set_runtime_platform(monkeypatch, system="Darwin", machine="arm64")
+
+    with pytest.raises(FileNotFoundError):
         infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cpu")
 
 
@@ -113,6 +142,17 @@ def test_infer_rejects_cuda_without_supported_126_runtime(
     )
 
     with pytest.raises(RuntimeError, match="only CUDA 12.6"):
+        infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cuda")
+
+
+def test_infer_rejects_cuda_on_macos_arm64(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reject packaged CUDA runs on macOS because the public contract remains CPU-only."""
+    _set_runtime_platform(monkeypatch, system="Darwin", machine="arm64")
+
+    with pytest.raises(RuntimeError, match="CPU-only"):
         infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cuda")
 
 
@@ -1070,3 +1110,20 @@ def _mapping(value: object) -> Mapping[str, Any]:
     """Narrow one loaded config node to a string-keyed mapping for assertions."""
     assert isinstance(value, Mapping)
     return value
+
+
+def _set_runtime_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    system: str,
+    machine: str,
+) -> None:
+    """Patch packaged-runtime platform detection to a deterministic host."""
+    monkeypatch.setattr(
+        "card_framework.shared.platform_support.platform_module.system",
+        lambda: system,
+    )
+    monkeypatch.setattr(
+        "card_framework.shared.platform_support.platform_module.machine",
+        lambda: machine,
+    )

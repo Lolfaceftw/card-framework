@@ -49,6 +49,7 @@ from card_framework.shared.config_loading import (
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import configure_logger
 from card_framework.shared.perf import StatusReporter, report_loading_duration
+from card_framework.shared.platform_support import apply_runtime_platform_fallbacks
 from card_framework.orchestration import StageOrchestrator
 from card_framework.runtime.loop_orchestrator import Orchestrator
 from card_framework.runtime.pipeline_plan import build_pipeline_stage_plan
@@ -1197,6 +1198,12 @@ def _resolve_duration_targets(
 def main(cfg: DictConfig) -> None:
     """Run the configured summarization pipeline."""
     cfg = normalize_runtime_config(cfg)
+    cfg_dict = _to_plain_dict(cfg)
+    if apply_runtime_platform_fallbacks(
+        cfg_dict,
+        reporter=lambda message: event_bus.publish("system_message", message),
+    ):
+        cfg = OmegaConf.create(cfg_dict)
     validate_runtime_credentials(cfg)
     logging_cfg = _to_plain_dict(cfg.get("logging", {}))
     configure_logger(logging_cfg)

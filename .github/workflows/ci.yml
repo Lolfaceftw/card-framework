@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  lint:
+    name: Ruff
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.0"
+
+      - name: Sync development environment
+        run: uv sync --dev --locked
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2025
+          - name: Linux x64
+            os: ubuntu-24.04
+          - name: macOS arm64
+            os: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.0"
+
+      - name: Sync development environment
+        run: uv sync --dev --locked
+
+      - name: Run targeted compatibility tests
+        run: >
+          uv run pytest
+          tests/api/test_infer_api.py
+          tests/api/test_runtime_layout.py
+          tests/benchmark/test_process_utils.py
+          tests/benchmark/test_qa_supervisor.py
+          tests/benchmark/test_watchdog.py
+          tests/benchmark/summarizer_critic/test_cli.py
+          tests/benchmark/summarizer_critic/test_sporc_cli.py
+          tests/real/test_packaged_cli_smoke.py
+          tests/real/test_packaged_infer_import.py
+          tests/shared/test_env.py
+          tests/shared/test_platform_support.py
+          tests/test_pyproject_scripts.py
+          -q

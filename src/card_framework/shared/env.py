@@ -6,9 +6,15 @@ import os
 from pathlib import Path
 from threading import Lock
 
-from dotenv import load_dotenv
-
 from card_framework.shared.paths import REPO_ROOT
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+except ImportError:
+    def _load_dotenv(*, dotenv_path: Path, override: bool = False) -> bool:
+        """Gracefully skip dotenv loading when python-dotenv is unavailable."""
+        del dotenv_path, override
+        return False
 
 _LOADED_DOTENV_PATHS: set[Path] = set()
 _LOAD_LOCK = Lock()
@@ -74,7 +80,7 @@ def load_repo_dotenv(
             if not env_path.is_file():
                 continue
             if env_path not in _LOADED_DOTENV_PATHS:
-                load_dotenv(dotenv_path=env_path, override=override)
+                _load_dotenv(dotenv_path=env_path, override=override)
                 _LOADED_DOTENV_PATHS.add(env_path)
             if loaded_path is None:
                 loaded_path = env_path

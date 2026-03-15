@@ -16,6 +16,10 @@ import threading
 import time
 from typing import TextIO
 
+from card_framework.benchmark.process_utils import (
+    detached_popen_kwargs,
+    terminate_process_tree,
+)
 from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_FULL_DATASET_MANIFEST_PATH,
     DEFAULT_GPU_THRESHOLD_GIB,
@@ -786,6 +790,7 @@ def _launch_duration_sweep_child(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **detached_popen_kwargs(),
         )
     except Exception:
         log_handle.close()
@@ -1191,24 +1196,7 @@ def _build_supervised_child_command(args: argparse.Namespace) -> list[str]:
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5.0)
-        return
-    process.kill()
+    terminate_process_tree(process, timeout_seconds=5.0)
 
 
 def _discover_terminal_payload(log_path: Path) -> dict[str, object]:
@@ -1290,6 +1278,7 @@ def _run_supervised_session(args: argparse.Namespace) -> int:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                **detached_popen_kwargs(),
             )
             pump_thread = _stream_process_output(
                 process=process,

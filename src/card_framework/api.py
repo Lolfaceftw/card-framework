@@ -11,7 +11,6 @@ import importlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import subprocess
 import sys
@@ -26,16 +25,19 @@ from card_framework.runtime.bootstrap import (
     ensure_runtime_requirements,
     resolve_uv_executable,
 )
-from card_framework.shared.config_loading import normalize_runtime_config_mapping
 from card_framework.shared.paths import DEFAULT_CONFIG_PATH
 from card_framework.shared.perf import StatusReporter, report_loading_duration
+from card_framework.shared.platform_support import (
+    UnsupportedPackagedRuntimeError,
+    apply_runtime_platform_fallbacks,
+    ensure_supported_packaged_runtime,
+)
 from card_framework.shared.runtime_layout import resolve_runtime_layout
 
 _CONFIG_ENV_VAR = "CARD_FRAMEWORK_CONFIG"
 _UV_ENV_VAR = "CARD_FRAMEWORK_UV_EXECUTABLE"
 _VLLM_URL_ENV_VAR = "CARD_FRAMEWORK_VLLM_URL"
 _VLLM_API_KEY_ENV_VAR = "CARD_FRAMEWORK_VLLM_API_KEY"
-_SUPPORTED_PLATFORM = "Windows"
 _SUPPORTED_CUDA_VERSION = "12.6"
 _DEFAULT_VLLM_API_KEY = "EMPTY"
 _PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu126"
@@ -180,8 +182,10 @@ def infer(
             platforms, or the pipeline subprocess fail.
         ValueError: The audio path, config path, or duration target is invalid.
     """
-    _ensure_supported_platform()
     resolved_device = _resolve_requested_device(device)
+    _ensure_supported_platform(device=resolved_device)
+    if resolved_device == "cuda":
+        _ensure_supported_cuda_runtime()
     audio_path = _resolve_audio_input(audio_wav)
     resolved_target_duration_seconds = _resolve_target_duration_seconds(
         target_duration_seconds
@@ -254,16 +258,12 @@ def infer(
         )
 
 
-def _ensure_supported_platform() -> None:
+def _ensure_supported_platform(*, device: Literal["cpu", "cuda"]) -> None:
     """Reject unsupported packaged-runtime platforms before any other work starts."""
-    current_platform = platform.system().strip() or "Unknown"
-    if current_platform == _SUPPORTED_PLATFORM:
-        return
-    raise RuntimeError(
-        "card_framework.infer(...) currently supports packaged whole-pipeline runs "
-        f"on {_SUPPORTED_PLATFORM} only. Detected platform: {current_platform}. "
-        "macOS and Linux are not yet validated for the public pip-installed runtime."
-    )
+    try:
+        ensure_supported_packaged_runtime(device=device)
+    except UnsupportedPackagedRuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 @contextmanager
@@ -309,6 +309,13 @@ def _prepared_inference_config(
         )
         config_modified = (
             _prepare_forced_alignment_runtime(
+                effective_config,
+                reporter=reporter,
+            )
+            or config_modified
+        )
+        config_modified = (
+            apply_runtime_platform_fallbacks(
                 effective_config,
                 reporter=reporter,
             )
@@ -598,8 +605,6 @@ def _resolve_requested_device(device: str) -> Literal["cpu", "cuda"]:
     normalized = _resolve_optional_text(device).lower()
     if normalized not in {"cpu", "cuda"}:
         raise ValueError("device must be either 'cpu' or 'cuda'.")
-    if normalized == "cuda":
-        _ensure_supported_cuda_runtime()
     return normalized
 
 
@@ -1012,6 +1017,8 @@ def _load_omegaconf() -> Any:
 def _load_config_mapping(config_path: Path) -> dict[str, Any]:
     """Load one Hydra-style YAML config as a plain dictionary."""
     omega_conf = _load_omegaconf()
+    from card_framework.shared.config_loading import normalize_runtime_config_mapping
+
     config = omega_conf.load(config_path)
     resolved = omega_conf.to_container(config, resolve=True)
     if not isinstance(resolved, dict):

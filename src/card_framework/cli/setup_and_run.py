@@ -387,11 +387,11 @@ def check_prerequisites(
 
 
 def build_tool_guidance(missing_tools: Sequence[str]) -> str:
-    """Return concise Windows-first install guidance for missing tools."""
+    """Return concise cross-platform install guidance for missing tools."""
     guidance_map = {
-        "uv": "Install uv: `pip install -U uv`.",
-        "git": "Install Git for Windows: https://git-scm.com/download/win",
-        "ffmpeg": "Install FFmpeg and add it to PATH: https://www.gyan.dev/ffmpeg/builds/",
+        "uv": "Install uv into the active environment: `python -m pip install -U uv`.",
+        "git": "Install Git and ensure `git` is on PATH: https://git-scm.com/downloads",
+        "ffmpeg": "Install FFmpeg and add it to PATH: https://ffmpeg.org/download.html",
     }
     guidance_parts = [guidance_map[tool] for tool in missing_tools if tool in guidance_map]
     return " ".join(guidance_parts)
