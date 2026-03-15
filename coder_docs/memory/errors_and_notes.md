@@ -1,3 +1,7 @@
+### 2026-03-15T16:32:00+08:00 - Main Can Merge Release Work Without The Matching Package Version Bump
+- Problem: PR `#16` merged the `v1.1.0` feature branch into `main`, but `main` still carried `version = "1.0.7"` in `pyproject.toml` and the editable package record in `uv.lock`. Tagging that merge commit as `v1.1.0` would have retriggered the PyPI publish workflow with stale `1.0.7` metadata and likely failed or produced an ambiguous release attempt.
+- Solution: Cut a dedicated `release/v1.1.0` branch from the merged `main`, bump both package-version metadata locations to `1.1.0`, run the documented release preflight on that branch, merge the branch, and only then push the matching `v1.1.0` tag from the merged `main` commit.
+
 ### 2026-03-15T16:35:00+08:00 - Runtime A2A Readiness Failures Must Propagate Their Actual Exception
 - Problem: `card_framework.cli.main._wait_for_agent_servers()` caught its own `RuntimeError` and immediately called `sys.exit(1)`, which hid the readiness failure from tests and any caller that needed the real exception details.
 - Solution: Remove the local `sys.exit(1)` conversion so the timeout `RuntimeError` propagates naturally, and add a regression test that asserts the helper raises when A2A servers never become healthy.
