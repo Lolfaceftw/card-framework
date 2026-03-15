@@ -117,6 +117,7 @@ class BenchmarkExecutionReport:
     results_path: str
     samples: list[SampleBenchmarkResult]
     summary: BenchmarkSummary
+    sample_seed: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

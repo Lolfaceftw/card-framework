@@ -96,6 +96,7 @@ def test_write_execution_artifacts_persists_speaker_comparison_payloads(
             mean_speaker_grammar_similarity=0.9,
             mean_composite=0.8,
         ),
+        sample_seed=23,
     )
 
     report_path, notes_path, results_path = write_execution_artifacts(
@@ -124,6 +125,8 @@ def test_write_execution_artifacts_persists_speaker_comparison_payloads(
     )
 
     results_text = results_path.read_text(encoding="utf-8")
+    notes_text = notes_path.read_text(encoding="utf-8")
+    assert "- Sample seed: `23`" in notes_text
     assert "| metric | mean | 95% CI |" in results_text
     assert "n/a" in results_text
     assert "```text" not in results_text
@@ -207,6 +210,7 @@ def test_write_duration_sweep_artifacts_persists_report(tmp_path: Path) -> None:
         ],
         report_path="",
         results_path="",
+        sample_seed=31,
     )
 
     report_path, results_path = write_duration_sweep_artifacts(
@@ -219,7 +223,10 @@ def test_write_duration_sweep_artifacts_persists_report(tmp_path: Path) -> None:
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["preset_summaries"][0]["duration_preset"] == "30s"
     assert payload["preset_summaries"][0]["mean_composite_ci95_lower"] == 0.65
-    assert "| composite_95_ci |" in results_path.read_text(encoding="utf-8")
+    results_text = results_path.read_text(encoding="utf-8")
+    assert payload["sample_seed"] == 31
+    assert "- Sample seed: `31`" in results_text
+    assert "| composite_95_ci |" in results_text
 
 
 def test_write_execution_artifacts_lists_preflight_skips(tmp_path: Path) -> None:

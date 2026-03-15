@@ -1,3 +1,7 @@
+### 2026-03-15T10:06:06+08:00 - Summarizer-Critic Benchmarks Need Deterministic Seeded Sample Selection
+- Problem: The QMSum and SPoRC real benchmark runners both selected the first `N` prepared samples in manifest order. That kept runs reproducible, but it baked manifest-order bias into every limited benchmark and made it impossible to request a deterministic randomized subset for more robust comparisons.
+- Solution: Add a shared seeded selector keyed by `(sample_seed, sample_id)`, thread `--sample-seed` through QMSum `execute` and `supervise` plus SPoRC `execute`, `supervise`, and `duration-sweep`, and record the active seed or `manifest_order` mode in benchmark artifacts so runs stay auditable.
+
 ### 2026-03-15T00:02:10+08:00 - SPoRC Duration Sweeps Should Fan Out Presets Concurrently And Show Aggregate Progress
 - Problem: `sporc duration-sweep` still ran presets serially, ignored `--max-samples` unless `--examples` was also set, and mirrored child token streams into the terminal. That made sweeps unnecessarily slow on vLLM-backed runs and buried the useful operator signal under per-token output.
 - Solution: Make duration sweeps honor `--max-samples` by default with `--examples` as a sweep-only override, launch preset `execute` children concurrently with explicit retrieval/summarizer/critic ports, suppress child token streaming during sweeps, emit machine-readable sample progress from child runs, and show only aggregate sample positions plus a combined ETA in the parent sweep process.

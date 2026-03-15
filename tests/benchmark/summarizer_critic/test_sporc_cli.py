@@ -103,6 +103,7 @@ def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
         duration_preset="",
         target_seconds_override=90,
         max_samples=25,
+        sample_seed=41,
         max_iterations=3,
         summarizer_timeout_seconds=None,
         critic_timeout_seconds=None,
@@ -131,6 +132,8 @@ def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
     assert "5m" in command
     assert "--max-samples" in command
     assert "100" in command
+    assert "--sample-seed" in command
+    assert "41" in command
     assert "--transcript-only" in command
     assert "--disable-stream-output" in command
     assert "--emit-progress-events" in command
@@ -298,6 +301,7 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
         duration_presets="30s,1m,5m",
         examples=None,
         max_samples=100,
+        sample_seed=19,
         parallelism=0,
         sweep_root=str(tmp_path),
         enable_voice_clone=False,
@@ -313,6 +317,7 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
     assert launched == [("30s", 100), ("1m", 100), ("5m", 100)]
     assert finalized == [("30s", 100), ("1m", 100), ("5m", 100)]
     assert written_reports[-1].examples_per_preset == 100
+    assert written_reports[-1].sample_seed == 19
     assert [summary.duration_preset for summary in written_reports[-1].preset_summaries] == [
         "30s",
         "1m",

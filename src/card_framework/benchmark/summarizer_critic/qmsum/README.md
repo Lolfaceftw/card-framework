@@ -82,6 +82,10 @@ $env:CARD_FRAMEWORK_VLLM_BASE_URL='<secret-vllm-base-url>'; $env:HF_HUB_DISABLE_
 Each concurrent run must use a distinct trio of `--retrieval-port`,
 `--summarizer-port`, and `--critic-port` values.
 
+Use `--sample-seed <int>` when you want deterministic seeded-random sample
+selection instead of the default manifest-order prefix. Omitting the flag keeps
+the existing manifest order.
+
 ## Main Outputs
 
 - run artifacts: `artifacts/summarizer_critic_benchmark/runs/<run_id>`
@@ -89,6 +93,7 @@ Each concurrent run must use a distinct trio of `--retrieval-port`,
 - per-run machine-readable report: `report.json`
 - per-run notes: `notes.md`
 - per-run human-readable results: `results.md` with native Markdown tables plus 95% CI values for aggregate metric means
+- per-run notes now record the active sample-selection mode as either a concrete `sample_seed` or `manifest_order`
 
 ## Notes
 

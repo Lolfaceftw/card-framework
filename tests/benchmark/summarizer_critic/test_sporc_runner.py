@@ -114,11 +114,38 @@ def _failed_result(sample_id: str) -> SampleBenchmarkResult:
 
 def test_select_samples_defaults_to_all_when_zero() -> None:
     samples = (_sample("a"), _sample("b"), _sample("c"))
-    assert [sample.sample_id for sample in _select_samples(samples, max_samples=0)] == [
-        "a",
-        "b",
-        "c",
+    assert [
+        sample.sample_id
+        for sample in _select_samples(
+            samples,
+            max_samples=0,
+            sample_seed=None,
+        )
+    ] == ["a", "b", "c"]
+
+
+def test_select_samples_uses_seed_independent_of_manifest_order() -> None:
+    forward = (_sample("a"), _sample("b"), _sample("c"), _sample("d"))
+    reverse = tuple(reversed(forward))
+
+    forward_ids = [
+        sample.sample_id
+        for sample in _select_samples(
+            forward,
+            max_samples=3,
+            sample_seed=23,
+        )
     ]
+    reverse_ids = [
+        sample.sample_id
+        for sample in _select_samples(
+            reverse,
+            max_samples=3,
+            sample_seed=23,
+        )
+    ]
+
+    assert forward_ids == reverse_ids
 
 
 def test_normalize_max_iterations_maps_non_positive_values_to_none() -> None:
@@ -390,6 +417,15 @@ def test_build_execute_parser_accepts_sweep_child_progress_flags() -> None:
     assert args.critic_port == 5003
     assert args.disable_stream_output is True
     assert args.emit_progress_events is True
+
+
+def test_build_execute_parser_accepts_sample_seed() -> None:
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+
+    args = parser.parse_args(["--sample-seed", "29"])
+
+    assert args.sample_seed == 29
 
 
 def test_execute_benchmark_reads_only_requested_sidecar_samples(

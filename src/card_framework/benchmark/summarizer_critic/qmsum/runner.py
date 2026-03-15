@@ -56,6 +56,9 @@ from card_framework.benchmark.reference_free.pipeline import (
     ReferenceFreePipeline,
     ReferenceFreePipelineConfig,
 )
+from card_framework.benchmark.summarizer_critic.sampling import (
+    select_benchmark_samples,
+)
 from card_framework.benchmark.summarizer_critic.config import (
     BenchmarkExecutionReport,
     BenchmarkSummary,
@@ -257,6 +260,21 @@ def _progress_snapshot(
         eta_seconds = (remaining_samples / average_examples_per_minute) * 60.0
         eta_text = _format_eta(eta_seconds)
     return remaining_samples, average_text, eta_text
+
+
+def _select_samples(
+    samples: tuple[PreparedBenchmarkSample, ...],
+    *,
+    max_samples: int,
+    sample_seed: int | None,
+) -> list[PreparedBenchmarkSample]:
+    """Select benchmark samples in manifest or seeded-random order."""
+    return select_benchmark_samples(
+        samples,
+        max_samples=max_samples,
+        sample_seed=sample_seed,
+        sample_id_getter=lambda sample: sample.sample_id,
+    )
 
 
 def _format_transcript(transcript: dict[str, Any]) -> str:
@@ -663,17 +681,30 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             ),
         )
 
-        samples_to_run = list(dataset_manifest.samples)
-        if int(args.max_samples) > 0:
-            samples_to_run = samples_to_run[: int(args.max_samples)]
+        sample_seed = (
+            int(args.sample_seed)
+            if getattr(args, "sample_seed", None) is not None
+            else None
+        )
+        samples_to_run = _select_samples(
+            dataset_manifest.samples,
+            max_samples=int(args.max_samples),
+            sample_seed=sample_seed,
+        )
         total_samples = len(samples_to_run)
+        sample_selection_label = (
+            f"seeded_random({sample_seed})"
+            if sample_seed is not None
+            else "manifest_order"
+        )
 
         event_bus.publish(
             "status_message",
             (
                 f"Starting summarizer-critic benchmark run {run_id} with "
                 f"{total_samples} sample(s); summarizer={summarizer_profile.provider_id}; "
-                f"critic={critic_profile.provider_id}; judge={judge_profile.provider_id}."
+                f"critic={critic_profile.provider_id}; judge={judge_profile.provider_id}; "
+                f"sample_selection={sample_selection_label}."
             ),
         )
 
@@ -779,6 +810,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             results_path="",
             samples=results,
             summary=summary,
+            sample_seed=sample_seed,
         )
         report_path, notes_path, results_path = write_execution_artifacts(
             run_root=run_root,
@@ -846,6 +878,15 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--alignscore-source-chunk-words", type=int, default=256)
     parser.add_argument("--judge-source-char-limit", type=int, default=30000)
     parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=None,
+        help=(
+            "Deterministically randomize sample ordering and prefix selection by "
+            "seed. Omit to preserve manifest order."
+        ),
+    )
     parser.add_argument("--max-iterations", type=int, default=0)
     parser.add_argument("--summarizer-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--critic-timeout-seconds", type=float, default=0.0)

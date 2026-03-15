@@ -146,6 +146,11 @@ def write_execution_artifacts(
         f"- Critic provider: `{report.critic_provider}`",
         f"- Judge provider: `{report.judge_provider}`",
         f"- Embedding mode: `{report.embedding_mode}`",
+        (
+            f"- Sample seed: `{report.sample_seed}`"
+            if report.sample_seed is not None
+            else "- Sample seed: `manifest_order`"
+        ),
         f"- Success count: `{report.summary.success_count}/{report.summary.sample_count}`",
         f"- Mean composite: `{report.summary.mean_composite:.3f}`",
     ]

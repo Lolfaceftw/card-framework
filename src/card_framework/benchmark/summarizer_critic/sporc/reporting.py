@@ -191,6 +191,11 @@ def write_execution_artifacts(
         f"- Judge provider: `{report.judge_provider}`",
         f"- Embedding mode: `{report.embedding_mode}`",
         f"- Transcript only: `{report.transcript_only}`",
+        (
+            f"- Sample seed: `{report.sample_seed}`"
+            if report.sample_seed is not None
+            else "- Sample seed: `manifest_order`"
+        ),
         f"- Duration tolerance ratio: `{report.duration_tolerance_ratio:.3f}`",
         f"- Sample count: `{report.summary.sample_count}`",
         f"- Executed count: `{report.summary.executed_count}`",
@@ -260,6 +265,11 @@ def write_duration_sweep_artifacts(
         f"- Critic provider: `{report.critic_provider}`",
         f"- Judge provider: `{report.judge_provider}`",
         f"- Embedding mode: `{report.embedding_mode}`",
+        (
+            f"- Sample seed: `{report.sample_seed}`"
+            if report.sample_seed is not None
+            else "- Sample seed: `manifest_order`"
+        ),
         "",
         render_duration_sweep_table(report.preset_summaries),
         "",

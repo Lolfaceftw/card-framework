@@ -1007,6 +1007,11 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
         preset_summaries=preset_summaries,
         report_path="",
         results_path="",
+        sample_seed=(
+            int(args.sample_seed)
+            if getattr(args, "sample_seed", None) is not None
+            else None
+        ),
     )
     report_path, results_path = write_duration_sweep_artifacts(
         sweep_root=sweep_root,
@@ -1148,6 +1153,7 @@ def _build_execute_child_command(
             else args.target_seconds_override
         ),
         "--max-samples": max_samples if max_samples is not None else args.max_samples,
+        "--sample-seed": args.sample_seed,
         "--max-iterations": args.max_iterations,
         "--summarizer-timeout-seconds": args.summarizer_timeout_seconds,
         "--critic-timeout-seconds": args.critic_timeout_seconds,

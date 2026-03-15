@@ -170,6 +170,7 @@ class BenchmarkExecutionReport:
     transcript_only: bool = False
     duration_preset: str = ""
     override_target_seconds: int | None = None
+    sample_seed: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -237,3 +238,4 @@ class DurationSweepReport:
     preset_summaries: list[DurationSweepPresetSummary]
     report_path: str
     results_path: str
+    sample_seed: int | None = None

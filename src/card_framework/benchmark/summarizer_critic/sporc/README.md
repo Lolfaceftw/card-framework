@@ -90,6 +90,7 @@ Use `duration-sweep` when you want multiple duration targets in one invocation:
 - `--mode single` runs one preset and uses `--duration-preset`,
 - `--mode batch-all` runs multiple presets and uses `--duration-presets`,
 - `--max-samples` controls how many prepared samples run per preset by default,
+- `--sample-seed` switches sample selection from manifest-order prefixing to deterministic seeded-random ordering,
 - `--examples` remains available as a sweep-only override for `--max-samples`,
 - `--parallelism 0` runs every selected preset concurrently,
 - `duration-sweep` is transcript-only by default unless you add `--enable-voice-clone`.
@@ -336,6 +337,7 @@ Important behavior:
 - `--mode batch-all` expects `--duration-presets "30s,1m,5m"` when you want a subset.
 - quote the comma-separated `--duration-presets` value in PowerShell to keep it as one argument.
 - `duration-sweep` defaults to `--max-samples` for per-preset sample count, and `--examples` overrides it only for the sweep.
+- `--sample-seed <int>` makes `execute`, `supervise`, and `duration-sweep` choose a reproducible seeded-random subset; omitting it preserves manifest order.
 - `duration-sweep` defaults to aggregate progress output with combined ETA instead of child token streams.
 
 ## Running A Custom Manifest
@@ -371,9 +373,11 @@ Shared execution flags users usually need:
 - `--max-iterations <int>`
 - `--output-root <path>`
 - `execute`: `--max-samples <int>` where `0` means all prepared examples
+- `execute`: `--sample-seed <int>` for deterministic seeded-random sample selection
 - `execute`: `--duration-preset <30s|1m|5m|15m>`
 - `execute`: `--target-seconds-override <int>`
 - `duration-sweep`: `--max-samples <int>` where `0` means all prepared examples per preset
+- `duration-sweep`: `--sample-seed <int>` for deterministic seeded-random per-preset sample selection
 - `duration-sweep`: `--examples <int>` as a sweep-only override
 - `duration-sweep`: `--parallelism <int>`
 - `duration-sweep`: `--duration-presets 30s,1m,5m,15m`

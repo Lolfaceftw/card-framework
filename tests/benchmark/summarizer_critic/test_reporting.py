@@ -78,6 +78,7 @@ def test_write_execution_artifacts_creates_report_and_markdown(tmp_path: Path) -
             mean_speaker_attribution=0.9,
             mean_composite=0.85,
         ),
+        sample_seed=17,
     )
     report_path, notes_path, results_path = write_execution_artifacts(
         run_root=tmp_path,
@@ -88,6 +89,8 @@ def test_write_execution_artifacts_creates_report_and_markdown(tmp_path: Path) -
     assert results_path.exists()
 
     results_text = results_path.read_text(encoding="utf-8")
+    notes_text = notes_path.read_text(encoding="utf-8")
+    assert "- Sample seed: `17`" in notes_text
     assert "## Sample Results" in results_text
     assert "| metric | mean | 95% CI |" in results_text
     assert "n/a" in results_text

@@ -50,6 +50,9 @@ from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     _run_server_in_thread,
     _stop_server,
 )
+from card_framework.benchmark.summarizer_critic.sampling import (
+    select_benchmark_samples,
+)
 from card_framework.benchmark.summarizer_critic.sporc.config import (
     BenchmarkExecutionReport,
     BenchmarkSummary,
@@ -241,11 +244,17 @@ def _resolve_sample_target_seconds(
 
 def _select_samples(
     samples: tuple[PreparedBenchmarkSample, ...],
+    *,
     max_samples: int,
+    sample_seed: int | None,
 ) -> list[PreparedBenchmarkSample]:
-    if max_samples == 0:
-        return list(samples)
-    return list(samples[: max(0, max_samples)])
+    """Select SPoRC samples in manifest or seeded-random order."""
+    return select_benchmark_samples(
+        samples,
+        max_samples=max_samples,
+        sample_seed=sample_seed,
+        sample_id_getter=lambda sample: sample.sample_id,
+    )
 
 
 def _transcript_word_count(transcript: Transcript) -> int:
@@ -414,6 +423,7 @@ def _build_execution_report(
     transcript_only: bool,
     duration_preset: str,
     override_target_seconds: int | None,
+    sample_seed: int | None,
 ) -> BenchmarkExecutionReport:
     """Build the SPoRC execution report before artifact paths are known."""
     summary = _summarize_results(results)
@@ -441,6 +451,7 @@ def _build_execution_report(
         transcript_only=transcript_only,
         duration_preset=duration_preset,
         override_target_seconds=override_target_seconds,
+        sample_seed=sample_seed,
     )
 
 
@@ -1116,14 +1127,30 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     duration_preset = str(getattr(args, "duration_preset", "") or "").strip()
     override_target_seconds = _resolve_override_target_seconds(args)
     duration_tolerance_ratio = float(base_cfg.orchestrator.duration_tolerance_ratio)
-    sample_limit = None if int(args.max_samples) == 0 else int(args.max_samples)
-    samples_to_run = list(
+    sample_seed = (
+        int(args.sample_seed)
+        if getattr(args, "sample_seed", None) is not None
+        else None
+    )
+    sample_limit = int(args.max_samples)
+    selection_fetch_limit = None if sample_seed is not None else sample_limit
+    prepared_samples = tuple(
         iter_prepared_dataset_samples(
             dataset_manifest.manifest_path,
-            max_samples=sample_limit,
+            max_samples=selection_fetch_limit,
         )
     )
+    samples_to_run = _select_samples(
+        prepared_samples,
+        max_samples=sample_limit,
+        sample_seed=sample_seed,
+    )
     total_samples = len(samples_to_run)
+    sample_selection_label = (
+        f"seeded_random({sample_seed})"
+        if sample_seed is not None
+        else "manifest_order"
+    )
     active_target_seconds_by_sample_id: dict[str, int] = {}
     preloaded_transcripts: dict[str, Transcript] = {}
     preflight_results: dict[str, SampleBenchmarkResult] = {}
@@ -1199,6 +1226,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             transcript_only=transcript_only,
             duration_preset=duration_preset,
             override_target_seconds=override_target_seconds,
+            sample_seed=sample_seed,
         )
         report_path, notes_path, results_path = write_execution_artifacts(
             run_root=run_root,
@@ -1397,7 +1425,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 f"critic={critic_profile.provider_id}; judge={judge_profile.provider_id}; "
                 f"judge_dimensions={', '.join(DIMENSION_NAMES)}; "
                 f"transcript_only={transcript_only}; "
-                f"target_override={override_target_seconds if override_target_seconds is not None else 'dataset_default'}."
+                f"target_override={override_target_seconds if override_target_seconds is not None else 'dataset_default'}; "
+                f"sample_selection={sample_selection_label}."
             ),
         )
         _emit_progress_event(
@@ -1408,6 +1437,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 "run_id": run_id,
                 "sample_count": total_samples,
                 "transcript_only": transcript_only,
+                "sample_seed": sample_seed,
             },
         )
 
@@ -1506,6 +1536,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             transcript_only=transcript_only,
             duration_preset=duration_preset,
             override_target_seconds=override_target_seconds,
+            sample_seed=sample_seed,
         )
         report_path, notes_path, results_path = write_execution_artifacts(
             run_root=run_root,
@@ -1595,6 +1626,15 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=100,
         help="Sample cap for execution. Use 0 to run all prepared SPoRC examples.",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=None,
+        help=(
+            "Deterministically randomize sample ordering and prefix selection by "
+            "seed. Omit to preserve manifest order."
+        ),
     )
     parser.add_argument(
         "--transcript-only",
