@@ -1,3 +1,11 @@
+### 2026-03-15T12:40:00+08:00 - Long Demucs Separations Need Outer Windowing Or RAM Scales With Full Track Length
+- Problem: The stage-1 separator was invoking `python -m demucs.separate` on the entire source file. For multi-hour stereo WAV inputs that made Demucs allocate full-length float32 mixture/output tensors, so one `python.exe` child could spike into double-digit gigabytes before Granite ASR even started.
+- Solution: Keep `htdemucs` as the separator, but wrap it in repo-level outer windowing with bounded `audio.separation.window_length_seconds` plus `window_context_seconds`, trim each chunk back to its base window after separation, stitch the vocals windows back together, and emit timed loading plus `chunk i/N` progress so operators can see that the RAM-heavy step is bounded work rather than a hung process.
+
+### 2026-03-15T11:49:00+08:00 - Granite Speech Requires The Model-Card Chat Prompt And Positional Processor Inputs
+- Problem: `ibm-granite/granite-4.0-1b-speech` does not behave like the generic Hugging Face ASR pipeline path. Using ad hoc `text=` or `audio=` keyword arguments, or skipping the model-card chat template, risks processor/input-shape failures and mismatched decoding behavior.
+- Solution: Follow the Granite model-card contract directly: build the prompt with `tokenizer.apply_chat_template(...)`, pass the prompt and mono `16 kHz` waveform positionally into `processor(prompt, wav, device=..., return_tensors="pt")`, and keep chunking/progress handling in the repo adapter instead of relying on the generic pipeline abstraction.
+
 ### 2026-03-15T11:08:55+08:00 - Packaged Infer Imports Must Stay Dependency-Light For Wheel Smoke
 - Problem: The clean-wheel smoke test installs `card-framework` with `--no-deps` before importing `from card_framework import infer`. That import path was still eager enough to fail immediately on optional runtime modules such as `python-dotenv`, which meant the built wheel could not prove its advertised public export in a minimal environment.
 - Solution: Make repository-root dotenv loading a graceful no-op when `python-dotenv` is unavailable and keep `card_framework.api` dependency-light by lazy-loading runtime config normalization inside the packaged `infer(...)` call path instead of at module import time.

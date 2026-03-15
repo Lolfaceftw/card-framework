@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 from rich.logging import RichHandler
 
 from card_framework.shared.logger_utils import (
+    ResilientRotatingFileHandler,
     _summarize_tool_result,
     configure_logger,
     logger,
@@ -92,3 +93,54 @@ def test_configure_logger_skips_console_handler_when_terminal_disabled(
         logger.handlers = original_handlers
         logger.setLevel(original_level)
         logger.propagate = original_propagate
+
+
+def test_resilient_rotating_file_handler_falls_back_when_rollover_is_locked(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    log_path = tmp_path / "agent.log"
+    handler = ResilientRotatingFileHandler(
+        log_path,
+        maxBytes=1,
+        backupCount=1,
+        encoding="utf-8",
+        rollover_retry_seconds=30.0,
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    try:
+        handler.emit(
+            logging.LogRecord(
+                name="AgentLogger",
+                level=logging.INFO,
+                pathname=__file__,
+                lineno=1,
+                msg="first",
+                args=(),
+                exc_info=None,
+            )
+        )
+
+        def _locked_rollover() -> None:
+            if handler.stream is not None:
+                handler.stream.close()
+                handler.stream = None
+            raise PermissionError("locked")
+
+        monkeypatch.setattr(handler, "doRollover", _locked_rollover)
+        locked_record = logging.LogRecord(
+            name="AgentLogger",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=2,
+            msg="second",
+            args=(),
+            exc_info=None,
+        )
+
+        handler.emit(locked_record)
+        assert handler.shouldRollover(locked_record) is False
+    finally:
+        handler.close()
+
+    assert log_path.read_text(encoding="utf-8").splitlines() == ["first", "second"]

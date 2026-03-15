@@ -70,7 +70,7 @@ At a high level, the repository currently supports:
 
 - **Stage 1: Audio ingestion and transcript generation**
   - Source separation
-  - ASR, diarization, and alignment
+  - Granite Speech ASR by default, plus diarization and alignment
   - Transcript JSON generation with speaker metadata
 - **Stage 2: Constraint-aware summarization**
   - Summarizer and critic agent loop
@@ -173,7 +173,12 @@ These runtime entrypoints now emit timed `Loading ...` and
 `Loaded ... in X.XX seconds.` status lines around slow startup and bootstrap
 phases such as packaged runtime setup, transcript loading, calibration,
 provider setup, retrieval indexing, and A2A readiness so cold starts no longer
-look idle.
+look idle. Stage-1 transcription now uses the same timed loading pattern for
+the default Granite Speech model load and publishes inline progress such as
+`segment 3/12` plus an ETA once the audio stage has learned transcription
+history. Stage-1 separation now also emits timed Demucs loading/status lines,
+and long source files are separated in bounded outer windows so RAM does not
+scale with the full recording length.
 
 ## Configuration
 
@@ -184,6 +189,13 @@ comment-and-uncomment provider block.
 - Keep real secrets in `.env`, not in tracked YAML files.
 - Copy `.env.example` to `.env` and fill only the provider keys you actually
   use.
+- Long stage-1 separations now default to `audio.separation.window_length_seconds=600`
+  with `audio.separation.window_context_seconds=5` so Demucs works on bounded
+  outer windows before stitching the vocals stem back together.
+- Stage-1 ASR now defaults to `audio.asr.provider=granite_speech` with
+  `ibm-granite/granite-4.0-1b-speech`, `30s` chunks, `5s` overlap, and
+  forced alignment enabled. `faster_whisper` remains available as an explicit
+  opt-in provider.
 - For the full workflow, profile names, and common examples, see
   [`CONFIG.MD`](./CONFIG.MD).
 

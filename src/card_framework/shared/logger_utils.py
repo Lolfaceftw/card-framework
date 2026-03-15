@@ -1,6 +1,7 @@
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import time
 
 from rich.logging import RichHandler
 
@@ -41,6 +42,56 @@ def _summarize_tool_result(result: str) -> str:
     return f"{compact[:157]}..."
 
 
+class ResilientRotatingFileHandler(RotatingFileHandler):
+    """Tolerate Windows rollover lock failures by deferring rotation briefly."""
+
+    def __init__(
+        self,
+        filename,
+        mode: str = "a",
+        maxBytes: int = 0,
+        backupCount: int = 0,
+        encoding: str | None = None,
+        delay: bool = False,
+        errors: str | None = None,
+        *,
+        rollover_retry_seconds: float = 30.0,
+    ) -> None:
+        super().__init__(
+            filename=filename,
+            mode=mode,
+            maxBytes=maxBytes,
+            backupCount=backupCount,
+            encoding=encoding,
+            delay=delay,
+            errors=errors,
+        )
+        self.rollover_retry_seconds = max(0.0, rollover_retry_seconds)
+        self._rollover_lock_retry_at = 0.0
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:
+        """Skip rollover attempts during the lock backoff window."""
+        if time.monotonic() < self._rollover_lock_retry_at:
+            return False
+        return super().shouldRollover(record)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Fallback to append-only writes when rollover is blocked by a file lock."""
+        try:
+            if self.shouldRollover(record):
+                try:
+                    self.doRollover()
+                except PermissionError:
+                    self._rollover_lock_retry_at = (
+                        time.monotonic() + self.rollover_retry_seconds
+                    )
+            logging.FileHandler.emit(self, record)
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+
+
 def configure_logger(cfg):
     """
     Configures the logger based on the provided configuration object.
@@ -69,7 +120,7 @@ def configure_logger(cfg):
 
     # File Handler
     log_file = cfg.get("log_file", "agent_interactions.log")
-    file_handler = RotatingFileHandler(
+    file_handler = ResilientRotatingFileHandler(
         log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     file_handler.setFormatter(formatter)
@@ -102,6 +153,10 @@ def _on_system_message(message: str, **kwargs):
 def _on_status_message(message: str, **kwargs):
     if kwargs.get("inline", False):
         return
+    logger.info(_format_with_metadata(f"[Status] {message}", **kwargs))
+
+
+def _on_status_log_message(message: str, **kwargs):
     logger.info(_format_with_metadata(f"[Status] {message}", **kwargs))
 
 
@@ -195,6 +250,7 @@ def _on_llm_call_completed(
 
 event_bus.subscribe("system_message", _on_system_message)
 event_bus.subscribe("status_message", _on_status_message)
+event_bus.subscribe("status_log_message", _on_status_log_message)
 event_bus.subscribe("error_message", _on_error_message)
 event_bus.subscribe("agent_message", _on_agent_message)
 event_bus.subscribe("agent_thought", _on_agent_thought)

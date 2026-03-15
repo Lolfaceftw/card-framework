@@ -108,15 +108,15 @@ audio:
     provider: "demucs"
     model: "htdemucs"
     timeout_seconds: 1800
+    window_length_seconds: 600
+    window_context_seconds: 5
   asr:
-    provider: "faster_whisper"
-    model: "medium.en"
-    compute_type_cuda: "int8_float16"
-    compute_type_cpu: "int8"
-    beam_size: 5
-    vad_filter: true
-    batch_size: 8
-    language:
+    provider: "granite_speech"
+    model: "ibm-granite/granite-4.0-1b-speech"
+    chunk_length_seconds: 30
+    chunk_overlap_seconds: 5
+    max_new_tokens: 200
+    language: "en"
     suppress_numerals: false
     forced_alignment:
       enabled: true

@@ -31,6 +31,53 @@ selection:
 - `selection.stage_llm.*`: optionally overrides one stage with another LLM
   profile. Use `default` to inherit the shared LLM.
 
+## Stage 1 Audio Defaults
+
+Stage-1 separation settings live under `audio.separation` and ASR settings live
+under `audio.asr` in `conf/config.yaml`.
+
+The current Demucs separation defaults are:
+
+```yaml
+audio:
+  separation:
+    provider: "demucs"
+    model: "htdemucs"
+    timeout_seconds: 1800
+    window_length_seconds: 600
+    window_context_seconds: 5
+```
+
+- Long source files are separated in `10m` outer windows with `5s` context on
+  each side before the vocals stem is stitched back together.
+- Stage-1 now emits timed Demucs loading/status lines and separation chunk
+  progress such as `chunk 2/10` with ETA-bearing stage updates.
+
+The current repo default is:
+
+```yaml
+audio:
+  asr:
+    provider: "granite_speech"
+    model: "ibm-granite/granite-4.0-1b-speech"
+    chunk_length_seconds: 30
+    chunk_overlap_seconds: 5
+    max_new_tokens: 200
+    language: "en"
+    forced_alignment:
+      enabled: true
+      required: true
+      batch_size: 8
+```
+
+- `granite_speech` is the default ASR backend for new runs.
+- The runtime chunks preprocessed audio into `30s` windows with `5s` overlap.
+- Stage-1 now emits timed Granite model loading messages and inline
+  transcription progress such as `segment 2/9` plus an ETA when the audio ETA
+  tracker has learned stage history.
+- `faster_whisper` is still supported, but it is now an explicit opt-in
+  provider instead of the default.
+
 ## Built-In LLM Profiles
 
 - `vllm_local`: local OpenAI-compatible vLLM endpoint.

@@ -1288,7 +1288,10 @@ def main(cfg: DictConfig) -> None:
                     audio_cfg_dict.get("separation", {}).get("model", "htdemucs")
                 ),
                 "transcriber_model": str(
-                    audio_cfg_dict.get("asr", {}).get("model", "large-v3")
+                    audio_cfg_dict.get("asr", {}).get(
+                        "model",
+                        "ibm-granite/granite-4.0-1b-speech",
+                    )
                 ),
                 "diarizer_backend": str(
                     audio_cfg_dict.get("diarization", {}).get("provider", "nemo")

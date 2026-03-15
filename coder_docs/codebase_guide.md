@@ -14,7 +14,7 @@
       <step>When behavior, configuration, commands, or workflow changes materially, update this guide in the same change.</step>
     </sessionStartChecklist>
     <primaryWorkflow>
-      <stage id="stage-1">Audio stage: source separation, ASR, diarization, alignment, and transcript JSON emission.</stage>
+      <stage id="stage-1">Audio stage: source separation, Granite Speech ASR by default, diarization, alignment, and transcript JSON emission.</stage>
       <stage id="stage-2">Summarization stage: local A2A retrieval, summarizer, and critic agents cooperate until convergence or iteration cap. When `audio.voice_clone.live_drafting.enabled=true` and voice cloning is enabled, each mutating draft step also renders per-turn audio immediately and uses actual measured segment duration instead of WPM estimates.</stage>
       <stage id="stage-3">Voice-clone stage: summary XML plus generated speaker samples are rendered into per-turn cloned audio and optional merged output. In live-draft mode this stage usually finalizes already-rendered turn audio into the persisted manifest instead of re-synthesizing every turn.</stage>
       <stage id="stage-4">Interjector stage: the next speaker can add short overlapping backchannels or echo-agreements onto the stage-3 merged audio using summary-aware token anchors.</stage>
@@ -158,8 +158,8 @@
   <section id="audio-pipeline" title="Audio Pipeline">
     <responsibility>The audio subsystem converts source audio into a structured transcript and optional cloned-audio output while keeping heavy model integrations behind protocol-style adapters.</responsibility>
     <stageOneFlow>
-      <step>Source separation produces vocals-first audio.</step>
-      <step>ASR produces segment timing and optional word-level timestamps.</step>
+      <step>Source separation defaults to Demucs `htdemucs`. Long recordings are split into `600s` base windows with `5s` context on each side, each window is separated independently, and the trimmed vocals windows are concatenated back into one final vocals stem so peak RAM is bounded by one window.</step>
+      <step>ASR now defaults to `ibm-granite/granite-4.0-1b-speech`, preprocesses audio to mono `16 kHz`, chunks it into `30s` windows with `5s` overlap, emits per-chunk `segment i/N` progress notes, and uses CTC forced alignment for authoritative word timestamps when enabled.</step>
       <step>Diarization produces speaker turns.</step>
       <step>Alignment merges ASR and diarization into normalized transcript segments.</step>
       <step>Transcript JSON is emitted atomically for later summarization and benchmark use.</step>
@@ -177,7 +177,8 @@
     </postTranscriptFlow>
     <adapterMap>
       <adapter>Demucs handles source separation when separation.provider=demucs.</adapter>
-      <adapter>Faster-Whisper handles transcription and optional forced alignment.</adapter>
+      <adapter>Granite Speech is the default transcription adapter, wired through `audio_pipeline.gateways.granite_speech_gateway.GraniteSpeechTranscriber` and loaded lazily through Transformers plus torchaudio.</adapter>
+      <adapter>Faster-Whisper remains available as an explicit opt-in transcription backend through `audio.asr.provider=faster_whisper`.</adapter>
       <adapter>NeMo MSDD remains the default diarization backend, with optional single-speaker fallback behavior controlled in config.</adapter>
       <adapter>Alternative diarization backends now include pyannote Community-1 plus NeMo Sortformer offline and streaming checkpoints, all wired through `audio_pipeline.factory.build_speaker_diarizer` and selected by `audio.diarization.provider`.</adapter>
       <adapter>FFmpeg-backed export is used for speaker sample generation.</adapter>
@@ -186,7 +187,11 @@
     <etaAndObservability>
       <rule>ETA estimation and learning live in audio_pipeline/eta.py and are reused across audio and voice-clone stages.</rule>
       <rule>Operator-facing ETA messages are shown only after the matching stage has learned or loaded persisted throughput history; first-run stages stay silent until history exists.</rule>
+      <rule>Long Demucs separations now report note-based `chunk i/N` progress, and the orchestrator republishes those chunk milestones with ETA just like Granite transcription segment progress.</rule>
+      <rule>The transcription stage now republishes chunk progress immediately when a transcriber reports unit counts, so operators see inline status such as `Audio stage: transcription segment 3/12; estimated time left ...` instead of waiting for the periodic ticker alone.</rule>
+      <rule>Demucs separation now uses the shared loading-duration reporter too, so stage-1 emits timed `Loading ...` / `Loaded ... in X.XX seconds.` messages before and after long separation work in addition to the Granite model-load messages.</rule>
       <rule>Learned ETA throughput is persisted immediately after each completed audio, speaker-sample, and voice-clone stage so interrupted pipelines retain finished-stage history.</rule>
+      <rule>Granite Speech model and processor initialization use the shared loading-duration reporter, so stage-1 emits the same timed `Loading ...` and `Loaded ... in X.XX seconds.` messages around ASR model startup as other slow runtime boundaries.</rule>
       <rule>Windows-only dedicated GPU heartbeat monitoring can run during voice cloning when enabled and when the resolved provider device is CUDA.</rule>
       <rule>src/card_framework/shared/events.py provides the shared event bus used by UI and logging subscribers.</rule>
     </etaAndObservability>
@@ -247,8 +252,8 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="conf/config.yaml">Canonical human-edited runtime config for source checkouts. It keeps the provider choice small through `selection` plus `profiles`, while real secrets come from `.env` rather than tracked YAML.</file>
-      <file path="src/card_framework/config/config.yaml">Bundled fallback runtime config shipped with the installed package. Keep it functionally aligned with `conf/config.yaml`.</file>
+      <file path="conf/config.yaml">Canonical human-edited runtime config for source checkouts. It keeps the provider choice small through `selection` plus `profiles`, while real secrets come from `.env` rather than tracked YAML. Stage-1 now defaults `audio.separation` to windowed Demucs (`600s` windows, `5s` context) and `audio.asr.provider` to `granite_speech` with the IBM Granite Speech model and `30s` chunking.</file>
+      <file path="src/card_framework/config/config.yaml">Bundled fallback runtime config shipped with the installed package. Keep it functionally aligned with `conf/config.yaml`, including the Demucs windowing defaults and Granite Speech ASR defaults.</file>
       <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa, including `deepseek_chat` for `deepseek-chat` and `deepseek_judge` for `deepseek-reasoner` when running reference-free judge sweeps.</file>
       <file path="src/card_framework/benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts. The benchmark vLLM API key is env-backed now instead of being stored literally in YAML.</file>
       <file path="CONFIG.MD">Operator-facing guide for `.env`, provider profile names, stage override selection, and common runtime configuration examples.</file>
@@ -288,6 +293,7 @@
       <note>The installed-package library entrypoint is `from card_framework import infer`. It accepts `(audio_wav, output_dir, target_duration_seconds, *, device, vllm_url=None, vllm_api_key=None)`, treats the duration target and the packaged device choice as required per call, reads an optional full-config override from `CARD_FRAMEWORK_CONFIG`, and uses `CARD_FRAMEWORK_HOME` for writable runtime assets when set.</note>
       <note>Packaged `infer(...)` now delegates to `card_framework.cli.setup_and_run` instead of invoking `card_framework.cli.main` directly, so pip-installed runs regain live wrapper/pipeline streaming while the wrapper resolves relative reusable transcripts, audio, and summary inputs from the caller workspace rather than site-packages-shaped `REPO_ROOT` paths.</note>
       <note>`card_framework.cli.main`, `card_framework.cli.setup_and_run`, and packaged `infer(...)` now share the timed loading-status pattern first introduced for SPoRC: operator-facing `Loading ...` and `Loaded ... in X.XX seconds.` lines surface slow startup and bootstrap waits instead of leaving the terminal blank.</note>
+      <note>Because Granite Speech is now the default ASR backend, `pyproject.toml` declares `transformers>=4.52.1` as a direct runtime dependency instead of relying on a transitive install path.</note>
       <note>The packaged path is intentionally vLLM-first. `vllm_url` or `CARD_FRAMEWORK_VLLM_URL` forces the shared summarizer, critic, and interjector LLM selection onto one OpenAI-compatible endpoint, while `CARD_FRAMEWORK_VLLM_API_KEY` can supply optional endpoint auth.</note>
       <note>Packaged `infer(...)` now resolves `ffmpeg` from `CARD_FRAMEWORK_FFMPEG_EXECUTABLE`, PATH, or the bundled `imageio-ffmpeg` fallback, and it resolves `uv` from `CARD_FRAMEWORK_UV_EXECUTABLE`, PATH, or the active interpreter scripts directory (`Scripts/uv.exe` on Windows, `bin/uv` on POSIX) before bootstrapping the vendored IndexTTS runtime.</note>
       <note>The packaged CPU contract now covers Windows x86_64, Linux x86_64, and macOS arm64. macOS Intel is out of scope, and packaged `device=\"cuda\"` remains Windows/Linux x86_64 only.</note>
@@ -323,6 +329,8 @@
       <note>When CLI overrides do not specify `audio.voice_clone.enabled`, `audio.interjector.enabled`, or `audio.speaker_samples.enabled`, `card_framework.cli.setup_and_run` now respects the defaults declared in the active runtime config, which is `conf/config.yaml` in a source checkout and `src/card_framework/config/config.yaml` in packaged contexts.</note>
       <note>`card_framework.cli.setup_and_run` now skips IndexTTS repo sync, nested uv sync, and model provisioning only when neither final synthesis nor the legacy calibration-backed estimate path needs the voice-clone runtime.</note>
       <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of live drafting or stage-3 rendering.</note>
+      <note>The default stage-1 ASR path is now Granite Speech with `30s` chunks, `5s` overlap, and fail-fast model/runtime errors. `faster_whisper` remains available only when selected explicitly in config.</note>
+      <note>The default stage-1 separation path is now windowed Demucs with `audio.separation.window_length_seconds=600` and `audio.separation.window_context_seconds=5`, which trades some extra runtime for much lower peak RAM on long recordings.</note>
     </commandNotes>
   </section>
 
