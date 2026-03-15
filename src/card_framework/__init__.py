@@ -6,7 +6,7 @@ from typing import Any
 
 from card_framework.shared.env import load_repo_dotenv
 
-load_repo_dotenv()
+load_repo_dotenv(search_cwd=True)
 
 __all__ = ["InferenceResult", "RuntimeBootstrapError", "infer"]
 

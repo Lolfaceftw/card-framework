@@ -109,6 +109,25 @@ def test_resolve_provider_config_prefers_vllm_url_env(monkeypatch) -> None:
     assert resolved["base_url"] == "http://vllm.example.test:8000/v1"
 
 
+def test_resolve_provider_config_supports_oc_env_placeholders(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-secret")
+    profile = ProviderProfile(
+        provider_id="deepseek_chat",
+        description="Provider 1",
+        llm_config={
+            "_target_": "card_framework.providers.deepseek_provider.DeepSeekProvider",
+            "api_key": '${oc.env:DEEPSEEK_API_KEY,""}',
+            "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com",
+        },
+        required_env=["DEEPSEEK_API_KEY"],
+    )
+
+    resolved = resolve_provider_config(profile)
+
+    assert resolved["api_key"] == "deepseek-secret"
+
+
 def test_build_embedding_profiles_uses_legacy_repo_config_when_base_is_noop(
     monkeypatch, tmp_path
 ) -> None:

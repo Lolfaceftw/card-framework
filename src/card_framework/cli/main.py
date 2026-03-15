@@ -42,6 +42,10 @@ from card_framework.audio_pipeline.io import write_transcript_atomic
 from card_framework.audio_pipeline.runtime import resolve_device, resolve_path
 from card_framework.audio_pipeline.speaker_samples import resolve_sample_source_audio_path
 from card_framework.shared.events import event_bus
+from card_framework.shared.config_loading import (
+    normalize_runtime_config,
+    validate_runtime_credentials,
+)
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import configure_logger
 from card_framework.shared.perf import StatusReporter, report_loading_duration
@@ -1192,6 +1196,8 @@ def _resolve_duration_targets(
 )
 def main(cfg: DictConfig) -> None:
     """Run the configured summarization pipeline."""
+    cfg = normalize_runtime_config(cfg)
+    validate_runtime_credentials(cfg)
     logging_cfg = _to_plain_dict(cfg.get("logging", {}))
     configure_logger(logging_cfg)
 

@@ -17,6 +17,7 @@ from card_framework.benchmark.types import (
     EmbeddingProfile,
     ProviderProfile,
 )
+from card_framework.shared.config_loading import normalize_runtime_config_mapping
 from card_framework.shared.paths import REPO_ROOT
 
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
@@ -24,6 +25,7 @@ _VLLM_URL_ENV_NAMES = ("VLLM_URL", "CARD_FRAMEWORK_VLLM_URL", "VLLM_BASE_URL")
 _LEGACY_CONFIG_PATH = REPO_ROOT / "conf" / "config.yaml"
 _LEGACY_PROVIDER_TARGET_PREFIX = "providers."
 _CURRENT_PROVIDER_TARGET_PREFIX = "card_framework.providers."
+_OC_ENV_PATTERN = re.compile(r"^\$\{oc\.env:([^,}]+)(?:,(.*))?\}$")
 
 
 class MatrixConfigError(RuntimeError):
@@ -162,6 +164,7 @@ def _load_legacy_embedding_config() -> dict[str, Any] | None:
     )
     if not isinstance(legacy_payload, dict):
         return None
+    legacy_payload = normalize_runtime_config_mapping(legacy_payload)
 
     raw_embedding = legacy_payload.get("embedding")
     if not isinstance(raw_embedding, dict):
@@ -203,6 +206,17 @@ def resolve_env_placeholders(value: Any) -> Any:
                 f"Required environment variable is missing: {env_name}"
             )
         return resolved
+    if isinstance(value, str) and (match := _OC_ENV_PATTERN.match(value)):
+        env_name = match.group(1).strip()
+        resolved = os.getenv(env_name)
+        if resolved is not None:
+            return resolved
+        raw_default = match.group(2)
+        if raw_default is None:
+            raise MatrixConfigError(
+                f"Required environment variable is missing: {env_name}"
+            )
+        return _strip_env_default(raw_default)
 
     if isinstance(value, dict):
         return {key: resolve_env_placeholders(raw) for key, raw in value.items()}
@@ -217,12 +231,28 @@ def _references_env_placeholder(value: Any, env_name: str) -> bool:
     """Return True if value tree contains ``$ENV{<env_name>}`` placeholder."""
     expected = f"$ENV{{{env_name}}}"
     if isinstance(value, str):
-        return value == expected
+        if value == expected:
+            return True
+        match = _OC_ENV_PATTERN.match(value)
+        return bool(match and match.group(1).strip() == env_name)
     if isinstance(value, dict):
         return any(_references_env_placeholder(raw, env_name) for raw in value.values())
     if isinstance(value, list):
         return any(_references_env_placeholder(raw, env_name) for raw in value)
     return False
+
+
+def _strip_env_default(raw_default: str) -> str:
+    """Normalize one default value extracted from an ``oc.env`` placeholder."""
+
+    normalized = raw_default.strip()
+    if (
+        len(normalized) >= 2
+        and normalized[0] == normalized[-1]
+        and normalized[0] in {'"', "'"}
+    ):
+        return normalized[1:-1]
+    return normalized
 
 
 def missing_required_env(profile: ProviderProfile) -> list[str]:

@@ -12,6 +12,7 @@ from typing import Any
 from omegaconf import DictConfig, ListConfig, OmegaConf
 import requests
 
+from card_framework.shared.config_loading import load_runtime_config
 from card_framework.shared.paths import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_PROVIDER_PROFILES_PATH,
@@ -73,7 +74,7 @@ def _extract_vllm_from_base_config(path: Path) -> dict[str, Any]:
     """Return vLLM config from the base runtime config when configured."""
     if not path.exists():
         return {}
-    config = _load_config(path)
+    config = load_runtime_config(path)
     llm_cfg = _as_plain_mapping(config.get("llm"))
     if not _looks_like_vllm_target(llm_cfg.get("_target_")):
         return {}

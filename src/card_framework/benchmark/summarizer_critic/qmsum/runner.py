@@ -96,6 +96,7 @@ from card_framework.providers.response_callbacks import RichConsoleResponseCallb
 from card_framework.retrieval.embeddings import TranscriptIndex
 from card_framework.runtime.loop_orchestrator import Orchestrator
 from card_framework.shared.events import event_bus
+from card_framework.shared.config_loading import load_runtime_config
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import configure_logger
 from card_framework.shared.paths import (
@@ -183,10 +184,7 @@ def _stop_server(server: ManagedServer) -> None:
 def _load_base_config(config_path: Path) -> DictConfig:
     if not config_path.exists():
         raise BenchmarkExecutionError(f"Config path does not exist: {config_path}")
-    cfg = OmegaConf.load(config_path)
-    if not isinstance(cfg, DictConfig):
-        raise BenchmarkExecutionError("Failed to load benchmark base config.")
-    return cfg
+    return load_runtime_config(config_path)
 
 
 def _resolve_orchestrator_timeouts(

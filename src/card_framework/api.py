@@ -26,6 +26,7 @@ from card_framework.runtime.bootstrap import (
     ensure_runtime_requirements,
     resolve_uv_executable,
 )
+from card_framework.shared.config_loading import normalize_runtime_config_mapping
 from card_framework.shared.paths import DEFAULT_CONFIG_PATH
 from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.runtime_layout import resolve_runtime_layout
@@ -1015,7 +1016,7 @@ def _load_config_mapping(config_path: Path) -> dict[str, Any]:
     resolved = omega_conf.to_container(config, resolve=True)
     if not isinstance(resolved, dict):
         raise ValueError(f"Config did not resolve to a mapping: {config_path}")
-    return resolved
+    return normalize_runtime_config_mapping(resolved)
 
 
 def _write_config_mapping(config_path: Path, config: Mapping[str, Any]) -> None:

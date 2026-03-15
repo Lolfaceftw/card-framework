@@ -1,3 +1,7 @@
+### 2026-03-15T10:54:38.7152585+08:00 - Runtime Config Drift And Inline Secrets Needed One Canonical Selector-Based Workflow
+- Problem: The repo had two different runtime config entrypoints, a root `conf/config.yaml` full of commented provider blocks, and inline API-key fields spread across tracked YAML. That made normal configuration noisy, let repo-local and packaged defaults drift, and encouraged users to keep secrets in config files instead of `.env`.
+- Solution: Make `conf/config.yaml` the canonical source-checkout config, keep `src/card_framework/config/config.yaml` as a bundled mirror, normalize the new `selection` plus `profiles` schema into explicit runtime sections in shared code, and move secret values to `.env`-backed fields with documented alias support.
+
 ### 2026-03-15T10:06:06+08:00 - Summarizer-Critic Benchmarks Need Deterministic Seeded Sample Selection
 - Problem: The QMSum and SPoRC real benchmark runners both selected the first `N` prepared samples in manifest order. That kept runs reproducible, but it baked manifest-order bias into every limited benchmark and made it impossible to request a deterministic randomized subset for more robust comparisons.
 - Solution: Add a shared seeded selector keyed by `(sample_seed, sample_id)`, thread `--sample-seed` through QMSum `execute` and `supervise` plus SPoRC `execute`, `supervise`, and `duration-sweep`, and record the active seed or `manifest_order` mode in benchmark artifacts so runs stay auditable.

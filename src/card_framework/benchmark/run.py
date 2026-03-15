@@ -69,6 +69,10 @@ from card_framework.benchmark.types import (
     SampleRunResult,
 )
 from card_framework.retrieval.embeddings import TranscriptIndex
+from card_framework.shared.config_loading import (
+    load_runtime_config,
+    required_env_names_for_llm_config,
+)
 from card_framework.shared.events import event_bus
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import configure_logger
@@ -650,10 +654,7 @@ def _commands_executed() -> list[str]:
 def _load_base_config(config_path: Path) -> DictConfig:
     if not config_path.exists():
         raise BenchmarkRuntimeError(f"Config path does not exist: {config_path}")
-    cfg = OmegaConf.load(config_path)
-    if not isinstance(cfg, DictConfig):
-        raise BenchmarkRuntimeError("Failed to load benchmark base config")
-    return cfg
+    return load_runtime_config(config_path)
 
 
 def _provider_filter(raw: str) -> set[str] | None:
@@ -735,7 +736,11 @@ def execute_command(args: argparse.Namespace) -> int:
                 provider_id="configured_default",
                 description="Configured default provider from packaged config.yaml",
                 llm_config=OmegaConf.to_container(base_cfg.llm, resolve=False),
-                required_env=[],
+                required_env=list(
+                    required_env_names_for_llm_config(
+                        OmegaConf.to_container(base_cfg.llm, resolve=True) or {}
+                    )
+                ),
             )
         ]
 

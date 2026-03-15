@@ -1,6 +1,6 @@
 vllm:
   base_url: "http://127.0.0.1:8001/v1"
-  api_key: "EMPTY"
+  api_key: ${oc.env:CARD_FRAMEWORK_VLLM_API_KEY,EMPTY}
   timeout_seconds: 30
   chat_template_kwargs:
     enable_thinking: false

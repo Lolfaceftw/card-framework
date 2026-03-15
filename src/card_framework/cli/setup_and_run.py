@@ -15,7 +15,7 @@ from typing import Any, Literal, Mapping, Sequence, TypeAlias, cast
 
 from card_framework.runtime.bootstrap import ensure_index_tts_runtime
 from card_framework.shared.paths import (
-    DEFAULT_CONFIG_PATH as PACKAGED_DEFAULT_CONFIG_PATH,
+    DEFAULT_CONFIG_PATH as SHARED_DEFAULT_CONFIG_PATH,
     REPO_ROOT,
     VENDOR_INDEX_TTS_DIR,
     discover_reusable_transcript_path,
@@ -199,7 +199,7 @@ def resolve_repo_config_path() -> Path:
         return Path(CONFIG_FILE_PATH).resolve()
     if DEFAULT_CONFIG_PATH is not None:
         return Path(DEFAULT_CONFIG_PATH).resolve()
-    return PACKAGED_DEFAULT_CONFIG_PATH.resolve()
+    return SHARED_DEFAULT_CONFIG_PATH.resolve()
 
 
 def resolve_workspace_root() -> Path:

@@ -120,7 +120,7 @@ src/card_framework/
   audio_pipeline/   Audio ingestion, speaker samples, voice cloning, interjector
   benchmark/        Summarization, QA, and diarization benchmarks
   cli/              Runtime, setup, calibration, matrix, and eval entrypoints
-  config/           Hydra configuration
+  config/           Bundled fallback config for packaged installs
   orchestration/    Transcript DTOs and stage orchestration
   prompts/          Jinja2 prompt templates
   providers/        LLM and embedding provider adapters
@@ -135,6 +135,10 @@ Other important locations:
 - `artifacts/`: generated transcripts, cloned audio, benchmark outputs, and
   other runtime artifacts
 - `checkpoints/`: local model/runtime checkpoints
+- `conf/config.yaml`: canonical human-edited runtime config for source checkouts
+- `src/card_framework/config/config.yaml`: packaged fallback config bundled into
+  the installed distribution
+- `.env.example`: template for provider secrets and optional local overrides
 - `coder_docs/`: repository-specific architecture, workflow, and maintenance
   guidance
 
@@ -170,6 +174,18 @@ These runtime entrypoints now emit timed `Loading ...` and
 phases such as packaged runtime setup, transcript loading, calibration,
 provider setup, retrieval indexing, and A2A readiness so cold starts no longer
 look idle.
+
+## Configuration
+
+The repository now uses a small selector-based config instead of a long
+comment-and-uncomment provider block.
+
+- Edit `conf/config.yaml` for normal source-checkout work.
+- Keep real secrets in `.env`, not in tracked YAML files.
+- Copy `.env.example` to `.env` and fill only the provider keys you actually
+  use.
+- For the full workflow, profile names, and common examples, see
+  [`CONFIG.MD`](./CONFIG.MD).
 
 Benchmark helpers:
 
@@ -378,6 +394,8 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
 
 - [`EEE_196_CARD_UCL.md`](./EEE_196_CARD_UCL.md): the CARD paper and project
   manuscript
+- [`CONFIG.MD`](./CONFIG.MD): runtime config, `.env`, provider profiles, and
+  common configuration examples
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current
   architecture, runtime flow, commands, and maintenance expectations
 - [`coder_docs/research_agents.md`](./coder_docs/research_agents.md):

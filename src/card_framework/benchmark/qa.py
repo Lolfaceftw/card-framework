@@ -57,6 +57,7 @@ from card_framework.benchmark.qa_settings import (
     resolve_workflow_timeouts,
 )
 from card_framework.benchmark.types import ProviderProfile
+from card_framework.shared.config_loading import load_runtime_config
 from card_framework.shared.events import event_bus
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import configure_logger, logger
@@ -407,10 +408,7 @@ def _load_base_config(config_path: Path) -> DictConfig:
     """Load base application config for provider and logging settings."""
     if not config_path.exists():
         raise QABenchmarkRuntimeError(f"Config path does not exist: {config_path}")
-    cfg = OmegaConf.load(config_path)
-    if not isinstance(cfg, DictConfig):
-        raise QABenchmarkRuntimeError("Failed to load benchmark base config")
-    return cfg
+    return load_runtime_config(config_path)
 
 
 def _load_qa_config(qa_config_path: Path) -> DictConfig:
