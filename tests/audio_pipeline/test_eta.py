@@ -344,3 +344,77 @@ def test_audio_orchestrator_separation_progress_emits_inline_and_log_updates() -
         for message in log_messages
     )
 
+
+@pytest.mark.parametrize(
+    ("stage", "description", "note"),
+    [
+        ("separation", "separating sources from sample.wav", "chunk 1/2"),
+        ("transcription", "transcribing vocals sample.wav", "segment 1/2"),
+    ],
+)
+def test_audio_orchestrator_uses_default_eta_without_history(
+    stage: str,
+    description: str,
+    note: str,
+) -> None:
+    """Use configured stage multipliers for audio ETA before any history exists."""
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=4.0, cuda=0.8),
+        transcription=StageSpeedProfile(cpu=1.5, cuda=0.35),
+        diarization=StageSpeedProfile(cpu=2.5, cuda=0.9),
+    )
+    assert not strategy.has_stage_history(stage=stage, device="cpu")
+
+    orchestrator = AudioToScriptOrchestrator(
+        separator=object(),
+        transcriber=object(),
+        diarizer=object(),
+        eta_strategy=strategy,
+        eta_update_interval_seconds=0.0,
+    )
+    system_messages: list[str] = []
+    status_messages: list[str] = []
+
+    def _capture_system(message: str) -> None:
+        system_messages.append(message)
+
+    def _capture_status(message: str, inline: bool = False) -> None:
+        del inline
+        status_messages.append(message)
+
+    from card_framework.shared.events import event_bus
+
+    event_bus.subscribe("system_message", _capture_system)
+    event_bus.subscribe("status_message", _capture_status)
+    try:
+        result = orchestrator._run_stage_with_eta(
+            stage=stage,
+            description=description,
+            audio_duration_ms=60_000,
+            device="cpu",
+            operation=lambda progress_callback: (
+                progress_callback(
+                    StageProgressUpdate(
+                        completed_units=1,
+                        total_units=2,
+                        processed_audio_ms=30_000,
+                        note=note,
+                    )
+                ),
+                "ok",
+            )[1],
+        )
+    finally:
+        event_bus.unsubscribe("system_message", _capture_system)
+        event_bus.unsubscribe("status_message", _capture_status)
+
+    assert result == "ok"
+    assert any(
+        message.startswith(f"Audio stage: {description} (estimated time left ")
+        for message in system_messages
+    )
+    assert any(
+        message.startswith(f"Audio stage: {stage} {note}; estimated time left ")
+        for message in status_messages
+    )
+

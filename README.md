@@ -175,10 +175,11 @@ phases such as packaged runtime setup, transcript loading, calibration,
 provider setup, retrieval indexing, and A2A readiness so cold starts no longer
 look idle. Stage-1 transcription now uses the same timed loading pattern for
 the default Granite Speech model load and publishes inline progress such as
-`segment 3/12` plus an ETA once the audio stage has learned transcription
-history. Stage-1 separation now also emits timed Demucs loading/status lines,
-and long source files are separated in bounded outer windows so RAM does not
-scale with the full recording length.
+`segment 3/12` plus an ETA from the configured/default stage throughput on the
+first run, then refines later runs with learned history. Stage-1 separation now
+also emits timed Demucs loading/status lines and the same first-run ETA
+behavior, while long source files are separated in bounded outer windows so RAM
+does not scale with the full recording length.
 
 ## Configuration
 

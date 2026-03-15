@@ -73,8 +73,9 @@ audio:
 - `granite_speech` is the default ASR backend for new runs.
 - The runtime chunks preprocessed audio into `30s` windows with `5s` overlap.
 - Stage-1 now emits timed Granite model loading messages and inline
-  transcription progress such as `segment 2/9` plus an ETA when the audio ETA
-  tracker has learned stage history.
+  transcription progress such as `segment 2/9` plus an ETA on the first run
+  from the configured/default audio ETA profile, then refines later runs with
+  learned stage history.
 - `faster_whisper` is still supported, but it is now an explicit opt-in
   provider instead of the default.
 

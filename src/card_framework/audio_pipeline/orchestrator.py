@@ -26,7 +26,6 @@ from card_framework.audio_pipeline.eta import (
     EtaProfilePersistence,
     StageProgressCallback,
     StageProgressUpdate,
-    StageEtaHistory,
     StageEtaLearner,
     StageEtaStrategy,
     default_stage_eta_strategy,
@@ -410,11 +409,6 @@ class AudioToScriptOrchestrator:
     ) -> float | None:
         """Estimate stage duration from strategy and known audio length."""
         if audio_duration_ms is None:
-            return None
-        if (
-            isinstance(self.eta_strategy, StageEtaHistory)
-            and not self.eta_strategy.has_stage_history(stage=stage, device=device)
-        ):
             return None
         return self.eta_strategy.estimate_total_seconds(
             stage=stage,

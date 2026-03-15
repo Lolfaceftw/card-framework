@@ -1,3 +1,7 @@
+### 2026-03-15T12:45:37.0083186+08:00 - Audio-Stage ETA Should Not Wait For Learned History
+- Problem: Separation and transcription already had configured/default throughput multipliers, but the orchestrator suppressed ETA entirely until a learned or persisted stage-history sample existed. That made first-run stage-1 logs look inconsistent with the new chunk-progress reporting even when the runtime knew the input audio duration.
+- Solution: Let the orchestrator estimate audio-stage ETA whenever duration is known, using the strategy's configured/default throughput on first run and refining future runs from learned or persisted history.
+
 ### 2026-03-15T12:40:00+08:00 - Long Demucs Separations Need Outer Windowing Or RAM Scales With Full Track Length
 - Problem: The stage-1 separator was invoking `python -m demucs.separate` on the entire source file. For multi-hour stereo WAV inputs that made Demucs allocate full-length float32 mixture/output tensors, so one `python.exe` child could spike into double-digit gigabytes before Granite ASR even started.
 - Solution: Keep `htdemucs` as the separator, but wrap it in repo-level outer windowing with bounded `audio.separation.window_length_seconds` plus `window_context_seconds`, trim each chunk back to its base window after separation, stitch the vocals windows back together, and emit timed loading plus `chunk i/N` progress so operators can see that the RAM-heavy step is bounded work rather than a hung process.
