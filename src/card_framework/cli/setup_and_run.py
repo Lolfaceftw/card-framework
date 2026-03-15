@@ -15,11 +15,12 @@ from typing import Any, Literal, Mapping, Sequence, TypeAlias, cast
 
 from card_framework.runtime.bootstrap import ensure_index_tts_runtime
 from card_framework.shared.paths import (
-    DEFAULT_CONFIG_PATH as PACKAGED_DEFAULT_CONFIG_PATH,
+    DEFAULT_CONFIG_PATH as SHARED_DEFAULT_CONFIG_PATH,
     REPO_ROOT,
     VENDOR_INDEX_TTS_DIR,
     discover_reusable_transcript_path,
 )
+from card_framework.shared.perf import report_loading_duration
 from card_framework.shared.runtime_layout import resolve_runtime_layout
 
 MAIN_MODULE = "card_framework.cli.main"
@@ -102,6 +103,11 @@ class ModelProvisionResult:
 
     downloaded: bool
     source: str
+
+
+def _emit_setup_status(message: str) -> None:
+    """Emit one operator-facing setup status line to stderr."""
+    print(message, file=sys.stderr, flush=True)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -193,7 +199,7 @@ def resolve_repo_config_path() -> Path:
         return Path(CONFIG_FILE_PATH).resolve()
     if DEFAULT_CONFIG_PATH is not None:
         return Path(DEFAULT_CONFIG_PATH).resolve()
-    return PACKAGED_DEFAULT_CONFIG_PATH.resolve()
+    return SHARED_DEFAULT_CONFIG_PATH.resolve()
 
 
 def resolve_workspace_root() -> Path:
@@ -381,11 +387,11 @@ def check_prerequisites(
 
 
 def build_tool_guidance(missing_tools: Sequence[str]) -> str:
-    """Return concise Windows-first install guidance for missing tools."""
+    """Return concise cross-platform install guidance for missing tools."""
     guidance_map = {
-        "uv": "Install uv: `pip install -U uv`.",
-        "git": "Install Git for Windows: https://git-scm.com/download/win",
-        "ffmpeg": "Install FFmpeg and add it to PATH: https://www.gyan.dev/ffmpeg/builds/",
+        "uv": "Install uv into the active environment: `python -m pip install -U uv`.",
+        "git": "Install Git and ensure `git` is on PATH: https://git-scm.com/downloads",
+        "ffmpeg": "Install FFmpeg and add it to PATH: https://ffmpeg.org/download.html",
     }
     guidance_parts = [guidance_map[tool] for tool in missing_tools if tool in guidance_map]
     return " ".join(guidance_parts)
@@ -1784,10 +1790,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print("[2/6] IndexTTS repository sync")
         if synthesis_enabled:
-            repo_result = ensure_indextts_repo(
-                git_executable=args.git_executable,
-                skip_update=bool(args.skip_repo_update),
-            )
+            with report_loading_duration(
+                "vendored IndexTTS runtime",
+                reporter=_emit_setup_status,
+            ):
+                repo_result = ensure_indextts_repo(
+                    git_executable=args.git_executable,
+                    skip_update=bool(args.skip_repo_update),
+                )
             repo_detail = (
                 f"cloned={repo_result.cloned}, updated={repo_result.updated}, "
                 f"pull_skipped_dirty={repo_result.pull_skipped_dirty}, "
@@ -1815,14 +1825,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 python_executable=sys.executable,
                 force_sync=bool(args.force_sync),
                 force_model_download=bool(args.force_model_download),
+                reporter=_emit_setup_status,
             )
             detail = f"packaged runtime ready at {layout.vendor_runtime_dir}"
         else:
-            synced_projects = smart_sync_projects(
-                uv_executable=args.uv_executable,
-                force_sync=bool(args.force_sync),
-                include_index_tts=synthesis_enabled,
-            )
+            with report_loading_duration(
+                "runtime dependency sync",
+                reporter=_emit_setup_status,
+            ):
+                synced_projects = smart_sync_projects(
+                    uv_executable=args.uv_executable,
+                    force_sync=bool(args.force_sync),
+                    include_index_tts=synthesis_enabled,
+                )
             if synced_projects:
                 detail = f"synced projects: {', '.join(synced_projects)}"
             else:
@@ -1839,10 +1854,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         elif synthesis_enabled:
-            model_result = ensure_indextts_model(
-                uv_executable=args.uv_executable,
-                force_download=bool(args.force_model_download),
-            )
+            with report_loading_duration(
+                "IndexTTS model provisioning",
+                reporter=_emit_setup_status,
+            ):
+                model_result = ensure_indextts_model(
+                    uv_executable=args.uv_executable,
+                    force_download=bool(args.force_model_download),
+                )
             model_detail = (
                 f"downloaded={model_result.downloaded}, source={model_result.source}"
             )
@@ -2028,11 +2047,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if calibration_warning_message is not None:
                 print(f"Note: {calibration_warning_message}")
-            run_calibration(
-                uv_executable=args.uv_executable,
-                transcript_path=resolved_transcript_override,
-                audio_path=resolved_audio_path,
-            )
+            with report_loading_duration(
+                "voice-clone calibration helper",
+                reporter=_emit_setup_status,
+            ):
+                run_calibration(
+                    uv_executable=args.uv_executable,
+                    transcript_path=resolved_transcript_override,
+                    audio_path=resolved_audio_path,
+                )
             records.append(
                 StepRecord(
                     name="calibration",

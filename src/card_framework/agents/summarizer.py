@@ -1,4 +1,4 @@
-﻿"""Summarizer executor with duration-aware incremental tool use."""
+"""Summarizer executor with duration-aware incremental tool use."""
 
 from __future__ import annotations
 
@@ -19,9 +19,14 @@ from card_framework.agents.summarizer_tool_dispatcher import (
     SummarizerToolDispatcher,
     coerce_positive_int,
 )
-from card_framework.agents.tool_handlers import build_revise_tools, build_summarizer_tools
+from card_framework.agents.tool_handlers import (
+    build_revise_tools,
+    build_summarizer_tools,
+)
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
-from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
+from card_framework.audio_pipeline.live_draft_voice_clone import (
+    LiveDraftVoiceCloneSession,
+)
 from card_framework.audio_pipeline.voice_clone_orchestrator import (
     VoiceCloneOrchestrator,
     load_speaker_sample_references,
@@ -29,7 +34,11 @@ from card_framework.audio_pipeline.voice_clone_orchestrator import (
 from card_framework.shared.events import EventBus, get_event_bus
 from card_framework.shared.llm_provider import LLMProvider
 from card_framework.shared.prompt_manager import PromptManager
-from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml, serialize_summary_turns
+from card_framework.shared.summary_xml import (
+    DEFAULT_EMO_PRESET,
+    parse_summary_xml,
+    serialize_summary_turns,
+)
 
 
 class SummarizerExecutor(BaseA2AExecutor):
@@ -149,8 +158,8 @@ class SummarizerExecutor(BaseA2AExecutor):
             raw_prefix, content = line.split("]: ", 1)
             prefix = f"{raw_prefix}]: "
 
-        available = cls._FULL_TRANSCRIPT_EXCERPT_LINE_CHAR_CAP - len(prefix) - len(
-            suffix
+        available = (
+            cls._FULL_TRANSCRIPT_EXCERPT_LINE_CHAR_CAP - len(prefix) - len(suffix)
         )
         if available <= 0:
             trimmed_prefix = prefix[
@@ -351,11 +360,13 @@ class SummarizerExecutor(BaseA2AExecutor):
         )
 
     async def handle_task(
-        self, task_data: dict[str, Any], context: RequestContext, event_queue: EventQueue
+        self,
+        task_data: dict[str, Any],
+        context: RequestContext,
+        event_queue: EventQueue,
     ) -> None:
         from card_framework.agents.dtos import SummarizerTaskRequest
 
-        del context
         req = SummarizerTaskRequest.model_validate(task_data)
         feedback = req.feedback
         retrieval_port = req.retrieval_port
@@ -364,9 +375,7 @@ class SummarizerExecutor(BaseA2AExecutor):
         speaker_samples_manifest_path = str(
             getattr(req, "speaker_samples_manifest_path", "")
         ).strip()
-        draft_audio_state_path = str(
-            getattr(req, "draft_audio_state_path", "")
-        ).strip()
+        draft_audio_state_path = str(getattr(req, "draft_audio_state_path", "")).strip()
         loop_context = getattr(req, "loop_context", task_data.get("loop_context", ""))
         loop_context_block = self._build_loop_context_prompt_block(loop_context)
         target_seconds = self._resolve_target_seconds(task_data=task_data, req=req)
@@ -505,7 +514,9 @@ class SummarizerExecutor(BaseA2AExecutor):
                 user_prompt=query_user_prompt,
                 max_tokens=64,
             ).strip()
-            self.event_bus.publish("system_message", f"Generated query: {retrieve_query}")
+            self.event_bus.publish(
+                "system_message", f"Generated query: {retrieve_query}"
+            )
 
             retrieve_task = RetrieveTaskRequest(
                 action="retrieve", query=retrieve_query, top_k=20
@@ -625,12 +636,16 @@ class SummarizerExecutor(BaseA2AExecutor):
             self.name,
             f"Tool-generated XML output:\n```xml\n{result_xml}\n```",
         )
-        await self.send_response(result_xml, event_queue)
+        await self.send_response(result_xml, context, event_queue)
 
     @staticmethod
     def _load_draft_into_registry(registry: MessageRegistry, draft_xml: str) -> None:
-        """Parse existing summary XML back into the registry."""
-        for turn in parse_summary_xml(draft_xml):
+        """Parse existing summary XML back into the registry when valid."""
+        try:
+            turns = parse_summary_xml(draft_xml)
+        except ValueError:
+            return
+        for turn in turns:
             registry.add(turn.speaker, turn.text, turn.emo_preset)
 
     async def process_tool_calls(
@@ -642,4 +657,3 @@ class SummarizerExecutor(BaseA2AExecutor):
             messages=messages,
             context_data=context_data,
         )
-

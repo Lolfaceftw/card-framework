@@ -23,6 +23,7 @@ from card_framework.audio_pipeline.gateways.fallback_gateways import (
     SingleSpeakerDiarizer,
 )
 from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
+from card_framework.audio_pipeline.gateways.granite_speech_gateway import GraniteSpeechTranscriber
 from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
 from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
 from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
@@ -56,13 +57,18 @@ def test_factory_builds_default_strategies() -> None:
     orchestrator = build_audio_to_script_orchestrator(
         {
             "separation": {"provider": "demucs", "model": "htdemucs"},
-            "asr": {"provider": "faster_whisper", "model": "large-v3"},
+            "asr": {
+                "provider": "granite_speech",
+                "model": "ibm-granite/granite-4.0-1b-speech",
+            },
             "diarization": {"provider": "nemo"},
         }
     )
 
     assert isinstance(orchestrator.separator, DemucsSourceSeparator)
-    assert isinstance(orchestrator.transcriber, FasterWhisperTranscriber)
+    assert orchestrator.separator.window_length_seconds == 600
+    assert orchestrator.separator.window_context_seconds == 5
+    assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is False
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
@@ -72,7 +78,7 @@ def test_factory_builds_eta_strategy_from_config() -> None:
     orchestrator = build_audio_to_script_orchestrator(
         {
             "separation": {"provider": "demucs", "model": "htdemucs"},
-            "asr": {"provider": "faster_whisper", "model": "large-v3"},
+            "asr": {"provider": "granite_speech"},
             "diarization": {"provider": "nemo"},
             "eta": {
                 "update_interval_seconds": 5,
@@ -127,6 +133,7 @@ def test_factory_supports_fallback_strategies() -> None:
     )
 
     assert isinstance(orchestrator.separator, PassthroughSourceSeparator)
+    assert isinstance(orchestrator.transcriber, FasterWhisperTranscriber)
     assert isinstance(orchestrator.diarizer, SingleSpeakerDiarizer)
 
 
@@ -134,7 +141,7 @@ def test_factory_allows_explicit_single_speaker_fallback_opt_in() -> None:
     orchestrator = build_audio_to_script_orchestrator(
         {
             "separation": {"provider": "demucs", "model": "htdemucs"},
-            "asr": {"provider": "faster_whisper", "model": "large-v3"},
+            "asr": {"provider": "granite_speech"},
             "diarization": {
                 "provider": "nemo",
                 "allow_single_speaker_fallback": True,
@@ -216,7 +223,7 @@ def test_factory_raises_for_unknown_provider() -> None:
         build_audio_to_script_orchestrator(
             {
                 "separation": {"provider": "unknown_provider"},
-                "asr": {"provider": "faster_whisper"},
+                "asr": {"provider": "granite_speech"},
                 "diarization": {"provider": "nemo"},
             }
         )
@@ -227,7 +234,7 @@ def test_factory_validates_eta_adaptive_bounds() -> None:
         build_audio_to_script_orchestrator(
             {
                 "separation": {"provider": "demucs"},
-                "asr": {"provider": "faster_whisper"},
+                "asr": {"provider": "granite_speech"},
                 "diarization": {"provider": "nemo"},
                 "eta": {
                     "adaptive": {
@@ -245,7 +252,7 @@ def test_factory_validates_eta_dynamic_bounds() -> None:
         build_audio_to_script_orchestrator(
             {
                 "separation": {"provider": "demucs"},
-                "asr": {"provider": "faster_whisper"},
+                "asr": {"provider": "granite_speech"},
                 "diarization": {"provider": "nemo"},
                 "eta": {
                     "dynamic": {
@@ -256,6 +263,34 @@ def test_factory_validates_eta_dynamic_bounds() -> None:
                 },
             }
         )
+
+
+def test_factory_builds_granite_transcriber_defaults() -> None:
+    orchestrator = build_audio_to_script_orchestrator(
+        {
+            "asr": {},
+        }
+    )
+
+    assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
+    assert orchestrator.transcriber.model_name == "ibm-granite/granite-4.0-1b-speech"
+    assert orchestrator.transcriber.chunk_length_seconds == 30
+    assert orchestrator.transcriber.chunk_overlap_seconds == 5
+    assert orchestrator.transcriber.max_new_tokens == 200
+    assert orchestrator.transcriber.language == "en"
+
+
+def test_factory_builds_demucs_separator_defaults() -> None:
+    orchestrator = build_audio_to_script_orchestrator(
+        {
+            "separation": {},
+        }
+    )
+
+    assert isinstance(orchestrator.separator, DemucsSourceSeparator)
+    assert orchestrator.separator.model_name == "htdemucs"
+    assert orchestrator.separator.window_length_seconds == 600
+    assert orchestrator.separator.window_context_seconds == 5
 
 
 def test_factory_builds_speaker_sample_generator_defaults() -> None:

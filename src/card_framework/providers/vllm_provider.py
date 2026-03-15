@@ -1,4 +1,4 @@
-﻿"""
+"""
 vLLM / OpenAI-Compatible LLM Provider
 ======================================
 Wraps any OpenAI-compatible endpoint (vLLM, ollama, LiteLLM, etc.)
@@ -7,7 +7,7 @@ behind the LLMProvider strategy interface.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import re
 from typing import Any
 
@@ -21,8 +21,10 @@ from card_framework.shared.llm_provider import (
     LLMResponseCallback,
     MessageInput,
     NullLLMResponseCallback,
+    StreamingResponseAbort,
     ToolChoice,
     ToolInput,
+    infer_agent_name_from_text,
     infer_agent_name,
     normalize_messages,
     normalize_tools,
@@ -65,7 +67,7 @@ class VLLMProvider(LLMProvider):
         )
         self._did_log_reasoning_fallback_warning = False
         self.request_timeout_seconds = max(1.0, float(request_timeout_seconds))
-        self.thinking_extra_body = thinking_extra_body or {
+        self.thinking_extra_body = self._coerce_jsonable(thinking_extra_body) or {
             "chat_template_kwargs": {"enable_thinking": True}
         }
         self._client = OpenAI(
@@ -83,6 +85,18 @@ class VLLMProvider(LLMProvider):
             "system_message",
             f"Connected to VLLM -> model={self.model_id}, url={self.base_url}",
         )
+
+    @classmethod
+    def _coerce_jsonable(cls, value: Any) -> Any:
+        """Convert nested config containers into JSON-serializable builtins."""
+        if isinstance(value, Mapping):
+            return {
+                str(key): cls._coerce_jsonable(raw_value)
+                for key, raw_value in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._coerce_jsonable(item) for item in value]
+        return value
 
     def set_response_callback(self, response_callback: LLMResponseCallback) -> None:
         """Replace the streaming callback sink at runtime."""
@@ -140,6 +154,61 @@ class VLLMProvider(LLMProvider):
             )
         return fallback_content
 
+    def _non_stream_create_kwargs(
+        self, create_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Clone request kwargs for a non-streaming fallback request."""
+        fallback_kwargs = dict(create_kwargs)
+        fallback_kwargs["stream"] = False
+        fallback_kwargs.pop("stream_options", None)
+        return fallback_kwargs
+
+    def _generate_non_streaming(self, create_kwargs: dict[str, Any]) -> str:
+        """Fallback to a non-streaming generate request when streaming fails."""
+        response = self._client.chat.completions.create(
+            **self._non_stream_create_kwargs(create_kwargs)
+        )
+        message = response.choices[0].message
+        content = str(message.content or "")
+        reasoning = str(getattr(message, "reasoning_content", "") or "")
+        return self._resolve_streamed_content(
+            content=content,
+            reasoning=reasoning,
+            operation="generate_non_streaming",
+        )
+
+    def _chat_non_streaming(self, create_kwargs: dict[str, Any]) -> AssistantMessage:
+        """Fallback to a non-streaming chat request when streaming fails."""
+        response = self._client.chat.completions.create(
+            **self._non_stream_create_kwargs(create_kwargs)
+        )
+        message = response.choices[0].message
+        raw_tool_calls = list(message.tool_calls or [])
+        final_tool_calls = [
+            ToolCall(
+                id=str(getattr(tool_call, "id", None) or f"call_{index}"),
+                function=Function(
+                    name=str(getattr(tool_call.function, "name", "")),
+                    arguments=str(getattr(tool_call.function, "arguments", "")),
+                ),
+            )
+            for index, tool_call in enumerate(raw_tool_calls)
+        ]
+        content = str(message.content or "")
+        reasoning = str(getattr(message, "reasoning_content", "") or "")
+        resolved_content = content
+        if not final_tool_calls:
+            resolved_content = self._resolve_streamed_content(
+                content=content,
+                reasoning=reasoning,
+                operation="chat_non_streaming",
+            )
+        return AssistantMessage(
+            content=resolved_content,
+            tool_calls=final_tool_calls if final_tool_calls else None,
+            reasoning_content=reasoning.strip() if reasoning.strip() else None,
+        )
+
     @staticmethod
     def _looks_like_structured_output(candidate: str) -> bool:
         """Return whether a text payload looks like JSON/XML/fenced structured data."""
@@ -177,32 +246,43 @@ class VLLMProvider(LLMProvider):
             create_kwargs["max_tokens"] = max_tokens
         create_kwargs = self._maybe_enable_thinking(create_kwargs)
 
-        response = self._client.chat.completions.create(**create_kwargs)
-
-        full_content = ""
-        full_thought = ""
-        self._response_callback.on_start("Agent")
         try:
-            for chunk in response:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
+            response = self._client.chat.completions.create(**create_kwargs)
 
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    self._response_callback.on_thought_token(delta.reasoning_content)
-                    full_thought += delta.reasoning_content
+            full_content = ""
+            full_thought = ""
+            self._response_callback.on_start(infer_agent_name_from_text(system_prompt))
+            try:
+                for chunk in response:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
 
-                if hasattr(delta, "content") and delta.content:
-                    self._response_callback.on_content_token(delta.content)
-                    full_content += delta.content
-        finally:
-            self._response_callback.on_complete()
+                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                        self._response_callback.on_thought_token(
+                            delta.reasoning_content
+                        )
+                        full_thought += delta.reasoning_content
 
-        return self._resolve_streamed_content(
-            content=full_content,
-            reasoning=full_thought,
-            operation="generate",
-        )
+                    if hasattr(delta, "content") and delta.content:
+                        self._response_callback.on_content_token(delta.content)
+                        full_content += delta.content
+            finally:
+                self._response_callback.on_complete()
+
+            return self._resolve_streamed_content(
+                content=full_content,
+                reasoning=full_thought,
+                operation="generate",
+            )
+        except StreamingResponseAbort:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[VLLMProvider] Streaming generate failed; retrying non-streaming: %s",
+                exc,
+            )
+            return self._generate_non_streaming(create_kwargs)
 
     def chat(
         self,
@@ -228,73 +308,87 @@ class VLLMProvider(LLMProvider):
             create_kwargs["max_tokens"] = max_tokens
         create_kwargs = self._maybe_enable_thinking(create_kwargs)
 
-        response_stream = self._client.chat.completions.create(**create_kwargs)
-
-        full_content = ""
-        full_thought = ""
-        tool_calls_data: list[dict[str, Any]] = []
-
-        agent_name = infer_agent_name(messages)
-        self._response_callback.on_start(agent_name)
         try:
-            for chunk in response_stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
+            response_stream = self._client.chat.completions.create(**create_kwargs)
 
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    self._response_callback.on_thought_token(delta.reasoning_content)
-                    full_thought += delta.reasoning_content
+            full_content = ""
+            full_thought = ""
+            tool_calls_data: list[dict[str, Any]] = []
 
-                if hasattr(delta, "content") and delta.content:
-                    self._response_callback.on_content_token(delta.content)
-                    full_content += delta.content
+            agent_name = infer_agent_name(messages)
+            self._response_callback.on_start(agent_name)
+            try:
+                for chunk in response_stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
 
-                if hasattr(delta, "tool_calls") and delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        while len(tool_calls_data) <= tc_delta.index:
-                            tool_calls_data.append(
-                                {
-                                    "id": None,
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""},
-                                }
-                            )
+                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                        self._response_callback.on_thought_token(
+                            delta.reasoning_content
+                        )
+                        full_thought += delta.reasoning_content
 
-                        tool_call = tool_calls_data[tc_delta.index]
-                        if tc_delta.id:
-                            tool_call["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                tool_call["function"]["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tool_call["function"]["arguments"] += (
-                                    tc_delta.function.arguments
+                    if hasattr(delta, "content") and delta.content:
+                        self._response_callback.on_content_token(delta.content)
+                        full_content += delta.content
+
+                    if hasattr(delta, "tool_calls") and delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            while len(tool_calls_data) <= tc_delta.index:
+                                tool_calls_data.append(
+                                    {
+                                        "id": None,
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    }
                                 )
-        finally:
-            self._response_callback.on_complete()
 
-        final_tool_calls = [
-            ToolCall(
-                id=str(tc.get("id") or f"call_{index}"),
-                function=Function(
-                    name=str(tc["function"]["name"]),
-                    arguments=str(tc["function"]["arguments"]),
-                ),
+                            tool_call = tool_calls_data[tc_delta.index]
+                            if tc_delta.id:
+                                tool_call["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    tool_call["function"]["name"] += (
+                                        tc_delta.function.name
+                                    )
+                                if tc_delta.function.arguments:
+                                    tool_call["function"]["arguments"] += (
+                                        tc_delta.function.arguments
+                                    )
+            finally:
+                self._response_callback.on_complete()
+
+            final_tool_calls = [
+                ToolCall(
+                    id=str(tc.get("id") or f"call_{index}"),
+                    function=Function(
+                        name=str(tc["function"]["name"]),
+                        arguments=str(tc["function"]["arguments"]),
+                    ),
+                )
+                for index, tc in enumerate(tool_calls_data)
+            ]
+            resolved_content = full_content
+            if not final_tool_calls:
+                resolved_content = self._resolve_streamed_content(
+                    content=full_content,
+                    reasoning=full_thought,
+                    operation="chat",
+                )
+
+            return AssistantMessage(
+                content=resolved_content,
+                tool_calls=final_tool_calls if final_tool_calls else None,
+                reasoning_content=full_thought.strip()
+                if full_thought.strip()
+                else None,
             )
-            for index, tc in enumerate(tool_calls_data)
-        ]
-        resolved_content = full_content
-        if not final_tool_calls:
-            resolved_content = self._resolve_streamed_content(
-                content=full_content,
-                reasoning=full_thought,
-                operation="chat",
+        except StreamingResponseAbort:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[VLLMProvider] Streaming chat failed; retrying non-streaming: %s",
+                exc,
             )
-
-        return AssistantMessage(
-            content=resolved_content,
-            tool_calls=final_tool_calls if final_tool_calls else None,
-            reasoning_content=full_thought.strip() if full_thought.strip() else None,
-        )
-
+            return self._chat_non_streaming(create_kwargs)

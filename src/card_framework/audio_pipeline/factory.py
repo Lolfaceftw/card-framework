@@ -20,6 +20,7 @@ from card_framework.audio_pipeline.gateways.fallback_gateways import (
     SingleSpeakerDiarizer,
 )
 from card_framework.audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
+from card_framework.audio_pipeline.gateways.granite_speech_gateway import GraniteSpeechTranscriber
 from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
 from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
 from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
@@ -40,6 +41,8 @@ from card_framework.audio_pipeline.speaker_samples import SpeakerSampleGenerator
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneProvider
 from card_framework.audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
 from card_framework.shared.llm_provider import LLMProvider
+
+
 def build_audio_to_script_orchestrator(
     audio_cfg: Mapping[str, Any],
 ) -> AudioToScriptOrchestrator:
@@ -332,6 +335,12 @@ def _build_separator(
             timeout_seconds=int(separation_cfg.get("timeout_seconds", 1800)),
             max_retries=int(retry_cfg.get("attempts", 2)),
             retry_base_seconds=float(retry_cfg.get("base_delay_seconds", 1.0)),
+            window_length_seconds=int(
+                separation_cfg.get("window_length_seconds", 600)
+            ),
+            window_context_seconds=int(
+                separation_cfg.get("window_context_seconds", 5)
+            ),
         )
     if provider in {"passthrough", "none"}:
         return PassthroughSourceSeparator()
@@ -340,9 +349,22 @@ def _build_separator(
 
 def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
     """Factory method for ASR strategy."""
-    provider = str(asr_cfg.get("provider", "faster_whisper")).strip().lower()
+    provider = str(asr_cfg.get("provider", "granite_speech")).strip().lower()
+    forced_alignment_cfg = _as_mapping(asr_cfg.get("forced_alignment", {}))
+    if provider == "granite_speech":
+        return GraniteSpeechTranscriber(
+            model_name=str(
+                asr_cfg.get("model", "ibm-granite/granite-4.0-1b-speech")
+            ),
+            language=(str(asr_cfg.get("language", "en")).strip() or "en"),
+            chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 30)),
+            chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 5)),
+            max_new_tokens=int(asr_cfg.get("max_new_tokens", 200)),
+            enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
+            require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),
+            forced_alignment_batch_size=int(forced_alignment_cfg.get("batch_size", 8)),
+        )
     if provider == "faster_whisper":
-        forced_alignment_cfg = _as_mapping(asr_cfg.get("forced_alignment", {}))
         return FasterWhisperTranscriber(
             model_name=str(asr_cfg.get("model", "large-v3")),
             compute_type_cuda=str(asr_cfg.get("compute_type_cuda", "int8_float16")),

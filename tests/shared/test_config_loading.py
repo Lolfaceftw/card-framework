@@ -1,0 +1,121 @@
+"""Tests for runtime config normalization and validation."""
+
+from __future__ import annotations
+
+import pytest
+
+from card_framework.shared.config_loading import (
+    RuntimeConfigError,
+    normalize_runtime_config_mapping,
+    validate_runtime_credentials,
+)
+
+
+def test_normalize_runtime_config_mapping_materializes_selected_profiles() -> None:
+    """Materialize explicit runtime sections from selection and profiles."""
+
+    normalized = normalize_runtime_config_mapping(
+        {
+            "selection": {
+                "llm": "vllm_local",
+                "embedding": "disabled",
+                "stage_llm": {"critic": "deepseek_reasoner"},
+            },
+            "profiles": {
+                "llm": {
+                    "vllm_local": {
+                        "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+                        "base_url": "http://localhost:8000/v1",
+                        "api_key": "EMPTY",
+                    },
+                    "deepseek_reasoner": {
+                        "_target_": "card_framework.providers.deepseek_provider.DeepSeekProvider",
+                        "api_key": "",
+                        "model": "deepseek-reasoner",
+                        "base_url": "https://api.deepseek.com",
+                    },
+                },
+                "embedding": {
+                    "disabled": {
+                        "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+                    }
+                },
+            },
+        }
+    )
+
+    assert normalized["llm"]["_target_"] == (
+        "card_framework.providers.vllm_provider.VLLMProvider"
+    )
+    assert normalized["embedding"]["_target_"] == (
+        "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+    )
+    assert normalized["stage_llm"]["summarizer"] == {}
+    assert normalized["stage_llm"]["interjector"] == {}
+    assert normalized["stage_llm"]["critic"]["model"] == "deepseek-reasoner"
+
+
+def test_normalize_runtime_config_mapping_preserves_explicit_runtime_sections() -> None:
+    """Prefer explicit runtime sections over selector-derived values."""
+
+    normalized = normalize_runtime_config_mapping(
+        {
+            "selection": {
+                "llm": "vllm_local",
+                "embedding": "disabled",
+            },
+            "profiles": {
+                "llm": {
+                    "vllm_local": {
+                        "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+                        "base_url": "http://localhost:8000/v1",
+                        "api_key": "EMPTY",
+                    }
+                },
+                "embedding": {
+                    "disabled": {
+                        "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+                    }
+                },
+            },
+            "llm": {
+                "_target_": "card_framework.providers.deepseek_provider.DeepSeekProvider",
+                "api_key": "from_override",
+            },
+            "stage_llm": {"critic": {}},
+        }
+    )
+
+    assert normalized["llm"]["_target_"] == (
+        "card_framework.providers.deepseek_provider.DeepSeekProvider"
+    )
+    assert normalized["llm"]["api_key"] == "from_override"
+    assert normalized["stage_llm"]["critic"] == {}
+    assert normalized["stage_llm"]["summarizer"] == {}
+    assert normalized["stage_llm"]["interjector"] == {}
+
+
+def test_validate_runtime_credentials_reports_missing_selected_provider_secret() -> None:
+    """Raise an actionable error when the selected provider secret is absent."""
+
+    with pytest.raises(RuntimeConfigError, match="DEEPSEEK_API_KEY"):
+        validate_runtime_credentials(
+            {
+                "selection": {"llm": "deepseek_chat", "embedding": "disabled"},
+                "profiles": {
+                    "llm": {
+                        "deepseek_chat": {
+                            "_target_": "card_framework.providers.deepseek_provider.DeepSeekProvider",
+                            "api_key": "",
+                            "model": "deepseek-chat",
+                            "base_url": "https://api.deepseek.com",
+                        }
+                    },
+                    "embedding": {
+                        "disabled": {
+                            "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+                        }
+                    },
+                },
+            }
+        )

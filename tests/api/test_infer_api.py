@@ -13,13 +13,32 @@ import pytest
 import card_framework.api as infer_api
 from card_framework.api import InferenceResult, infer
 from card_framework.runtime.bootstrap import RuntimeBootstrapError
+from card_framework.shared.perf import report_loading_duration
 from card_framework.shared.runtime_layout import RuntimeLayout
 
 
 @pytest.fixture(autouse=True)
-def _force_windows_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+def _force_supported_packaged_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep infer API tests on the supported packaged-runtime platform by default."""
-    monkeypatch.setattr("card_framework.api.platform.system", lambda: "Windows")
+    _set_runtime_platform(monkeypatch, system="Linux", machine="x86_64")
+
+
+@pytest.fixture(autouse=True)
+def _stub_optional_nemo_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep default infer tests from falling back due to a missing optional NeMo install."""
+    from card_framework.shared import platform_support
+
+    real_find_spec = platform_support.importlib.util.find_spec
+
+    def _fake_find_spec(module_name: str):  # type: ignore[no-untyped-def]
+        if module_name == "nemo":
+            return object()
+        return real_find_spec(module_name)
+
+    monkeypatch.setattr(
+        "card_framework.shared.platform_support.importlib.util.find_spec",
+        _fake_find_spec,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +59,26 @@ def _stub_ctc_forced_aligner_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_runtime_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep infer API tests deterministic against host credential env vars."""
+    for env_var in (
+        "CARD_FRAMEWORK_VLLM_URL",
+        "VLLM_BASE_URL",
+        "CARD_FRAMEWORK_VLLM_API_KEY",
+        "VLLM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "ZAI_API_KEY",
+        "GLM_API_KEY",
+        "HUGGINGFACE_TOKEN",
+        "HF_TOKEN",
+        "HUGGINGFACEHUB_API_TOKEN",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+
 def test_infer_rejects_missing_audio(tmp_path: Path) -> None:
     """Fail fast when the source audio path does not exist."""
     with pytest.raises(FileNotFoundError):
@@ -51,9 +90,20 @@ def test_infer_rejects_unsupported_platform(
     tmp_path: Path,
 ) -> None:
     """Reject packaged whole-pipeline runs outside the supported OS contract."""
-    monkeypatch.setattr("card_framework.api.platform.system", lambda: "Linux")
+    _set_runtime_platform(monkeypatch, system="Linux", machine="arm64")
 
-    with pytest.raises(RuntimeError, match="Windows only"):
+    with pytest.raises(RuntimeError, match="Windows x86_64, Linux x86_64, and macOS arm64"):
+        infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cpu")
+
+
+def test_infer_allows_cpu_on_macos_arm64(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Allow CPU packaged runs on Apple Silicon macOS hosts."""
+    _set_runtime_platform(monkeypatch, system="Darwin", machine="arm64")
+
+    with pytest.raises(FileNotFoundError):
         infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cpu")
 
 
@@ -92,6 +142,17 @@ def test_infer_rejects_cuda_without_supported_126_runtime(
     )
 
     with pytest.raises(RuntimeError, match="only CUDA 12.6"):
+        infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cuda")
+
+
+def test_infer_rejects_cuda_on_macos_arm64(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reject packaged CUDA runs on macOS because the public contract remains CPU-only."""
+    _set_runtime_platform(monkeypatch, system="Darwin", machine="arm64")
+
+    with pytest.raises(RuntimeError, match="CPU-only"):
         infer(tmp_path / "missing.wav", tmp_path / "outputs", 300, device="cuda")
 
 
@@ -340,6 +401,69 @@ def test_infer_runs_pipeline_and_returns_artifact_paths(
     assert "orchestrator.target_seconds=300" in recorded_command
 
 
+def test_infer_reports_timed_loading_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Emit timed operator-facing status lines during packaged infer bootstrap."""
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"RIFF")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "audio:",
+                "  voice_clone:",
+                "    enabled: false",
+                "    live_drafting:",
+                "      enabled: false",
+                "  interjector:",
+                "    enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CARD_FRAMEWORK_CONFIG", str(config_path))
+    monkeypatch.setattr("card_framework.api.ensure_runtime_requirements", lambda **_: None)
+    monkeypatch.setattr(
+        "card_framework.api.resolve_runtime_layout",
+        lambda: _runtime_layout(tmp_path),
+    )
+
+    def _fake_bootstrap(**kwargs: Any) -> None:
+        reporter = kwargs["reporter"]
+        with report_loading_duration(
+            "packaged IndexTTS runtime",
+            reporter=reporter,
+        ):
+            return None
+
+    monkeypatch.setattr("card_framework.api.ensure_index_tts_runtime", _fake_bootstrap)
+    monkeypatch.setattr(
+        "card_framework.api.subprocess.run",
+        lambda command, cwd=None, check=False, capture_output=True, text=True, encoding=None, errors=None, env=None: (
+            _write_success_outputs(
+                _command_output_root(
+                    command,
+                    Path(cwd) if cwd is not None else tmp_path,
+                )
+            )
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+
+    infer(audio_path, tmp_path / "outputs", 180, device="cpu")
+
+    captured = capsys.readouterr()
+    assert "Loading packaged infer runtime config..." in captured.err
+    assert "Loaded packaged infer runtime config in" in captured.err
+    assert "Loading packaged IndexTTS runtime..." in captured.err
+    assert "Loaded packaged IndexTTS runtime in" in captured.err
+
+
 def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -372,7 +496,9 @@ def test_infer_bootstraps_ctc_forced_aligner_for_default_stage1_alignment(
     bootstrap_calls: list[str] = []
     monkeypatch.setattr(
         "card_framework.api.ensure_ctc_forced_aligner_runtime",
-        lambda *, python_executable: bootstrap_calls.append(python_executable),
+        lambda *, python_executable, reporter=None: bootstrap_calls.append(
+            python_executable
+        ),
     )
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
@@ -499,7 +625,9 @@ def test_infer_skips_ctc_forced_aligner_bootstrap_when_alignment_and_interjector
     bootstrap_calls: list[str] = []
     monkeypatch.setattr(
         "card_framework.api.ensure_ctc_forced_aligner_runtime",
-        lambda *, python_executable: bootstrap_calls.append(python_executable),
+        lambda *, python_executable, reporter=None: bootstrap_calls.append(
+            python_executable
+        ),
     )
     monkeypatch.setattr(
         "card_framework.api.subprocess.run",
@@ -982,3 +1110,20 @@ def _mapping(value: object) -> Mapping[str, Any]:
     """Narrow one loaded config node to a string-keyed mapping for assertions."""
     assert isinstance(value, Mapping)
     return value
+
+
+def _set_runtime_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    system: str,
+    machine: str,
+) -> None:
+    """Patch packaged-runtime platform detection to a deterministic host."""
+    monkeypatch.setattr(
+        "card_framework.shared.platform_support.platform_module.system",
+        lambda: system,
+    )
+    monkeypatch.setattr(
+        "card_framework.shared.platform_support.platform_module.machine",
+        lambda: machine,
+    )

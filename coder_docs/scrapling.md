@@ -12,6 +12,10 @@ Authoritative upstream references:
 
 ## Policy
 
+- In Codex sessions, the only supported delegated agent for open-web search and
+  external research is the configured `researcher` research agent.
+- Keep repository reading, local command execution, validation, and
+  implementation in the main thread.
 - Use Scrapling MCP for external web search, page retrieval, and extraction as the required default workflow.
 - Treat generic non-Scrapling web-search and browsing tools as disallowed whenever Scrapling can satisfy the task.
 - Prefer direct authoritative URLs over generic search-result pages whenever the destination is already known.
@@ -214,5 +218,7 @@ The goal is to use Scrapling's full value, not just treat it as a plain HTTP cli
 ## Current Repo Expectation
 
 - Treat this file as the authoritative Scrapling workflow for the repository.
+- Keep this file aligned with `coder_docs/research_agents.md` so Codex web
+  research remains routed through `researcher`.
 - If Scrapling MCP usage policy changes materially, update this file and `coder_docs/codebase_guide.md` in the same change.
 - If `AGENTS.md` and this file drift, reconcile them immediately.

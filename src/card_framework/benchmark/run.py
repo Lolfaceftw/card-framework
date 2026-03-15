@@ -31,7 +31,12 @@ from card_framework.benchmark.artifacts import (
     utc_now_iso,
     write_json_with_hash,
 )
-from card_framework.benchmark.datasets import ManifestError, load_manifest, load_transcript, prepare_manifest
+from card_framework.benchmark.datasets import (
+    ManifestError,
+    load_manifest,
+    load_transcript,
+    prepare_manifest,
+)
 from card_framework.benchmark.instrumentation import EventCapture
 from card_framework.benchmark.matrix import (
     MatrixConfigError,
@@ -69,6 +74,10 @@ from card_framework.benchmark.types import (
     SampleRunResult,
 )
 from card_framework.retrieval.embeddings import TranscriptIndex
+from card_framework.shared.config_loading import (
+    load_runtime_config,
+    required_env_names_for_llm_config,
+)
 from card_framework.shared.events import event_bus
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
 from card_framework.shared.logger_utils import configure_logger
@@ -91,11 +100,30 @@ class BenchmarkRuntimeError(RuntimeError):
 class ManagedServer:
     """Uvicorn server and backing thread handle for managed lifecycle."""
 
-    def __init__(self, *, name: str, port: int, server: uvicorn.Server, thread: threading.Thread) -> None:
+    def __init__(
+        self, *, name: str, port: int, server: uvicorn.Server, thread: threading.Thread
+    ) -> None:
         self.name = name
         self.port = port
         self.server = server
         self.thread = thread
+
+
+def _resolve_orchestrator_word_budget(base_cfg: DictConfig) -> tuple[int, int]:
+    """Return a valid word-budget range for legacy benchmark consumers."""
+    orchestrator_cfg = base_cfg.get("orchestrator", {})
+
+    raw_min_words = orchestrator_cfg.get("min_words", 500)
+    raw_max_words = orchestrator_cfg.get("max_words", 550)
+    min_words = int(raw_min_words)
+    max_words = int(raw_max_words)
+    if min_words <= 0 or max_words <= 0:
+        raise BenchmarkRuntimeError("Benchmark word budgets must be positive integers.")
+    if min_words > max_words:
+        raise BenchmarkRuntimeError(
+            "Benchmark word-budget config is invalid: min_words exceeds max_words."
+        )
+    return min_words, max_words
 
 
 def _reserve_port() -> int:
@@ -405,7 +433,9 @@ async def _run_cell(
                 executor=InfoRetrievalExecutor(transcript_index),
             )
             servers.append(
-                _run_server_in_thread("benchmark-retrieval-a2a", retrieval_app, retrieval_port)
+                _run_server_in_thread(
+                    "benchmark-retrieval-a2a", retrieval_app, retrieval_port
+                )
             )
 
         summarizer_app = _build_a2a_app(
@@ -424,7 +454,9 @@ async def _run_cell(
             ),
         )
         servers.append(
-            _run_server_in_thread("benchmark-summarizer-a2a", summarizer_app, summarizer_port)
+            _run_server_in_thread(
+                "benchmark-summarizer-a2a", summarizer_app, summarizer_port
+            )
         )
 
         critic_app = _build_a2a_app(
@@ -438,11 +470,19 @@ async def _run_cell(
                 .get("max_tool_turns", 5),
                 retrieval_port=retrieval_port,
                 is_embedding_enabled=is_embedding_enabled,
+                reasoning_loop_guard=OmegaConf.to_container(
+                    base_cfg.get("agents", {})
+                    .get("critic", {})
+                    .get("reasoning_loop_guard", {}),
+                    resolve=True,
+                ),
                 agent_client=shared_agent_client,
                 event_bus=shared_event_bus,
             ),
         )
-        servers.append(_run_server_in_thread("benchmark-critic-a2a", critic_app, critic_port))
+        servers.append(
+            _run_server_in_thread("benchmark-critic-a2a", critic_app, critic_port)
+        )
 
         checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
         health_targets = [("Summarizer", summarizer_port), ("Critic", critic_port)]
@@ -462,8 +502,7 @@ async def _run_cell(
             event_bus=shared_event_bus,
         )
 
-        min_words = int(base_cfg.orchestrator.min_words)
-        max_words = int(base_cfg.orchestrator.max_words)
+        min_words, max_words = _resolve_orchestrator_word_budget(base_cfg)
         max_iterations = int(base_cfg.orchestrator.max_iterations)
 
         sample_results: list[SampleRunResult] = []
@@ -618,7 +657,9 @@ async def _run_cell(
                 )
 
         overall_status = (
-            "pass" if all(result.status == "pass" for result in sample_results) else "fail"
+            "pass"
+            if all(result.status == "pass" for result in sample_results)
+            else "fail"
         )
         return CellRunResult(
             cell_id=cell.cell_id,
@@ -644,10 +685,7 @@ def _commands_executed() -> list[str]:
 def _load_base_config(config_path: Path) -> DictConfig:
     if not config_path.exists():
         raise BenchmarkRuntimeError(f"Config path does not exist: {config_path}")
-    cfg = OmegaConf.load(config_path)
-    if not isinstance(cfg, DictConfig):
-        raise BenchmarkRuntimeError("Failed to load benchmark base config")
-    return cfg
+    return load_runtime_config(config_path)
 
 
 def _provider_filter(raw: str) -> set[str] | None:
@@ -722,14 +760,20 @@ def execute_command(args: argparse.Namespace) -> int:
     provider_filter = _provider_filter(args.providers)
 
     if provider_filter is not None:
-        profiles = [profile for profile in profiles if profile.provider_id in provider_filter]
+        profiles = [
+            profile for profile in profiles if profile.provider_id in provider_filter
+        ]
     elif args.preset == "smoke":
         profiles = [
             ProviderProfile(
                 provider_id="configured_default",
                 description="Configured default provider from packaged config.yaml",
                 llm_config=OmegaConf.to_container(base_cfg.llm, resolve=False),
-                required_env=[],
+                required_env=list(
+                    required_env_names_for_llm_config(
+                        OmegaConf.to_container(base_cfg.llm, resolve=True) or {}
+                    )
+                ),
             )
         ]
 
@@ -930,7 +974,12 @@ def prepare_manifest_command(args: argparse.Namespace) -> int:
         num_samples=args.num_samples,
         local_transcript_path=args.local_transcript_path,
     )
-    print(json.dumps({"manifest_path": str(output_path), "samples": len(manifest["samples"])}, indent=2))
+    print(
+        json.dumps(
+            {"manifest_path": str(output_path), "samples": len(manifest["samples"])},
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -958,4 +1007,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -26,7 +26,6 @@ from card_framework.audio_pipeline.eta import (
     EtaProfilePersistence,
     StageProgressCallback,
     StageProgressUpdate,
-    StageEtaHistory,
     StageEtaLearner,
     StageEtaStrategy,
     default_stage_eta_strategy,
@@ -270,19 +269,37 @@ class AudioToScriptOrchestrator:
             audio_duration_ms=audio_duration_ms,
         )
         tracker_lock = threading.Lock()
+        last_logged_progress: tuple[str, int, int, str] | None = None
 
         def _progress_callback(update: StageProgressUpdate) -> None:
-            if eta_tracker is None:
-                return
+            nonlocal last_logged_progress
             elapsed_seconds = max(0.0, time.monotonic() - started_at)
-            with tracker_lock:
-                try:
-                    eta_tracker.observe_progress(
-                        elapsed_seconds=elapsed_seconds,
-                        update=update,
-                    )
-                except Exception:
-                    return
+            remaining_seconds: float | None = None
+            if eta_tracker is not None:
+                with tracker_lock:
+                    try:
+                        eta_tracker.observe_progress(
+                            elapsed_seconds=elapsed_seconds,
+                            update=update,
+                        )
+                        remaining_seconds = eta_tracker.estimate_signed_remaining_seconds(
+                            elapsed_seconds=elapsed_seconds
+                        )
+                    except Exception:
+                        remaining_seconds = None
+            progress_message = self._build_progress_update_message(
+                stage=stage,
+                update=update,
+                remaining_seconds=remaining_seconds,
+            )
+            if progress_message is None:
+                return
+            event_bus.publish("status_message", progress_message, inline=True)
+            progress_key = self._build_progress_log_key(stage=stage, update=update)
+            if progress_key is None or progress_key == last_logged_progress:
+                return
+            event_bus.publish("status_log_message", progress_message)
+            last_logged_progress = progress_key
 
         if eta_tracker is None:
             event_bus.publish("system_message", f"Audio stage: {description}")
@@ -316,7 +333,7 @@ class AudioToScriptOrchestrator:
             ticker_thread.start()
 
         try:
-            result = operation(_progress_callback if eta_tracker is not None else None)
+            result = operation(_progress_callback)
         except Exception:
             self._stop_eta_updates(stop_event=stop_event, ticker_thread=ticker_thread)
             elapsed_seconds = time.monotonic() - started_at
@@ -345,6 +362,44 @@ class AudioToScriptOrchestrator:
         )
         return result
 
+    def _build_progress_update_message(
+        self,
+        *,
+        stage: AudioStageName,
+        update: StageProgressUpdate,
+        remaining_seconds: float | None,
+    ) -> str | None:
+        """Build one operator-visible stage progress message when available."""
+        note = update.note.strip()
+        if stage not in {"separation", "transcription"} or not note:
+            return None
+        message = f"Audio stage: {stage} {note}"
+        if remaining_seconds is None:
+            return message
+        if remaining_seconds >= 0:
+            return (
+                f"{message}; estimated time left "
+                f"{format_eta_seconds(remaining_seconds)}"
+            )
+        return (
+            f"{message}; running longer than estimate by "
+            f"{format_eta_seconds(abs(remaining_seconds))}"
+        )
+
+    def _build_progress_log_key(
+        self,
+        *,
+        stage: AudioStageName,
+        update: StageProgressUpdate,
+    ) -> tuple[str, int, int, str] | None:
+        """Return a stable key for note-based progress milestones worth logging."""
+        note = update.note.strip()
+        if stage not in {"separation", "transcription"} or not note:
+            return None
+        if update.completed_units is None or update.total_units is None:
+            return None
+        return (stage, update.completed_units, update.total_units, note)
+
     def _estimate_stage_total_seconds(
         self,
         *,
@@ -354,11 +409,6 @@ class AudioToScriptOrchestrator:
     ) -> float | None:
         """Estimate stage duration from strategy and known audio length."""
         if audio_duration_ms is None:
-            return None
-        if (
-            isinstance(self.eta_strategy, StageEtaHistory)
-            and not self.eta_strategy.has_stage_history(stage=stage, device=device)
-        ):
             return None
         return self.eta_strategy.estimate_total_seconds(
             stage=stage,

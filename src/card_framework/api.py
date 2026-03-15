@@ -11,7 +11,6 @@ import importlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import subprocess
 import sys
@@ -27,13 +26,18 @@ from card_framework.runtime.bootstrap import (
     resolve_uv_executable,
 )
 from card_framework.shared.paths import DEFAULT_CONFIG_PATH
+from card_framework.shared.perf import StatusReporter, report_loading_duration
+from card_framework.shared.platform_support import (
+    UnsupportedPackagedRuntimeError,
+    apply_runtime_platform_fallbacks,
+    ensure_supported_packaged_runtime,
+)
 from card_framework.shared.runtime_layout import resolve_runtime_layout
 
 _CONFIG_ENV_VAR = "CARD_FRAMEWORK_CONFIG"
 _UV_ENV_VAR = "CARD_FRAMEWORK_UV_EXECUTABLE"
 _VLLM_URL_ENV_VAR = "CARD_FRAMEWORK_VLLM_URL"
 _VLLM_API_KEY_ENV_VAR = "CARD_FRAMEWORK_VLLM_API_KEY"
-_SUPPORTED_PLATFORM = "Windows"
 _SUPPORTED_CUDA_VERSION = "12.6"
 _DEFAULT_VLLM_API_KEY = "EMPTY"
 _PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu126"
@@ -76,6 +80,11 @@ _PROVIDER_API_KEY_REQUIREMENTS: dict[str, dict[str, object]] = {
         ),
     },
 }
+
+
+def _emit_infer_status(message: str) -> None:
+    """Emit one operator-facing infer status line to stderr."""
+    print(message, file=sys.stderr, flush=True)
 
 
 @dataclass(slots=True, frozen=True)
@@ -173,8 +182,10 @@ def infer(
             platforms, or the pipeline subprocess fail.
         ValueError: The audio path, config path, or duration target is invalid.
     """
-    _ensure_supported_platform()
     resolved_device = _resolve_requested_device(device)
+    _ensure_supported_platform(device=resolved_device)
+    if resolved_device == "cuda":
+        _ensure_supported_cuda_runtime()
     audio_path = _resolve_audio_input(audio_wav)
     resolved_target_duration_seconds = _resolve_target_duration_seconds(
         target_duration_seconds
@@ -192,6 +203,7 @@ def infer(
         device=resolved_device,
         vllm_url=vllm_url,
         vllm_api_key=vllm_api_key,
+        reporter=_emit_infer_status,
     ) as (config_path, config):
         audio_cfg = _as_mapping(config.get("audio", {}))
         voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
@@ -224,6 +236,7 @@ def infer(
                 layout=layout,
                 uv_executable=uv_executable,
                 python_executable=sys.executable,
+                reporter=_emit_infer_status,
             )
 
         command = _build_pipeline_command(
@@ -245,16 +258,12 @@ def infer(
         )
 
 
-def _ensure_supported_platform() -> None:
+def _ensure_supported_platform(*, device: Literal["cpu", "cuda"]) -> None:
     """Reject unsupported packaged-runtime platforms before any other work starts."""
-    current_platform = platform.system().strip() or "Unknown"
-    if current_platform == _SUPPORTED_PLATFORM:
-        return
-    raise RuntimeError(
-        "card_framework.infer(...) currently supports packaged whole-pipeline runs "
-        f"on {_SUPPORTED_PLATFORM} only. Detected platform: {current_platform}. "
-        "macOS and Linux are not yet validated for the public pip-installed runtime."
-    )
+    try:
+        ensure_supported_packaged_runtime(device=device)
+    except UnsupportedPackagedRuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 @contextmanager
@@ -265,37 +274,53 @@ def _prepared_inference_config(
     device: Literal["cpu", "cuda"],
     vllm_url: str | None,
     vllm_api_key: str | None,
+    reporter: StatusReporter | None = None,
 ) -> Iterator[tuple[Path, dict[str, Any]]]:
     """Prepare an effective config for one inference call and clean it up."""
     effective_config = deepcopy(dict(base_config))
-    config_modified = _apply_device_override(effective_config, device=device)
+    with report_loading_duration(
+        "packaged infer runtime config",
+        reporter=reporter,
+    ):
+        config_modified = _apply_device_override(effective_config, device=device)
 
-    resolved_vllm_url = _resolve_optional_text(vllm_url) or _resolve_optional_env(
-        (_VLLM_URL_ENV_VAR, "VLLM_BASE_URL")
-    )
-    resolved_vllm_api_key = _resolve_optional_text(
-        vllm_api_key
-    ) or _resolve_optional_env((_VLLM_API_KEY_ENV_VAR, "VLLM_API_KEY"))
-
-    if resolved_vllm_url:
-        _apply_vllm_first_override(
-            effective_config,
-            base_url=resolved_vllm_url,
-            api_key=resolved_vllm_api_key or _DEFAULT_VLLM_API_KEY,
+        resolved_vllm_url = _resolve_optional_text(vllm_url) or _resolve_optional_env(
+            (_VLLM_URL_ENV_VAR, "VLLM_BASE_URL")
         )
-        config_modified = True
-    elif resolved_vllm_api_key:
-        config_modified = _apply_optional_vllm_api_key(
-            effective_config,
-            api_key=resolved_vllm_api_key,
-        ) or config_modified
+        resolved_vllm_api_key = _resolve_optional_text(
+            vllm_api_key
+        ) or _resolve_optional_env((_VLLM_API_KEY_ENV_VAR, "VLLM_API_KEY"))
 
-    config_modified = (
-        _resolve_runtime_credentials(effective_config) or config_modified
-    )
-    config_modified = (
-        _prepare_forced_alignment_runtime(effective_config) or config_modified
-    )
+        if resolved_vllm_url:
+            _apply_vllm_first_override(
+                effective_config,
+                base_url=resolved_vllm_url,
+                api_key=resolved_vllm_api_key or _DEFAULT_VLLM_API_KEY,
+            )
+            config_modified = True
+        elif resolved_vllm_api_key:
+            config_modified = _apply_optional_vllm_api_key(
+                effective_config,
+                api_key=resolved_vllm_api_key,
+            ) or config_modified
+
+        config_modified = (
+            _resolve_runtime_credentials(effective_config) or config_modified
+        )
+        config_modified = (
+            _prepare_forced_alignment_runtime(
+                effective_config,
+                reporter=reporter,
+            )
+            or config_modified
+        )
+        config_modified = (
+            apply_runtime_platform_fallbacks(
+                effective_config,
+                reporter=reporter,
+            )
+            or config_modified
+        )
 
     if not config_modified:
         yield base_config_path, effective_config
@@ -413,7 +438,11 @@ def _resolve_runtime_credentials(config: dict[str, Any]) -> bool:
     return modified
 
 
-def _prepare_forced_alignment_runtime(config: dict[str, Any]) -> bool:
+def _prepare_forced_alignment_runtime(
+    config: dict[str, Any],
+    *,
+    reporter: StatusReporter | None = None,
+) -> bool:
     """Bootstrap forced alignment when possible and fall back cleanly when not."""
     audio_cfg = _as_mapping(config.get("audio", {}))
     asr_cfg = _as_mapping(audio_cfg.get("asr", {}))
@@ -426,7 +455,10 @@ def _prepare_forced_alignment_runtime(config: dict[str, Any]) -> bool:
         return False
 
     try:
-        ensure_ctc_forced_aligner_runtime(python_executable=sys.executable)
+        ensure_ctc_forced_aligner_runtime(
+            python_executable=sys.executable,
+            reporter=reporter,
+        )
         return False
     except RuntimeBootstrapError as exc:
         modified = False
@@ -573,8 +605,6 @@ def _resolve_requested_device(device: str) -> Literal["cpu", "cuda"]:
     normalized = _resolve_optional_text(device).lower()
     if normalized not in {"cpu", "cuda"}:
         raise ValueError("device must be either 'cpu' or 'cuda'.")
-    if normalized == "cuda":
-        _ensure_supported_cuda_runtime()
     return normalized
 
 
@@ -987,11 +1017,13 @@ def _load_omegaconf() -> Any:
 def _load_config_mapping(config_path: Path) -> dict[str, Any]:
     """Load one Hydra-style YAML config as a plain dictionary."""
     omega_conf = _load_omegaconf()
+    from card_framework.shared.config_loading import normalize_runtime_config_mapping
+
     config = omega_conf.load(config_path)
     resolved = omega_conf.to_container(config, resolve=True)
     if not isinstance(resolved, dict):
         raise ValueError(f"Config did not resolve to a mapping: {config_path}")
-    return resolved
+    return normalize_runtime_config_mapping(resolved)
 
 
 def _write_config_mapping(config_path: Path, config: Mapping[str, Any]) -> None:

@@ -1,16 +1,33 @@
-﻿import ast
+import asyncio
+import ast
 import hashlib
 import json
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from difflib import SequenceMatcher
+import threading
 from typing import Any
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
+from a2a.types import Task, TaskState, TaskStatus
 from a2a.utils import new_agent_text_message
 
 from card_framework.agents.tool_call_utils import build_tool_signature
 from card_framework.shared.logger_utils import logger
-from card_framework.shared.llm_provider import Message, ToolDefinition
+from card_framework.shared.llm_provider import (
+    LLMProvider,
+    LLMResponseCallback,
+    Message,
+    NullLLMResponseCallback,
+    StreamingResponseAbort,
+    ToolDefinition,
+)
+from card_framework.shared.repetition_guard import (
+    count_words,
+    extract_repeated_response_span,
+    normalize_repetition_text,
+)
 
 
 class BaseA2AExecutor(AgentExecutor, ABC):
@@ -18,8 +35,39 @@ class BaseA2AExecutor(AgentExecutor, ABC):
     Base class for A2A executors to standardize common logic.
     """
 
+    _provider_callback_locks: dict[int, threading.Lock] = {}
+    _provider_callback_locks_guard = threading.Lock()
+
     def __init__(self, name: str):
         self.name = name
+
+    @staticmethod
+    async def _emit_working_task_event(
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        """Publish an early working-task event so non-blocking A2A calls can poll."""
+        if (
+            context.task_id is None
+            or context.context_id is None
+            or context.message is None
+        ):
+            return
+
+        existing_task = context.current_task
+        if existing_task is None:
+            task_event = Task(
+                id=context.task_id,
+                context_id=context.context_id,
+                status=TaskStatus(state=TaskState.working),
+                history=[context.message],
+            )
+        else:
+            task_event = existing_task.model_copy(
+                update={"status": TaskStatus(state=TaskState.working)}
+            )
+        context.current_task = task_event
+        await event_queue.enqueue_event(task_event)
 
     @staticmethod
     def _summarize_json_text(raw_text: str, *, max_preview_chars: int = 160) -> str:
@@ -140,6 +188,311 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         msg_dict["tool_calls"] = sanitized_tool_calls if sanitized_tool_calls else None
         return msg_dict
 
+    @classmethod
+    def _normalize_reasoning_loop_text(cls, raw_text: str) -> str:
+        """Normalize assistant text for repetition and similarity checks."""
+        return normalize_repetition_text(raw_text)
+
+    @staticmethod
+    def _count_words(raw_text: str) -> int:
+        """Return a loose word count for repetition guard thresholds."""
+        return count_words(raw_text)
+
+    @classmethod
+    def _extract_repeated_response_span(
+        cls,
+        raw_text: str,
+        *,
+        min_words: int,
+        repeat_threshold: int,
+    ) -> tuple[str, int] | None:
+        """Return a repeated sentence-like span when one dominates a response."""
+        return extract_repeated_response_span(
+            raw_text,
+            min_words=min_words,
+            repeat_threshold=repeat_threshold,
+        )
+
+    @staticmethod
+    def _coerce_reasoning_loop_guard_config(
+        raw_guard: Any,
+    ) -> dict[str, Any]:
+        """Normalize the opt-in no-tool repetition guard configuration."""
+        guard_payload = dict(raw_guard) if isinstance(raw_guard, dict) else {}
+
+        def _bool(name: str, default: bool) -> bool:
+            raw_value = guard_payload.get(name, default)
+            return raw_value if isinstance(raw_value, bool) else default
+
+        def _int(name: str, default: int, minimum: int) -> int:
+            raw_value = guard_payload.get(name, default)
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, parsed)
+
+        def _ratio(name: str, default: float) -> float:
+            raw_value = guard_payload.get(name, default)
+            try:
+                parsed = float(raw_value)
+            except (TypeError, ValueError):
+                return default
+            return max(0.0, min(1.0, parsed))
+
+        return {
+            "enabled": _bool("enabled", False),
+            "max_consecutive_no_tool_turns": _int(
+                "max_consecutive_no_tool_turns",
+                default=2,
+                minimum=1,
+            ),
+            "single_response_repeat_threshold": _int(
+                "single_response_repeat_threshold",
+                default=3,
+                minimum=2,
+            ),
+            "min_repeated_sentence_words": _int(
+                "min_repeated_sentence_words",
+                default=8,
+                minimum=1,
+            ),
+            "cross_turn_similarity_threshold": _ratio(
+                "cross_turn_similarity_threshold",
+                default=0.96,
+            ),
+        }
+
+    @staticmethod
+    def _reasoning_loop_guard_state(
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return mutable runtime state for the reasoning-loop guard."""
+        raw_state = runtime_context.get("reasoning_loop_guard_state")
+        if isinstance(raw_state, dict):
+            return raw_state
+        state = {
+            "consecutive_no_tool_turns": 0,
+            "last_no_tool_response_normalized": "",
+            "last_no_tool_response_word_count": 0,
+        }
+        runtime_context["reasoning_loop_guard_state"] = state
+        return state
+
+    @classmethod
+    def _build_reasoning_loop_guard_stop_reason(
+        cls,
+        *,
+        runtime_context: dict[str, Any],
+        guard_config: dict[str, Any],
+        assistant_text: str,
+    ) -> str | None:
+        """Return a stop reason when repetitive no-tool reasoning is detected."""
+        if not guard_config["enabled"]:
+            return None
+
+        normalized_text = cls._normalize_reasoning_loop_text(assistant_text)
+        state = cls._reasoning_loop_guard_state(runtime_context)
+        consecutive_no_tool_turns = int(state.get("consecutive_no_tool_turns", 0)) + 1
+        state["consecutive_no_tool_turns"] = consecutive_no_tool_turns
+
+        repeated_span = cls._extract_repeated_response_span(
+            assistant_text,
+            min_words=int(guard_config["min_repeated_sentence_words"]),
+            repeat_threshold=int(guard_config["single_response_repeat_threshold"]),
+        )
+        if repeated_span is not None:
+            preview, repeat_count = repeated_span
+            return (
+                f"single-response repetition detected ({repeat_count} repeats): "
+                f"{cls._summarize_json_text(preview)}"
+            )
+
+        current_word_count = cls._count_words(normalized_text)
+        previous_text = str(state.get("last_no_tool_response_normalized", ""))
+        previous_word_count = int(state.get("last_no_tool_response_word_count", 0))
+        if (
+            previous_text
+            and normalized_text
+            and current_word_count >= int(guard_config["min_repeated_sentence_words"])
+            and previous_word_count >= int(guard_config["min_repeated_sentence_words"])
+            and consecutive_no_tool_turns
+            >= int(guard_config["max_consecutive_no_tool_turns"])
+        ):
+            similarity = SequenceMatcher(
+                a=previous_text,
+                b=normalized_text,
+            ).ratio()
+            if similarity >= float(guard_config["cross_turn_similarity_threshold"]):
+                return (
+                    "cross-turn repetition detected "
+                    f"(similarity={similarity:.2f}, turns={consecutive_no_tool_turns})"
+                )
+
+        state["last_no_tool_response_normalized"] = normalized_text
+        state["last_no_tool_response_word_count"] = current_word_count
+        return None
+
+    @staticmethod
+    def _reset_reasoning_loop_guard_state(runtime_context: dict[str, Any]) -> None:
+        """Clear no-tool repetition history after a successful tool-call turn."""
+        state = BaseA2AExecutor._reasoning_loop_guard_state(runtime_context)
+        state["consecutive_no_tool_turns"] = 0
+        state["last_no_tool_response_normalized"] = ""
+        state["last_no_tool_response_word_count"] = 0
+
+    @classmethod
+    def _resolve_callback_target(
+        cls,
+        provider: LLMProvider,
+    ) -> tuple[LLMProvider, LLMResponseCallback] | None:
+        """Find the deepest provider that supports callback injection."""
+        current: object = provider
+        seen: set[int] = set()
+        while isinstance(current, LLMProvider) and id(current) not in seen:
+            seen.add(id(current))
+            if hasattr(current, "set_response_callback"):
+                existing_callback = (
+                    current._response_callback
+                    if hasattr(current, "_response_callback")
+                    else None
+                )
+                if existing_callback is None:
+                    existing_callback = NullLLMResponseCallback()
+                return current, existing_callback
+            current = (
+                current.inner_provider if hasattr(current, "inner_provider") else None
+            )
+        return None
+
+    @classmethod
+    def _resolve_callback_lock(cls, provider: LLMProvider) -> threading.Lock:
+        """Return a stable lock for temporary callback swaps on one provider."""
+        provider_id = id(provider)
+        with cls._provider_callback_locks_guard:
+            callback_lock = cls._provider_callback_locks.get(provider_id)
+            if callback_lock is None:
+                callback_lock = threading.Lock()
+                cls._provider_callback_locks[provider_id] = callback_lock
+            return callback_lock
+
+    @classmethod
+    @contextmanager
+    def _temporary_response_callback(
+        cls,
+        provider: LLMProvider,
+        callback: LLMResponseCallback | None,
+    ):
+        """Temporarily replace the provider stream callback for one chat call."""
+        if callback is None:
+            yield
+            return
+
+        callback_target = cls._resolve_callback_target(provider)
+        if callback_target is None:
+            yield
+            return
+
+        target_provider, existing_callback = callback_target
+        callback_lock = cls._resolve_callback_lock(target_provider)
+        with callback_lock:
+            target_provider.set_response_callback(callback)
+            try:
+                yield
+            finally:
+                target_provider.set_response_callback(existing_callback)
+
+    def _build_runtime_stream_callback(
+        self,
+        runtime_context: dict[str, Any],
+    ) -> LLMResponseCallback | None:
+        """Build an optional per-turn callback wrapper from runtime context."""
+        callback_factory = runtime_context.get("stream_response_callback_factory")
+        if not callable(callback_factory):
+            return None
+        callback_target = self._resolve_callback_target(self.llm)
+        existing_callback: LLMResponseCallback
+        if callback_target is None:
+            existing_callback = NullLLMResponseCallback()
+        else:
+            _provider, existing_callback = callback_target
+        built_callback = callback_factory(existing_callback)
+        return built_callback if built_callback is not None else None
+
+    async def _chat_with_runtime_stream_callback(
+        self,
+        *,
+        chat_kwargs: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> Any:
+        """Execute one chat call with an optional temporary stream callback."""
+        runtime_callback = self._build_runtime_stream_callback(runtime_context)
+        if runtime_callback is None:
+            return await asyncio.to_thread(self.llm.chat, **chat_kwargs)
+
+        def _chat_with_callback() -> Any:
+            with self._temporary_response_callback(self.llm, runtime_callback):
+                return self.llm.chat(**chat_kwargs)
+
+        return await asyncio.to_thread(_chat_with_callback)
+
+    def _handle_streaming_response_abort(
+        self,
+        *,
+        abort_error: StreamingResponseAbort,
+        messages: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+    ) -> bool:
+        """Handle one controlled stream abort and optionally retry the turn."""
+        from card_framework.shared.events import event_bus
+
+        retry_count = int(runtime_context.get("stream_abort_retry_count", 0)) + 1
+        runtime_context["stream_abort_retry_count"] = retry_count
+        max_retry_attempts = int(runtime_context.get("max_stream_abort_retries", 0))
+        retry_prompt_builder = runtime_context.get("stream_abort_retry_prompt_builder")
+
+        if callable(retry_prompt_builder) and retry_count <= max_retry_attempts:
+            retry_prompt = retry_prompt_builder(
+                abort_error=abort_error,
+                attempt=retry_count,
+                max_attempts=max_retry_attempts,
+            )
+            if isinstance(retry_prompt, str) and retry_prompt.strip():
+                logger.warning(
+                    "[%s] Streaming guard aborted response; retrying turn %s/%s: %s",
+                    self.name,
+                    retry_count,
+                    max_retry_attempts,
+                    abort_error.reason,
+                )
+                event_bus.publish(
+                    "status_message",
+                    message=(
+                        f"{self.name} stream guard interrupted a repetitive response "
+                        f"and is retrying turn {retry_count}/{max_retry_attempts}."
+                    ),
+                )
+                runtime_context["no_tool_call_count"] = 0
+                self._reset_reasoning_loop_guard_state(runtime_context)
+                messages.append({"role": "user", "content": retry_prompt})
+                return True
+
+        runtime_context["loop_stop_category"] = "reasoning_loop_guard"
+        runtime_context["loop_stop_reason"] = abort_error.reason
+        logger.warning(
+            "[%s] Streaming guard aborted response without retry: %s",
+            self.name,
+            abort_error.reason,
+        )
+        event_bus.publish(
+            "status_message",
+            message=(
+                f"{self.name} stream guard stopped a repetitive response: "
+                f"{abort_error.reason}"
+            ),
+        )
+        return False
+
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         raw_input = context.get_user_input()
         logger.info(
@@ -156,6 +509,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             raise ValueError(f"{self.name} received non-JSON task: {raw_input[:200]}")
 
         try:
+            await self._emit_working_task_event(context, event_queue)
+            await asyncio.sleep(0)
             await self.handle_task(task_data, context, event_queue)
         except Exception as e:
             logger.error(f"[{self.name}] Error handling task: {e}")
@@ -168,11 +523,40 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         """Subclasses implement this to handle the parsed JSON task."""
         pass
 
-    async def send_response(self, result: str, event_queue: EventQueue) -> None:
+    async def send_response(
+        self,
+        result: str,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
         """Helper to send a text response back."""
         logger.info(f"[{self.name}] Result: {self._summarize_json_text(result)}")
         logger.debug(f"[{self.name}] Result payload: {result}")
-        await event_queue.enqueue_event(new_agent_text_message(result))
+        task_id = getattr(context, "task_id", None)
+        context_id = getattr(context, "context_id", None)
+        response_message = new_agent_text_message(
+            result,
+            context_id=context_id,
+            task_id=task_id,
+        )
+
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and isinstance(context_id, str)
+            and context_id
+        ):
+            from a2a.server.tasks import TaskUpdater
+
+            task_updater = TaskUpdater(
+                event_queue=event_queue,
+                task_id=task_id,
+                context_id=context_id,
+            )
+            await task_updater.complete(message=response_message)
+            return
+
+        await event_queue.enqueue_event(response_message)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         pass
@@ -220,9 +604,15 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         runtime_context["seen_tool_signature_turns"] = seen_tool_signature_turns
         runtime_context.setdefault("tool_replay_window", "run")
         runtime_context["no_tool_call_count"] = 0
+        runtime_context.pop("loop_stop_category", None)
+        runtime_context.pop("loop_stop_reason", None)
         enable_extended_text_tool_parser = bool(
             runtime_context.get("enable_extended_text_tool_parser", False)
         )
+        reasoning_loop_guard = self._coerce_reasoning_loop_guard_config(
+            runtime_context.get("reasoning_loop_guard")
+        )
+        runtime_context["reasoning_loop_guard"] = reasoning_loop_guard
 
         total_parsed_calls = 0
         total_executed_calls = 0
@@ -272,15 +662,40 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                 chat_kwargs["tool_choice"] = tool_choice
             if chat_max_tokens is not None:
                 chat_kwargs["max_tokens"] = chat_max_tokens
-            response_message = self.llm.chat(**chat_kwargs)
+            try:
+                response_message = await self._chat_with_runtime_stream_callback(
+                    chat_kwargs=chat_kwargs,
+                    runtime_context=runtime_context,
+                )
+            except StreamingResponseAbort as abort_error:
+                if self._handle_streaming_response_abort(
+                    abort_error=abort_error,
+                    messages=messages,
+                    runtime_context=runtime_context,
+                ):
+                    continue
+                break
+            runtime_context["stream_abort_retry_count"] = 0
+            reasoning_content = ""
             if hasattr(response_message, "model_dump"):
-                msg_dict = response_message.model_dump()
+                raw_response_payload = response_message.model_dump()
+                raw_reasoning = raw_response_payload.get("reasoning_content")
+                reasoning_content = (
+                    str(raw_reasoning).strip() if raw_reasoning is not None else ""
+                )
+                msg_dict = raw_response_payload
                 msg_dict = {
                     k: v
                     for k, v in msg_dict.items()
                     if k in ("role", "content", "tool_calls")
                 }
             else:
+                raw_reasoning = getattr(response_message, "reasoning_content", None)
+                if raw_reasoning is None:
+                    raw_reasoning = getattr(response_message, "reasoning", None)
+                reasoning_content = (
+                    str(raw_reasoning).strip() if raw_reasoning is not None else ""
+                )
                 msg_dict = {
                     "role": response_message.role,
                     "content": response_message.content,
@@ -321,6 +736,34 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                         ),
                     )
                     break
+                assistant_text = str(msg_dict.get("content") or "").strip()
+                if reasoning_content and reasoning_content != assistant_text:
+                    assistant_text = (
+                        f"{assistant_text}\n{reasoning_content}".strip()
+                        if assistant_text
+                        else reasoning_content
+                    )
+                guard_stop_reason = self._build_reasoning_loop_guard_stop_reason(
+                    runtime_context=runtime_context,
+                    guard_config=reasoning_loop_guard,
+                    assistant_text=assistant_text,
+                )
+                if guard_stop_reason is not None:
+                    runtime_context["loop_stop_category"] = "reasoning_loop_guard"
+                    runtime_context["loop_stop_reason"] = guard_stop_reason
+                    logger.warning(
+                        "[%s] Reasoning-loop guard stopped no-tool response: %s",
+                        self.name,
+                        guard_stop_reason,
+                    )
+                    event_bus.publish(
+                        "status_message",
+                        message=(
+                            f"{self.name} reasoning-loop guard stopped a "
+                            f"repetitive no-tool response: {guard_stop_reason}"
+                        ),
+                    )
+                    break
                 if no_tool_call_patience is not None:
                     no_tool_call_count = (
                         int(runtime_context.get("no_tool_call_count", 0)) + 1
@@ -335,6 +778,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                         break
                 continue
             runtime_context["no_tool_call_count"] = 0
+            self._reset_reasoning_loop_guard_state(runtime_context)
 
             executable_tool_calls: list[dict[str, Any]] = []
             executable_call_metadata: list[dict[str, Any]] = []
@@ -483,4 +927,3 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             f"[{self.name}] Tool loop summary parsed={total_parsed_calls} executed={total_executed_calls} skipped_duplicates={total_skipped_calls}"
         )
         return None
-

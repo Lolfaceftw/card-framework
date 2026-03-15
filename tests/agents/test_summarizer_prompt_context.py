@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import pytest
 
@@ -8,9 +8,13 @@ except Exception:
     _jinja2 = None
 
 if _jinja2 is None or getattr(_jinja2, "__spec__", None) is None:
-    pytest.skip("jinja2 is required for prompt template rendering tests.", allow_module_level=True)
+    pytest.skip(
+        "jinja2 is required for prompt template rendering tests.",
+        allow_module_level=True,
+    )
 
 from card_framework.agents.loop_context import build_loop_context_prompt_block
+from card_framework.agents.message_registry import MessageRegistry
 from card_framework.agents.summarizer import SummarizerExecutor
 from card_framework.shared.prompt_manager import PromptManager
 
@@ -63,7 +67,9 @@ def test_full_transcript_prompt_excerpt_keeps_small_transcript_unchanged() -> No
     assert excerpt == transcript
 
 
-def test_full_transcript_prompt_excerpt_samples_large_transcript_with_coverage() -> None:
+def test_full_transcript_prompt_excerpt_samples_large_transcript_with_coverage() -> (
+    None
+):
     lines = [
         f"[SPEAKER_{index % 2:02d}]: line {index} " + ("context " * 80)
         for index in range(90)
@@ -80,3 +86,12 @@ def test_full_transcript_prompt_excerpt_samples_large_transcript_with_coverage()
     assert "[... omitted " in excerpt
 
 
+def test_load_draft_into_registry_ignores_malformed_xml() -> None:
+    registry = MessageRegistry()
+
+    SummarizerExecutor._load_draft_into_registry(
+        registry,
+        '<SPEAKER_00 emo_preset="neutral">missing close tag',
+    )
+
+    assert len(registry) == 0

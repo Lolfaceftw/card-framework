@@ -1,10 +1,12 @@
-﻿"""Critic executor for duration-aware summary evaluation."""
+"""Critic executor for duration-aware summary evaluation."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from pathlib import Path
 import re
+from typing import Any
 
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
@@ -18,8 +20,16 @@ from card_framework.audio_pipeline.live_draft_voice_clone import (
     _snapshot_matches_summary_xml,
     load_live_draft_voice_clone_state,
 )
+from card_framework.providers.response_callbacks import (
+    CompositeResponseCallback,
+    StreamingRepeatGuardCallback,
+)
 from card_framework.shared.events import EventBus, get_event_bus
-from card_framework.shared.llm_provider import LLMProvider
+from card_framework.shared.llm_provider import (
+    LLMProvider,
+    LLMResponseCallback,
+    StreamingResponseAbort,
+)
 from card_framework.shared.prompt_manager import PromptManager
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml
 
@@ -28,6 +38,15 @@ class CriticExecutor(BaseA2AExecutor):
     """Evaluate a draft summary using deterministic checks plus an LLM critic."""
 
     _DEFAULT_NEUTRAL_WPM = 150.0
+    _DEFAULT_REASONING_LOOP_GUARD = {
+        "enabled": True,
+        "max_consecutive_no_tool_turns": 2,
+        "single_response_repeat_threshold": 3,
+        "min_repeated_sentence_words": 8,
+        "cross_turn_similarity_threshold": 0.96,
+        "stream_abort_enabled": True,
+        "max_stream_abort_retries": 1,
+    }
 
     def __init__(
         self,
@@ -36,6 +55,7 @@ class CriticExecutor(BaseA2AExecutor):
         max_tool_turns: int = 5,
         retrieval_port: int = 9012,
         is_embedding_enabled: bool = True,
+        reasoning_loop_guard: Mapping[str, Any] | None = None,
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
     ) -> None:
@@ -46,12 +66,82 @@ class CriticExecutor(BaseA2AExecutor):
         self.max_tool_turns = max_tool_turns
         self.retrieval_port = retrieval_port
         self.is_embedding_enabled = is_embedding_enabled
+        self.reasoning_loop_guard = self._resolve_reasoning_loop_guard(
+            reasoning_loop_guard
+        )
         self.agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
         )
         self.event_bus = event_bus if event_bus is not None else get_event_bus()
 
-    def _resolve_target_seconds(self, *, target_seconds: int | None, min_words: int, max_words: int) -> int:
+    def _resolve_reasoning_loop_guard(
+        self,
+        reasoning_loop_guard: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Resolve critic no-tool repetition guard settings for the shared loop."""
+        resolved: dict[str, Any] = dict(self._DEFAULT_REASONING_LOOP_GUARD)
+        if isinstance(reasoning_loop_guard, Mapping):
+            resolved.update(
+                {
+                    str(key): value
+                    for key, value in reasoning_loop_guard.items()
+                }
+            )
+        normalized = self._coerce_reasoning_loop_guard_config(resolved)
+
+        raw_stream_abort_enabled = resolved.get("stream_abort_enabled", True)
+        normalized["stream_abort_enabled"] = (
+            raw_stream_abort_enabled
+            if isinstance(raw_stream_abort_enabled, bool)
+            else True
+        )
+
+        raw_max_stream_abort_retries = resolved.get("max_stream_abort_retries", 1)
+        try:
+            max_stream_abort_retries = int(raw_max_stream_abort_retries)
+        except (TypeError, ValueError):
+            max_stream_abort_retries = 1
+        normalized["max_stream_abort_retries"] = max(0, max_stream_abort_retries)
+        return normalized
+
+    def _build_stream_response_callback(
+        self,
+        existing_callback: LLMResponseCallback,
+    ) -> LLMResponseCallback:
+        """Wrap the existing callback with the critic stream repetition guard."""
+        return CompositeResponseCallback(
+            StreamingRepeatGuardCallback(
+                min_repeated_sentence_words=int(
+                    self.reasoning_loop_guard["min_repeated_sentence_words"]
+                ),
+                single_response_repeat_threshold=int(
+                    self.reasoning_loop_guard["single_response_repeat_threshold"]
+                ),
+            ),
+            existing_callback,
+        )
+
+    def _build_stream_abort_retry_prompt(
+        self,
+        *,
+        abort_error: StreamingResponseAbort,
+        attempt: int,
+        max_attempts: int,
+    ) -> str:
+        """Build a corrective retry prompt after a repetitive streamed response."""
+        return (
+            "Your previous response was interrupted because you started repeating the "
+            f"same transcript-verification loop ({abort_error.reason}). Retry the same "
+            f"critique now. This is retry {attempt} of {max_attempts}. Do not repeat "
+            "or re-check the same transcript line over and over. If the issue is real, "
+            "state it once, cite the transcript evidence once, and then call "
+            "`submit_verdict`. If you need more evidence, use the available tools "
+            "instead of narrating repeated re-reads."
+        )
+
+    def _resolve_target_seconds(
+        self, *, target_seconds: int | None, min_words: int, max_words: int
+    ) -> int:
         """Resolve the intended duration target for the critic pass."""
         if target_seconds is not None and int(target_seconds) > 0:
             return int(target_seconds)
@@ -78,7 +168,9 @@ class CriticExecutor(BaseA2AExecutor):
                 state = load_live_draft_voice_clone_state(draft_audio_state_path)
             except Exception:
                 state = None
-            if state is not None and _snapshot_matches_summary_xml(state.current_snapshot, draft):
+            if state is not None and _snapshot_matches_summary_xml(
+                state.current_snapshot, draft
+            ):
                 total_seconds = round(
                     sum(
                         record.duration_ms / 1000.0
@@ -141,7 +233,9 @@ class CriticExecutor(BaseA2AExecutor):
                     "TRUNCATION: The last speaker block does not end with sentence-ending punctuation (. ! ?)."
                 )
         else:
-            failures.append("COHERENCE: No properly closed speaker-tagged XML blocks found.")
+            failures.append(
+                "COHERENCE: No properly closed speaker-tagged XML blocks found."
+            )
 
         open_tags = re.findall(r"<([A-Za-z0-9_.-]+)(?:\s[^>]*)?>", draft)
         close_tags = re.findall(r"</([A-Za-z0-9_.-]+)>", draft)
@@ -160,7 +254,6 @@ class CriticExecutor(BaseA2AExecutor):
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
         """Execute one critic task end to end."""
-        del context
         from card_framework.agents.dtos import CriticTaskRequest
 
         req = CriticTaskRequest.model_validate(task_data)
@@ -179,7 +272,9 @@ class CriticExecutor(BaseA2AExecutor):
         )
         full_transcript = req.full_transcript
 
-        self.event_bus.publish("system_message", "Evaluating draft using LLM Critic Loop...")
+        self.event_bus.publish(
+            "system_message", "Evaluating draft using LLM Critic Loop..."
+        )
 
         system_prompt = PromptManager.get_prompt(
             "critic_system",
@@ -275,7 +370,18 @@ class CriticExecutor(BaseA2AExecutor):
             "target_seconds": target_seconds,
             "duration_tolerance_ratio": duration_tolerance_ratio,
             "draft_audio_state_path": draft_audio_state_path,
+            "reasoning_loop_guard": dict(self.reasoning_loop_guard),
         }
+        if bool(self.reasoning_loop_guard.get("stream_abort_enabled", False)):
+            context_data["max_stream_abort_retries"] = int(
+                self.reasoning_loop_guard.get("max_stream_abort_retries", 0)
+            )
+            context_data["stream_response_callback_factory"] = (
+                self._build_stream_response_callback
+            )
+            context_data["stream_abort_retry_prompt_builder"] = (
+                self._build_stream_abort_retry_prompt
+            )
         final_verdict = await self.run_agent_loop(
             messages, tools, self.max_tool_turns, context_data
         )
@@ -287,17 +393,35 @@ class CriticExecutor(BaseA2AExecutor):
                 duration_tolerance_ratio=duration_tolerance_ratio,
                 draft_audio_state_path=draft_audio_state_path,
             )
+            loop_stop_category = str(context_data.get("loop_stop_category", "")).strip()
+            loop_stop_reason = str(context_data.get("loop_stop_reason", "")).strip()
+            if loop_stop_category == "reasoning_loop_guard":
+                feedback_prefix = "CRITIC LOOP GUARD: "
+                feedback_body = (
+                    loop_stop_reason
+                    if loop_stop_reason
+                    else "Stopped repetitive no-tool reasoning before verdict."
+                )
+            else:
+                feedback_prefix = (
+                    "CRITIC ERROR: LLM failed to submit a structured verdict. "
+                )
+                feedback_body = ""
             final_verdict = {
                 "status": stats["status"],
                 "word_count": stats["actual_word_count"],
                 "estimated_seconds": stats["actual_estimated_seconds"],
-                "feedback": "CRITIC ERROR: LLM failed to submit a structured verdict. "
+                "feedback": feedback_prefix
+                + feedback_body
+                + (" | " if feedback_body and stats["failures"] else "")
                 + " | ".join(stats["failures"]),
             }
 
         result_json = json.dumps(final_verdict)
         if final_verdict.get("status") == "pass":
-            self.event_bus.publish("status_message", message=f"Final Verdict: {result_json}")
+            self.event_bus.publish(
+                "status_message", message=f"Final Verdict: {result_json}"
+            )
         else:
             self.event_bus.publish(
                 "agent_message",
@@ -305,7 +429,7 @@ class CriticExecutor(BaseA2AExecutor):
                 message=f"Final Verdict: {result_json}",
             )
 
-        await self.send_response(result_json, event_queue)
+        await self.send_response(result_json, context, event_queue)
 
     async def process_tool_calls(
         self, tool_calls: list[dict], messages: list, context_data: dict
@@ -383,4 +507,3 @@ class CriticExecutor(BaseA2AExecutor):
         if final_verdict:
             return True, final_verdict
         return False, None
-

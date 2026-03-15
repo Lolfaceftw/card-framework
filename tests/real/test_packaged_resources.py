@@ -10,6 +10,7 @@ import pytest
 
 from card_framework.orchestration.transcript import Transcript
 from card_framework.runtime.pipeline_plan import build_pipeline_stage_plan
+from card_framework.shared.config_loading import load_runtime_config
 from card_framework.shared.paths import (
     DEFAULT_BENCHMARK_MANIFEST_PATH,
     DEFAULT_CONFIG_PATH,
@@ -17,7 +18,9 @@ from card_framework.shared.paths import (
     DEFAULT_PROVIDER_PROFILES_PATH,
     DEFAULT_QA_CONFIG_PATH,
     INDEX_TTS_CHECKPOINTS_DIR,
+    PACKAGED_DEFAULT_CONFIG_PATH,
     PROMPTS_DIR,
+    REPO_DEFAULT_CONFIG_PATH,
     VENDOR_INDEX_TTS_DIR,
 )
 from card_framework.shared.prompt_manager import PromptManager
@@ -31,6 +34,7 @@ FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "real"
 def test_packaged_resource_paths_and_prompt_loading() -> None:
     """Load real packaged resources from the installed src layout."""
     assert DEFAULT_CONFIG_PATH.exists()
+    assert PACKAGED_DEFAULT_CONFIG_PATH.exists()
     assert DEFAULT_BENCHMARK_MANIFEST_PATH.exists()
     assert DEFAULT_PROVIDER_PROFILES_PATH.exists()
     assert DEFAULT_QA_CONFIG_PATH.exists()
@@ -39,7 +43,7 @@ def test_packaged_resource_paths_and_prompt_loading() -> None:
     assert VENDOR_INDEX_TTS_DIR.exists()
     assert INDEX_TTS_CHECKPOINTS_DIR.exists()
 
-    config = OmegaConf.load(DEFAULT_CONFIG_PATH)
+    config = OmegaConf.load(PACKAGED_DEFAULT_CONFIG_PATH)
     assert str(config.audio.voice_clone.runner_project_dir) == "src/card_framework/_vendor/index_tts"
     assert str(config.audio.voice_clone.cfg_path) == "checkpoints/index_tts/config.yaml"
     assert str(config.audio.voice_clone.model_dir) == "checkpoints/index_tts"
@@ -47,6 +51,30 @@ def test_packaged_resource_paths_and_prompt_loading() -> None:
     rendered_prompt = PromptManager.get_prompt("corrector_system", max_examples=2)
     assert "Provide correction instructions" in rendered_prompt
     assert "Include 2 or fewer few-shot examples." in rendered_prompt
+
+
+@pytest.mark.integration
+def test_repo_and_packaged_configs_resolve_same_runtime_defaults() -> None:
+    """Keep repo-root and packaged fallback configs functionally aligned."""
+
+    repo_cfg = load_runtime_config(REPO_DEFAULT_CONFIG_PATH)
+    packaged_cfg = load_runtime_config(PACKAGED_DEFAULT_CONFIG_PATH)
+
+    assert OmegaConf.to_container(repo_cfg.llm, resolve=True) == OmegaConf.to_container(
+        packaged_cfg.llm, resolve=True
+    )
+    assert OmegaConf.to_container(
+        repo_cfg.embedding, resolve=True
+    ) == OmegaConf.to_container(packaged_cfg.embedding, resolve=True)
+    assert OmegaConf.to_container(
+        repo_cfg.stage_llm, resolve=True
+    ) == OmegaConf.to_container(packaged_cfg.stage_llm, resolve=True)
+    assert (
+        repo_cfg.orchestrator.target_minutes == packaged_cfg.orchestrator.target_minutes
+    )
+    assert (
+        repo_cfg.audio.voice_clone.cfg_path == packaged_cfg.audio.voice_clone.cfg_path
+    )
 
 
 @pytest.mark.integration

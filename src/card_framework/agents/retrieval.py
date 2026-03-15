@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 
 from a2a.server.agent_execution import RequestContext
@@ -72,5 +72,4 @@ class InfoRetrievalExecutor(BaseA2AExecutor):
             )
             event_bus.publish("error_message", message=f"Unknown action: {action}")
 
-        await self.send_response(result, event_queue)
-
+        await self.send_response(result, context, event_queue)

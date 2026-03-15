@@ -10,14 +10,22 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+import re
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 if TYPE_CHECKING:
     import numpy as np
 
 
 MessageRole = Literal["system", "user", "assistant", "tool", "developer", "model"]
-VALID_MESSAGE_ROLES: set[str] = {"system", "user", "assistant", "tool", "developer", "model"}
+VALID_MESSAGE_ROLES: set[str] = {
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "developer",
+    "model",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,7 +37,9 @@ class ToolCallDefinition:
     arguments: str
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object], index: int) -> "ToolCallDefinition":
+    def from_mapping(
+        cls, payload: Mapping[str, object], index: int
+    ) -> "ToolCallDefinition":
         """Parse a tool-call payload from OpenAI-compatible message history."""
         function_payload = payload.get("function")
         function = function_payload if isinstance(function_payload, Mapping) else {}
@@ -126,7 +136,9 @@ class ToolDefinition:
     def from_mapping(cls, payload: Mapping[str, object]) -> "ToolDefinition":
         """Parse a tool definition from either flattened or OpenAI-shaped mappings."""
         function_payload = payload.get("function")
-        function = function_payload if isinstance(function_payload, Mapping) else payload
+        function = (
+            function_payload if isinstance(function_payload, Mapping) else payload
+        )
         strict_value = function.get("strict")
         strict = strict_value if isinstance(strict_value, bool) else None
         raw_parameters = function.get("parameters")
@@ -155,6 +167,32 @@ ToolInput = ToolDefinition | Mapping[str, object]
 ToolChoice = str | Mapping[str, object]
 
 
+class StreamingResponseAbort(RuntimeError):
+    """Raised by streaming callbacks to stop one response before completion."""
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        partial_content: str = "",
+        partial_reasoning: str = "",
+    ) -> None:
+        """Store a normalized abort reason plus any partial streamed text."""
+        super().__init__(reason)
+        self.reason = reason
+        self.partial_content = partial_content
+        self.partial_reasoning = partial_reasoning
+
+_AGENT_NAME_HINTS: tuple[tuple[str, str], ...] = (
+    ("summarizer", "Summarizer"),
+    ("critic", "Critic"),
+    ("corrector", "Corrector"),
+    ("retrieval", "Retrieval"),
+    ("judge", "Judge"),
+    ("evaluator", "Judge"),
+)
+
+
 def normalize_messages(messages: Sequence[MessageInput]) -> list[dict[str, object]]:
     """Normalize typed or mapping-based messages into OpenAI-compatible dicts."""
     normalized: list[dict[str, object]] = []
@@ -181,6 +219,23 @@ def normalize_tools(
     return normalized
 
 
+def infer_agent_name_from_text(text: str, default: str = "Agent") -> str:
+    """Infer a display label from free-form system prompt text."""
+    normalized = text.strip().lower()
+    if not normalized:
+        return default
+    first_match_label = ""
+    first_match_index: int | None = None
+    for hint, label in _AGENT_NAME_HINTS:
+        match = re.search(rf"\b{re.escape(hint)}\b", normalized)
+        if match is None:
+            continue
+        if first_match_index is None or match.start() < first_match_index:
+            first_match_index = match.start()
+            first_match_label = label
+    return first_match_label or default
+
+
 def infer_agent_name(messages: Sequence[MessageInput], default: str = "Agent") -> str:
     """Infer display name from the latest system message in conversation history."""
     for message in reversed(messages):
@@ -189,11 +244,12 @@ def infer_agent_name(messages: Sequence[MessageInput], default: str = "Agent") -
         )
         if typed_message.role != "system":
             continue
-        content = typed_message.content
-        if "Summarizer" in content:
-            return "Summarizer"
-        if "Critic" in content:
-            return "Critic"
+        inferred_name = infer_agent_name_from_text(
+            typed_message.content,
+            default="",
+        )
+        if inferred_name:
+            return inferred_name
         break
     return default
 
@@ -250,7 +306,7 @@ class LLMProvider(ABC):
         tools: Sequence[ToolInput] | None = None,
         tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
-    ):
+    ) -> Any:
         """
         Chat completion with support for tools.
         Returns the full response object or a structured representation including tool calls.

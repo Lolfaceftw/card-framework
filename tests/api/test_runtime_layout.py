@@ -266,6 +266,30 @@ def test_resolve_uv_executable_prefers_active_scripts_dir_over_path_lookup(
     assert resolved == str(bundled_uv_path.resolve())
 
 
+def test_resolve_uv_executable_uses_active_bin_dir_on_posix(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Find the packaged uv executable in a POSIX-style scripts directory."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv_path = bin_dir / "uv"
+    uv_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "card_framework.runtime.bootstrap.shutil.which",
+        lambda command: None,
+    )
+    monkeypatch.setattr(
+        "card_framework.runtime.bootstrap.sysconfig.get_path",
+        lambda key: str(bin_dir),
+    )
+
+    resolved = resolve_uv_executable(uv_executable="uv")
+
+    assert resolved == str(uv_path.resolve())
+
+
 def test_vendored_indextts_lock_includes_py312_windows_numba_wheels() -> None:
     """Keep the vendored IndexTTS lock compatible with packaged Python 3.12 on Windows."""
     vendor_lock_path = (

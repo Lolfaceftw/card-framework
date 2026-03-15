@@ -344,7 +344,10 @@ def bootstrap_speaker_samples_from_audio(
                 _as_mapping(audio_cfg.get("separation", {})).get("model", "htdemucs")
             ),
             "transcriber_model": str(
-                _as_mapping(audio_cfg.get("asr", {})).get("model", "large-v3")
+                _as_mapping(audio_cfg.get("asr", {})).get(
+                    "model",
+                    "ibm-granite/granite-4.0-1b-speech",
+                )
             ),
             "diarizer_backend": str(
                 _as_mapping(audio_cfg.get("diarization", {})).get("provider", "nemo")

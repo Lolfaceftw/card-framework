@@ -14,7 +14,7 @@ from card_framework.audio_pipeline.calibration import (
     VoiceCloneCalibration,
     ensure_voice_clone_calibration,
 )
-from card_framework.shared.paths import DEFAULT_CONFIG_PATH as PACKAGED_DEFAULT_CONFIG_PATH
+from card_framework.shared.paths import DEFAULT_CONFIG_PATH
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -71,7 +71,7 @@ def load_audio_config(project_root: Path, *, config_path: Path | None = None) ->
         ValueError: If the config file does not define an ``audio`` mapping.
     """
     del project_root
-    config_path = config_path or PACKAGED_DEFAULT_CONFIG_PATH
+    config_path = config_path or DEFAULT_CONFIG_PATH
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     config = OmegaConf.load(config_path)

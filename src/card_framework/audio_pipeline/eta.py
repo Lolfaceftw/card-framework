@@ -102,7 +102,9 @@ class DynamicEtaTracker:
     The tracker combines:
     1. Initial estimate from historical/profile data.
     2. Progress-ratio updates (units completed and/or processed audio).
-    3. Elapsed-time overrun correction when no reliable progress is available.
+    3. Asymmetric convergence so observed progress can replace a bad cold-start
+       prior quickly without making slower later corrections overly jumpy.
+    4. Elapsed-time overrun correction when no reliable progress is available.
     """
 
     initial_total_seconds: float
@@ -153,6 +155,9 @@ class DynamicEtaTracker:
             elapsed + self.headroom_seconds,
             elapsed / ratio,
         )
+        if candidate_total <= self.current_total_seconds:
+            self.current_total_seconds = candidate_total
+            return
         self.current_total_seconds = (
             (1.0 - self.progress_smoothing) * self.current_total_seconds
             + self.progress_smoothing * candidate_total

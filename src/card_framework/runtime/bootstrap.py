@@ -16,6 +16,7 @@ from typing import Any
 
 from card_framework.audio_pipeline.errors import DependencyMissingError
 from card_framework.audio_pipeline.runtime import resolve_command_path
+from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.runtime_layout import RuntimeLayout
 
 _MIN_WEIGHT_BYTES = 1_000_000
@@ -80,33 +81,42 @@ def ensure_index_tts_runtime(
     python_executable: str | None = None,
     force_sync: bool = False,
     force_model_download: bool = False,
+    reporter: StatusReporter | None = None,
 ) -> None:
     """Ensure the writable IndexTTS runtime project and checkpoints are ready."""
-    resolved_uv_executable = resolve_uv_executable(uv_executable=uv_executable)
-    resolved_python_executable = _resolve_python_executable(
-        python_executable=python_executable
-    )
-    _ensure_runtime_directories(layout=layout)
-    source_fingerprints = _project_fingerprints(layout.vendor_source_dir)
-    _copy_vendor_project_if_needed(
-        layout=layout,
-        source_fingerprints=source_fingerprints,
-    )
-    _sync_vendor_project_if_needed(
-        layout=layout,
-        uv_executable=resolved_uv_executable,
-        python_executable=resolved_python_executable,
-        source_fingerprints=source_fingerprints,
-        force_sync=force_sync,
-    )
-    _ensure_model_checkpoints(
-        layout=layout,
-        uv_executable=resolved_uv_executable,
-        force_download=force_model_download,
-    )
+    with report_loading_duration(
+        "packaged IndexTTS runtime",
+        reporter=reporter,
+    ):
+        resolved_uv_executable = resolve_uv_executable(uv_executable=uv_executable)
+        resolved_python_executable = _resolve_python_executable(
+            python_executable=python_executable
+        )
+        _ensure_runtime_directories(layout=layout)
+        source_fingerprints = _project_fingerprints(layout.vendor_source_dir)
+        _copy_vendor_project_if_needed(
+            layout=layout,
+            source_fingerprints=source_fingerprints,
+        )
+        _sync_vendor_project_if_needed(
+            layout=layout,
+            uv_executable=resolved_uv_executable,
+            python_executable=resolved_python_executable,
+            source_fingerprints=source_fingerprints,
+            force_sync=force_sync,
+        )
+        _ensure_model_checkpoints(
+            layout=layout,
+            uv_executable=resolved_uv_executable,
+            force_download=force_model_download,
+        )
 
 
-def ensure_ctc_forced_aligner_runtime(*, python_executable: str) -> None:
+def ensure_ctc_forced_aligner_runtime(
+    *,
+    python_executable: str,
+    reporter: StatusReporter | None = None,
+) -> None:
     """Install the pinned CTC forced-aligner package when it is missing."""
     if importlib.util.find_spec("ctc_forced_aligner") is not None:
         return
@@ -115,11 +125,15 @@ def ensure_ctc_forced_aligner_runtime(*, python_executable: str) -> None:
         python_executable=python_executable,
         package_spec=_CTC_FORCED_ALIGNER_ARCHIVE_URL,
     )
-    _run_cmd(
-        step="ctc_forced_aligner_install",
-        command=install_command,
-        cwd=install_cwd,
-    )
+    with report_loading_duration(
+        "packaged ctc-forced-aligner runtime",
+        reporter=reporter,
+    ):
+        _run_cmd(
+            step="ctc_forced_aligner_install",
+            command=install_command,
+            cwd=install_cwd,
+        )
 
 
 def resolve_uv_executable(*, uv_executable: str = "uv") -> str:

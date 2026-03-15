@@ -1,4 +1,4 @@
-﻿"""Use the DeepSeek chat API through the shared LLM provider interface."""
+"""Use the DeepSeek chat API through the shared LLM provider interface."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from card_framework.shared.llm_provider import (
     NullLLMResponseCallback,
     ToolChoice,
     ToolInput,
+    infer_agent_name_from_text,
     infer_agent_name,
     normalize_messages,
     normalize_tools,
@@ -74,7 +75,7 @@ class DeepSeekProvider(LLMProvider):
         response = self._client.chat.completions.create(**create_kwargs)
 
         full_content = ""
-        self._response_callback.on_start("Agent")
+        self._response_callback.on_start(infer_agent_name_from_text(system_prompt))
         try:
             for chunk in response:
                 if not chunk.choices:
@@ -95,14 +96,11 @@ class DeepSeekProvider(LLMProvider):
     @staticmethod
     def _copy_message_without_reasoning(msg: dict[str, Any]) -> dict[str, Any]:
         """Return a defensive copy of a message without stale reasoning content."""
-        msg_clean = {
+        return {
             key: deepcopy(value)
             for key, value in msg.items()
             if key != "reasoning_content" and value is not None
         }
-        if msg.get("role") == "assistant" and "reasoning_content" in msg:
-            msg_clean["reasoning_content"] = msg["reasoning_content"]
-        return msg_clean
 
     @staticmethod
     def _tool_call_dedupe_key(tool_call: dict[str, Any]) -> str:
@@ -136,7 +134,9 @@ class DeepSeekProvider(LLMProvider):
 
         return merged_calls
 
-    def _normalize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _normalize_messages(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Normalize message history to satisfy DeepSeek tool-call constraints."""
         normalized: list[dict[str, Any]] = []
         valid_tool_call_ids: set[str] = set()
@@ -177,9 +177,18 @@ class DeepSeekProvider(LLMProvider):
                         last_msg["content"] = msg_clean["content"]
 
                 if msg_clean.get("tool_calls"):
+                    last_tool_calls = last_msg.get("tool_calls")
                     merged_calls = self._merge_tool_calls(
-                        existing_calls=last_msg.get("tool_calls"),
-                        incoming_calls=msg_clean["tool_calls"],
+                        existing_calls=(
+                            last_tool_calls
+                            if isinstance(last_tool_calls, list)
+                            else None
+                        ),
+                        incoming_calls=(
+                            msg_clean["tool_calls"]
+                            if isinstance(msg_clean["tool_calls"], list)
+                            else None
+                        ),
                     )
                     last_msg["tool_calls"] = merged_calls
                     for tool_call in merged_calls:
@@ -312,4 +321,3 @@ class DeepSeekProvider(LLMProvider):
         response_stream = self._client.chat.completions.create(**create_kwargs)
         agent_name = infer_agent_name(messages)
         return self._process_stream(response_stream, agent_name)
-

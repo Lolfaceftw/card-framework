@@ -1,4 +1,4 @@
-﻿"""Streaming callback adapters used by provider implementations."""
+"""Streaming callback adapters used by provider implementations."""
 
 from __future__ import annotations
 
@@ -6,7 +6,11 @@ from contextlib import AbstractContextManager
 import sys
 from typing import Any
 
-from card_framework.shared.llm_provider import LLMResponseCallback
+from card_framework.shared.llm_provider import (
+    LLMResponseCallback,
+    StreamingResponseAbort,
+)
+from card_framework.shared.repetition_guard import extract_repeated_response_span
 
 
 def _stdout_supports_live_rich_output() -> bool:
@@ -44,6 +48,7 @@ class RichConsoleResponseCallback(LLMResponseCallback):
             self._plain_started = False
             self._plain_thought_started = False
             self._plain_content_started = False
+            self._ensure_plain_header()
             return
 
         from card_framework.cli.ui import ui
@@ -117,3 +122,90 @@ class RichConsoleResponseCallback(LLMResponseCallback):
         self._live_context = None
         self._live_message = None
 
+
+class CompositeResponseCallback(LLMResponseCallback):
+    """Forward streaming events to multiple callbacks in order."""
+
+    def __init__(self, *callbacks: LLMResponseCallback) -> None:
+        self._callbacks = tuple(callbacks)
+
+    def on_start(self, agent_name: str) -> None:
+        """Signal stream start to each callback."""
+        for callback in self._callbacks:
+            callback.on_start(agent_name)
+
+    def on_thought_token(self, token: str) -> None:
+        """Forward one reasoning token chunk to each callback."""
+        for callback in self._callbacks:
+            callback.on_thought_token(token)
+
+    def on_content_token(self, token: str) -> None:
+        """Forward one content token chunk to each callback."""
+        for callback in self._callbacks:
+            callback.on_content_token(token)
+
+    def on_complete(self) -> None:
+        """Close every callback, preserving the first raised error."""
+        first_error: Exception | None = None
+        for callback in self._callbacks:
+            try:
+                callback.on_complete()
+            except Exception as exc:  # pragma: no cover - defensive cleanup path
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+
+class StreamingRepeatGuardCallback(LLMResponseCallback):
+    """Abort a stream when one response starts repeating the same long span."""
+
+    def __init__(
+        self,
+        *,
+        min_repeated_sentence_words: int,
+        single_response_repeat_threshold: int,
+    ) -> None:
+        self._min_repeated_sentence_words = max(1, min_repeated_sentence_words)
+        self._single_response_repeat_threshold = max(2, single_response_repeat_threshold)
+        self._thought_buffer = ""
+        self._content_buffer = ""
+
+    def on_start(self, agent_name: str) -> None:
+        """Reset per-response buffers for a new stream."""
+        del agent_name
+        self._thought_buffer = ""
+        self._content_buffer = ""
+
+    def _check_buffer(self, *, text: str, is_content: bool) -> None:
+        """Raise a controlled abort when the streamed text becomes repetitive."""
+        repeated_span = extract_repeated_response_span(
+            text,
+            min_words=self._min_repeated_sentence_words,
+            repeat_threshold=self._single_response_repeat_threshold,
+        )
+        if repeated_span is None:
+            return
+        preview, repeat_count = repeated_span
+        raise StreamingResponseAbort(
+            reason=(
+                "stream repetition detected "
+                f"({repeat_count} repeats): {preview}"
+            ),
+            partial_content=text if is_content else "",
+            partial_reasoning=text if not is_content else "",
+        )
+
+    def on_thought_token(self, token: str) -> None:
+        """Inspect incremental reasoning text for repeated long spans."""
+        self._thought_buffer += token
+        self._check_buffer(text=self._thought_buffer, is_content=False)
+
+    def on_content_token(self, token: str) -> None:
+        """Inspect incremental content text for repeated long spans."""
+        self._content_buffer += token
+        self._check_buffer(text=self._content_buffer, is_content=True)
+
+    def on_complete(self) -> None:
+        """No-op completion hook for the stream guard."""
+        return None

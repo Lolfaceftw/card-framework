@@ -1,12 +1,19 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from card_framework.benchmark.reference_free.contracts import JudgeRubric, JudgeRubricDimension
-from card_framework.benchmark.reference_free.judge_runner import LLMJudgeRunner
+from card_framework.benchmark.reference_free.contracts import (
+    JudgeRubric,
+    JudgeRubricDimension,
+)
+from card_framework.benchmark.reference_free.judge_runner import (
+    LLMJudgeRunner,
+    LLMJudgeRunnerConfig,
+)
 
 
 class FakeJudgeProvider:
     def __init__(self, responses: list[str]) -> None:
         self._responses = responses
+        self.max_tokens_seen: list[int | None] = []
 
     def generate(
         self,
@@ -14,6 +21,7 @@ class FakeJudgeProvider:
         user_prompt: str,
         max_tokens: int | None = None,
     ) -> str:
+        self.max_tokens_seen.append(max_tokens)
         if not self._responses:
             raise RuntimeError("No fake responses left")
         return self._responses.pop(0)
@@ -83,3 +91,43 @@ def test_judge_runner_handles_invalid_json() -> None:
     assert result.scores is None
     assert result.error_message is not None
 
+
+def test_judge_runner_does_not_impose_a_default_max_token_limit() -> None:
+    provider = FakeJudgeProvider(
+        responses=[
+            '{"factuality": 0.8, "relevance": 0.7, "coherence": 0.6, "overall": 0.65, "confidence": 0.8, "rationale": "ok"}'
+        ]
+    )
+    runner = LLMJudgeRunner(judge_llm=provider, rubric=_rubric())
+
+    result = runner.evaluate(
+        source_text="source text",
+        summary_text="summary text",
+        enable_order_swap=False,
+        repeats=1,
+    )
+
+    assert result.status == "ok"
+    assert provider.max_tokens_seen == [None]
+
+
+def test_judge_runner_can_use_full_source_without_char_limit() -> None:
+    provider = FakeJudgeProvider(
+        responses=[
+            '{"factuality": 0.8, "relevance": 0.7, "coherence": 0.6, "overall": 0.65, "confidence": 0.8, "rationale": "ok"}'
+        ]
+    )
+    runner = LLMJudgeRunner(
+        judge_llm=provider,
+        rubric=_rubric(),
+        config=LLMJudgeRunnerConfig(source_char_limit=None, max_tokens=None),
+    )
+
+    result = runner.evaluate(
+        source_text="source text " * 4000,
+        summary_text="summary text",
+        enable_order_swap=False,
+        repeats=1,
+    )
+
+    assert result.status == "ok"

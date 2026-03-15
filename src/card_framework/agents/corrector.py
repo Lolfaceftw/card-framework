@@ -1,4 +1,4 @@
-﻿"""Corrector agent that generates retry guidance for failed agent generations."""
+"""Corrector agent that generates retry guidance for failed agent generations."""
 
 from __future__ import annotations
 
@@ -353,8 +353,6 @@ class CorrectorExecutor(BaseA2AExecutor):
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
         """Generate correction instructions and few-shot examples."""
-        del context
         request = CorrectorTaskRequest.model_validate(task_data)
         response = self.corrector.build_retry_guidance(request)
-        await self.send_response(response.model_dump_json(), event_queue)
-
+        await self.send_response(response.model_dump_json(), context, event_queue)

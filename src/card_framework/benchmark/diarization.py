@@ -28,6 +28,7 @@ from card_framework.benchmark.diarization_types import (
     DiarizationProviderAggregate,
     DiarizationSampleRunResult,
 )
+from card_framework.shared.config_loading import load_runtime_config
 from card_framework.shared.paths import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_DIARIZATION_MANIFEST_PATH,
@@ -143,12 +144,7 @@ def _load_base_config(config_path: Path) -> DictConfig:
         raise DiarizationBenchmarkRuntimeError(
             f"Config path does not exist: {config_path}"
         )
-    cfg = OmegaConf.load(config_path)
-    if not isinstance(cfg, DictConfig):
-        raise DiarizationBenchmarkRuntimeError(
-            "Failed to load diarization benchmark base config."
-        )
-    return cfg
+    return load_runtime_config(config_path)
 
 
 def _default_provider_ids(active_provider: str) -> list[str]:
