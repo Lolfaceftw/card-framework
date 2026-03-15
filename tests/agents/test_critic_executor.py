@@ -1,4 +1,4 @@
-﻿"""Unit tests for critic deterministic-check tool handling."""
+"""Unit tests for critic deterministic-check tool handling."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 import types
 from typing import Any
@@ -243,7 +244,9 @@ class _StreamingLoopLLM(LLMProvider):
         if isinstance(response, _LoopResponse):
             return response
 
-        reasoning_tokens = [str(token) for token in response.get("reasoning_tokens", [])]
+        reasoning_tokens = [
+            str(token) for token in response.get("reasoning_tokens", [])
+        ]
         content_tokens = [str(token) for token in response.get("content_tokens", [])]
         self._response_callback.on_start("Critic")
         try:
@@ -261,11 +264,92 @@ class _StreamingLoopLLM(LLMProvider):
         )
 
 
+class _TaggedResponseCallback:
+    """Record which runtime callback handled one streamed response."""
+
+    def __init__(self, tag: str, started_tags: list[str]) -> None:
+        self._tag = tag
+        self._started_tags = started_tags
+
+    def on_start(self, agent_name: str) -> None:
+        del agent_name
+        self._started_tags.append(self._tag)
+
+    def on_thought_token(self, token: str) -> None:
+        del token
+
+    def on_content_token(self, token: str) -> None:
+        del token
+
+    def on_complete(self) -> None:
+        return None
+
+
+class _BlockingStreamingLLM(LLMProvider):
+    """Block the first streamed chat so a second concurrent call can race it."""
+
+    def __init__(self) -> None:
+        self._response_callback: Any = _NullResponseCallback()
+        self._call_count = 0
+        self._call_count_lock = threading.Lock()
+        self.first_started = threading.Event()
+        self.second_started = threading.Event()
+        self.release_first = threading.Event()
+
+    def set_response_callback(self, response_callback: Any) -> None:
+        self._response_callback = response_callback
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        del system_prompt, user_prompt, max_tokens
+        raise NotImplementedError
+
+    def chat(
+        self,
+        messages: list[Any],
+        tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | str | None = None,
+        max_tokens: int | None = None,
+    ) -> _LoopResponse:
+        del messages, tools, tool_choice, max_tokens
+        with self._call_count_lock:
+            self._call_count += 1
+            call_index = self._call_count
+
+        self._response_callback.on_start("Critic")
+        try:
+            if call_index == 1:
+                self.first_started.set()
+                if not self.release_first.wait(timeout=5.0):
+                    raise AssertionError("Timed out waiting to release the first call.")
+            else:
+                self.second_started.set()
+            self._response_callback.on_content_token(f"call-{call_index}")
+        finally:
+            self._response_callback.on_complete()
+        return _LoopResponse(content=f"call-{call_index}")
+
+
 class _LoopGuardExecutor(BaseA2AExecutor):
     """Tiny concrete executor used to exercise the shared loop guard."""
 
     def __init__(self, llm: _LoopLLM) -> None:
         super().__init__("LoopGuard")
+        self.llm = llm
+
+    async def handle_task(self, task_data, context, event_queue) -> None:  # noqa: ANN001
+        del task_data, context, event_queue
+
+
+class _CallbackLockExecutor(BaseA2AExecutor):
+    """Concrete executor used to exercise per-call stream callback wiring."""
+
+    def __init__(self, llm: LLMProvider) -> None:
+        super().__init__("CallbackLock")
         self.llm = llm
 
     async def handle_task(self, task_data, context, event_queue) -> None:  # noqa: ANN001
@@ -427,7 +511,9 @@ def test_verify_against_transcript_uses_injected_agent_client() -> None:
     assert fake_client.calls == [{"port": 9123, "timeout": 120.0}]
 
 
-def test_run_deterministic_checks_prefers_live_draft_audio_state(tmp_path: Path) -> None:
+def test_run_deterministic_checks_prefers_live_draft_audio_state(
+    tmp_path: Path,
+) -> None:
     """Use persisted live-draft audio durations when the state snapshot matches."""
     speaker_manifest_path = tmp_path / "speaker_samples" / "manifest.json"
     speaker_manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -691,8 +777,9 @@ def test_handle_task_retries_after_stream_repetition_abort() -> None:
     }
     assert llm.calls == 2
     assert llm.chat_messages[1][-1]["role"] == "user"
-    assert "interrupted because you started repeating the same" in (
-        llm.chat_messages[1][-1]["content"]
+    assert (
+        "interrupted because you started repeating the same"
+        in (llm.chat_messages[1][-1]["content"])
     )
     assert "Retry the same critique now." in llm.chat_messages[1][-1]["content"]
 
@@ -741,6 +828,41 @@ def test_handle_task_falls_back_after_repeated_stream_abort() -> None:
     assert payload["feedback"].startswith("CRITIC LOOP GUARD:")
     assert "stream repetition detected" in payload["feedback"]
     assert llm.calls == 2
+
+
+def test_chat_with_runtime_stream_callback_serializes_shared_provider_swaps() -> None:
+    """Serialize temporary callback swaps so concurrent chats do not cross-wire."""
+    llm = _BlockingStreamingLLM()
+    executor = _CallbackLockExecutor(llm)
+    callback_starts: list[str] = []
+
+    async def _run_chat(tag: str) -> _LoopResponse:
+        return await executor._chat_with_runtime_stream_callback(
+            chat_kwargs={"messages": [], "tools": []},
+            runtime_context={
+                "stream_response_callback_factory": (
+                    lambda existing: _TaggedResponseCallback(tag, callback_starts)
+                )
+            },
+        )
+
+    async def _exercise() -> None:
+        first_task = asyncio.create_task(_run_chat("first"))
+        await asyncio.to_thread(llm.first_started.wait, 1.0)
+
+        second_task = asyncio.create_task(_run_chat("second"))
+        await asyncio.sleep(0.1)
+        assert not llm.second_started.is_set()
+
+        llm.release_first.set()
+        first_result = await first_task
+        second_result = await second_task
+
+        assert first_result.model_dump()["content"] == "call-1"
+        assert second_result.model_dump()["content"] == "call-2"
+        assert callback_starts == ["first", "second"]
+
+    asyncio.run(_exercise())
 
 
 def test_handle_task_preserves_normal_tool_flow() -> None:
@@ -818,4 +940,3 @@ def test_handle_task_preserves_normal_tool_flow() -> None:
         "estimated_seconds": 1.5,
         "feedback": "ok",
     }
-

@@ -1,12 +1,13 @@
-from openai import OpenAI
-import anthropic
 import json
 import random
-from gen_api_answer import get_openai_response, get_anthropic_response
 
-# Initialize clients
-anthropic_client = anthropic.Anthropic()
-openai_client = OpenAI()
+try:
+    from .gen_api_answer import get_anthropic_response, get_openai_response
+except ImportError:  # pragma: no cover - script-style fallback for the vendored app
+    from gen_api_answer import (  # type: ignore[no-redef]
+        get_anthropic_response,
+        get_openai_response,
+    )
 
 GOOD_SYSTEM_PROMPT = """You are an assistant that generates random conversations between a human and an AI assistant for testing purposes. The AI response generated should be a few sentences long. Format your output as JSON: {"human": "<human message>", "ai": <AI assistant response>}. Ensure the output is valid JSON, without additional formatting or explanations."""
 BAD_SYSTEM_PROMPT = """You are an assistant that generates random conversations between a human and an AI assistant for testing purposes. The response should contain incorrect information, logical fallacies, or misleading explanations. It should sound plausible but be fundamentally wrong. The AI response generated should be a few sentences long. Format your output as JSON: {"human": "<human message>", "ai": <AI assistant response>}. Ensure the output is valid JSON, without additional formatting or explanations."""
@@ -26,26 +27,30 @@ Format as JSON with "human", "ai", and "ground_truth" fields."""
 
 RESPONSE_GENERATION_SYSTEM_PROMPT = "You are an assistant that generates random responses to human messages for testing purposes. Generate bad responses (with a mix of correct and incorrect information) 60% of the time and good responses 40% of the time. Do not say which type of response you are generating, just generate the response."
 
+
 def get_random_human_ai_pair():
     # Select system prompt with specified probabilities
     system_prompt = random.choices(
         [GOOD_SYSTEM_PROMPT, BAD_SYSTEM_PROMPT, AMBIGUOUS_SYSTEM_PROMPT],
-        weights=[0.2, 0.2, 0.6]  # 20% good, 20% bad, 60% ambiguous
+        weights=[0.2, 0.2, 0.6],  # 20% good, 20% bad, 60% ambiguous
     )[0]
 
     # Log which type of response is being generated
     prompt_type = {
         GOOD_SYSTEM_PROMPT: "good",
         BAD_SYSTEM_PROMPT: "bad",
-        AMBIGUOUS_SYSTEM_PROMPT: "ambiguous"
+        AMBIGUOUS_SYSTEM_PROMPT: "ambiguous",
     }[system_prompt]
     print(f"Generating {prompt_type} response")
 
     # Randomly choose between GPT-3.5 and Claude with 65%/35% weights
-    model_choice = random.choices([
-        ("gpt-3.5-turbo", get_openai_response),
-        ("claude-3-5-haiku-latest", get_anthropic_response)
-    ], weights=[0.5, 0.5])[0]
+    model_choice = random.choices(
+        [
+            ("gpt-3.5-turbo", get_openai_response),
+            ("claude-3-5-haiku-latest", get_anthropic_response),
+        ],
+        weights=[0.5, 0.5],
+    )[0]
     model_name, api_func = model_choice
 
     # Generate response using selected model
@@ -54,7 +59,7 @@ def get_random_human_ai_pair():
         prompt=GENERATION_PROMPT,
         system_prompt=system_prompt,
         max_tokens=500,
-        temperature=1
+        temperature=1,
     )
 
     # Define default messages
@@ -63,7 +68,7 @@ def get_random_human_ai_pair():
 
     try:
         # Clean the response by replacing newlines with spaces
-        cleaned_response = response.replace('\n', ' ').replace('\r', '')
+        cleaned_response = response.replace("\n", " ").replace("\r", "")
         data = json.loads(cleaned_response)
 
         # Extract messages with fallbacks
@@ -80,27 +85,31 @@ def get_random_human_ai_pair():
 
     return human_message, ai_message
 
+
 def get_random_human_ai_ground_truth_pair():
     # Select system prompt with specified probabilities
     system_prompts = {
         "good": GOOD_SYSTEM_PROMPT_WITH_GROUND_TRUTH,
         "bad": BAD_SYSTEM_PROMPT_WITH_GROUND_TRUTH,
-        "ambiguous": AMBIGUOUS_SYSTEM_PROMPT_WITH_GROUND_TRUTH
+        "ambiguous": AMBIGUOUS_SYSTEM_PROMPT_WITH_GROUND_TRUTH,
     }
 
     prompt_type = random.choices(
         ["good", "bad", "ambiguous"],
-        weights=[0.2, 0.2, 0.6]  # 20% good, 20% bad, 60% ambiguous
+        weights=[0.2, 0.2, 0.6],  # 20% good, 20% bad, 60% ambiguous
     )[0]
 
     system_prompt = system_prompts[prompt_type]
     print(f"Generating {prompt_type} response with ground truth")
 
     # Randomly choose between GPT-3.5 and Claude with 50/50 weights
-    model_choice = random.choices([
-        ("gpt-3.5-turbo", get_openai_response),
-        ("claude-3-5-haiku-latest", get_anthropic_response)
-    ], weights=[0.5, 0.5])[0]
+    model_choice = random.choices(
+        [
+            ("gpt-3.5-turbo", get_openai_response),
+            ("claude-3-5-haiku-latest", get_anthropic_response),
+        ],
+        weights=[0.5, 0.5],
+    )[0]
     model_name, api_func = model_choice
 
     # Define default messages
@@ -121,7 +130,7 @@ def get_random_human_ai_ground_truth_pair():
 
 6. Recovery: Adequate rest between training sessions allows for repair and growth, supported by proper nutrition, particularly protein intake (1.6-2.2g/kg/day).
 
-This process is influenced by factors including genetics, age, sex, nutrition, sleep quality, and training variables. Optimal muscle growth requires a structured resistance training program, adequate protein intake, sufficient calories, and proper recovery."""
+This process is influenced by factors including genetics, age, sex, nutrition, sleep quality, and training variables. Optimal muscle growth requires a structured resistance training program, adequate protein intake, sufficient calories, and proper recovery.""",
     }
 
     # Generate response using selected model
@@ -130,13 +139,13 @@ This process is influenced by factors including genetics, age, sex, nutrition, s
         prompt=GENERATION_PROMPT_WITH_GROUND_TRUTH,
         system_prompt=system_prompt,
         max_tokens=1000,  # Increased token limit to accommodate ground truth
-        temperature=1
+        temperature=1,
     )
 
     # Parse the response to get all three components
     try:
         # Clean the response by replacing newlines with spaces
-        cleaned_response = response.replace('\n', ' ').replace('\r', '')
+        cleaned_response = response.replace("\n", " ").replace("\r", "")
         data = json.loads(cleaned_response)
 
         # Extract messages with fallbacks
@@ -145,7 +154,9 @@ This process is influenced by factors including genetics, age, sex, nutrition, s
         ground_truth = data.get("ground_truth", defaults["ground_truth"])
 
         # Debug logging
-        print(f"Parsed response: human='{human_message}', ai='{ai_message[:50]}...', ground_truth='{ground_truth[:50]}...'")
+        print(
+            f"Parsed response: human='{human_message}', ai='{ai_message[:50]}...', ground_truth='{ground_truth[:50]}...'"
+        )
 
     except Exception as e:
         print(f"Failed to parse response: {str(e)}\n {response}")
@@ -154,6 +165,7 @@ This process is influenced by factors including genetics, age, sex, nutrition, s
         ground_truth = defaults["ground_truth"]
 
     return human_message, ai_message, ground_truth
+
 
 def generate_ai_response(human_msg):
     """Generate AI response using GPT-3.5-turbo"""
@@ -166,7 +178,7 @@ def generate_ai_response(human_msg):
             human_msg,
             system_prompt=RESPONSE_GENERATION_SYSTEM_PROMPT,
             max_tokens=1000,
-            temperature=1
+            temperature=1,
         )
         # Extract just the response content since we don't need JSON format here
         if isinstance(response, str):

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -22,10 +23,85 @@ from card_framework.benchmark.summarizer_critic.config import (
     PreparedDatasetManifest,
     QMSUM_REPO_URL,
 )
+from card_framework.shared.paths import REPO_ROOT
+
+
+APPROVED_QMSUM_ROOT = REPO_ROOT / "artifacts"
 
 
 class DatasetPreparationError(RuntimeError):
     """Raise when the QMSum benchmark slice cannot be prepared."""
+
+
+def _resolve_repo_dir(repo_dir: Path) -> Path:
+    """Resolve and constrain the QMSum checkout path under the artifacts root."""
+    resolved_root = APPROVED_QMSUM_ROOT.resolve()
+    resolved_repo_dir = repo_dir.resolve(strict=False)
+    try:
+        resolved_repo_dir.relative_to(resolved_root)
+    except ValueError as exc:
+        raise DatasetPreparationError(
+            "QMSum repo_dir must stay under the repository artifacts root: "
+            f"{resolved_root}"
+        ) from exc
+    if resolved_repo_dir == resolved_root:
+        raise DatasetPreparationError(
+            "QMSum repo_dir must be a subdirectory beneath the artifacts root."
+        )
+    return resolved_repo_dir
+
+
+def _resolve_git_executable() -> str:
+    """Return an absolute Git executable path or raise a preparation error."""
+    git_executable = shutil.which("git")
+    if not git_executable:
+        raise DatasetPreparationError(
+            "Git is required to prepare the official QMSum benchmark dataset."
+        )
+    return git_executable
+
+
+def _validated_archive_url(branch_name: str) -> str:
+    """Return the fixed GitHub archive URL for one allowed QMSum branch."""
+    archive_url = (
+        f"https://github.com/Yale-LILY/QMSum/archive/refs/heads/{branch_name}.zip"
+    )
+    parsed = urllib.parse.urlparse(archive_url)
+    if parsed.scheme != "https" or parsed.netloc != "github.com":
+        raise DatasetPreparationError(f"Refusing unexpected archive URL: {archive_url}")
+    return archive_url
+
+
+def _resolve_archive_member_path(destination_root: Path, member_name: str) -> Path:
+    """Resolve one ZIP member path and reject path traversal."""
+    resolved_destination_root = destination_root.resolve()
+    target_path = (resolved_destination_root / member_name).resolve(strict=False)
+    try:
+        target_path.relative_to(resolved_destination_root)
+    except ValueError as exc:
+        raise DatasetPreparationError(
+            f"Archive entry escapes extraction root: {member_name}"
+        ) from exc
+    return target_path
+
+
+def _extract_archive_safely(archive_path: Path, destination_root: Path) -> None:
+    """Extract a ZIP archive while constraining every member path."""
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            target_path = _resolve_archive_member_path(
+                destination_root,
+                member.filename,
+            )
+            if member.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with (
+                archive.open(member) as source_handle,
+                target_path.open("wb") as destination_handle,
+            ):
+                shutil.copyfileobj(source_handle, destination_handle)
 
 
 def derive_target_seconds(
@@ -46,6 +122,7 @@ def ensure_official_qmsum_repo(
     force_download: bool = False,
 ) -> Path:
     """Ensure the official QMSum repository is available locally."""
+    repo_dir = _resolve_repo_dir(repo_dir)
     data_dir = repo_dir / "data" / "ALL" / "test"
     if data_dir.exists() and not force_download:
         return repo_dir.resolve()
@@ -54,22 +131,22 @@ def ensure_official_qmsum_repo(
         shutil.rmtree(repo_dir)
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
+    git_executable = _resolve_git_executable()
     clone_result = subprocess.run(
-        ["git", "clone", "--depth", "1", QMSUM_REPO_URL, str(repo_dir)],
+        [git_executable, "clone", "--depth", "1", QMSUM_REPO_URL, str(repo_dir)],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         check=False,
+        # repo_dir is constrained under the repo artifacts root before cloning.
     )
     if clone_result.returncode == 0 and data_dir.exists():
         return repo_dir.resolve()
 
     branch_names = ("main", "master")
     for branch_name in branch_names:
-        archive_url = (
-            f"https://github.com/Yale-LILY/QMSum/archive/refs/heads/{branch_name}.zip"
-        )
+        archive_url = _validated_archive_url(branch_name)
         archive_path = repo_dir.parent / f"qmsum_{branch_name}.zip"
         extract_root = repo_dir.parent / f"QMSum-{branch_name}"
         try:
@@ -77,8 +154,7 @@ def ensure_official_qmsum_repo(
         except (urllib.error.URLError, OSError):
             continue
         try:
-            with zipfile.ZipFile(archive_path) as archive:
-                archive.extractall(repo_dir.parent)
+            _extract_archive_safely(archive_path, repo_dir.parent)
         finally:
             archive_path.unlink(missing_ok=True)
         if repo_dir.exists():

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import socket
+
+import pytest
 
 from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     _select_samples,
     _format_eta,
     _progress_snapshot,
+    _release_reserved_port,
     _resolve_benchmark_ports,
     BenchmarkExecutionError,
     build_execute_parser,
@@ -140,3 +144,21 @@ def test_resolve_benchmark_ports_rejects_duplicates() -> None:
         raise AssertionError(
             "Expected duplicate ports to raise BenchmarkExecutionError"
         )
+
+
+def test_resolve_benchmark_ports_keeps_reserved_ports_bound_until_consumed() -> None:
+    args = argparse.Namespace(
+        retrieval_port=None,
+        summarizer_port=None,
+        critic_port=None,
+    )
+    retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(args)
+
+    try:
+        for port in (retrieval_port, summarizer_port, critic_port):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                with pytest.raises(OSError):
+                    probe.bind(("127.0.0.1", port))
+    finally:
+        for port in (retrieval_port, summarizer_port, critic_port):
+            _release_reserved_port(port)

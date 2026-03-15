@@ -5,6 +5,7 @@ import json
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from difflib import SequenceMatcher
+import threading
 from typing import Any
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -33,6 +34,9 @@ class BaseA2AExecutor(AgentExecutor, ABC):
     """
     Base class for A2A executors to standardize common logic.
     """
+
+    _provider_callback_locks: dict[int, threading.Lock] = {}
+    _provider_callback_locks_guard = threading.Lock()
 
     def __init__(self, name: str):
         self.name = name
@@ -289,9 +293,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
 
         normalized_text = cls._normalize_reasoning_loop_text(assistant_text)
         state = cls._reasoning_loop_guard_state(runtime_context)
-        consecutive_no_tool_turns = (
-            int(state.get("consecutive_no_tool_turns", 0)) + 1
-        )
+        consecutive_no_tool_turns = int(state.get("consecutive_no_tool_turns", 0)) + 1
         state["consecutive_no_tool_turns"] = consecutive_no_tool_turns
 
         repeated_span = cls._extract_repeated_response_span(
@@ -312,10 +314,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         if (
             previous_text
             and normalized_text
-            and current_word_count
-            >= int(guard_config["min_repeated_sentence_words"])
-            and previous_word_count
-            >= int(guard_config["min_repeated_sentence_words"])
+            and current_word_count >= int(guard_config["min_repeated_sentence_words"])
+            and previous_word_count >= int(guard_config["min_repeated_sentence_words"])
             and consecutive_no_tool_turns
             >= int(guard_config["max_consecutive_no_tool_turns"])
         ):
@@ -351,14 +351,30 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         seen: set[int] = set()
         while isinstance(current, LLMProvider) and id(current) not in seen:
             seen.add(id(current))
-            callback_setter = getattr(current, "set_response_callback", None)
-            if callable(callback_setter):
-                existing_callback = getattr(current, "_response_callback", None)
+            if hasattr(current, "set_response_callback"):
+                existing_callback = (
+                    current._response_callback
+                    if hasattr(current, "_response_callback")
+                    else None
+                )
                 if existing_callback is None:
                     existing_callback = NullLLMResponseCallback()
                 return current, existing_callback
-            current = getattr(current, "inner_provider", None)
+            current = (
+                current.inner_provider if hasattr(current, "inner_provider") else None
+            )
         return None
+
+    @classmethod
+    def _resolve_callback_lock(cls, provider: LLMProvider) -> threading.Lock:
+        """Return a stable lock for temporary callback swaps on one provider."""
+        provider_id = id(provider)
+        with cls._provider_callback_locks_guard:
+            callback_lock = cls._provider_callback_locks.get(provider_id)
+            if callback_lock is None:
+                callback_lock = threading.Lock()
+                cls._provider_callback_locks[provider_id] = callback_lock
+            return callback_lock
 
     @classmethod
     @contextmanager
@@ -378,12 +394,13 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             return
 
         target_provider, existing_callback = callback_target
-        setter = getattr(target_provider, "set_response_callback")
-        setter(callback)
-        try:
-            yield
-        finally:
-            setter(existing_callback)
+        callback_lock = cls._resolve_callback_lock(target_provider)
+        with callback_lock:
+            target_provider.set_response_callback(callback)
+            try:
+                yield
+            finally:
+                target_provider.set_response_callback(existing_callback)
 
     def _build_runtime_stream_callback(
         self,
@@ -410,8 +427,14 @@ class BaseA2AExecutor(AgentExecutor, ABC):
     ) -> Any:
         """Execute one chat call with an optional temporary stream callback."""
         runtime_callback = self._build_runtime_stream_callback(runtime_context)
-        with self._temporary_response_callback(self.llm, runtime_callback):
+        if runtime_callback is None:
             return await asyncio.to_thread(self.llm.chat, **chat_kwargs)
+
+        def _chat_with_callback() -> Any:
+            with self._temporary_response_callback(self.llm, runtime_callback):
+                return self.llm.chat(**chat_kwargs)
+
+        return await asyncio.to_thread(_chat_with_callback)
 
     def _handle_streaming_response_abort(
         self,

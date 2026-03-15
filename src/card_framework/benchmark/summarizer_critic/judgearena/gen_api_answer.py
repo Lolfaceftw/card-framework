@@ -1,36 +1,73 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from openai import OpenAI
-import anthropic
-from together import Together
-import cohere
 import json
-import re
 import os
+import re
+
 import requests
-from prompts import (
-    JUDGE_SYSTEM_PROMPT,
-    PROMETHEUS_PROMPT,
-    PROMETHEUS_PROMPT_WITH_REFERENCE,
-    ATLA_PROMPT,
-    ATLA_PROMPT_WITH_REFERENCE,
-    FLOW_JUDGE_PROMPT,
-)
-from transformers import AutoTokenizer
-from atla import Atla
+from openai import OpenAI
+
+try:
+    import anthropic
+except ImportError:  # pragma: no cover - optional dependency
+    anthropic = None
+
+try:
+    import cohere
+except ImportError:  # pragma: no cover - optional dependency
+    cohere = None
+
+try:
+    from together import Together
+except ImportError:  # pragma: no cover - optional dependency
+    Together = None
+
+try:
+    from transformers import AutoTokenizer
+except ImportError:  # pragma: no cover - optional dependency
+    AutoTokenizer = None
+
+try:
+    from .prompts import (
+        ATLA_PROMPT,
+        ATLA_PROMPT_WITH_REFERENCE,
+        FLOW_JUDGE_PROMPT,
+        JUDGE_SYSTEM_PROMPT,
+        PROMETHEUS_PROMPT,
+        PROMETHEUS_PROMPT_WITH_REFERENCE,
+    )
+except ImportError:  # pragma: no cover - script-style fallback for the vendored app
+    from prompts import (  # type: ignore[no-redef]
+        ATLA_PROMPT,
+        ATLA_PROMPT_WITH_REFERENCE,
+        FLOW_JUDGE_PROMPT,
+        JUDGE_SYSTEM_PROMPT,
+        PROMETHEUS_PROMPT,
+        PROMETHEUS_PROMPT_WITH_REFERENCE,
+    )
+
+if TYPE_CHECKING:
+    from atla import Atla as AtlaClient
+else:
+    AtlaClient = Any
+
+try:
+    from atla import Atla as _AtlaRuntimeClient
+except ImportError:  # pragma: no cover - optional dependency
+    _AtlaRuntimeClient = None
 
 hf_api_key = os.getenv("HF_API_KEY")
 flow_judge_api_key = os.getenv("FLOW_JUDGE_API_KEY")
 salesforce_api_key = os.getenv("SALESFORCE_API_KEY")
 
-_anthropic_client: anthropic.Anthropic | None = None
-_atla_client: Atla | None = None
-_cohere_client: cohere.ClientV2 | None = None
+_anthropic_client: Any | None = None
+_atla_client: AtlaClient | None = None
+_cohere_client: Any | None = None
 _openai_clients: dict[tuple[str | None, str, float | None], OpenAI] = {}
-_together_client: Together | None = None
+_together_client: Any | None = None
 
 
 def _resolve_env_placeholder(value: Any) -> Any:
@@ -69,31 +106,45 @@ def _get_openai_client(model_info: dict[str, Any] | None = None) -> OpenAI:
     return client
 
 
-def _get_anthropic_client() -> anthropic.Anthropic:
+def _get_anthropic_client() -> Any:
     global _anthropic_client
     if _anthropic_client is None:
+        if anthropic is None:
+            raise RuntimeError(
+                "Anthropic support requires the optional `anthropic` package."
+            )
         _anthropic_client = anthropic.Anthropic()
     return _anthropic_client
 
 
-def _get_together_client() -> Together:
+def _get_together_client() -> Any:
     global _together_client
     if _together_client is None:
+        if Together is None:
+            raise RuntimeError(
+                "Together support requires the optional `together` package."
+            )
         _together_client = Together()
     return _together_client
 
 
-def _get_cohere_client() -> cohere.ClientV2:
+def _get_cohere_client() -> Any:
     global _cohere_client
     if _cohere_client is None:
+        if cohere is None:
+            raise RuntimeError("Cohere support requires the optional `cohere` package.")
         _cohere_client = cohere.ClientV2(os.getenv("CO_API_KEY"))
     return _cohere_client
 
 
-def _get_atla_client() -> Atla:
+def _get_atla_client() -> AtlaClient:
     global _atla_client
     if _atla_client is None:
-        _atla_client = Atla()
+        if _AtlaRuntimeClient is None:
+            raise RuntimeError(
+                "Atla support requires the optional `atla` package to be installed."
+            )
+        _atla_client = _AtlaRuntimeClient()
     return _atla_client
 
 
@@ -494,6 +545,10 @@ def get_prometheus_response(
 
         # Apply chat template
         model_id = "prometheus-eval/prometheus-7b-v2.0"
+        if AutoTokenizer is None:
+            raise RuntimeError(
+                "Prometheus support requires the optional `transformers` package."
+            )
         tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_api_key)
         formatted_prompt = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True

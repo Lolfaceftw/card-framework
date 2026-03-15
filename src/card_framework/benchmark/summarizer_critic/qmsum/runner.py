@@ -124,10 +124,35 @@ class ManagedServer:
         self.thread = thread
 
 
+_RESERVED_PORT_SOCKETS: dict[int, socket.socket] = {}
+_RESERVED_PORTS_LOCK = threading.Lock()
+
+
 def _reserve_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as handle:
-        handle.bind(("127.0.0.1", 0))
-        return int(handle.getsockname()[1])
+    handle = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    handle.bind(("127.0.0.1", 0))
+    handle.listen(2048)
+    port = int(handle.getsockname()[1])
+    with _RESERVED_PORTS_LOCK:
+        _RESERVED_PORT_SOCKETS[port] = handle
+    return port
+
+
+def _consume_reserved_port_socket(port: int) -> socket.socket | None:
+    """Return and remove a reserved socket for the requested port."""
+    with _RESERVED_PORTS_LOCK:
+        return _RESERVED_PORT_SOCKETS.pop(port, None)
+
+
+def _release_reserved_port(port: int) -> None:
+    """Close any still-reserved socket for the requested port."""
+    handle = _consume_reserved_port_socket(port)
+    if handle is None:
+        return
+    try:
+        handle.close()
+    except OSError:
+        return
 
 
 def _resolve_requested_port(name: str, value: int | None) -> int:
@@ -161,6 +186,7 @@ def _resolve_benchmark_ports(args: argparse.Namespace) -> tuple[int, int, int]:
 
 
 def _run_server_in_thread(name: str, app: Any, port: int) -> ManagedServer:
+    reserved_socket = _consume_reserved_port_socket(port)
     config = uvicorn.Config(
         app, host="127.0.0.1", port=port, log_level="warning", access_log=False
     )
@@ -169,7 +195,17 @@ def _run_server_in_thread(name: str, app: Any, port: int) -> ManagedServer:
     def _serve() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(server.serve())
+        try:
+            if reserved_socket is None:
+                loop.run_until_complete(server.serve())
+            else:
+                loop.run_until_complete(server.serve(sockets=[reserved_socket]))
+        finally:
+            if reserved_socket is not None:
+                try:
+                    reserved_socket.close()
+                except OSError:
+                    pass
 
     thread = threading.Thread(target=_serve, name=name, daemon=True)
     thread.start()
@@ -590,8 +626,13 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     event_capture.start()
     shared_agent_client = AgentClient(event_bus=event_bus)
     servers: list[ManagedServer] = []
+    reserved_ports: tuple[int, int, int] | None = None
     try:
         retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(args)
+        reserved_ports = (retrieval_port, summarizer_port, critic_port)
+
+        if not retrieval_enabled:
+            _release_reserved_port(retrieval_port)
 
         if retrieval_enabled:
             retrieval_app = _build_a2a_app(
@@ -835,6 +876,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         event_capture.stop()
         for server in reversed(servers):
             _stop_server(server)
+        if reserved_ports is not None:
+            for port in reserved_ports:
+                _release_reserved_port(port)
         await shared_agent_client.close()
 
 

@@ -8,48 +8,86 @@ import gradio as gr
 
 from dotenv import load_dotenv
 
-from gen_api_answer import (
-    parse_model_response,
-    prometheus_parse_model_response,
-    salesforce_parse_model_response,
-    flow_judge_parse_model_response,
-    stream_model_response,
-)
-
-from random_sample_generation import (
-    get_random_human_ai_pair,
-    get_random_human_ai_ground_truth_pair,
-    generate_ai_response,
-)
-from db import add_vote, create_db_connection, get_votes
-
-from utils import Vote
-
-from common import (
-    POLICY_CONTENT,
-    ACKNOWLEDGEMENTS,
-    CSS_STYLES,
-    MAIN_TITLE,
-    HOW_IT_WORKS,
-)
-from prompts import (
-    DEFAULT_EVAL_PROMPT,
-    DEFAULT_EVAL_PROMPT_EDITABLE,
-    FIXED_EVAL_SUFFIX,
-    DEFAULT_EVAL_CRITERIA,
-    DEFAULT_SCORE_1,
-    DEFAULT_SCORE_2,
-    DEFAULT_SCORE_3,
-    DEFAULT_SCORE_4,
-    DEFAULT_SCORE_5,
-)
-from leaderboard import (
-    get_leaderboard,
-    get_leaderboard_stats,
-    get_model_rankings,
-    DEFAULT_ELO,
-    K_FACTOR,
-)
+try:
+    from .common import (
+        ACKNOWLEDGEMENTS,
+        CSS_STYLES,
+        HOW_IT_WORKS,
+        MAIN_TITLE,
+        POLICY_CONTENT,
+    )
+    from .db import add_vote, create_db_connection, get_votes
+    from .gen_api_answer import (
+        flow_judge_parse_model_response,
+        parse_model_response,
+        prometheus_parse_model_response,
+        salesforce_parse_model_response,
+        stream_model_response,
+    )
+    from .leaderboard import (
+        DEFAULT_ELO,
+        K_FACTOR,
+        get_leaderboard,
+        get_leaderboard_stats,
+        get_model_rankings,
+    )
+    from .prompts import (
+        DEFAULT_EVAL_CRITERIA,
+        DEFAULT_EVAL_PROMPT,
+        DEFAULT_EVAL_PROMPT_EDITABLE,
+        DEFAULT_SCORE_1,
+        DEFAULT_SCORE_2,
+        DEFAULT_SCORE_3,
+        DEFAULT_SCORE_4,
+        DEFAULT_SCORE_5,
+        FIXED_EVAL_SUFFIX,
+    )
+    from .random_sample_generation import (
+        generate_ai_response,
+        get_random_human_ai_ground_truth_pair,
+        get_random_human_ai_pair,
+    )
+    from .utils import Vote
+except ImportError:  # pragma: no cover - script-style fallback for the vendored app
+    from common import (  # type: ignore[no-redef]
+        ACKNOWLEDGEMENTS,
+        CSS_STYLES,
+        HOW_IT_WORKS,
+        MAIN_TITLE,
+        POLICY_CONTENT,
+    )
+    from db import add_vote, create_db_connection, get_votes  # type: ignore[no-redef]
+    from gen_api_answer import (  # type: ignore[no-redef]
+        flow_judge_parse_model_response,
+        parse_model_response,
+        prometheus_parse_model_response,
+        salesforce_parse_model_response,
+        stream_model_response,
+    )
+    from leaderboard import (  # type: ignore[no-redef]
+        DEFAULT_ELO,
+        K_FACTOR,
+        get_leaderboard,
+        get_leaderboard_stats,
+        get_model_rankings,
+    )
+    from prompts import (  # type: ignore[no-redef]
+        DEFAULT_EVAL_CRITERIA,
+        DEFAULT_EVAL_PROMPT,
+        DEFAULT_EVAL_PROMPT_EDITABLE,
+        DEFAULT_SCORE_1,
+        DEFAULT_SCORE_2,
+        DEFAULT_SCORE_3,
+        DEFAULT_SCORE_4,
+        DEFAULT_SCORE_5,
+        FIXED_EVAL_SUFFIX,
+    )
+    from random_sample_generation import (  # type: ignore[no-redef]
+        generate_ai_response,
+        get_random_human_ai_ground_truth_pair,
+        get_random_human_ai_pair,
+    )
+    from utils import Vote  # type: ignore[no-redef]
 
 load_dotenv()
 
@@ -57,8 +95,12 @@ load_dotenv()
 elo_scores = defaultdict(lambda: DEFAULT_ELO)
 vote_counts = defaultdict(int)
 
-db = create_db_connection()
-votes_collection = get_votes(db)
+try:
+    db = create_db_connection()
+    votes_collection = get_votes(db)
+except RuntimeError:
+    db = None
+    votes_collection = []
 
 current_time = datetime.now()
 

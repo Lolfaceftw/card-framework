@@ -47,6 +47,7 @@ from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     _load_base_config,
     _make_run_id,
     _progress_snapshot,
+    _release_reserved_port,
     _resolve_embedding_profile,
     _resolve_benchmark_ports,
     _run_server_in_thread,
@@ -460,9 +461,7 @@ def _build_resume_failure_result(
     stage = str(active_sample.get("stage") or "unknown")
     raw_iteration = active_sample.get("iteration")
     iteration_text = (
-        f" iteration={int(raw_iteration)}"
-        if isinstance(raw_iteration, int)
-        else ""
+        f" iteration={int(raw_iteration)}" if isinstance(raw_iteration, int) else ""
     )
     elapsed_seconds = float(active_sample.get("elapsed_sample_seconds", 0.0) or 0.0)
     return SampleBenchmarkResult(
@@ -622,7 +621,9 @@ def _evaluate_sample_preflight(
     reference_wpm: float,
 ) -> tuple[Transcript, dict[str, int | float | str], str | None]:
     """Evaluate whether a prepared sample can support the requested target."""
-    source_payload = json.loads(Path(sample.transcript_path).read_text(encoding="utf-8"))
+    source_payload = json.loads(
+        Path(sample.transcript_path).read_text(encoding="utf-8")
+    )
     transcript = Transcript.from_mapping(source_payload)
     transcript_word_count = _transcript_word_count(transcript)
     timestamp_span_seconds = _timestamp_span_seconds(transcript)
@@ -694,7 +695,9 @@ def _summarize_results(results: list[SampleBenchmarkResult]) -> BenchmarkSummary
     successful_results = [
         result for result in executed_results if result.status == "completed"
     ]
-    failed_results = [result for result in executed_results if result.status == "failed"]
+    failed_results = [
+        result for result in executed_results if result.status == "failed"
+    ]
     skipped_results = [result for result in results if result.status == "skipped"]
     return BenchmarkSummary(
         sample_count=len(results),
@@ -715,7 +718,9 @@ def _summarize_results(results: list[SampleBenchmarkResult]) -> BenchmarkSummary
             else 0.0
         ),
         mean_speaker_grammar_similarity=(
-            sum(result.metrics.speaker_grammar_similarity for result in executed_results)
+            sum(
+                result.metrics.speaker_grammar_similarity for result in executed_results
+            )
             / len(executed_results)
             if executed_results
             else 0.0
@@ -904,6 +909,7 @@ async def _start_managed_runtime(
     event_capture.start()
     shared_agent_client = AgentClient(event_bus=event_bus)
     servers: list[ManagedServer] = []
+    reserved_ports: tuple[int, int, int] | None = None
     try:
         runtime_args = _build_runtime_port_args(
             args,
@@ -912,6 +918,10 @@ async def _start_managed_runtime(
         retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(
             runtime_args
         )
+        reserved_ports = (retrieval_port, summarizer_port, critic_port)
+
+        if not retrieval_enabled:
+            _release_reserved_port(retrieval_port)
 
         if retrieval_enabled:
             retrieval_app = _build_a2a_app(
@@ -1003,6 +1013,9 @@ async def _start_managed_runtime(
         event_capture.stop()
         for server in reversed(servers):
             _stop_server(server)
+        if reserved_ports is not None:
+            for port in reserved_ports:
+                _release_reserved_port(port)
         await shared_agent_client.close()
         raise
 
@@ -1681,7 +1694,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     )
 
     raw_checkpoint_path = str(getattr(args, "checkpoint_path", "") or "").strip()
-    checkpoint_path = Path(raw_checkpoint_path).resolve() if raw_checkpoint_path else None
+    checkpoint_path = (
+        Path(raw_checkpoint_path).resolve() if raw_checkpoint_path else None
+    )
     checkpoint_payload: dict[str, Any] = {}
     resumed_from_checkpoint = bool(getattr(args, "resume_from_checkpoint", False))
     resume_count = 0
@@ -1698,9 +1713,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 f"SPoRC checkpoint is missing run_id: {checkpoint_path}"
             )
         resume_count = int(checkpoint_payload.get("resume_count", 0)) + 1
-        recovered_stall_count = int(
-            checkpoint_payload.get("recovered_stall_count", 0)
-        )
+        recovered_stall_count = int(checkpoint_payload.get("recovered_stall_count", 0))
     else:
         run_id = _make_run_id()
     run_root = Path(args.output_root).resolve() / run_id
@@ -1758,9 +1771,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 "Resume checkpoint dataset manifest does not match the requested dataset manifest."
             )
     sample_selection_label = (
-        f"seeded_random({sample_seed})"
-        if sample_seed is not None
-        else "manifest_order"
+        f"seeded_random({sample_seed})" if sample_seed is not None else "manifest_order"
     )
     results_by_sample_id: dict[str, SampleBenchmarkResult] = {}
     for raw_result in checkpoint_payload.get("completed_results", []):
@@ -1785,7 +1796,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         DEFAULT_DATASET_MANIFEST_PATH.parent / "benchmark_medium_10_manifest.json"
     ).resolve()
     if (
-        dataset_manifest.manifest_path.resolve() == DEFAULT_DATASET_MANIFEST_PATH.resolve()
+        dataset_manifest.manifest_path.resolve()
+        == DEFAULT_DATASET_MANIFEST_PATH.resolve()
         and override_target_seconds in {300, 900}
     ):
         event_bus.publish(
@@ -2016,7 +2028,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     if resumed_from_checkpoint:
         active_sample_payload = checkpoint_payload.get("active_sample")
         if isinstance(active_sample_payload, dict):
-            active_sample_id = str(active_sample_payload.get("sample_id", "") or "").strip()
+            active_sample_id = str(
+                active_sample_payload.get("sample_id", "") or ""
+            ).strip()
             if active_sample_id and active_sample_id not in results_by_sample_id:
                 resumed_sample = sample_lookup.get(active_sample_id)
                 active_target_seconds = active_target_seconds_by_sample_id.get(
@@ -2097,7 +2111,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             "transcript_only": transcript_only,
             "sample_seed": sample_seed,
             "resume_count": resume_count,
-            "checkpoint_path": str(checkpoint_path) if checkpoint_path is not None else "",
+            "checkpoint_path": str(checkpoint_path)
+            if checkpoint_path is not None
+            else "",
         },
     )
 
