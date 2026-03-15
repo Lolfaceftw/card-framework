@@ -208,6 +208,35 @@ def test_dynamic_eta_tracker_reestimates_total_from_progress() -> None:
     assert remaining == 40.0
 
 
+def test_dynamic_eta_tracker_contracts_quickly_after_real_progress() -> None:
+    tracker = DynamicEtaTracker(
+        initial_total_seconds=3_600.0,
+        progress_smoothing=0.25,
+    )
+    tracker.observe_progress(
+        elapsed_seconds=24.0,
+        update=StageProgressUpdate(completed_units=1, total_units=10),
+    )
+
+    assert tracker.estimate_total_seconds(elapsed_seconds=24.0) == pytest.approx(240.0)
+    assert tracker.estimate_signed_remaining_seconds(elapsed_seconds=24.0) == pytest.approx(
+        216.0
+    )
+
+
+def test_dynamic_eta_tracker_expands_gradually_when_runtime_slows() -> None:
+    tracker = DynamicEtaTracker(
+        initial_total_seconds=100.0,
+        progress_smoothing=0.25,
+    )
+    tracker.observe_progress(
+        elapsed_seconds=60.0,
+        update=StageProgressUpdate(completed_units=1, total_units=2),
+    )
+
+    assert tracker.estimate_total_seconds(elapsed_seconds=60.0) == pytest.approx(105.0)
+
+
 def test_dynamic_eta_tracker_inflates_after_overrun() -> None:
     tracker = DynamicEtaTracker(
         initial_total_seconds=5.0,

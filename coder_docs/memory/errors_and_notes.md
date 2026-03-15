@@ -1,3 +1,7 @@
+### 2026-03-15T12:55:00+08:00 - ETA Must Abandon A Bad Cold-Start Prior As Soon As Chunk Throughput Is Real
+- Problem: The dynamic ETA tracker blended the initial profile-based estimate with live chunk progress using the same smoothing in both directions. On long-stage separation runs that meant a pessimistic first-run prior could linger for multiple chunks, so logs showed unrealistic drops like `58m -> 44m -> 33m -> 25m` even though each chunk runtime already implied a much shorter finish time.
+- Solution: Make the tracker contract immediately to the observed total when real progress says the stage is faster than the prior, and keep smoothing only for slower upward corrections so ETA stabilizes quickly after the first real chunk without becoming noisy when later chunks slow down.
+
 ### 2026-03-15T12:45:37.0083186+08:00 - Audio-Stage ETA Should Not Wait For Learned History
 - Problem: Separation and transcription already had configured/default throughput multipliers, but the orchestrator suppressed ETA entirely until a learned or persisted stage-history sample existed. That made first-run stage-1 logs look inconsistent with the new chunk-progress reporting even when the runtime knew the input audio duration.
 - Solution: Let the orchestrator estimate audio-stage ETA whenever duration is known, using the strategy's configured/default throughput on first run and refining future runs from learned or persisted history.

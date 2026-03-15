@@ -187,6 +187,7 @@
     <etaAndObservability>
       <rule>ETA estimation and learning live in audio_pipeline/eta.py and are reused across audio and voice-clone stages.</rule>
       <rule>Operator-facing audio-stage ETA messages start from the configured/default throughput profile whenever audio duration is known, then refine as learned or persisted throughput history becomes available.</rule>
+      <rule>Once separation or transcription starts emitting `chunk i/N` or `segment i/N` progress, the dynamic tracker now snaps down quickly to the observed throughput if the cold-start prior was too pessimistic, while still smoothing slower upward corrections.</rule>
       <rule>Long Demucs separations now report note-based `chunk i/N` progress, and the orchestrator republishes those chunk milestones with ETA just like Granite transcription segment progress.</rule>
       <rule>The transcription stage now republishes chunk progress immediately when a transcriber reports unit counts, so operators see inline status such as `Audio stage: transcription segment 3/12; estimated time left ...` instead of waiting for the periodic ticker alone.</rule>
       <rule>Demucs separation now uses the shared loading-duration reporter too, so stage-1 emits timed `Loading ...` / `Loaded ... in X.XX seconds.` messages before and after long separation work in addition to the Granite model-load messages.</rule>
