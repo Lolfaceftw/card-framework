@@ -42,7 +42,8 @@ def _sample_result() -> SampleBenchmarkResult:
 
 def test_render_sample_results_table_contains_expected_columns() -> None:
     table = render_sample_results_table([_sample_result()])
-    assert "sample" in table
+    assert "| sample | status |" in table
+    assert "| --- | --- |" in table
     assert "meeting_a__general_01" in table
     assert "0.850" in table
 
@@ -85,3 +86,9 @@ def test_write_execution_artifacts_creates_report_and_markdown(tmp_path: Path) -
     assert report_path.exists()
     assert notes_path.exists()
     assert results_path.exists()
+
+    results_text = results_path.read_text(encoding="utf-8")
+    assert "## Sample Results" in results_text
+    assert "| metric | mean | 95% CI |" in results_text
+    assert "n/a" in results_text
+    assert "```text" not in results_text

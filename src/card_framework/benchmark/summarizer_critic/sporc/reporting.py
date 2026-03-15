@@ -14,10 +14,15 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     SampleBenchmarkResult,
     SupervisedRunRecord,
 )
+from card_framework.benchmark.summarizer_critic.reporting_utils import (
+    format_confidence_interval,
+    mean_confidence_interval_95,
+    render_markdown_table,
+)
 
 
 def render_sample_results_table(results: list[SampleBenchmarkResult]) -> str:
-    """Render benchmark sample results as a markdown-friendly ASCII table."""
+    """Render benchmark sample results as a Markdown table."""
     headers = [
         "sample",
         "status",
@@ -41,29 +46,11 @@ def render_sample_results_table(results: list[SampleBenchmarkResult]) -> str:
         ]
         for result in results
     ]
-    widths = [
-        max(len(header), *(len(row[index]) for row in rows))
-        for index, header in enumerate(headers)
-    ]
-
-    def _format(values: list[str]) -> str:
-        return (
-            "| "
-            + " | ".join(
-                value.ljust(widths[index]) for index, value in enumerate(values)
-            )
-            + " |"
-        )
-
-    divider = "+-" + "-+-".join("-" * width for width in widths) + "-+"
-    lines = [divider, _format(headers), divider]
-    lines.extend(_format(row) for row in rows)
-    lines.append(divider)
-    return "\n".join(lines)
+    return render_markdown_table(headers, rows)
 
 
 def render_supervised_results_table(records: list[SupervisedRunRecord]) -> str:
-    """Render supervised session outcomes as an ASCII table."""
+    """Render supervised session outcomes as a Markdown table."""
     headers = ["run", "status", "exit", "secs", "peak_ram%", "peak_gpu_gib", "report"]
     rows = [
         [
@@ -77,31 +64,13 @@ def render_supervised_results_table(records: list[SupervisedRunRecord]) -> str:
         ]
         for record in records
     ]
-    widths = [
-        max(len(header), *(len(row[index]) for row in rows))
-        for index, header in enumerate(headers)
-    ]
-
-    def _format(values: list[str]) -> str:
-        return (
-            "| "
-            + " | ".join(
-                value.ljust(widths[index]) for index, value in enumerate(values)
-            )
-            + " |"
-        )
-
-    divider = "+-" + "-+-".join("-" * width for width in widths) + "-+"
-    lines = [divider, _format(headers), divider]
-    lines.extend(_format(row) for row in rows)
-    lines.append(divider)
-    return "\n".join(lines)
+    return render_markdown_table(headers, rows)
 
 
 def render_duration_sweep_table(
     summaries: list[DurationSweepPresetSummary],
 ) -> str:
-    """Render duration sweep aggregates as an ASCII table."""
+    """Render duration sweep aggregates as a Markdown table."""
     headers = [
         "preset",
         "status",
@@ -116,6 +85,7 @@ def render_duration_sweep_table(
         "natural",
         "speaker_grammar",
         "composite",
+        "composite_95_ci",
     ]
     rows = [
         [
@@ -132,28 +102,70 @@ def render_duration_sweep_table(
             f"{summary.mean_naturalness:.3f}",
             f"{summary.mean_speaker_grammar_similarity:.3f}",
             f"{summary.mean_composite:.3f}",
+            format_confidence_interval(
+                (
+                    summary.mean_composite_ci95_lower,
+                    summary.mean_composite_ci95_upper,
+                )
+                if summary.mean_composite_ci95_lower is not None
+                and summary.mean_composite_ci95_upper is not None
+                else None
+            ),
         ]
         for summary in summaries
     ]
-    widths = [
-        max(len(header), *(len(row[index]) for row in rows))
-        for index, header in enumerate(headers)
+    return render_markdown_table(headers, rows)
+
+
+def _render_aggregate_metrics_table(report: BenchmarkExecutionReport) -> str:
+    """Render executed-sample means plus 95% confidence intervals."""
+    executed_samples = [
+        sample for sample in report.samples if sample.status != "skipped"
     ]
-
-    def _format(values: list[str]) -> str:
-        return (
-            "| "
-            + " | ".join(
-                value.ljust(widths[index]) for index, value in enumerate(values)
-            )
-            + " |"
-        )
-
-    divider = "+-" + "-+-".join("-" * width for width in widths) + "-+"
-    lines = [divider, _format(headers), divider]
-    lines.extend(_format(row) for row in rows)
-    lines.append(divider)
-    return "\n".join(lines)
+    return render_markdown_table(
+        ["metric", "mean", "95% CI"],
+        [
+            [
+                "factualness",
+                f"{report.summary.mean_factualness:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [sample.metrics.factualness for sample in executed_samples]
+                    )
+                ),
+            ],
+            [
+                "naturalness",
+                f"{report.summary.mean_naturalness:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [sample.metrics.naturalness for sample in executed_samples]
+                    )
+                ),
+            ],
+            [
+                "speaker_grammar_similarity",
+                f"{report.summary.mean_speaker_grammar_similarity:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [
+                            sample.metrics.speaker_grammar_similarity
+                            for sample in executed_samples
+                        ]
+                    )
+                ),
+            ],
+            [
+                "composite",
+                f"{report.summary.mean_composite:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [sample.metrics.composite for sample in executed_samples]
+                    )
+                ),
+            ],
+        ],
+    )
 
 
 def write_execution_artifacts(
@@ -204,18 +216,16 @@ def write_execution_artifacts(
     results_lines = [
         "# SPoRC Summarizer-Critic Benchmark Results",
         "",
-        "```text",
+        "## Sample Results",
+        "",
         render_sample_results_table(report.samples),
-        "```",
         "",
         "## Aggregate Metrics",
         "",
         f"- Executed samples: `{report.summary.executed_count}`",
         f"- Skipped samples: `{report.summary.skipped_count}`",
-        f"- Mean factualness: `{report.summary.mean_factualness:.3f}`",
-        f"- Mean naturalness: `{report.summary.mean_naturalness:.3f}`",
-        f"- Mean speaker grammar similarity: `{report.summary.mean_speaker_grammar_similarity:.3f}`",
-        f"- Mean composite: `{report.summary.mean_composite:.3f}`",
+        "",
+        _render_aggregate_metrics_table(report),
     ]
     skipped_samples = [sample for sample in report.samples if sample.status == "skipped"]
     if skipped_samples:
@@ -251,9 +261,7 @@ def write_duration_sweep_artifacts(
         f"- Judge provider: `{report.judge_provider}`",
         f"- Embedding mode: `{report.embedding_mode}`",
         "",
-        "```text",
         render_duration_sweep_table(report.preset_summaries),
-        "```",
         "",
         "## Per-Preset Artifacts",
         "",
@@ -299,9 +307,8 @@ def write_supervisor_session_artifacts(
     )
     results_path.write_text(
         "# SPoRC Summarizer-Critic Supervisor Results\n\n"
-        + "```text\n"
         + render_supervised_results_table(records)
-        + "\n```\n",
+        + "\n",
         encoding="utf-8",
     )
     return session_json_path, notes_path, results_path

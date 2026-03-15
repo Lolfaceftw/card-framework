@@ -87,6 +87,7 @@ from card_framework.agents.base import BaseA2AExecutor
 from card_framework.agents.critic import CriticExecutor
 from card_framework.agents.utils import count_words
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
+from card_framework.shared.llm_provider import LLMProvider
 from card_framework.shared.prompt_manager import PromptManager
 
 
@@ -178,6 +179,86 @@ class _LoopLLM:
         response = self._responses[self._index]
         self._index += 1
         return response
+
+
+class _NullResponseCallback:
+    """Ignore streamed callback events in unit-test providers."""
+
+    def on_start(self, agent_name: str) -> None:
+        del agent_name
+
+    def on_thought_token(self, token: str) -> None:
+        del token
+
+    def on_content_token(self, token: str) -> None:
+        del token
+
+    def on_complete(self) -> None:
+        return None
+
+
+class _StreamingLoopLLM(LLMProvider):
+    """Deterministic streaming LLM stub that can be interrupted by callbacks."""
+
+    def __init__(self, responses: list[dict[str, Any] | _LoopResponse]) -> None:
+        self._responses = list(responses)
+        self._index = 0
+        self.calls = 0
+        self.chat_messages: list[list[dict[str, Any]]] = []
+        self._response_callback = _NullResponseCallback()
+
+    def set_response_callback(self, response_callback: Any) -> None:
+        self._response_callback = response_callback
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        del system_prompt, user_prompt, max_tokens
+        raise NotImplementedError
+
+    def chat(
+        self,
+        messages: list[Any],
+        tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | str | None = None,
+        max_tokens: int | None = None,
+    ) -> _LoopResponse:
+        del tools, tool_choice, max_tokens
+        self.calls += 1
+        self.chat_messages.append(
+            [
+                message.to_openai_dict()
+                if hasattr(message, "to_openai_dict")
+                else dict(message)
+                for message in messages
+            ]
+        )
+        if self._index >= len(self._responses):
+            return _LoopResponse(content="")
+        response = self._responses[self._index]
+        self._index += 1
+        if isinstance(response, _LoopResponse):
+            return response
+
+        reasoning_tokens = [str(token) for token in response.get("reasoning_tokens", [])]
+        content_tokens = [str(token) for token in response.get("content_tokens", [])]
+        self._response_callback.on_start("Critic")
+        try:
+            for token in reasoning_tokens:
+                self._response_callback.on_thought_token(token)
+            for token in content_tokens:
+                self._response_callback.on_content_token(token)
+        finally:
+            self._response_callback.on_complete()
+
+        return _LoopResponse(
+            content="".join(content_tokens),
+            tool_calls=response.get("tool_calls"),
+            reasoning_content="".join(reasoning_tokens) or None,
+        )
 
 
 class _LoopGuardExecutor(BaseA2AExecutor):
@@ -540,6 +621,126 @@ def test_handle_task_falls_back_with_loop_guard_prefix() -> None:
     payload = json.loads(extract_agent_text_message(queue.events[0]))
     assert payload["feedback"].startswith("CRITIC LOOP GUARD:")
     assert "single-response repetition" in payload["feedback"]
+
+
+def test_handle_task_retries_after_stream_repetition_abort() -> None:
+    """Retry the critic once when stream-time repetition is detected."""
+    draft = "<SPEAKER_00>Short finalized draft.</SPEAKER_00>"
+    repeated_chunk = "Wait, the transcript says Ashley said the line already. "
+    llm = _StreamingLoopLLM(
+        [
+            {"content_tokens": [repeated_chunk, repeated_chunk, repeated_chunk]},
+            _LoopResponse(
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "submit_verdict",
+                            "arguments": json.dumps(
+                                {
+                                    "status": "pass",
+                                    "actual_word_count": 3,
+                                    "estimated_seconds": 1.5,
+                                    "feedback": "ok after retry",
+                                }
+                            ),
+                        },
+                    }
+                ]
+            ),
+        ]
+    )
+    executor = CriticExecutor(
+        llm=llm,
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+        reasoning_loop_guard={"max_stream_abort_retries": 1},
+    )
+    queue = _RecordingQueue()
+    original_get_prompt = PromptManager.__dict__["get_prompt"]
+
+    def _fake_get_prompt(cls, key: str, **kwargs: Any) -> str:
+        if key == "critic_user":
+            return str(kwargs.get("draft", ""))
+        return f"{key} prompt"
+
+    PromptManager.get_prompt = classmethod(_fake_get_prompt)
+    try:
+        asyncio.run(
+            executor.handle_task(
+                {
+                    "draft": draft,
+                    "target_seconds": 60,
+                    "duration_tolerance_ratio": 0.05,
+                    "full_transcript": "[E0001] [SPEAKER_00] Source text",
+                },
+                context=SimpleNamespace(task_id=None, context_id=None),
+                event_queue=queue,  # type: ignore[arg-type]
+            )
+        )
+    finally:
+        PromptManager.get_prompt = original_get_prompt
+
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
+    assert payload == {
+        "status": "pass",
+        "word_count": 3,
+        "estimated_seconds": 1.5,
+        "feedback": "ok after retry",
+    }
+    assert llm.calls == 2
+    assert llm.chat_messages[1][-1]["role"] == "user"
+    assert "interrupted because you started repeating the same" in (
+        llm.chat_messages[1][-1]["content"]
+    )
+    assert "Retry the same critique now." in llm.chat_messages[1][-1]["content"]
+
+
+def test_handle_task_falls_back_after_repeated_stream_abort() -> None:
+    """Use deterministic fallback when the retried critic stream loops again."""
+    repeated_chunk = "Wait, the transcript says Ashley said the line already. "
+    llm = _StreamingLoopLLM(
+        [
+            {"content_tokens": [repeated_chunk, repeated_chunk, repeated_chunk]},
+            {"content_tokens": [repeated_chunk, repeated_chunk, repeated_chunk]},
+        ]
+    )
+    executor = CriticExecutor(
+        llm=llm,
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+        reasoning_loop_guard={"max_stream_abort_retries": 1},
+    )
+    queue = _RecordingQueue()
+    original_get_prompt = PromptManager.__dict__["get_prompt"]
+
+    def _fake_get_prompt(cls, key: str, **kwargs: Any) -> str:
+        if key == "critic_user":
+            return str(kwargs.get("draft", ""))
+        return f"{key} prompt"
+
+    PromptManager.get_prompt = classmethod(_fake_get_prompt)
+    try:
+        asyncio.run(
+            executor.handle_task(
+                {
+                    "draft": "<SPEAKER_00>Short finalized draft.</SPEAKER_00>",
+                    "target_seconds": 60,
+                    "duration_tolerance_ratio": 0.05,
+                    "full_transcript": "[E0001] [SPEAKER_00] Source text",
+                },
+                context=SimpleNamespace(task_id=None, context_id=None),
+                event_queue=queue,  # type: ignore[arg-type]
+            )
+        )
+    finally:
+        PromptManager.get_prompt = original_get_prompt
+
+    payload = json.loads(extract_agent_text_message(queue.events[0]))
+    assert payload["feedback"].startswith("CRITIC LOOP GUARD:")
+    assert "stream repetition detected" in payload["feedback"]
+    assert llm.calls == 2
 
 
 def test_handle_task_preserves_normal_tool_flow() -> None:

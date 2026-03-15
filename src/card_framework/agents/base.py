@@ -1,10 +1,9 @@
 import asyncio
 import ast
 import hashlib
-import html
 import json
-import re
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -15,7 +14,19 @@ from a2a.utils import new_agent_text_message
 
 from card_framework.agents.tool_call_utils import build_tool_signature
 from card_framework.shared.logger_utils import logger
-from card_framework.shared.llm_provider import Message, ToolDefinition
+from card_framework.shared.llm_provider import (
+    LLMProvider,
+    LLMResponseCallback,
+    Message,
+    NullLLMResponseCallback,
+    StreamingResponseAbort,
+    ToolDefinition,
+)
+from card_framework.shared.repetition_guard import (
+    count_words,
+    extract_repeated_response_span,
+    normalize_repetition_text,
+)
 
 
 class BaseA2AExecutor(AgentExecutor, ABC):
@@ -25,9 +36,6 @@ class BaseA2AExecutor(AgentExecutor, ABC):
 
     def __init__(self, name: str):
         self.name = name
-
-    _NON_ALNUM_PATTERN = re.compile(r"[^a-z0-9\s]+")
-    _REPEATED_SPAN_SPLIT_PATTERN = re.compile(r"(?:\n+|(?<=[.!?])\s+)")
 
     @staticmethod
     async def _emit_working_task_event(
@@ -179,14 +187,12 @@ class BaseA2AExecutor(AgentExecutor, ABC):
     @classmethod
     def _normalize_reasoning_loop_text(cls, raw_text: str) -> str:
         """Normalize assistant text for repetition and similarity checks."""
-        normalized = html.unescape(raw_text).lower()
-        normalized = cls._NON_ALNUM_PATTERN.sub(" ", normalized)
-        return " ".join(normalized.split()).strip()
+        return normalize_repetition_text(raw_text)
 
     @staticmethod
     def _count_words(raw_text: str) -> int:
         """Return a loose word count for repetition guard thresholds."""
-        return len(re.findall(r"\b\w+\b", raw_text))
+        return count_words(raw_text)
 
     @classmethod
     def _extract_repeated_response_span(
@@ -197,26 +203,11 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         repeat_threshold: int,
     ) -> tuple[str, int] | None:
         """Return a repeated sentence-like span when one dominates a response."""
-        counts: dict[str, tuple[int, str]] = {}
-        for segment in cls._REPEATED_SPAN_SPLIT_PATTERN.split(raw_text):
-            candidate = " ".join(segment.split()).strip(" -*\u2022")
-            if not candidate:
-                continue
-            if cls._count_words(candidate) < min_words:
-                continue
-            normalized = cls._normalize_reasoning_loop_text(candidate)
-            if not normalized:
-                continue
-            current_count, current_preview = counts.get(normalized, (0, candidate))
-            counts[normalized] = (current_count + 1, current_preview)
-
-        best_match: tuple[str, int] | None = None
-        for count, preview in counts.values():
-            if count < repeat_threshold:
-                continue
-            if best_match is None or count > best_match[1]:
-                best_match = (preview, count)
-        return best_match
+        return extract_repeated_response_span(
+            raw_text,
+            min_words=min_words,
+            repeat_threshold=repeat_threshold,
+        )
 
     @staticmethod
     def _coerce_reasoning_loop_guard_config(
@@ -349,6 +340,135 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         state["consecutive_no_tool_turns"] = 0
         state["last_no_tool_response_normalized"] = ""
         state["last_no_tool_response_word_count"] = 0
+
+    @classmethod
+    def _resolve_callback_target(
+        cls,
+        provider: LLMProvider,
+    ) -> tuple[LLMProvider, LLMResponseCallback] | None:
+        """Find the deepest provider that supports callback injection."""
+        current: object = provider
+        seen: set[int] = set()
+        while isinstance(current, LLMProvider) and id(current) not in seen:
+            seen.add(id(current))
+            callback_setter = getattr(current, "set_response_callback", None)
+            if callable(callback_setter):
+                existing_callback = getattr(current, "_response_callback", None)
+                if existing_callback is None:
+                    existing_callback = NullLLMResponseCallback()
+                return current, existing_callback
+            current = getattr(current, "inner_provider", None)
+        return None
+
+    @classmethod
+    @contextmanager
+    def _temporary_response_callback(
+        cls,
+        provider: LLMProvider,
+        callback: LLMResponseCallback | None,
+    ):
+        """Temporarily replace the provider stream callback for one chat call."""
+        if callback is None:
+            yield
+            return
+
+        callback_target = cls._resolve_callback_target(provider)
+        if callback_target is None:
+            yield
+            return
+
+        target_provider, existing_callback = callback_target
+        setter = getattr(target_provider, "set_response_callback")
+        setter(callback)
+        try:
+            yield
+        finally:
+            setter(existing_callback)
+
+    def _build_runtime_stream_callback(
+        self,
+        runtime_context: dict[str, Any],
+    ) -> LLMResponseCallback | None:
+        """Build an optional per-turn callback wrapper from runtime context."""
+        callback_factory = runtime_context.get("stream_response_callback_factory")
+        if not callable(callback_factory):
+            return None
+        callback_target = self._resolve_callback_target(self.llm)
+        existing_callback: LLMResponseCallback
+        if callback_target is None:
+            existing_callback = NullLLMResponseCallback()
+        else:
+            _provider, existing_callback = callback_target
+        built_callback = callback_factory(existing_callback)
+        return built_callback if built_callback is not None else None
+
+    async def _chat_with_runtime_stream_callback(
+        self,
+        *,
+        chat_kwargs: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> Any:
+        """Execute one chat call with an optional temporary stream callback."""
+        runtime_callback = self._build_runtime_stream_callback(runtime_context)
+        with self._temporary_response_callback(self.llm, runtime_callback):
+            return await asyncio.to_thread(self.llm.chat, **chat_kwargs)
+
+    def _handle_streaming_response_abort(
+        self,
+        *,
+        abort_error: StreamingResponseAbort,
+        messages: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+    ) -> bool:
+        """Handle one controlled stream abort and optionally retry the turn."""
+        from card_framework.shared.events import event_bus
+
+        retry_count = int(runtime_context.get("stream_abort_retry_count", 0)) + 1
+        runtime_context["stream_abort_retry_count"] = retry_count
+        max_retry_attempts = int(runtime_context.get("max_stream_abort_retries", 0))
+        retry_prompt_builder = runtime_context.get("stream_abort_retry_prompt_builder")
+
+        if callable(retry_prompt_builder) and retry_count <= max_retry_attempts:
+            retry_prompt = retry_prompt_builder(
+                abort_error=abort_error,
+                attempt=retry_count,
+                max_attempts=max_retry_attempts,
+            )
+            if isinstance(retry_prompt, str) and retry_prompt.strip():
+                logger.warning(
+                    "[%s] Streaming guard aborted response; retrying turn %s/%s: %s",
+                    self.name,
+                    retry_count,
+                    max_retry_attempts,
+                    abort_error.reason,
+                )
+                event_bus.publish(
+                    "status_message",
+                    message=(
+                        f"{self.name} stream guard interrupted a repetitive response "
+                        f"and is retrying turn {retry_count}/{max_retry_attempts}."
+                    ),
+                )
+                runtime_context["no_tool_call_count"] = 0
+                self._reset_reasoning_loop_guard_state(runtime_context)
+                messages.append({"role": "user", "content": retry_prompt})
+                return True
+
+        runtime_context["loop_stop_category"] = "reasoning_loop_guard"
+        runtime_context["loop_stop_reason"] = abort_error.reason
+        logger.warning(
+            "[%s] Streaming guard aborted response without retry: %s",
+            self.name,
+            abort_error.reason,
+        )
+        event_bus.publish(
+            "status_message",
+            message=(
+                f"{self.name} stream guard stopped a repetitive response: "
+                f"{abort_error.reason}"
+            ),
+        )
+        return False
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         raw_input = context.get_user_input()
@@ -519,7 +639,20 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                 chat_kwargs["tool_choice"] = tool_choice
             if chat_max_tokens is not None:
                 chat_kwargs["max_tokens"] = chat_max_tokens
-            response_message = await asyncio.to_thread(self.llm.chat, **chat_kwargs)
+            try:
+                response_message = await self._chat_with_runtime_stream_callback(
+                    chat_kwargs=chat_kwargs,
+                    runtime_context=runtime_context,
+                )
+            except StreamingResponseAbort as abort_error:
+                if self._handle_streaming_response_abort(
+                    abort_error=abort_error,
+                    messages=messages,
+                    runtime_context=runtime_context,
+                ):
+                    continue
+                break
+            runtime_context["stream_abort_retry_count"] = 0
             reasoning_content = ""
             if hasattr(response_message, "model_dump"):
                 raw_response_payload = response_message.model_dump()

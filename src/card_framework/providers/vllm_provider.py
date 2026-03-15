@@ -21,6 +21,7 @@ from card_framework.shared.llm_provider import (
     LLMResponseCallback,
     MessageInput,
     NullLLMResponseCallback,
+    StreamingResponseAbort,
     ToolChoice,
     ToolInput,
     infer_agent_name_from_text,
@@ -274,6 +275,8 @@ class VLLMProvider(LLMProvider):
                 reasoning=full_thought,
                 operation="generate",
             )
+        except StreamingResponseAbort:
+            raise
         except Exception as exc:
             logger.warning(
                 "[VLLMProvider] Streaming generate failed; retrying non-streaming: %s",
@@ -381,6 +384,8 @@ class VLLMProvider(LLMProvider):
                 if full_thought.strip()
                 else None,
             )
+        except StreamingResponseAbort:
+            raise
         except Exception as exc:
             logger.warning(
                 "[VLLMProvider] Streaming chat failed; retrying non-streaming: %s",

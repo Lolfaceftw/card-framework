@@ -20,8 +20,16 @@ from card_framework.audio_pipeline.live_draft_voice_clone import (
     _snapshot_matches_summary_xml,
     load_live_draft_voice_clone_state,
 )
+from card_framework.providers.response_callbacks import (
+    CompositeResponseCallback,
+    StreamingRepeatGuardCallback,
+)
 from card_framework.shared.events import EventBus, get_event_bus
-from card_framework.shared.llm_provider import LLMProvider
+from card_framework.shared.llm_provider import (
+    LLMProvider,
+    LLMResponseCallback,
+    StreamingResponseAbort,
+)
 from card_framework.shared.prompt_manager import PromptManager
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml
 
@@ -36,6 +44,8 @@ class CriticExecutor(BaseA2AExecutor):
         "single_response_repeat_threshold": 3,
         "min_repeated_sentence_words": 8,
         "cross_turn_similarity_threshold": 0.96,
+        "stream_abort_enabled": True,
+        "max_stream_abort_retries": 1,
     }
 
     def __init__(
@@ -69,7 +79,7 @@ class CriticExecutor(BaseA2AExecutor):
         reasoning_loop_guard: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         """Resolve critic no-tool repetition guard settings for the shared loop."""
-        resolved = dict(self._DEFAULT_REASONING_LOOP_GUARD)
+        resolved: dict[str, Any] = dict(self._DEFAULT_REASONING_LOOP_GUARD)
         if isinstance(reasoning_loop_guard, Mapping):
             resolved.update(
                 {
@@ -77,7 +87,57 @@ class CriticExecutor(BaseA2AExecutor):
                     for key, value in reasoning_loop_guard.items()
                 }
             )
-        return self._coerce_reasoning_loop_guard_config(resolved)
+        normalized = self._coerce_reasoning_loop_guard_config(resolved)
+
+        raw_stream_abort_enabled = resolved.get("stream_abort_enabled", True)
+        normalized["stream_abort_enabled"] = (
+            raw_stream_abort_enabled
+            if isinstance(raw_stream_abort_enabled, bool)
+            else True
+        )
+
+        raw_max_stream_abort_retries = resolved.get("max_stream_abort_retries", 1)
+        try:
+            max_stream_abort_retries = int(raw_max_stream_abort_retries)
+        except (TypeError, ValueError):
+            max_stream_abort_retries = 1
+        normalized["max_stream_abort_retries"] = max(0, max_stream_abort_retries)
+        return normalized
+
+    def _build_stream_response_callback(
+        self,
+        existing_callback: LLMResponseCallback,
+    ) -> LLMResponseCallback:
+        """Wrap the existing callback with the critic stream repetition guard."""
+        return CompositeResponseCallback(
+            StreamingRepeatGuardCallback(
+                min_repeated_sentence_words=int(
+                    self.reasoning_loop_guard["min_repeated_sentence_words"]
+                ),
+                single_response_repeat_threshold=int(
+                    self.reasoning_loop_guard["single_response_repeat_threshold"]
+                ),
+            ),
+            existing_callback,
+        )
+
+    def _build_stream_abort_retry_prompt(
+        self,
+        *,
+        abort_error: StreamingResponseAbort,
+        attempt: int,
+        max_attempts: int,
+    ) -> str:
+        """Build a corrective retry prompt after a repetitive streamed response."""
+        return (
+            "Your previous response was interrupted because you started repeating the "
+            f"same transcript-verification loop ({abort_error.reason}). Retry the same "
+            f"critique now. This is retry {attempt} of {max_attempts}. Do not repeat "
+            "or re-check the same transcript line over and over. If the issue is real, "
+            "state it once, cite the transcript evidence once, and then call "
+            "`submit_verdict`. If you need more evidence, use the available tools "
+            "instead of narrating repeated re-reads."
+        )
 
     def _resolve_target_seconds(
         self, *, target_seconds: int | None, min_words: int, max_words: int
@@ -312,6 +372,16 @@ class CriticExecutor(BaseA2AExecutor):
             "draft_audio_state_path": draft_audio_state_path,
             "reasoning_loop_guard": dict(self.reasoning_loop_guard),
         }
+        if bool(self.reasoning_loop_guard.get("stream_abort_enabled", False)):
+            context_data["max_stream_abort_retries"] = int(
+                self.reasoning_loop_guard.get("max_stream_abort_retries", 0)
+            )
+            context_data["stream_response_callback_factory"] = (
+                self._build_stream_response_callback
+            )
+            context_data["stream_abort_retry_prompt_builder"] = (
+                self._build_stream_abort_retry_prompt
+            )
         final_verdict = await self.run_agent_loop(
             messages, tools, self.max_tool_turns, context_data
         )

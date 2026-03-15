@@ -215,6 +215,8 @@ class DurationSweepPresetSummary:
     report_path: str | None
     notes_path: str | None
     results_path: str | None
+    mean_composite_ci95_lower: float | None = None
+    mean_composite_ci95_upper: float | None = None
     error_message: str | None = None
 
 

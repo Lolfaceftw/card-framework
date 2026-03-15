@@ -329,6 +329,8 @@ agents:
       single_response_repeat_threshold: 3
       min_repeated_sentence_words: 8
       cross_turn_similarity_threshold: 0.96
+      stream_abort_enabled: true
+      max_stream_abort_retries: 1
 
 # ── Logging Settings ──────────────────────────────────────────────────
 logging:

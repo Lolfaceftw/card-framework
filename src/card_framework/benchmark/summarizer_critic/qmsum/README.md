@@ -88,7 +88,7 @@ Each concurrent run must use a distinct trio of `--retrieval-port`,
 - supervisor session artifacts: `artifacts/summarizer_critic_benchmark/supervisor/<session_id>`
 - per-run machine-readable report: `report.json`
 - per-run notes: `notes.md`
-- per-run human-readable results: `results.md`
+- per-run human-readable results: `results.md` with native Markdown tables plus 95% CI values for aggregate metric means
 
 ## Notes
 

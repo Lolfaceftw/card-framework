@@ -5,9 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from omegaconf import OmegaConf
 
 from card_framework.providers.vllm_provider import VLLMProvider
+from card_framework.shared.llm_provider import StreamingResponseAbort
 from tests.support.servers import run_openai_compatible_server
 
 
@@ -28,6 +30,23 @@ class _RecordingCallback:
 
     def on_complete(self) -> None:
         self.events.append(("complete", ""))
+
+
+class _AbortOnContentCallback:
+    """Abort one streamed response as soon as content arrives."""
+
+    def on_start(self, agent_name: str) -> None:
+        del agent_name
+
+    def on_thought_token(self, token: str) -> None:
+        del token
+
+    def on_content_token(self, token: str) -> None:
+        del token
+        raise StreamingResponseAbort(reason="test stream abort")
+
+    def on_complete(self) -> None:
+        return None
 
 
 def _chunk(
@@ -274,6 +293,23 @@ def test_chat_falls_back_to_non_streaming_on_stream_error(free_tcp_port: int) ->
         provider._client.close()
 
     assert dumped["content"] == "fallback chat answer"
+
+
+def test_chat_reraises_stream_abort_without_non_streaming_fallback(
+    free_tcp_port: int,
+) -> None:
+    """Propagate controlled callback aborts instead of retrying non-streaming."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream([_chunk(content="loop"), _chunk(finish_reason="stop")])
+        provider = _build_provider(server.base_url, enable_thinking=False)
+        provider.set_response_callback(_AbortOnContentCallback())
+
+        with pytest.raises(StreamingResponseAbort, match="test stream abort"):
+            provider.chat(messages=[{"role": "system", "content": "Critic"}])
+
+        provider._client.close()
+
+    assert len(server.chat_requests) == 1
 
 
 def test_generate_falls_back_to_reasoning_when_content_empty(

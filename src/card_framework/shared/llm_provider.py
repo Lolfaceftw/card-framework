@@ -166,6 +166,23 @@ MessageInput = Message | Mapping[str, object]
 ToolInput = ToolDefinition | Mapping[str, object]
 ToolChoice = str | Mapping[str, object]
 
+
+class StreamingResponseAbort(RuntimeError):
+    """Raised by streaming callbacks to stop one response before completion."""
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        partial_content: str = "",
+        partial_reasoning: str = "",
+    ) -> None:
+        """Store a normalized abort reason plus any partial streamed text."""
+        super().__init__(reason)
+        self.reason = reason
+        self.partial_content = partial_content
+        self.partial_reasoning = partial_reasoning
+
 _AGENT_NAME_HINTS: tuple[tuple[str, str], ...] = (
     ("summarizer", "Summarizer"),
     ("critic", "Critic"),

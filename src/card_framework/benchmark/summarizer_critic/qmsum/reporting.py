@@ -12,10 +12,15 @@ from card_framework.benchmark.summarizer_critic.config import (
     SampleBenchmarkResult,
     SupervisedRunRecord,
 )
+from card_framework.benchmark.summarizer_critic.reporting_utils import (
+    format_confidence_interval,
+    mean_confidence_interval_95,
+    render_markdown_table,
+)
 
 
 def render_sample_results_table(results: list[SampleBenchmarkResult]) -> str:
-    """Render benchmark sample results as a markdown-friendly ASCII table."""
+    """Render benchmark sample results as a Markdown table."""
     headers = [
         "sample",
         "status",
@@ -41,29 +46,11 @@ def render_sample_results_table(results: list[SampleBenchmarkResult]) -> str:
         ]
         for result in results
     ]
-    widths = [
-        max(len(header), *(len(row[index]) for row in rows))
-        for index, header in enumerate(headers)
-    ]
-
-    def _format(values: list[str]) -> str:
-        return (
-            "| "
-            + " | ".join(
-                value.ljust(widths[index]) for index, value in enumerate(values)
-            )
-            + " |"
-        )
-
-    divider = "+-" + "-+-".join("-" * width for width in widths) + "-+"
-    lines = [divider, _format(headers), divider]
-    lines.extend(_format(row) for row in rows)
-    lines.append(divider)
-    return "\n".join(lines)
+    return render_markdown_table(headers, rows)
 
 
 def render_supervised_results_table(records: list[SupervisedRunRecord]) -> str:
-    """Render supervised session outcomes as an ASCII table."""
+    """Render supervised session outcomes as a Markdown table."""
     headers = ["run", "status", "exit", "secs", "peak_ram%", "peak_gpu_gib", "report"]
     rows = [
         [
@@ -77,25 +64,64 @@ def render_supervised_results_table(records: list[SupervisedRunRecord]) -> str:
         ]
         for record in records
     ]
-    widths = [
-        max(len(header), *(len(row[index]) for row in rows))
-        for index, header in enumerate(headers)
-    ]
+    return render_markdown_table(headers, rows)
 
-    def _format(values: list[str]) -> str:
-        return (
-            "| "
-            + " | ".join(
-                value.ljust(widths[index]) for index, value in enumerate(values)
-            )
-            + " |"
-        )
 
-    divider = "+-" + "-+-".join("-" * width for width in widths) + "-+"
-    lines = [divider, _format(headers), divider]
-    lines.extend(_format(row) for row in rows)
-    lines.append(divider)
-    return "\n".join(lines)
+def _render_aggregate_metrics_table(report: BenchmarkExecutionReport) -> str:
+    """Render mean benchmark metrics plus 95% confidence intervals."""
+    return render_markdown_table(
+        ["metric", "mean", "95% CI"],
+        [
+            [
+                "duration_control",
+                f"{report.summary.mean_duration_control:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [result.metrics.duration_control for result in report.samples]
+                    )
+                ),
+            ],
+            [
+                "factualness",
+                f"{report.summary.mean_factualness:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [result.metrics.factualness for result in report.samples]
+                    )
+                ),
+            ],
+            [
+                "naturalness",
+                f"{report.summary.mean_naturalness:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [result.metrics.naturalness for result in report.samples]
+                    )
+                ),
+            ],
+            [
+                "speaker_attribution",
+                f"{report.summary.mean_speaker_attribution:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [
+                            result.metrics.speaker_attribution
+                            for result in report.samples
+                        ]
+                    )
+                ),
+            ],
+            [
+                "composite",
+                f"{report.summary.mean_composite:.3f}",
+                format_confidence_interval(
+                    mean_confidence_interval_95(
+                        [result.metrics.composite for result in report.samples]
+                    )
+                ),
+            ],
+        ],
+    )
 
 
 def write_execution_artifacts(
@@ -128,17 +154,13 @@ def write_execution_artifacts(
     results_lines = [
         "# Summarizer-Critic Benchmark Results",
         "",
-        "```text",
+        "## Sample Results",
+        "",
         render_sample_results_table(report.samples),
-        "```",
         "",
         "## Aggregate Metrics",
         "",
-        f"- Mean duration control: `{report.summary.mean_duration_control:.3f}`",
-        f"- Mean factualness: `{report.summary.mean_factualness:.3f}`",
-        f"- Mean naturalness: `{report.summary.mean_naturalness:.3f}`",
-        f"- Mean speaker attribution: `{report.summary.mean_speaker_attribution:.3f}`",
-        f"- Mean composite: `{report.summary.mean_composite:.3f}`",
+        _render_aggregate_metrics_table(report),
     ]
     results_path.write_text("\n".join(results_lines) + "\n", encoding="utf-8")
     return report_path, notes_path, results_path
@@ -173,9 +195,8 @@ def write_supervisor_session_artifacts(
     )
     results_path.write_text(
         "# Summarizer-Critic Supervisor Results\n\n"
-        + "```text\n"
         + render_supervised_results_table(records)
-        + "\n```\n",
+        + "\n",
         encoding="utf-8",
     )
     return session_json_path, notes_path, results_path

@@ -56,7 +56,8 @@ def _sample_result() -> SampleBenchmarkResult:
 
 def test_render_sample_results_table_contains_expected_columns() -> None:
     table = render_sample_results_table([_sample_result()])
-    assert "sample" in table
+    assert "| sample | status |" in table
+    assert "| --- | --- |" in table
     assert "sporc_00001_example_episode" in table
     assert "0.800" in table
 
@@ -122,6 +123,11 @@ def test_write_execution_artifacts_persists_speaker_comparison_payloads(
         == "voice_clone/sample_0001/manifest.json"
     )
 
+    results_text = results_path.read_text(encoding="utf-8")
+    assert "| metric | mean | 95% CI |" in results_text
+    assert "n/a" in results_text
+    assert "```text" not in results_text
+
 
 def test_render_duration_sweep_table_contains_expected_columns() -> None:
     table = render_duration_sweep_table(
@@ -146,13 +152,18 @@ def test_render_duration_sweep_table_contains_expected_columns() -> None:
                 report_path="report.json",
                 notes_path="notes.md",
                 results_path="results.md",
+                mean_composite_ci95_lower=0.65,
+                mean_composite_ci95_upper=0.75,
             )
         ]
     )
 
+    assert "| preset | status |" in table
     assert "speaker_grammar" in table
+    assert "composite_95_ci" in table
     assert "30s" in table
     assert "0.700" in table
+    assert "[0.650, 0.750]" in table
 
 
 def test_write_duration_sweep_artifacts_persists_report(tmp_path: Path) -> None:
@@ -190,6 +201,8 @@ def test_write_duration_sweep_artifacts_persists_report(tmp_path: Path) -> None:
                 report_path="report.json",
                 notes_path="notes.md",
                 results_path="results.md",
+                mean_composite_ci95_lower=0.65,
+                mean_composite_ci95_upper=0.75,
             )
         ],
         report_path="",
@@ -205,6 +218,8 @@ def test_write_duration_sweep_artifacts_persists_report(tmp_path: Path) -> None:
     assert results_path.exists()
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["preset_summaries"][0]["duration_preset"] == "30s"
+    assert payload["preset_summaries"][0]["mean_composite_ci95_lower"] == 0.65
+    assert "| composite_95_ci |" in results_path.read_text(encoding="utf-8")
 
 
 def test_write_execution_artifacts_lists_preflight_skips(tmp_path: Path) -> None:
@@ -279,3 +294,4 @@ def test_write_execution_artifacts_lists_preflight_skips(tmp_path: Path) -> None
     assert "- Skipped count: `1`" in notes_text
     assert "## Preflight Skips" in results_text
     assert "sporc_00099_short_teaser" in results_text
+    assert "| metric | mean | 95% CI |" in results_text
