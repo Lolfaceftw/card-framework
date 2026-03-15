@@ -307,13 +307,22 @@ def _resolve_embedding_profile(
         ) from exc
 
 
-def _configure_benchmark_logging(base_cfg: DictConfig) -> None:
-    """Enable readable terminal logging for benchmark execution."""
+def _configure_benchmark_logging(
+    base_cfg: DictConfig,
+    *,
+    log_file: str | None = None,
+    print_to_terminal: bool | None = None,
+) -> None:
+    """Enable benchmark logging with optional file and terminal overrides."""
     logging_cfg = base_cfg.get("logging")
     if not isinstance(logging_cfg, DictConfig):
         return
-    logging_cfg["print_to_terminal"] = True
-    logging_cfg["summarizer_critic_print_to_terminal"] = True
+    if print_to_terminal is None:
+        print_to_terminal = True
+    logging_cfg["print_to_terminal"] = bool(print_to_terminal)
+    logging_cfg["summarizer_critic_print_to_terminal"] = bool(print_to_terminal)
+    if log_file is not None:
+        logging_cfg["log_file"] = log_file
     configure_logger(logging_cfg)
 
 

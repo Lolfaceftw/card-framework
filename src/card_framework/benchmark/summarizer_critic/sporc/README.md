@@ -93,6 +93,7 @@ Use `duration-sweep` when you want multiple duration targets in one invocation:
 - `--sample-seed` switches sample selection from manifest-order prefixing to deterministic seeded-random ordering,
 - `--examples` remains available as a sweep-only override for `--max-samples`,
 - `--parallelism 0` runs every selected preset concurrently,
+- stalled preset children now heartbeat every `30s`, write per-preset checkpoints, and auto-restart from checkpoint when the active sample stops making progress,
 - `duration-sweep` is transcript-only by default unless you add `--enable-voice-clone`.
 
 Common flag mix-ups:
@@ -126,13 +127,17 @@ Each `duration-sweep` run writes:
 
 - `report.json`
 - `results.md`
+- `logs/<preset>.log`
+- `checkpoints/<preset>.checkpoint.json`
 
 Each preset inside a `duration-sweep` still launches a normal `execute` run, so
 the aggregate sweep artifacts live under `artifacts/summarizer_critic_benchmark/sweeps`
 while the detailed per-preset run artifacts still appear under
 `artifacts/summarizer_critic_benchmark/sporc_runs`. Sweep children suppress token
-stream rendering and report sample progress back to the parent, so the sweep
-terminal view stays on aggregate sample positions and combined ETA.
+stream rendering, report sample progress back to the parent, and persist
+checkpoint state after every terminal sample, so the sweep terminal view stays
+on aggregate sample positions and combined ETA while stalled children can be
+restarted without rerunning completed samples.
 
 ## Step 1: Prepare The Dataset
 
@@ -328,6 +333,9 @@ Sweep-specific flags:
 - `--duration-presets 30s,1m,5m,15m`
 - `--sweep-root <path>`
 - `--enable-voice-clone`
+- `--child-stall-seconds <float>` to restart a child when its active sample reports no new activity for too long
+- `--max-child-restarts <int>` to cap parent-driven checkpoint resumes per preset
+- `--progress-heartbeat-seconds <float>` to control sweep-child heartbeat cadence
 
 Important behavior:
 
@@ -339,6 +347,7 @@ Important behavior:
 - `duration-sweep` defaults to `--max-samples` for per-preset sample count, and `--examples` overrides it only for the sweep.
 - `--sample-seed <int>` makes `execute`, `supervise`, and `duration-sweep` choose a reproducible seeded-random subset; omitting it preserves manifest order.
 - `duration-sweep` defaults to aggregate progress output with combined ETA instead of child token streams.
+- `duration-sweep` also applies sweep-only request timeout defaults of `900s` for summarizer/critic and `300s` for retrieval/index so a wedged backend becomes a failed sample instead of a permanently hung preset.
 
 ## Running A Custom Manifest
 
@@ -394,6 +403,11 @@ Relevant flags:
 - `--index-timeout-seconds`
 
 If omitted, the stage timeout is unbounded.
+
+Sweep exception:
+
+- `duration-sweep` injects default request timeouts of `900s` for summarizer/critic and `300s` for retrieval/index unless you override them explicitly.
+- standalone `execute` keeps the historical unbounded defaults unless you pass timeout flags yourself.
 
 Practical guidance:
 

@@ -77,6 +77,8 @@ def render_duration_sweep_table(
         "examples",
         "executed",
         "skipped",
+        "restarts",
+        "recovered_stalls",
         "ok",
         "within_tol",
         "mean_cand_s",
@@ -94,6 +96,8 @@ def render_duration_sweep_table(
             str(summary.sample_count),
             str(summary.executed_count),
             str(summary.skipped_count),
+            str(summary.restart_count),
+            str(summary.recovered_stall_count),
             f"{summary.success_count}/{summary.executed_count}",
             f"{summary.within_tolerance_rate:.3f}",
             f"{summary.mean_candidate_seconds:.1f}",
@@ -196,6 +200,13 @@ def write_execution_artifacts(
             if report.sample_seed is not None
             else "- Sample seed: `manifest_order`"
         ),
+        (
+            f"- Checkpoint path: `{report.checkpoint_path}`"
+            if report.checkpoint_path
+            else "- Checkpoint path: `none`"
+        ),
+        f"- Resumed from checkpoint: `{report.resumed_from_checkpoint}`",
+        f"- Resume count: `{report.resume_count}`",
         f"- Duration tolerance ratio: `{report.duration_tolerance_ratio:.3f}`",
         f"- Sample count: `{report.summary.sample_count}`",
         f"- Executed count: `{report.summary.executed_count}`",
@@ -279,6 +290,9 @@ def write_duration_sweep_artifacts(
     for summary in report.preset_summaries:
         results_lines.append(
             f"- `{summary.duration_preset}`: report={summary.report_path or '-'} results={summary.results_path or '-'}"
+        )
+        results_lines.append(
+            f"- `{summary.duration_preset}` restarts: `{summary.restart_count}` recovered_stalls: `{summary.recovered_stall_count}`"
         )
         if summary.error_message:
             results_lines.append(

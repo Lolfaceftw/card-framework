@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import gzip
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+from omegaconf import OmegaConf
 
 from card_framework.benchmark.summarizer_critic.sporc.runner import (
     _build_preflight_failed_result,
+    _classify_sample_failure,
     _prepare_provider_config,
     _compute_composite_score,
     _evaluate_sample_preflight,
@@ -27,7 +32,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     SampleBenchmarkResult,
     SampleMetricBundle,
 )
-from card_framework.benchmark.types import ProviderProfile
+from card_framework.benchmark.types import EmbeddingProfile, ProviderProfile
 
 
 def _sample(
@@ -66,6 +71,13 @@ def _write_transcript(
                 "metadata": {"dataset": "sporc"},
             }
         ),
+        encoding="utf-8",
+    )
+
+
+def _write_empty_transcript(path: Path) -> None:
+    path.write_text(
+        json.dumps({"segments": [], "metadata": {"dataset": "sporc"}}),
         encoding="utf-8",
     )
 
@@ -109,6 +121,50 @@ def _failed_result(sample_id: str) -> SampleBenchmarkResult:
         tool_invocations=0,
         metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
         error_message="boom",
+    )
+
+
+def _benchmark_base_cfg(tmp_path: Path):
+    return OmegaConf.create(
+        {
+            "orchestrator": {"duration_tolerance_ratio": 0.25},
+            "audio": {
+                "work_dir": str(tmp_path / "audio"),
+                "speaker_samples": {"enabled": False},
+                "voice_clone": {
+                    "enabled": False,
+                    "emo_presets": {"neutral": "steady neutral delivery"},
+                    "live_drafting": {"enabled": False},
+                },
+            },
+            "logging": {"enabled": False},
+            "agents": {
+                "summarizer": {"max_tool_turns": 1, "loop_guardrails": {}},
+                "critic": {"max_tool_turns": 1, "reasoning_loop_guard": {}},
+            },
+        }
+    )
+
+
+def _benchmark_provider_profile() -> ProviderProfile:
+    return ProviderProfile(
+        provider_id="vllm_default",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+        },
+    )
+
+
+def _disabled_embedding_profile() -> EmbeddingProfile:
+    return EmbeddingProfile(
+        embedding_id="disabled",
+        description="disabled",
+        embedding_config={
+            "_target_": "card_framework.providers.noop.NoOpEmbeddingProvider"
+        },
     )
 
 
@@ -183,6 +239,15 @@ def test_resolve_orchestrator_timeouts_accepts_positive_overrides() -> None:
         "retrieval": 45.0,
         "index": 55.0,
     }
+
+
+def test_classify_sample_failure_maps_timeout_messages_to_stage_timeout() -> None:
+    final_status, error_message = _classify_sample_failure(
+        TimeoutError("summarizer request timed out after 900s")
+    )
+
+    assert final_status == "stage_timeout"
+    assert "timed out" in error_message
 
 
 def test_compute_composite_score_uses_only_three_judge_dimensions() -> None:
@@ -409,6 +474,14 @@ def test_build_execute_parser_accepts_sweep_child_progress_flags() -> None:
             "5003",
             "--disable-stream-output",
             "--emit-progress-events",
+            "--emit-progress-heartbeats",
+            "--progress-heartbeat-seconds",
+            "45",
+            "--checkpoint-path",
+            "checkpoint.json",
+            "--resume-from-checkpoint",
+            "--resume-failure-reason",
+            "sweep_watchdog_stalled",
         ]
     )
 
@@ -417,6 +490,299 @@ def test_build_execute_parser_accepts_sweep_child_progress_flags() -> None:
     assert args.critic_port == 5003
     assert args.disable_stream_output is True
     assert args.emit_progress_events is True
+    assert args.emit_progress_heartbeats is True
+    assert args.progress_heartbeat_seconds == 45.0
+    assert args.checkpoint_path == "checkpoint.json"
+    assert args.resume_from_checkpoint is True
+    assert args.resume_failure_reason == "sweep_watchdog_stalled"
+
+
+def test_execute_benchmark_resumes_checkpoint_and_marks_orphaned_sample_failed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    transcript_a = tmp_path / "a.transcript.json"
+    transcript_b = tmp_path / "b.transcript.json"
+    transcript_c = tmp_path / "c.transcript.json"
+    _write_transcript(transcript_a, text=" ".join(["word"] * 124))
+    _write_transcript(transcript_b, text=" ".join(["word"] * 124))
+    _write_empty_transcript(transcript_c)
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_sample",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "sample",
+                "episode_data_path": str(tmp_path / "episode.jsonl.gz"),
+                "turn_data_path": str(tmp_path / "turn.jsonl.gz"),
+                "sample_count": 3,
+                "samples": [
+                    {
+                        "sample_id": "a",
+                        "dataset": "sporc_sample",
+                        "episode_key": "a.mp3",
+                        "transcript_path": str(transcript_a),
+                        "reference_summary": "reference a",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                    {
+                        "sample_id": "b",
+                        "dataset": "sporc_sample",
+                        "episode_key": "b.mp3",
+                        "transcript_path": str(transcript_b),
+                        "reference_summary": "reference b",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                    {
+                        "sample_id": "c",
+                        "dataset": "sporc_sample",
+                        "episode_key": "c.mp3",
+                        "transcript_path": str(transcript_c),
+                        "reference_summary": "reference c",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "checkpoint_version": 1,
+                "run_id": "resume-run",
+                "dataset_manifest_path": str(manifest_path.resolve()),
+                "dataset_variant": "sample",
+                "duration_preset": "",
+                "override_target_seconds": None,
+                "transcript_only": True,
+                "sample_seed": None,
+                "sample_order": ["a", "b", "c"],
+                "completed_results": [asdict(_completed_result("a"))],
+                "active_sample": {
+                    "sample_index": 2,
+                    "sample_count": 3,
+                    "sample_id": "b",
+                    "target_seconds": 30,
+                    "stage": "summarizer",
+                    "iteration": 2,
+                    "elapsed_sample_seconds": 42.5,
+                    "last_activity_age_seconds": 601.0,
+                },
+                "resume_count": 0,
+                "recovered_stall_count": 0,
+                "updated_at_utc": "2026-03-15T04:30:00+00:00",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(manifest_path),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--transcript-only",
+            "--max-samples",
+            "3",
+            "--checkpoint-path",
+            str(checkpoint_path),
+            "--resume-from-checkpoint",
+        ]
+    )
+    provider_profile = _benchmark_provider_profile()
+    embedding_profile = _disabled_embedding_profile()
+
+    async def _unexpected_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        raise AssertionError("runtime startup should not happen on all-terminal resume")
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._load_base_config",
+        lambda path: _benchmark_base_cfg(tmp_path),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.load_provider_profiles",
+        lambda path: [provider_profile],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._find_provider_profile",
+        lambda profiles, provider_id: provider_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.missing_required_env",
+        lambda profile: [],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._resolve_embedding_profile",
+        lambda base_cfg, embedding_mode: embedding_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _unexpected_start_runtime,
+    )
+
+    report = execute_benchmark(args)
+
+    assert report.run_id == "resume-run"
+    assert report.status == "partial"
+    assert report.resumed_from_checkpoint is True
+    assert report.resume_count == 1
+    assert [sample.sample_id for sample in report.samples] == ["a", "b", "c"]
+    assert report.samples[1].status == "failed"
+    assert report.samples[1].final_status == "resume_interrupted_sample"
+    assert report.samples[1].duration_seconds == 42.5
+    assert report.samples[2].status == "skipped"
+    assert report.samples[2].final_status == "preflight_failed"
+
+    checkpoint_payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint_payload["resume_count"] == 1
+    assert checkpoint_payload["active_sample"] is None
+    assert len(checkpoint_payload["completed_results"]) == 3
+
+
+def test_execute_benchmark_continues_after_failed_sample_and_rebuilds_runtime(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    transcript_a = tmp_path / "a.transcript.json"
+    transcript_b = tmp_path / "b.transcript.json"
+    _write_transcript(transcript_a, text=" ".join(["word"] * 124))
+    _write_transcript(transcript_b, text=" ".join(["word"] * 124))
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_sample",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "sample",
+                "episode_data_path": str(tmp_path / "episode.jsonl.gz"),
+                "turn_data_path": str(tmp_path / "turn.jsonl.gz"),
+                "sample_count": 2,
+                "samples": [
+                    {
+                        "sample_id": "a",
+                        "dataset": "sporc_sample",
+                        "episode_key": "a.mp3",
+                        "transcript_path": str(transcript_a),
+                        "reference_summary": "reference a",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                    {
+                        "sample_id": "b",
+                        "dataset": "sporc_sample",
+                        "episode_key": "b.mp3",
+                        "transcript_path": str(transcript_b),
+                        "reference_summary": "reference b",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(manifest_path),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--transcript-only",
+            "--max-samples",
+            "2",
+        ]
+    )
+
+    base_cfg = _benchmark_base_cfg(tmp_path)
+    provider_profile = _benchmark_provider_profile()
+    embedding_profile = _disabled_embedding_profile()
+    start_calls: list[bool] = []
+    stop_calls: list[str] = []
+
+    async def _fake_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        start_calls.append(bool(kwargs["force_dynamic_ports"]))
+        return SimpleNamespace(
+            orchestrator=object(),
+            judge=object(),
+            event_capture=object(),
+            retrieval_enabled=False,
+            shared_agent_client=object(),
+            servers=[],
+            retrieval_port=5001,
+            summarizer_port=5002,
+            critic_port=5003,
+        )
+
+    async def _fake_stop_runtime(runtime):  # type: ignore[no-untyped-def]
+        if runtime is not None:
+            stop_calls.append("stopped")
+
+    async def _fake_execute_sample(*, sample, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        if sample.sample_id == "a":
+            failed = _failed_result("a")
+            failed.final_status = "stage_timeout"
+            failed.error_message = "summarizer request timed out after 900s"
+            return failed
+        return _completed_result(sample.sample_id)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._load_base_config",
+        lambda path: base_cfg,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.load_provider_profiles",
+        lambda path: [provider_profile],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._find_provider_profile",
+        lambda profiles, provider_id: provider_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.missing_required_env",
+        lambda profile: [],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._resolve_embedding_profile",
+        lambda base_cfg, embedding_mode: embedding_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _fake_start_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._stop_managed_runtime",
+        _fake_stop_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._execute_sample",
+        _fake_execute_sample,
+    )
+
+    report = execute_benchmark(args)
+
+    assert report.status == "partial"
+    assert [sample.sample_id for sample in report.samples] == ["a", "b"]
+    assert report.samples[0].final_status == "stage_timeout"
+    assert report.samples[1].status == "completed"
+    assert start_calls == [False, True]
+    assert len(stop_calls) == 2
 
 
 def test_build_execute_parser_accepts_sample_seed() -> None:

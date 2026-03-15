@@ -6,17 +6,20 @@ import argparse
 import json
 import os
 from pathlib import Path
+import time
 
 from card_framework.benchmark.summarizer_critic.sporc.cli import (
     _DurationSweepChildState,
     _build_execute_child_command,
     _child_environment,
     _build_parser,
+    _detect_duration_sweep_child_stall,
     _parse_duration_preset_list,
     _render_duration_sweep_menu,
     _resolve_duration_sweep_examples,
     _resolve_prepare_root,
     _run_duration_sweep,
+    _update_duration_sweep_child_state,
     main,
 )
 from card_framework.benchmark.summarizer_critic.sporc.config import (
@@ -40,6 +43,23 @@ class _CompletedProcessStub:
     def wait(self, timeout: float | None = None) -> int:
         del timeout
         return 0
+
+
+class _MutableProcessStub:
+    """Mutable process stub used by watchdog and restart tests."""
+
+    def __init__(self, pid: int, returncode: int | None = None) -> None:
+        self.pid = pid
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
 
 
 def test_sporc_child_environment_enables_unbuffered_python_output(monkeypatch) -> None:
@@ -126,6 +146,12 @@ def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
         critic_port=5003,
         disable_stream_output=True,
         emit_progress_events=True,
+        checkpoint_path=Path("checkpoint.json"),
+        resume_from_checkpoint=True,
+        resume_failure_reason="sweep_watchdog_stalled",
+        emit_progress_heartbeats=True,
+        progress_heartbeat_seconds=30.0,
+        apply_sweep_timeout_defaults=True,
     )
 
     assert "--duration-preset" in command
@@ -144,6 +170,104 @@ def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
     assert "--critic-port" in command
     assert "5003" in command
     assert "--target-seconds-override" not in command
+    assert "--checkpoint-path" in command
+    assert "checkpoint.json" in command
+    assert "--resume-from-checkpoint" in command
+    assert "--resume-failure-reason" in command
+    assert "sweep_watchdog_stalled" in command
+    assert "--emit-progress-heartbeats" in command
+    assert "--progress-heartbeat-seconds" in command
+    assert "30.0" in command
+    assert "--summarizer-timeout-seconds" in command
+    assert "900.0" in command
+    assert "--critic-timeout-seconds" in command
+    assert "--retrieval-timeout-seconds" in command
+    assert "--index-timeout-seconds" in command
+
+
+def test_update_duration_sweep_child_state_tracks_heartbeat_metadata(
+    tmp_path: Path,
+) -> None:
+    state = _DurationSweepChildState(
+        duration_preset="5m",
+        process=_CompletedProcessStub(pid=1001),
+        log_path=tmp_path / "5m.log",
+        log_handle=(tmp_path / "5m.log").open("w", encoding="utf-8"),
+        reader_thread=None,
+        retrieval_port=5001,
+        summarizer_port=5002,
+        critic_port=5003,
+        max_samples=100,
+        checkpoint_path=tmp_path / "5m.checkpoint.json",
+        output_root=tmp_path / "runs",
+    )
+    try:
+        _update_duration_sweep_child_state(
+            state,
+            {
+                "sporc_progress_event": "sample_start",
+                "sample_index": 8,
+                "sample_count": 100,
+                "sample_id": "sample-8",
+            },
+        )
+        _update_duration_sweep_child_state(
+            state,
+            {
+                "sporc_progress_event": "sample_heartbeat",
+                "sample_index": 8,
+                "sample_count": 100,
+                "sample_id": "sample-8",
+                "stage": "summarizer",
+                "iteration": 2,
+                "last_activity_age_seconds": 45.0,
+            },
+        )
+
+        assert state.active_sample_index == 8
+        assert state.active_sample_id == "sample-8"
+        assert state.active_stage == "summarizer"
+        assert state.active_iteration == 2
+        assert state.last_heartbeat_at is not None
+        assert state.last_activity_at is not None
+        assert state.last_activity_age_seconds == 45.0
+    finally:
+        state.log_handle.close()
+
+
+def test_detect_duration_sweep_child_stall_uses_heartbeat_and_activity_age(
+    tmp_path: Path,
+) -> None:
+    now_monotonic = time.monotonic()
+    state = _DurationSweepChildState(
+        duration_preset="5m",
+        process=_MutableProcessStub(pid=1001, returncode=None),
+        log_path=tmp_path / "5m.log",
+        log_handle=(tmp_path / "5m.log").open("w", encoding="utf-8"),
+        reader_thread=None,
+        retrieval_port=5001,
+        summarizer_port=5002,
+        critic_port=5003,
+        max_samples=100,
+        checkpoint_path=tmp_path / "5m.checkpoint.json",
+        output_root=tmp_path / "runs",
+        active_sample_id="sample-8",
+        active_stage="summarizer",
+        last_heartbeat_at=now_monotonic - 100.0,
+        last_activity_at=now_monotonic - 650.0,
+        last_activity_age_seconds=650.0,
+    )
+    try:
+        assert (
+            _detect_duration_sweep_child_stall(
+                state,
+                now_monotonic=now_monotonic,
+                child_stall_seconds=600.0,
+            )
+            is not None
+        )
+    finally:
+        state.log_handle.close()
 
 
 def test_build_parser_skips_runner_import_for_prepare_dataset(monkeypatch) -> None:
@@ -239,6 +363,8 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
             summarizer_port=5101 + len(launched) * 3,
             critic_port=5102 + len(launched) * 3,
             max_samples=max_samples,
+            checkpoint_path=tmp_path / f"{duration_preset}.checkpoint.json",
+            output_root=tmp_path / "runs",
         )
 
     def _fake_finalize_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
@@ -270,6 +396,8 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
             mean_composite_ci95_lower=None,
             mean_composite_ci95_upper=None,
             error_message=None,
+            restart_count=state.restart_count,
+            recovered_stall_count=state.recovered_stall_count,
         )
 
     def _fake_write_duration_sweep_artifacts(**kwargs):  # type: ignore[no-untyped-def]
@@ -323,6 +451,152 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
         "1m",
         "5m",
     ]
+
+
+def test_run_duration_sweep_restarts_stalled_child_and_records_recovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    launched: list[tuple[bool, int]] = []
+    written_reports = []
+
+    def _fake_launch_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        duration_preset = kwargs["duration_preset"]
+        resume_from_checkpoint = bool(kwargs.get("resume_from_checkpoint", False))
+        restart_count = int(kwargs.get("restart_count", 0))
+        recovered_stall_count = int(kwargs.get("recovered_stall_count", 0))
+        process = _MutableProcessStub(
+            pid=2000 + len(launched),
+            returncode=0 if resume_from_checkpoint else None,
+        )
+        launched.append((resume_from_checkpoint, restart_count))
+        log_path = tmp_path / f"{duration_preset}.log"
+        log_handle = log_path.open("a" if resume_from_checkpoint else "w", encoding="utf-8")
+        state = _DurationSweepChildState(
+            duration_preset=duration_preset,
+            process=process,
+            log_path=log_path,
+            log_handle=log_handle,
+            reader_thread=None,
+            retrieval_port=5100 + len(launched) * 3,
+            summarizer_port=5101 + len(launched) * 3,
+            critic_port=5102 + len(launched) * 3,
+            max_samples=kwargs["max_samples"],
+            checkpoint_path=tmp_path / f"{duration_preset}.checkpoint.json",
+            output_root=tmp_path / "runs",
+            sample_count=100,
+            completed_samples=7,
+            restart_count=restart_count,
+            recovered_stall_count=recovered_stall_count,
+        )
+        if not resume_from_checkpoint:
+            now_monotonic = time.monotonic()
+            state.active_sample_index = 8
+            state.active_sample_id = "sample-8"
+            state.active_stage = "summarizer"
+            state.last_heartbeat_at = now_monotonic - 100.0
+            state.last_activity_at = now_monotonic - 650.0
+            state.last_activity_age_seconds = 650.0
+        else:
+            kwargs["event_queue"].put(
+                (
+                    duration_preset,
+                    process.pid,
+                    {
+                        "sporc_progress_event": "sample_done",
+                        "sample_index": 8,
+                        "sample_count": 100,
+                        "sample_id": "sample-8",
+                        "final_status": "sweep_watchdog_stalled",
+                    },
+                )
+            )
+        return state
+
+    def _fake_finalize_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        state = kwargs["state"]
+        if not state.log_handle.closed:
+            state.log_handle.close()
+        return DurationSweepPresetSummary(
+            duration_preset=state.duration_preset,
+            target_seconds=300,
+            status="completed",
+            sample_count=100,
+            executed_count=8,
+            skipped_count=0,
+            success_count=7,
+            failure_count=1,
+            within_tolerance_count=7,
+            within_tolerance_rate=0.875,
+            mean_candidate_seconds=300.0,
+            mean_absolute_duration_delta_seconds=0.0,
+            mean_factualness=0.9,
+            mean_naturalness=0.9,
+            mean_speaker_grammar_similarity=0.9,
+            mean_composite=0.9,
+            report_path=str(tmp_path / "5m.report.json"),
+            notes_path=str(tmp_path / "5m.notes.md"),
+            results_path=str(tmp_path / "5m.results.md"),
+            mean_composite_ci95_lower=None,
+            mean_composite_ci95_upper=None,
+            error_message=None,
+            restart_count=state.restart_count,
+            recovered_stall_count=state.recovered_stall_count,
+        )
+
+    def _fake_write_duration_sweep_artifacts(**kwargs):  # type: ignore[no-untyped-def]
+        report = kwargs["report"]
+        written_reports.append(report)
+        sweep_root = kwargs["sweep_root"]
+        return sweep_root / "report.json", sweep_root / "results.md"
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._launch_duration_sweep_child",
+        _fake_launch_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._finalize_duration_sweep_child",
+        _fake_finalize_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_reporting_helpers",
+        lambda **kwargs: (_fake_write_duration_sweep_artifacts, None),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._emit_cli_status",
+        lambda message: None,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._terminate_process_tree",
+        lambda process: setattr(process, "returncode", -9),
+    )
+
+    args = argparse.Namespace(
+        mode="single",
+        duration_preset="5m",
+        duration_presets="5m",
+        examples=None,
+        max_samples=100,
+        sample_seed=None,
+        parallelism=1,
+        sweep_root=str(tmp_path),
+        enable_voice_clone=False,
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="disabled",
+        child_stall_seconds=600.0,
+        max_child_restarts=2,
+        progress_heartbeat_seconds=30.0,
+        output_root=str(tmp_path / "runs"),
+    )
+
+    exit_code = _run_duration_sweep(args)
+
+    assert exit_code == 0
+    assert launched == [(False, 0), (True, 1)]
+    assert written_reports[-1].preset_summaries[0].restart_count == 1
+    assert written_reports[-1].preset_summaries[0].recovered_stall_count == 1
 
 
 def test_main_prepare_dataset_handles_keyboard_interrupt(

@@ -58,6 +58,9 @@ _TELEMETRY_HELPERS: tuple[object, object, object, object] | None = None
 _REPORTING_HELPERS: tuple[object, object] | None = None
 _PROGRESS_EVENT_KEY = "sporc_progress_event"
 _SWEEP_PROGRESS_HEARTBEAT_SECONDS = 15.0
+_SWEEP_CHILD_NO_HEARTBEAT_SECONDS = 90.0
+_SWEEP_CHILD_DEFAULT_STALL_SECONDS = 600.0
+_SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
 
 
 @dataclass(slots=True)
@@ -73,10 +76,19 @@ class _DurationSweepChildState:
     summarizer_port: int
     critic_port: int
     max_samples: int
+    checkpoint_path: Path
+    output_root: Path
     sample_count: int | None = None
     completed_samples: int = 0
     active_sample_index: int | None = None
     active_sample_id: str | None = None
+    active_stage: str | None = None
+    active_iteration: int | None = None
+    last_heartbeat_at: float | None = None
+    last_activity_at: float | None = None
+    last_activity_age_seconds: float | None = None
+    restart_count: int = 0
+    recovered_stall_count: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -299,6 +311,18 @@ def _build_parser(
                 "Use 0 to run all selected presets in parallel."
             ),
         )
+        duration_sweep.add_argument(
+            "--child-stall-seconds",
+            type=float,
+            default=_SWEEP_CHILD_DEFAULT_STALL_SECONDS,
+            help="Restart a sweep child when its active sample shows no new activity for this many seconds.",
+        )
+        duration_sweep.add_argument(
+            "--max-child-restarts",
+            type=int,
+            default=2,
+            help="Maximum watchdog restarts per preset child before the preset is marked failed.",
+        )
     return parser
 
 
@@ -457,6 +481,8 @@ def _build_failed_preset_summary(
     duration_preset: str,
     sample_count: int,
     error_message: str,
+    restart_count: int = 0,
+    recovered_stall_count: int = 0,
 ) -> DurationSweepPresetSummary:
     """Build a failed preset summary when execute_benchmark raises."""
     return DurationSweepPresetSummary(
@@ -482,6 +508,8 @@ def _build_failed_preset_summary(
         mean_composite_ci95_lower=None,
         mean_composite_ci95_upper=None,
         error_message=error_message,
+        restart_count=restart_count,
+        recovered_stall_count=recovered_stall_count,
     )
 
 
@@ -525,6 +553,8 @@ def _summarize_duration_report(
     report: BenchmarkExecutionReport,
     *,
     duration_preset: str,
+    restart_count: int = 0,
+    recovered_stall_count: int | None = None,
 ) -> DurationSweepPresetSummary:
     """Collapse one execute report into a sweep-level preset summary."""
     sample_count = len(report.samples)
@@ -555,6 +585,11 @@ def _summarize_duration_report(
     )
     composite_ci95 = mean_confidence_interval_95(
         [sample.metrics.composite for sample in executed_samples]
+    )
+    derived_recovered_stall_count = sum(
+        1
+        for sample in report.samples
+        if sample.final_status == _SWEEP_STALL_FINAL_STATUS
     )
     return DurationSweepPresetSummary(
         duration_preset=duration_preset,
@@ -592,6 +627,12 @@ def _summarize_duration_report(
             round(composite_ci95[1], 4) if composite_ci95 is not None else None
         ),
         error_message=None,
+        restart_count=max(int(report.resume_count), int(restart_count)),
+        recovered_stall_count=(
+            max(derived_recovered_stall_count, int(recovered_stall_count))
+            if recovered_stall_count is not None
+            else derived_recovered_stall_count
+        ),
     )
 
 
@@ -616,6 +657,7 @@ def _update_duration_sweep_child_state(
 ) -> None:
     """Apply one parsed progress event to the tracked child state."""
     event_name = str(payload.get(_PROGRESS_EVENT_KEY, ""))
+    now_monotonic = time.monotonic()
     raw_sample_count = payload.get("sample_count")
     if isinstance(raw_sample_count, int) and raw_sample_count >= 0:
         state.sample_count = raw_sample_count
@@ -628,14 +670,54 @@ def _update_duration_sweep_child_state(
         state.active_sample_id = (
             str(raw_sample_id) if isinstance(raw_sample_id, str) and raw_sample_id else None
         )
+        state.active_stage = "sample_start"
+        state.active_iteration = None
+        state.last_heartbeat_at = now_monotonic
+        state.last_activity_at = now_monotonic
+        state.last_activity_age_seconds = 0.0
+        return
+
+    if event_name == "sample_heartbeat":
+        raw_sample_index = payload.get("sample_index")
+        if isinstance(raw_sample_index, int) and raw_sample_index > 0:
+            state.active_sample_index = raw_sample_index
+        raw_sample_id = payload.get("sample_id")
+        if isinstance(raw_sample_id, str) and raw_sample_id:
+            state.active_sample_id = raw_sample_id
+        raw_stage = payload.get("stage")
+        state.active_stage = (
+            str(raw_stage) if isinstance(raw_stage, str) and raw_stage else None
+        )
+        raw_iteration = payload.get("iteration")
+        state.active_iteration = (
+            int(raw_iteration)
+            if isinstance(raw_iteration, int)
+            else None
+        )
+        raw_activity_age = payload.get("last_activity_age_seconds")
+        if isinstance(raw_activity_age, (int, float)):
+            state.last_activity_age_seconds = float(raw_activity_age)
+            state.last_activity_at = max(
+                0.0,
+                now_monotonic - float(raw_activity_age),
+            )
+        state.last_heartbeat_at = now_monotonic
         return
 
     if event_name == "sample_done":
         raw_sample_index = payload.get("sample_index")
         if isinstance(raw_sample_index, int) and raw_sample_index >= 0:
             state.completed_samples = max(state.completed_samples, raw_sample_index)
+        raw_final_status = payload.get("final_status")
+        if raw_final_status == _SWEEP_STALL_FINAL_STATUS:
+            state.recovered_stall_count += 1
         state.active_sample_index = None
         state.active_sample_id = None
+        state.active_stage = None
+        state.active_iteration = None
+        state.last_heartbeat_at = None
+        state.last_activity_at = None
+        state.last_activity_age_seconds = None
 
 
 def _format_duration_sweep_progress(
@@ -688,6 +770,14 @@ def _format_duration_sweep_progress(
             label = f"{duration_preset}:{state.completed_samples}/{planned_samples}"
         else:
             label = f"{duration_preset}:starting"
+        if state.active_stage:
+            label = (
+                f"{label}@{state.active_stage}"
+                if state.active_iteration is None
+                else f"{label}@{state.active_stage}#{state.active_iteration}"
+            )
+        if state.restart_count > 0:
+            label = f"{label}(r{state.restart_count})"
         active_labels.append(label)
 
     if total_known and total_samples > 0:
@@ -717,7 +807,7 @@ def _format_duration_sweep_progress(
 def _start_duration_sweep_reader(
     *,
     state: _DurationSweepChildState,
-    event_queue: queue.Queue[tuple[str, dict[str, object]]],
+    event_queue: queue.Queue[tuple[str, int, dict[str, object]]],
 ) -> threading.Thread | None:
     """Start a background line pump for one duration-sweep child."""
     stream = state.process.stdout
@@ -730,7 +820,7 @@ def _start_duration_sweep_reader(
             state.log_handle.flush()
             payload = _parse_duration_sweep_progress_line(line)
             if payload is not None:
-                event_queue.put((state.duration_preset, payload))
+                event_queue.put((state.duration_preset, state.process.pid, payload))
 
     thread = threading.Thread(
         target=_pump,
@@ -748,13 +838,31 @@ def _launch_duration_sweep_child(
     duration_preset: str,
     max_samples: int,
     used_ports: set[int],
-    event_queue: queue.Queue[tuple[str, dict[str, object]]],
+    event_queue: queue.Queue[tuple[str, int, dict[str, object]]],
+    checkpoint_path: Path | None = None,
+    resume_from_checkpoint: bool = False,
+    resume_failure_reason: str | None = None,
+    restart_count: int = 0,
+    recovered_stall_count: int = 0,
 ) -> _DurationSweepChildState:
     """Launch one preset child execute process for the duration sweep."""
+    progress_heartbeat_seconds = float(
+        getattr(args, "progress_heartbeat_seconds", 30.0)
+    )
     logs_root = sweep_root / "logs"
     logs_root.mkdir(parents=True, exist_ok=True)
+    checkpoints_root = sweep_root / "checkpoints"
+    checkpoints_root.mkdir(parents=True, exist_ok=True)
     log_path = logs_root / f"{duration_preset}.log"
-    log_handle = log_path.open("w", encoding="utf-8")
+    resolved_checkpoint_path = (
+        checkpoint_path
+        if checkpoint_path is not None
+        else checkpoints_root / f"{duration_preset}.checkpoint.json"
+    )
+    log_handle = log_path.open(
+        "a" if resume_from_checkpoint and log_path.exists() else "w",
+        encoding="utf-8",
+    )
     retrieval_port, summarizer_port, critic_port = _reserve_distinct_port_triplet(
         used_ports
     )
@@ -769,13 +877,20 @@ def _launch_duration_sweep_child(
         critic_port=critic_port,
         disable_stream_output=True,
         emit_progress_events=True,
+        checkpoint_path=resolved_checkpoint_path,
+        resume_from_checkpoint=resume_from_checkpoint,
+        resume_failure_reason=resume_failure_reason,
+        emit_progress_heartbeats=True,
+        progress_heartbeat_seconds=progress_heartbeat_seconds,
+        apply_sweep_timeout_defaults=True,
     )
     log_handle.write(
         (
-            f"[Sweep] Starting preset {duration_preset}\n"
+            f"[Sweep] {'Restarting' if resume_from_checkpoint else 'Starting'} preset {duration_preset}\n"
             f"[Sweep] Command: {' '.join(child_command)}\n"
             f"[Sweep] Ports: retrieval={retrieval_port} "
             f"summarizer={summarizer_port} critic={critic_port}\n"
+            f"[Sweep] Checkpoint: {resolved_checkpoint_path}\n"
         )
     )
     log_handle.flush()
@@ -805,6 +920,12 @@ def _launch_duration_sweep_child(
         summarizer_port=summarizer_port,
         critic_port=critic_port,
         max_samples=max_samples,
+        checkpoint_path=resolved_checkpoint_path,
+        output_root=Path(
+            getattr(args, "output_root", REPO_ROOT / "artifacts" / "sporc_runs")
+        ).resolve(),
+        restart_count=restart_count,
+        recovered_stall_count=recovered_stall_count,
     )
     state.reader_thread = _start_duration_sweep_reader(
         state=state,
@@ -813,13 +934,128 @@ def _launch_duration_sweep_child(
     return state
 
 
+def _discover_report_path_from_checkpoint(
+    state: _DurationSweepChildState,
+) -> Path | None:
+    """Resolve the latest report snapshot path from the execute checkpoint."""
+    if not state.checkpoint_path.exists():
+        return None
+    try:
+        checkpoint_payload = json.loads(
+            state.checkpoint_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(checkpoint_payload, dict):
+        return None
+    run_id = str(checkpoint_payload.get("run_id", "") or "").strip()
+    if not run_id:
+        return None
+    report_path = (state.output_root / run_id / "report.json").resolve()
+    return report_path if report_path.exists() else None
+
+
+def _stop_duration_sweep_child(
+    state: _DurationSweepChildState,
+    *,
+    reason: str,
+) -> int | None:
+    """Terminate one running sweep child and close its background reader."""
+    state.log_handle.write(f"[Sweep] {reason}\n")
+    state.log_handle.flush()
+    if state.process.poll() is None:
+        _terminate_process_tree(state.process)
+    try:
+        exit_code = state.process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        exit_code = state.process.poll()
+    if state.reader_thread is not None:
+        state.reader_thread.join(timeout=5.0)
+    if exit_code is not None:
+        state.log_handle.write(f"[Sweep] Child exited with code {exit_code}\n")
+        state.log_handle.flush()
+    if not state.log_handle.closed:
+        state.log_handle.close()
+    return exit_code
+
+
+def _detect_duration_sweep_child_stall(
+    state: _DurationSweepChildState,
+    *,
+    now_monotonic: float,
+    child_stall_seconds: float,
+) -> str | None:
+    """Return a watchdog restart reason when a child appears stalled."""
+    if state.process.poll() is not None or state.active_sample_id is None:
+        return None
+    if (
+        state.last_heartbeat_at is not None
+        and now_monotonic - state.last_heartbeat_at > _SWEEP_CHILD_NO_HEARTBEAT_SECONDS
+    ):
+        return (
+            f"sample {state.active_sample_id} stopped heartbeating for "
+            f"{now_monotonic - state.last_heartbeat_at:.1f}s "
+            f"(stage={state.active_stage or 'unknown'})."
+        )
+    if (
+        state.last_activity_age_seconds is not None
+        and state.last_activity_age_seconds > child_stall_seconds
+    ):
+        return (
+            f"sample {state.active_sample_id} reported no new activity for "
+            f"{state.last_activity_age_seconds:.1f}s "
+            f"(stage={state.active_stage or 'unknown'})."
+        )
+    return None
+
+
+def _restart_duration_sweep_child(
+    *,
+    state: _DurationSweepChildState,
+    args: argparse.Namespace,
+    sweep_root: Path,
+    used_ports: set[int],
+    event_queue: queue.Queue[tuple[str, int, dict[str, object]]],
+    reason: str,
+) -> _DurationSweepChildState:
+    """Restart one stalled preset child from its execute checkpoint."""
+    _stop_duration_sweep_child(
+        state,
+        reason=(
+            f"Watchdog restarting preset {state.duration_preset} after stall: {reason}"
+        ),
+    )
+    restarted_state = _launch_duration_sweep_child(
+        args=args,
+        sweep_root=sweep_root,
+        duration_preset=state.duration_preset,
+        max_samples=state.max_samples,
+        used_ports=used_ports,
+        event_queue=event_queue,
+        checkpoint_path=state.checkpoint_path,
+        resume_from_checkpoint=True,
+        resume_failure_reason=_SWEEP_STALL_FINAL_STATUS,
+        restart_count=state.restart_count + 1,
+        recovered_stall_count=state.recovered_stall_count,
+    )
+    restarted_state.sample_count = state.sample_count
+    restarted_state.completed_samples = state.completed_samples
+    return restarted_state
+
+
 def _finalize_duration_sweep_child(
     *,
     state: _DurationSweepChildState,
     fallback_sample_count: int,
+    forced_status: str | None = None,
+    forced_error_message: str | None = None,
 ) -> DurationSweepPresetSummary:
     """Finalize one duration-sweep child process into a preset summary."""
-    exit_code = state.process.wait(timeout=5.0)
+    try:
+        exit_code = state.process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(state.process)
+        exit_code = state.process.wait(timeout=5.0)
     if state.reader_thread is not None:
         state.reader_thread.join(timeout=5.0)
     state.log_handle.write(f"[Sweep] Child exited with code {exit_code}\n")
@@ -828,15 +1064,29 @@ def _finalize_duration_sweep_child(
 
     terminal_payload = _discover_terminal_payload(state.log_path)
     report_path_value = terminal_payload.get("report_path")
+    report_path: Path | None = None
     if isinstance(report_path_value, str) and report_path_value.strip():
-        report_path = Path(report_path_value).resolve()
-        if report_path.exists():
-            return _summarize_duration_report(
-                _load_execution_report(report_path),
-                duration_preset=state.duration_preset,
-            )
+        candidate_report_path = Path(report_path_value).resolve()
+        if candidate_report_path.exists():
+            report_path = candidate_report_path
+    if report_path is None:
+        report_path = _discover_report_path_from_checkpoint(state)
+    if report_path is not None:
+        report_summary = _summarize_duration_report(
+            _load_execution_report(report_path),
+            duration_preset=state.duration_preset,
+            restart_count=state.restart_count,
+            recovered_stall_count=state.recovered_stall_count,
+        )
+        if forced_status is None and forced_error_message is None:
+            return report_summary
+        return replace(
+            report_summary,
+            status=forced_status or report_summary.status,
+            error_message=forced_error_message,
+        )
 
-    error_message = terminal_payload.get("error")
+    error_message = forced_error_message or terminal_payload.get("error")
     if not isinstance(error_message, str) or not error_message.strip():
         error_message = (
             f"Preset {state.duration_preset} exited with code {exit_code} "
@@ -849,6 +1099,8 @@ def _finalize_duration_sweep_child(
         duration_preset=state.duration_preset,
         sample_count=max(resolved_sample_count, 0),
         error_message=error_message,
+        restart_count=state.restart_count,
+        recovered_stall_count=state.recovered_stall_count,
     )
 
 
@@ -883,9 +1135,13 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
     running_children: dict[str, _DurationSweepChildState] = {}
     preset_summaries_by_preset: dict[str, DurationSweepPresetSummary] = {}
     used_ports: set[int] = set()
-    event_queue: queue.Queue[tuple[str, dict[str, object]]] = queue.Queue()
+    event_queue: queue.Queue[tuple[str, int, dict[str, object]]] = queue.Queue()
     last_progress: str | None = None
     next_heartbeat_at = 0.0
+    child_stall_seconds = float(
+        getattr(args, "child_stall_seconds", _SWEEP_CHILD_DEFAULT_STALL_SECONDS)
+    )
+    max_child_restarts = int(getattr(args, "max_child_restarts", 2))
 
     _emit_cli_status(
         (
@@ -924,25 +1180,83 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
 
                 progress_changed = False
                 try:
-                    duration_preset, payload = event_queue.get(timeout=0.5)
+                    duration_preset, child_pid, payload = event_queue.get(timeout=0.5)
                 except queue.Empty:
                     pass
                 else:
                     child_state = running_children.get(duration_preset)
-                    if child_state is not None:
+                    if child_state is not None and child_state.process.pid == child_pid:
                         _update_duration_sweep_child_state(child_state, payload)
                         progress_changed = True
                     while True:
                         try:
-                            duration_preset, payload = event_queue.get_nowait()
+                            duration_preset, child_pid, payload = event_queue.get_nowait()
                         except queue.Empty:
                             break
                         child_state = running_children.get(duration_preset)
-                        if child_state is not None:
+                        if child_state is not None and child_state.process.pid == child_pid:
                             _update_duration_sweep_child_state(child_state, payload)
                             progress_changed = True
 
+                now_monotonic = time.monotonic()
                 for duration_preset, child_state in list(running_children.items()):
+                    stall_reason = _detect_duration_sweep_child_stall(
+                        child_state,
+                        now_monotonic=now_monotonic,
+                        child_stall_seconds=child_stall_seconds,
+                    )
+                    if stall_reason is not None:
+                        if child_state.restart_count >= max_child_restarts:
+                            child_state.log_handle.write(
+                                "[Sweep] Watchdog terminating preset "
+                                f"{duration_preset} after exhausting "
+                                f"{max_child_restarts} restart(s): "
+                                f"{stall_reason}\n"
+                            )
+                            child_state.log_handle.flush()
+                            if child_state.process.poll() is None:
+                                _terminate_process_tree(child_state.process)
+                            preset_summaries_by_preset[duration_preset] = (
+                                _finalize_duration_sweep_child(
+                                    state=child_state,
+                                    fallback_sample_count=examples,
+                                    forced_status="failed",
+                                    forced_error_message=(
+                                        "Sweep watchdog exceeded "
+                                        f"{max_child_restarts} restart(s) for "
+                                        f"preset {duration_preset}: {stall_reason}"
+                                    ),
+                                )
+                            )
+                            del running_children[duration_preset]
+                            progress_changed = True
+                            _emit_cli_status(
+                                (
+                                    f"Failed preset {duration_preset} after "
+                                    f"{child_state.restart_count} restart(s): "
+                                    f"{stall_reason}"
+                                )
+                            )
+                            continue
+                        restarted_state = _restart_duration_sweep_child(
+                            state=child_state,
+                            args=args,
+                            sweep_root=sweep_root,
+                            used_ports=used_ports,
+                            event_queue=event_queue,
+                            reason=stall_reason,
+                        )
+                        running_children[duration_preset] = restarted_state
+                        progress_changed = True
+                        _emit_cli_status(
+                            (
+                                f"Restarted preset {duration_preset} "
+                                f"restart={restarted_state.restart_count}/"
+                                f"{max_child_restarts} "
+                                f"reason={stall_reason}"
+                            )
+                        )
+                        continue
                     if child_state.process.poll() is None:
                         continue
                     preset_summaries_by_preset[duration_preset] = (
@@ -1127,6 +1441,12 @@ def _build_execute_child_command(
     critic_port: int | None = None,
     disable_stream_output: bool = False,
     emit_progress_events: bool = False,
+    checkpoint_path: Path | None = None,
+    resume_from_checkpoint: bool = False,
+    resume_failure_reason: str | None = None,
+    emit_progress_heartbeats: bool = False,
+    progress_heartbeat_seconds: float | None = None,
+    apply_sweep_timeout_defaults: bool = False,
 ) -> list[str]:
     """Build a child execute command with optional sweep-specific overrides."""
     command = [
@@ -1135,6 +1455,20 @@ def _build_execute_child_command(
         "card_framework.benchmark.summarizer_critic.sporc",
         "execute",
     ]
+    summarizer_timeout = args.summarizer_timeout_seconds
+    critic_timeout = args.critic_timeout_seconds
+    retrieval_timeout = args.retrieval_timeout_seconds
+    index_timeout = args.index_timeout_seconds
+    if apply_sweep_timeout_defaults:
+        summarizer_timeout = (
+            summarizer_timeout if summarizer_timeout is not None else 900.0
+        )
+        critic_timeout = critic_timeout if critic_timeout is not None else 900.0
+        retrieval_timeout = (
+            retrieval_timeout if retrieval_timeout is not None else 300.0
+        )
+        index_timeout = index_timeout if index_timeout is not None else 300.0
+
     forwarded = {
         "--dataset-manifest": args.dataset_manifest,
         "--dataset-variant": args.dataset_variant,
@@ -1160,13 +1494,16 @@ def _build_execute_child_command(
         "--max-samples": max_samples if max_samples is not None else args.max_samples,
         "--sample-seed": args.sample_seed,
         "--max-iterations": args.max_iterations,
-        "--summarizer-timeout-seconds": args.summarizer_timeout_seconds,
-        "--critic-timeout-seconds": args.critic_timeout_seconds,
-        "--retrieval-timeout-seconds": args.retrieval_timeout_seconds,
-        "--index-timeout-seconds": args.index_timeout_seconds,
+        "--summarizer-timeout-seconds": summarizer_timeout,
+        "--critic-timeout-seconds": critic_timeout,
+        "--retrieval-timeout-seconds": retrieval_timeout,
+        "--index-timeout-seconds": index_timeout,
         "--retrieval-port": retrieval_port,
         "--summarizer-port": summarizer_port,
         "--critic-port": critic_port,
+        "--checkpoint-path": str(checkpoint_path) if checkpoint_path is not None else "",
+        "--progress-heartbeat-seconds": progress_heartbeat_seconds,
+        "--resume-failure-reason": resume_failure_reason,
     }
     if args.prepare_if_missing:
         command.append("--prepare-if-missing")
@@ -1183,6 +1520,10 @@ def _build_execute_child_command(
         command.append("--disable-stream-output")
     if emit_progress_events:
         command.append("--emit-progress-events")
+    if emit_progress_heartbeats:
+        command.append("--emit-progress-heartbeats")
+    if resume_from_checkpoint:
+        command.append("--resume-from-checkpoint")
     for flag, value in forwarded.items():
         if value in (None, ""):
             continue

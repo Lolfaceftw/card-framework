@@ -171,6 +171,9 @@ class BenchmarkExecutionReport:
     duration_preset: str = ""
     override_target_seconds: int | None = None
     sample_seed: int | None = None
+    checkpoint_path: str | None = None
+    resumed_from_checkpoint: bool = False
+    resume_count: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -219,6 +222,8 @@ class DurationSweepPresetSummary:
     mean_composite_ci95_lower: float | None = None
     mean_composite_ci95_upper: float | None = None
     error_message: str | None = None
+    restart_count: int = 0
+    recovered_stall_count: int = 0
 
 
 @dataclass(slots=True, frozen=True)

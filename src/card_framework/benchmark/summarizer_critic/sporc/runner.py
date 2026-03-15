@@ -6,14 +6,16 @@ from collections import defaultdict
 from copy import deepcopy
 import argparse
 import asyncio
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 import shutil
 import sys
+import threading
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import hydra
@@ -123,6 +125,224 @@ _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
 _PROGRESS_EVENT_KEY = "sporc_progress_event"
+_STAGE_TIMEOUT_FINAL_STATUS = "stage_timeout"
+_RESUME_FAILURE_DEFAULT_STATUS = "resume_interrupted_sample"
+_SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
+_CHECKPOINT_VERSION = 1
+
+
+@dataclass(slots=True)
+class _ManagedBenchmarkRuntime:
+    """Own one SPoRC execute runtime instance and its local A2A servers."""
+
+    orchestrator: Orchestrator
+    judge: SPoRCJudge
+    event_capture: EventCapture
+    retrieval_enabled: bool
+    shared_agent_client: AgentClient
+    servers: list[ManagedServer]
+    retrieval_port: int
+    summarizer_port: int
+    critic_port: int
+
+
+class _BenchmarkProgressTracker:
+    """Track active-sample liveness for heartbeats and checkpoints."""
+
+    def __init__(
+        self,
+        *,
+        args: argparse.Namespace,
+        duration_preset: str,
+        persist_callback: Callable[[], None] | None,
+    ) -> None:
+        self._args = args
+        self._duration_preset = duration_preset
+        self._persist_callback = persist_callback
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._active_sample: dict[str, Any] | None = None
+        self._subscriptions: list[tuple[str, Callable[..., Any]]] = []
+
+    def subscribe(self) -> None:
+        """Subscribe to runtime events that indicate benchmark activity."""
+        subscriptions = [
+            ("a2a_call_started", self._on_a2a_call_started),
+            ("a2a_call_retry", self._on_a2a_activity),
+            ("a2a_call_succeeded", self._on_a2a_activity),
+            ("orchestrator_iteration_started", self._on_iteration_started),
+            ("tool_invocation", self._on_activity),
+            ("status_message", self._on_activity),
+        ]
+        for event_name, callback in subscriptions:
+            event_bus.subscribe(event_name, callback)
+            self._subscriptions.append((event_name, callback))
+
+    def unsubscribe(self) -> None:
+        """Unsubscribe from any registered runtime events."""
+        for event_name, callback in self._subscriptions:
+            event_bus.unsubscribe(event_name, callback)
+        self._subscriptions.clear()
+
+    def start(self) -> None:
+        """Start periodic heartbeat emission when enabled."""
+        if not bool(getattr(self._args, "emit_progress_heartbeats", False)):
+            return
+        if self._heartbeat_thread is not None:
+            return
+        interval_seconds = max(
+            1.0,
+            float(getattr(self._args, "progress_heartbeat_seconds", 30.0)),
+        )
+
+        def _pump() -> None:
+            while not self._stop_event.wait(interval_seconds):
+                payload = self.snapshot_heartbeat_payload()
+                if payload is None:
+                    continue
+                _emit_progress_event(
+                    self._args,
+                    event="sample_heartbeat",
+                    duration_preset=self._duration_preset,
+                    payload=payload,
+                )
+                self._persist()
+
+        self._heartbeat_thread = threading.Thread(
+            target=_pump,
+            name=f"sporc-progress-heartbeat-{self._duration_preset}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def stop(self) -> None:
+        """Stop heartbeat emission."""
+        self._stop_event.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=5.0)
+            self._heartbeat_thread = None
+
+    def activate_sample(
+        self,
+        *,
+        sample_index: int,
+        sample_count: int,
+        sample_id: str,
+        target_seconds: int,
+    ) -> None:
+        """Begin tracking one active sample."""
+        now_monotonic = time.monotonic()
+        now_utc = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._active_sample = {
+                "sample_index": sample_index,
+                "sample_count": sample_count,
+                "sample_id": sample_id,
+                "target_seconds": target_seconds,
+                "stage": "sample_start",
+                "iteration": None,
+                "started_at_utc": now_utc,
+                "started_monotonic": now_monotonic,
+                "last_activity_utc": now_utc,
+                "last_activity_monotonic": now_monotonic,
+                "elapsed_sample_seconds": 0.0,
+                "last_activity_age_seconds": 0.0,
+            }
+        self._persist()
+
+    def clear_active_sample(self) -> None:
+        """Clear the currently active sample after a terminal result."""
+        with self._lock:
+            self._active_sample = None
+        self._persist()
+
+    def active_sample_snapshot(self) -> dict[str, Any] | None:
+        """Return a JSON-serializable active-sample snapshot for checkpoints."""
+        with self._lock:
+            if self._active_sample is None:
+                return None
+            return self._snapshot_locked()
+
+    def snapshot_heartbeat_payload(self) -> dict[str, Any] | None:
+        """Return the payload for one machine-readable heartbeat event."""
+        with self._lock:
+            if self._active_sample is None:
+                return None
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> dict[str, Any]:
+        assert self._active_sample is not None
+        active_sample = dict(self._active_sample)
+        now_monotonic = time.monotonic()
+        started_monotonic = float(active_sample.pop("started_monotonic", now_monotonic))
+        last_activity_monotonic = float(
+            active_sample.pop("last_activity_monotonic", now_monotonic)
+        )
+        elapsed_sample_seconds = max(0.0, now_monotonic - started_monotonic)
+        last_activity_age_seconds = max(0.0, now_monotonic - last_activity_monotonic)
+        active_sample["elapsed_sample_seconds"] = round(elapsed_sample_seconds, 3)
+        active_sample["last_activity_age_seconds"] = round(
+            last_activity_age_seconds,
+            3,
+        )
+        return active_sample
+
+    def _mark_activity(
+        self,
+        *,
+        stage: str | None = None,
+        iteration: int | None = None,
+    ) -> None:
+        with self._lock:
+            if self._active_sample is None:
+                return
+            now_monotonic = time.monotonic()
+            self._active_sample["last_activity_monotonic"] = now_monotonic
+            self._active_sample["last_activity_utc"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            if stage is not None:
+                self._active_sample["stage"] = stage
+            if iteration is not None:
+                self._active_sample["iteration"] = int(iteration)
+        self._persist()
+
+    def _persist(self) -> None:
+        if self._persist_callback is None:
+            return
+        self._persist_callback()
+
+    def _on_a2a_call_started(
+        self,
+        call_id: str,
+        port: int,
+        timeout: float,
+        max_retries: int,
+        **metadata: Any,
+    ) -> None:
+        del call_id, port, timeout, max_retries
+        raw_stage = metadata.get("stage")
+        raw_iteration = metadata.get("iteration")
+        stage = str(raw_stage) if isinstance(raw_stage, str) and raw_stage else None
+        iteration = int(raw_iteration) if isinstance(raw_iteration, int) else None
+        self._mark_activity(stage=stage, iteration=iteration)
+
+    def _on_iteration_started(
+        self,
+        iteration: int,
+        max_iterations: int | None = None,
+    ) -> None:
+        del max_iterations
+        self._mark_activity(stage="summarizer", iteration=iteration)
+
+    def _on_a2a_activity(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        self._mark_activity()
+
+    def _on_activity(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        self._mark_activity()
 
 
 def _resolve_orchestrator_timeouts(args: argparse.Namespace) -> dict[str, float | None]:
@@ -168,6 +388,114 @@ def _emit_progress_event(
         **payload,
     }
     print(json.dumps(event_payload), flush=True)
+
+
+def _deserialize_sample_result(raw_payload: dict[str, Any]) -> SampleBenchmarkResult:
+    """Rebuild one sample result from JSON-compatible checkpoint payload."""
+    sample_payload = dict(raw_payload)
+    raw_metrics = sample_payload.pop("metrics", None) or {}
+    if not isinstance(raw_metrics, dict):
+        raw_metrics = {}
+    return SampleBenchmarkResult(
+        metrics=SampleMetricBundle(
+            factualness=float(raw_metrics.get("factualness", 0.0) or 0.0),
+            naturalness=float(raw_metrics.get("naturalness", 0.0) or 0.0),
+            speaker_grammar_similarity=float(
+                raw_metrics.get("speaker_grammar_similarity", 0.0) or 0.0
+            ),
+            composite=float(raw_metrics.get("composite", 0.0) or 0.0),
+        ),
+        **sample_payload,
+    )
+
+
+def _load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
+    """Load a persisted execute checkpoint from disk."""
+    payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise BenchmarkExecutionError(
+            f"Invalid SPoRC checkpoint payload in {checkpoint_path}."
+        )
+    checkpoint_version = int(payload.get("checkpoint_version", 0) or 0)
+    if checkpoint_version != _CHECKPOINT_VERSION:
+        raise BenchmarkExecutionError(
+            f"Unsupported SPoRC checkpoint version {checkpoint_version} in {checkpoint_path}."
+        )
+    return payload
+
+
+def _write_checkpoint_payload(
+    checkpoint_path: Path,
+    payload: dict[str, Any],
+) -> None:
+    """Atomically persist one execute checkpoint payload."""
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = checkpoint_path.with_suffix(f"{checkpoint_path.suffix}.tmp")
+    temp_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temp_path.replace(checkpoint_path)
+
+
+def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
+    """Map one sample exception to a stable terminal status and message."""
+    message = str(exc).strip() or exc.__class__.__name__
+    lowered = message.lower()
+    if "timeout=" in lowered or "readtimeout" in lowered or "writetimeout" in lowered:
+        return _STAGE_TIMEOUT_FINAL_STATUS, message
+    if "timed out" in lowered or "timeout" in lowered:
+        return _STAGE_TIMEOUT_FINAL_STATUS, message
+    return "execution_error", message
+
+
+def _build_resume_failure_result(
+    *,
+    sample: PreparedBenchmarkSample,
+    target_seconds: int,
+    reason: str,
+    active_sample: dict[str, Any],
+) -> SampleBenchmarkResult:
+    """Build a failed result for an orphaned active sample during resume."""
+    stage = str(active_sample.get("stage") or "unknown")
+    raw_iteration = active_sample.get("iteration")
+    iteration_text = (
+        f" iteration={int(raw_iteration)}"
+        if isinstance(raw_iteration, int)
+        else ""
+    )
+    elapsed_seconds = float(active_sample.get("elapsed_sample_seconds", 0.0) or 0.0)
+    return SampleBenchmarkResult(
+        sample_id=sample.sample_id,
+        dataset=sample.dataset,
+        episode_key=sample.episode_key,
+        status="failed",
+        target_seconds=target_seconds,
+        candidate_seconds=0.0,
+        converged=False,
+        iterations_run=int(raw_iteration) if isinstance(raw_iteration, int) else 0,
+        final_status=reason,
+        duration_seconds=round(elapsed_seconds, 3),
+        retrieval_events=0,
+        tool_invocations=0,
+        metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
+        error_message=(
+            "Marked failed while resuming from checkpoint after the previous child "
+            f"stopped during stage={stage}{iteration_text}."
+        ),
+    )
+
+
+def _ordered_results(
+    sample_order: list[str],
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+) -> list[SampleBenchmarkResult]:
+    """Return results in deterministic sample-order sequence."""
+    return [
+        results_by_sample_id[sample_id]
+        for sample_id in sample_order
+        if sample_id in results_by_sample_id
+    ]
 
 
 def _prepare_provider_config(
@@ -424,6 +752,9 @@ def _build_execution_report(
     duration_preset: str,
     override_target_seconds: int | None,
     sample_seed: int | None,
+    checkpoint_path: Path | None,
+    resumed_from_checkpoint: bool,
+    resume_count: int,
 ) -> BenchmarkExecutionReport:
     """Build the SPoRC execution report before artifact paths are known."""
     summary = _summarize_results(results)
@@ -452,7 +783,238 @@ def _build_execution_report(
         duration_preset=duration_preset,
         override_target_seconds=override_target_seconds,
         sample_seed=sample_seed,
+        checkpoint_path=(str(checkpoint_path) if checkpoint_path is not None else None),
+        resumed_from_checkpoint=resumed_from_checkpoint,
+        resume_count=resume_count,
     )
+
+
+def _write_execution_report_snapshot(
+    *,
+    run_root: Path,
+    run_id: str,
+    dataset_manifest: Any,
+    summarizer_provider: str,
+    critic_provider: str,
+    judge_provider: str,
+    embedding_mode: str,
+    sample_order: list[str],
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+    duration_tolerance_ratio: float,
+    transcript_only: bool,
+    duration_preset: str,
+    override_target_seconds: int | None,
+    sample_seed: int | None,
+    checkpoint_path: Path | None,
+    resumed_from_checkpoint: bool,
+    resume_count: int,
+) -> BenchmarkExecutionReport:
+    """Write one partial or final execution report snapshot."""
+    provisional_report = _build_execution_report(
+        run_id=run_id,
+        dataset_manifest=dataset_manifest,
+        summarizer_provider=summarizer_provider,
+        critic_provider=critic_provider,
+        judge_provider=judge_provider,
+        embedding_mode=embedding_mode,
+        results=_ordered_results(sample_order, results_by_sample_id),
+        duration_tolerance_ratio=duration_tolerance_ratio,
+        transcript_only=transcript_only,
+        duration_preset=duration_preset,
+        override_target_seconds=override_target_seconds,
+        sample_seed=sample_seed,
+        checkpoint_path=checkpoint_path,
+        resumed_from_checkpoint=resumed_from_checkpoint,
+        resume_count=resume_count,
+    )
+    report_path, notes_path, results_path = write_execution_artifacts(
+        run_root=run_root,
+        report=provisional_report,
+    )
+    finalized_report = replace(
+        provisional_report,
+        report_path=str(report_path),
+        notes_path=str(notes_path),
+        results_path=str(results_path),
+    )
+    write_execution_artifacts(run_root=run_root, report=finalized_report)
+    return finalized_report
+
+
+def _build_runtime_port_args(
+    args: argparse.Namespace,
+    *,
+    force_dynamic_ports: bool,
+) -> argparse.Namespace:
+    """Return port settings for one runtime build."""
+    if not force_dynamic_ports:
+        return args
+    runtime_args = argparse.Namespace(**vars(args))
+    runtime_args.retrieval_port = None
+    runtime_args.summarizer_port = None
+    runtime_args.critic_port = None
+    return runtime_args
+
+
+async def _start_managed_runtime(
+    *,
+    args: argparse.Namespace,
+    base_cfg: Any,
+    summarizer_provider_config: dict[str, Any],
+    critic_provider_config: dict[str, Any],
+    judge_provider_config: dict[str, Any],
+    embedding_profile: EmbeddingProfile,
+    transcript_only: bool,
+    calibration: Any,
+    voice_clone_orchestrator: Any | None,
+    logging_enabled: bool,
+    force_dynamic_ports: bool,
+) -> _ManagedBenchmarkRuntime:
+    """Instantiate providers, local agents, and the orchestrator for one run phase."""
+    llm_summarizer: LLMProvider = hydra.utils.instantiate(
+        OmegaConf.create(summarizer_provider_config)
+    )
+    llm_critic: LLMProvider = hydra.utils.instantiate(
+        OmegaConf.create(critic_provider_config)
+    )
+    llm_judge: LLMProvider = hydra.utils.instantiate(
+        OmegaConf.create(judge_provider_config)
+    )
+    if not bool(args.disable_stream_output):
+        _attach_stream_callback(llm_summarizer)
+        _attach_stream_callback(llm_critic)
+        _attach_stream_callback(llm_judge)
+    if logging_enabled:
+        llm_summarizer = LoggingLLMProvider(inner_provider=llm_summarizer)
+        llm_critic = LoggingLLMProvider(inner_provider=llm_critic)
+        llm_judge = LoggingLLMProvider(inner_provider=llm_judge)
+
+    embedding: EmbeddingProvider = hydra.utils.instantiate(
+        OmegaConf.create(embedding_profile.embedding_config)
+    )
+    retrieval_enabled = embedding_profile.embedding_id != "disabled"
+    transcript_index = TranscriptIndex(embedding_provider=embedding)
+    judge = SPoRCJudge(
+        judge_llm=llm_judge,
+        config=SPoRCJudgeConfig(source_char_limit=int(args.judge_source_char_limit)),
+    )
+    event_capture = EventCapture(
+        ["tool_invocation", "retrieval_stats", "orchestrator_iteration_completed"]
+    )
+    event_capture.start()
+    shared_agent_client = AgentClient(event_bus=event_bus)
+    servers: list[ManagedServer] = []
+    try:
+        runtime_args = _build_runtime_port_args(
+            args,
+            force_dynamic_ports=force_dynamic_ports,
+        )
+        retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(
+            runtime_args
+        )
+
+        if retrieval_enabled:
+            retrieval_app = _build_a2a_app(
+                name="InfoRetrieval",
+                description="Indexes transcript segments and retrieves relevant ones.",
+                port=retrieval_port,
+                executor=InfoRetrievalExecutor(transcript_index),
+            )
+            servers.append(
+                _run_server_in_thread("sporc-retrieval", retrieval_app, retrieval_port)
+            )
+
+        summarizer_app = _build_a2a_app(
+            name="Summarizer",
+            description="Produces abstractive summaries.",
+            port=summarizer_port,
+            executor=SummarizerExecutor(
+                llm=llm_summarizer,
+                retrieval_port=retrieval_port,
+                max_tool_turns=int(base_cfg.agents.summarizer.max_tool_turns),
+                calibration=calibration,
+                is_embedding_enabled=retrieval_enabled,
+                voice_clone_orchestrator=voice_clone_orchestrator,
+                live_draft_audio_enabled=not transcript_only,
+                loop_guardrails=_coerce_mapping(
+                    OmegaConf.to_container(
+                        base_cfg.agents.summarizer.get("loop_guardrails", {}),
+                        resolve=True,
+                    )
+                ),
+                agent_client=shared_agent_client,
+                event_bus=event_bus,
+            ),
+        )
+        servers.append(
+            _run_server_in_thread("sporc-summarizer", summarizer_app, summarizer_port)
+        )
+
+        critic_app = _build_a2a_app(
+            name="Critic",
+            description="Evaluates summaries.",
+            port=critic_port,
+            executor=CriticExecutor(
+                llm=llm_critic,
+                calibration=calibration,
+                max_tool_turns=int(base_cfg.agents.critic.max_tool_turns),
+                retrieval_port=retrieval_port,
+                is_embedding_enabled=retrieval_enabled,
+                reasoning_loop_guard=_coerce_mapping(
+                    OmegaConf.to_container(
+                        base_cfg.agents.critic.get("reasoning_loop_guard", {}),
+                        resolve=True,
+                    )
+                ),
+                agent_client=shared_agent_client,
+                event_bus=event_bus,
+            ),
+        )
+        servers.append(_run_server_in_thread("sporc-critic", critic_app, critic_port))
+
+        checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
+        targets = [("Summarizer", summarizer_port), ("Critic", critic_port)]
+        if retrieval_enabled:
+            targets.insert(0, ("InfoRetrieval", retrieval_port))
+        for name, port in targets:
+            if not checker.check(name, port):
+                raise BenchmarkExecutionError(f"Health check failed for {name}:{port}")
+
+        orchestrator = Orchestrator(
+            retrieval_port=retrieval_port,
+            summarizer_port=summarizer_port,
+            critic_port=critic_port,
+            timeouts=_resolve_orchestrator_timeouts(args),
+            agent_client=shared_agent_client,
+            event_bus=event_bus,
+        )
+        return _ManagedBenchmarkRuntime(
+            orchestrator=orchestrator,
+            judge=judge,
+            event_capture=event_capture,
+            retrieval_enabled=retrieval_enabled,
+            shared_agent_client=shared_agent_client,
+            servers=servers,
+            retrieval_port=retrieval_port,
+            summarizer_port=summarizer_port,
+            critic_port=critic_port,
+        )
+    except Exception:
+        event_capture.stop()
+        for server in reversed(servers):
+            _stop_server(server)
+        await shared_agent_client.close()
+        raise
+
+
+async def _stop_managed_runtime(runtime: _ManagedBenchmarkRuntime | None) -> None:
+    """Tear down one managed runtime instance."""
+    if runtime is None:
+        return
+    runtime.event_capture.stop()
+    for server in reversed(runtime.servers):
+        _stop_server(server)
+    await runtime.shared_agent_client.close()
 
 
 def _format_transcript(transcript: dict[str, Any]) -> str:
@@ -1049,6 +1611,7 @@ async def _execute_sample(
             else None,
         )
     except Exception as exc:
+        final_status, error_message = _classify_sample_failure(exc)
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
@@ -1061,7 +1624,7 @@ async def _execute_sample(
             candidate_seconds=0.0,
             converged=False,
             iterations_run=0,
-            final_status="execution_error",
+            final_status=final_status,
             duration_seconds=duration_seconds,
             retrieval_events=max(0, retrieval_after - retrieval_before),
             tool_invocations=max(0, tool_after - tool_before),
@@ -1092,7 +1655,7 @@ async def _execute_sample(
                 if archived_voice_clone_merged_audio is not None
                 else None
             ),
-            error_message=str(exc),
+            error_message=error_message,
         )
 
 
@@ -1117,12 +1680,38 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         include_samples=False,
     )
 
-    run_id = _make_run_id()
+    raw_checkpoint_path = str(getattr(args, "checkpoint_path", "") or "").strip()
+    checkpoint_path = Path(raw_checkpoint_path).resolve() if raw_checkpoint_path else None
+    checkpoint_payload: dict[str, Any] = {}
+    resumed_from_checkpoint = bool(getattr(args, "resume_from_checkpoint", False))
+    resume_count = 0
+    recovered_stall_count = 0
+    if resumed_from_checkpoint:
+        if checkpoint_path is None or not checkpoint_path.exists():
+            raise BenchmarkExecutionError(
+                "--resume-from-checkpoint requires an existing --checkpoint-path."
+            )
+        checkpoint_payload = _load_checkpoint_payload(checkpoint_path)
+        run_id = str(checkpoint_payload.get("run_id", "") or "").strip()
+        if not run_id:
+            raise BenchmarkExecutionError(
+                f"SPoRC checkpoint is missing run_id: {checkpoint_path}"
+            )
+        resume_count = int(checkpoint_payload.get("resume_count", 0)) + 1
+        recovered_stall_count = int(
+            checkpoint_payload.get("recovered_stall_count", 0)
+        )
+    else:
+        run_id = _make_run_id()
     run_root = Path(args.output_root).resolve() / run_id
     run_root.mkdir(parents=True, exist_ok=True)
 
     base_cfg = _load_base_config(Path(args.config).resolve())
-    _configure_benchmark_logging(base_cfg)
+    _configure_benchmark_logging(
+        base_cfg,
+        log_file=str((run_root / "agent_interactions.log").resolve()),
+        print_to_terminal=not bool(getattr(args, "emit_progress_events", False)),
+    )
     transcript_only = bool(getattr(args, "transcript_only", False))
     duration_preset = str(getattr(args, "duration_preset", "") or "").strip()
     override_target_seconds = _resolve_override_target_seconds(args)
@@ -1146,11 +1735,49 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         sample_seed=sample_seed,
     )
     total_samples = len(samples_to_run)
+    sample_lookup = {sample.sample_id: sample for sample in samples_to_run}
+    sample_order = [sample.sample_id for sample in samples_to_run]
+    sample_index_by_id = {
+        sample.sample_id: index for index, sample in enumerate(samples_to_run, start=1)
+    }
+    if resumed_from_checkpoint:
+        checkpoint_order = checkpoint_payload.get("sample_order", [])
+        if checkpoint_order and list(checkpoint_order) != sample_order:
+            raise BenchmarkExecutionError(
+                "Resume checkpoint sample order no longer matches the selected benchmark samples."
+            )
+        checkpoint_manifest = str(
+            checkpoint_payload.get("dataset_manifest_path", "") or ""
+        ).strip()
+        if (
+            checkpoint_manifest
+            and Path(checkpoint_manifest).resolve()
+            != dataset_manifest.manifest_path.resolve()
+        ):
+            raise BenchmarkExecutionError(
+                "Resume checkpoint dataset manifest does not match the requested dataset manifest."
+            )
     sample_selection_label = (
         f"seeded_random({sample_seed})"
         if sample_seed is not None
         else "manifest_order"
     )
+    results_by_sample_id: dict[str, SampleBenchmarkResult] = {}
+    for raw_result in checkpoint_payload.get("completed_results", []):
+        if not isinstance(raw_result, dict):
+            continue
+        restored_result = _deserialize_sample_result(raw_result)
+        results_by_sample_id[restored_result.sample_id] = restored_result
+    unexpected_checkpoint_samples = [
+        sample_id
+        for sample_id in results_by_sample_id
+        if sample_id not in sample_lookup
+    ]
+    if unexpected_checkpoint_samples:
+        raise BenchmarkExecutionError(
+            "Resume checkpoint contains samples outside the active benchmark selection: "
+            f"{unexpected_checkpoint_samples}"
+        )
     active_target_seconds_by_sample_id: dict[str, int] = {}
     preloaded_transcripts: dict[str, Transcript] = {}
     preflight_results: dict[str, SampleBenchmarkResult] = {}
@@ -1173,6 +1800,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     for sample in samples_to_run:
         active_target_seconds = _resolve_sample_target_seconds(sample, args)
         active_target_seconds_by_sample_id[sample.sample_id] = active_target_seconds
+        if sample.sample_id in results_by_sample_id:
+            continue
         transcript, stats, reason = _evaluate_sample_preflight(
             sample=sample,
             target_seconds=active_target_seconds,
@@ -1209,8 +1838,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 ),
             )
 
-    if not preloaded_transcripts:
-        provisional_report = _build_execution_report(
+    for sample_id, preflight_result in preflight_results.items():
+        results_by_sample_id.setdefault(sample_id, preflight_result)
+
+    if len(results_by_sample_id) >= total_samples:
+        final_report = _write_execution_report_snapshot(
+            run_root=run_root,
             run_id=run_id,
             dataset_manifest=dataset_manifest,
             summarizer_provider=str(args.summarizer_provider),
@@ -1219,26 +1852,43 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 args.judge_provider or args.critic_provider or args.summarizer_provider
             ),
             embedding_mode=str(args.embedding_mode),
-            results=[
-                preflight_results[sample.sample_id] for sample in samples_to_run
-            ],
+            sample_order=sample_order,
+            results_by_sample_id=results_by_sample_id,
             duration_tolerance_ratio=duration_tolerance_ratio,
             transcript_only=transcript_only,
             duration_preset=duration_preset,
             override_target_seconds=override_target_seconds,
             sample_seed=sample_seed,
+            checkpoint_path=checkpoint_path,
+            resumed_from_checkpoint=resumed_from_checkpoint,
+            resume_count=resume_count,
         )
-        report_path, notes_path, results_path = write_execution_artifacts(
-            run_root=run_root,
-            report=provisional_report,
-        )
-        final_report = replace(
-            provisional_report,
-            report_path=str(report_path),
-            notes_path=str(notes_path),
-            results_path=str(results_path),
-        )
-        write_execution_artifacts(run_root=run_root, report=final_report)
+        if checkpoint_path is not None:
+            _write_checkpoint_payload(
+                checkpoint_path,
+                {
+                    "checkpoint_version": _CHECKPOINT_VERSION,
+                    "run_id": run_id,
+                    "dataset_manifest_path": str(dataset_manifest.manifest_path),
+                    "dataset_variant": dataset_manifest.dataset_variant,
+                    "duration_preset": duration_preset,
+                    "override_target_seconds": override_target_seconds,
+                    "transcript_only": transcript_only,
+                    "sample_seed": sample_seed,
+                    "sample_order": sample_order,
+                    "completed_results": [
+                        asdict(result)
+                        for result in _ordered_results(
+                            sample_order,
+                            results_by_sample_id,
+                        )
+                    ],
+                    "active_sample": None,
+                    "resume_count": resume_count,
+                    "recovered_stall_count": recovered_stall_count,
+                    "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                },
+            )
         return final_report
 
     profiles = load_provider_profiles(Path(args.provider_profiles).resolve())
@@ -1284,174 +1934,208 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             raise BenchmarkExecutionError(
                 "SPoRC benchmark requires audio.voice_clone.enabled=true unless --transcript-only is used."
             )
-    llm_summarizer: LLMProvider = hydra.utils.instantiate(
-        OmegaConf.create(
-            _prepare_provider_config(
-                summarizer_profile,
-                role="summarizer",
-                transcript_only=transcript_only,
-            )
-        )
+    summarizer_provider_config = _prepare_provider_config(
+        summarizer_profile,
+        role="summarizer",
+        transcript_only=transcript_only,
     )
-    llm_critic: LLMProvider = hydra.utils.instantiate(
-        OmegaConf.create(
-            _prepare_provider_config(
-                critic_profile,
-                role="critic",
-                transcript_only=transcript_only,
-            )
-        )
+    critic_provider_config = _prepare_provider_config(
+        critic_profile,
+        role="critic",
+        transcript_only=transcript_only,
     )
-    llm_judge: LLMProvider = hydra.utils.instantiate(
-        OmegaConf.create(
-            _prepare_provider_config(
-                judge_profile,
-                role="judge",
-                transcript_only=transcript_only,
-            )
-        )
+    judge_provider_config = _prepare_provider_config(
+        judge_profile,
+        role="judge",
+        transcript_only=transcript_only,
     )
-    if not bool(args.disable_stream_output):
-        _attach_stream_callback(llm_summarizer)
-        _attach_stream_callback(llm_critic)
-        _attach_stream_callback(llm_judge)
-    if logging_enabled:
-        llm_summarizer = LoggingLLMProvider(inner_provider=llm_summarizer)
-        llm_critic = LoggingLLMProvider(inner_provider=llm_critic)
-        llm_judge = LoggingLLMProvider(inner_provider=llm_judge)
+    max_iterations = _normalize_max_iterations(args.max_iterations)
 
-    embedding: EmbeddingProvider = hydra.utils.instantiate(
-        OmegaConf.create(embedding_profile.embedding_config)
-    )
-    retrieval_enabled = embedding_profile.embedding_id != "disabled"
-    transcript_index = TranscriptIndex(embedding_provider=embedding)
-    judge = SPoRCJudge(
-        judge_llm=llm_judge,
-        config=SPoRCJudgeConfig(source_char_limit=int(args.judge_source_char_limit)),
-    )
+    progress_tracker: _BenchmarkProgressTracker | None = None
+    runtime: _ManagedBenchmarkRuntime | None = None
+    force_dynamic_ports = False
 
-    event_capture = EventCapture(
-        ["tool_invocation", "retrieval_stats", "orchestrator_iteration_completed"]
-    )
-    event_capture.start()
-    shared_agent_client = AgentClient(event_bus=event_bus)
-    servers: list[ManagedServer] = []
-    try:
-        retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(args)
-
-        if retrieval_enabled:
-            retrieval_app = _build_a2a_app(
-                name="InfoRetrieval",
-                description="Indexes transcript segments and retrieves relevant ones.",
-                port=retrieval_port,
-                executor=InfoRetrievalExecutor(transcript_index),
-            )
-            servers.append(
-                _run_server_in_thread("sporc-retrieval", retrieval_app, retrieval_port)
-            )
-
-        summarizer_app = _build_a2a_app(
-            name="Summarizer",
-            description="Produces abstractive summaries.",
-            port=summarizer_port,
-            executor=SummarizerExecutor(
-                llm=llm_summarizer,
-                retrieval_port=retrieval_port,
-                max_tool_turns=int(base_cfg.agents.summarizer.max_tool_turns),
-                calibration=calibration,
-                is_embedding_enabled=retrieval_enabled,
-                voice_clone_orchestrator=voice_clone_orchestrator,
-                live_draft_audio_enabled=not transcript_only,
-                loop_guardrails=_coerce_mapping(
-                    OmegaConf.to_container(
-                        base_cfg.agents.summarizer.get("loop_guardrails", {}),
-                        resolve=True,
-                    )
-                ),
-                agent_client=shared_agent_client,
-                event_bus=event_bus,
-            ),
-        )
-        servers.append(
-            _run_server_in_thread("sporc-summarizer", summarizer_app, summarizer_port)
-        )
-
-        critic_app = _build_a2a_app(
-            name="Critic",
-            description="Evaluates summaries.",
-            port=critic_port,
-            executor=CriticExecutor(
-                llm=llm_critic,
-                calibration=calibration,
-                max_tool_turns=int(base_cfg.agents.critic.max_tool_turns),
-                retrieval_port=retrieval_port,
-                is_embedding_enabled=retrieval_enabled,
-                reasoning_loop_guard=_coerce_mapping(
-                    OmegaConf.to_container(
-                        base_cfg.agents.critic.get("reasoning_loop_guard", {}),
-                        resolve=True,
-                    )
-                ),
-                agent_client=shared_agent_client,
-                event_bus=event_bus,
-            ),
-        )
-        servers.append(_run_server_in_thread("sporc-critic", critic_app, critic_port))
-
-        checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
-        targets = [("Summarizer", summarizer_port), ("Critic", critic_port)]
-        if retrieval_enabled:
-            targets.insert(0, ("InfoRetrieval", retrieval_port))
-        for name, port in targets:
-            if not checker.check(name, port):
-                raise BenchmarkExecutionError(f"Health check failed for {name}:{port}")
-
-        orchestrator = Orchestrator(
-            retrieval_port=retrieval_port,
-            summarizer_port=summarizer_port,
-            critic_port=critic_port,
-            timeouts=_resolve_orchestrator_timeouts(args),
-            agent_client=shared_agent_client,
-            event_bus=event_bus,
-        )
-
-        max_iterations = _normalize_max_iterations(args.max_iterations)
-
-        event_bus.publish(
-            "status_message",
-            (
-                f"Starting SPoRC summarizer-critic benchmark run {run_id} with "
-                f"{total_samples} sample(s); summarizer={summarizer_profile.provider_id}; "
-                f"critic={critic_profile.provider_id}; judge={judge_profile.provider_id}; "
-                f"judge_dimensions={', '.join(DIMENSION_NAMES)}; "
-                f"transcript_only={transcript_only}; "
-                f"target_override={override_target_seconds if override_target_seconds is not None else 'dataset_default'}; "
-                f"sample_selection={sample_selection_label}."
-            ),
-        )
-        _emit_progress_event(
-            args,
-            event="run_start",
-            duration_preset=str(duration_preset or "dataset_default"),
-            payload={
+    def _persist_checkpoint() -> None:
+        if checkpoint_path is None:
+            return
+        _write_checkpoint_payload(
+            checkpoint_path,
+            {
+                "checkpoint_version": _CHECKPOINT_VERSION,
                 "run_id": run_id,
-                "sample_count": total_samples,
+                "dataset_manifest_path": str(dataset_manifest.manifest_path),
+                "dataset_variant": dataset_manifest.dataset_variant,
+                "duration_preset": duration_preset,
+                "override_target_seconds": override_target_seconds,
                 "transcript_only": transcript_only,
                 "sample_seed": sample_seed,
+                "sample_order": sample_order,
+                "completed_results": [
+                    asdict(result)
+                    for result in _ordered_results(sample_order, results_by_sample_id)
+                ],
+                "active_sample": (
+                    progress_tracker.active_sample_snapshot()
+                    if progress_tracker is not None
+                    else None
+                ),
+                "resume_count": resume_count,
+                "recovered_stall_count": recovered_stall_count,
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             },
         )
 
-        results: list[SampleBenchmarkResult] = []
-        benchmark_started = time.perf_counter()
-        for sample_index, sample in enumerate(samples_to_run, start=1):
+    final_report = _write_execution_report_snapshot(
+        run_root=run_root,
+        run_id=run_id,
+        dataset_manifest=dataset_manifest,
+        summarizer_provider=summarizer_profile.provider_id,
+        critic_provider=critic_profile.provider_id,
+        judge_provider=judge_profile.provider_id,
+        embedding_mode=embedding_profile.embedding_id,
+        sample_order=sample_order,
+        results_by_sample_id=results_by_sample_id,
+        duration_tolerance_ratio=duration_tolerance_ratio,
+        transcript_only=transcript_only,
+        duration_preset=duration_preset,
+        override_target_seconds=override_target_seconds,
+        sample_seed=sample_seed,
+        checkpoint_path=checkpoint_path,
+        resumed_from_checkpoint=resumed_from_checkpoint,
+        resume_count=resume_count,
+    )
+    progress_tracker = _BenchmarkProgressTracker(
+        args=args,
+        duration_preset=str(duration_preset or "dataset_default"),
+        persist_callback=_persist_checkpoint,
+    )
+    progress_tracker.subscribe()
+    progress_tracker.start()
+    _persist_checkpoint()
+
+    if resumed_from_checkpoint:
+        active_sample_payload = checkpoint_payload.get("active_sample")
+        if isinstance(active_sample_payload, dict):
+            active_sample_id = str(active_sample_payload.get("sample_id", "") or "").strip()
+            if active_sample_id and active_sample_id not in results_by_sample_id:
+                resumed_sample = sample_lookup.get(active_sample_id)
+                active_target_seconds = active_target_seconds_by_sample_id.get(
+                    active_sample_id
+                )
+                if resumed_sample is not None and active_target_seconds is not None:
+                    resume_failure_reason = str(
+                        getattr(args, "resume_failure_reason", "")
+                        or _RESUME_FAILURE_DEFAULT_STATUS
+                    ).strip()
+                    if not resume_failure_reason:
+                        resume_failure_reason = _RESUME_FAILURE_DEFAULT_STATUS
+                    resumed_failure = _build_resume_failure_result(
+                        sample=resumed_sample,
+                        target_seconds=active_target_seconds,
+                        reason=resume_failure_reason,
+                        active_sample=active_sample_payload,
+                    )
+                    results_by_sample_id[active_sample_id] = resumed_failure
+                    if resume_failure_reason == _SWEEP_STALL_FINAL_STATUS:
+                        recovered_stall_count += 1
+                    _persist_checkpoint()
+                    final_report = _write_execution_report_snapshot(
+                        run_root=run_root,
+                        run_id=run_id,
+                        dataset_manifest=dataset_manifest,
+                        summarizer_provider=summarizer_profile.provider_id,
+                        critic_provider=critic_profile.provider_id,
+                        judge_provider=judge_profile.provider_id,
+                        embedding_mode=embedding_profile.embedding_id,
+                        sample_order=sample_order,
+                        results_by_sample_id=results_by_sample_id,
+                        duration_tolerance_ratio=duration_tolerance_ratio,
+                        transcript_only=transcript_only,
+                        duration_preset=duration_preset,
+                        override_target_seconds=override_target_seconds,
+                        sample_seed=sample_seed,
+                        checkpoint_path=checkpoint_path,
+                        resumed_from_checkpoint=resumed_from_checkpoint,
+                        resume_count=resume_count,
+                    )
+                    _emit_progress_event(
+                        args,
+                        event="sample_done",
+                        duration_preset=str(duration_preset or "dataset_default"),
+                        payload={
+                            "sample_index": sample_index_by_id[active_sample_id],
+                            "sample_count": total_samples,
+                            "sample_id": active_sample_id,
+                            "final_status": resumed_failure.final_status,
+                            "composite": round(resumed_failure.metrics.composite, 4),
+                            "duration_seconds": round(
+                                resumed_failure.duration_seconds,
+                                3,
+                            ),
+                        },
+                    )
+
+    event_bus.publish(
+        "status_message",
+        (
+            f"Starting SPoRC summarizer-critic benchmark run {run_id} with "
+            f"{total_samples} sample(s); summarizer={summarizer_profile.provider_id}; "
+            f"critic={critic_profile.provider_id}; judge={judge_profile.provider_id}; "
+            f"judge_dimensions={', '.join(DIMENSION_NAMES)}; "
+            f"transcript_only={transcript_only}; "
+            f"target_override={override_target_seconds if override_target_seconds is not None else 'dataset_default'}; "
+            f"sample_selection={sample_selection_label}; resume_count={resume_count}."
+        ),
+    )
+    _emit_progress_event(
+        args,
+        event="run_start",
+        duration_preset=str(duration_preset or "dataset_default"),
+        payload={
+            "run_id": run_id,
+            "sample_count": total_samples,
+            "transcript_only": transcript_only,
+            "sample_seed": sample_seed,
+            "resume_count": resume_count,
+            "checkpoint_path": str(checkpoint_path) if checkpoint_path is not None else "",
+        },
+    )
+
+    if len(results_by_sample_id) >= total_samples:
+        _emit_progress_event(
+            args,
+            event="run_complete",
+            duration_preset=str(duration_preset or "dataset_default"),
+            payload={
+                "run_id": run_id,
+                "status": final_report.status,
+                "sample_count": total_samples,
+                "report_path": final_report.report_path,
+                "results_path": final_report.results_path,
+            },
+        )
+        progress_tracker.stop()
+        progress_tracker.unsubscribe()
+        return final_report
+
+    benchmark_started = time.perf_counter()
+    try:
+        for sample in samples_to_run:
+            if sample.sample_id in results_by_sample_id:
+                continue
             active_target_seconds = active_target_seconds_by_sample_id[sample.sample_id]
+            sample_index = sample_index_by_id[sample.sample_id]
+            completed_before_sample = len(results_by_sample_id)
             remaining_samples, average_text, eta_text = _progress_snapshot(
-                completed_samples=sample_index - 1,
+                completed_samples=completed_before_sample,
                 total_samples=total_samples,
                 elapsed_seconds=time.perf_counter() - benchmark_started,
             )
-            iteration_label = (
-                "unbounded" if max_iterations is None else str(max_iterations)
+            progress_tracker.activate_sample(
+                sample_index=sample_index,
+                sample_count=total_samples,
+                sample_id=sample.sample_id,
+                target_seconds=active_target_seconds,
             )
             _emit_progress_event(
                 args,
@@ -1462,7 +2146,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     "sample_count": total_samples,
                     "sample_id": sample.sample_id,
                     "target_seconds": active_target_seconds,
-                    "max_iterations": iteration_label,
+                    "max_iterations": (
+                        "unbounded" if max_iterations is None else str(max_iterations)
+                    ),
                 },
             )
             event_bus.publish(
@@ -1470,24 +2156,39 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 (
                     f"Sample {sample_index}/{len(samples_to_run)} start: "
                     f"{sample.sample_id} target={active_target_seconds}s "
-                    f"max_iterations={iteration_label} remaining={remaining_samples} "
-                    f"rolling_avg={average_text} eta={eta_text}"
+                    f"max_iterations={'unbounded' if max_iterations is None else str(max_iterations)} "
+                    f"remaining={remaining_samples} rolling_avg={average_text} eta={eta_text}"
                 ),
             )
             preflight_result = preflight_results.get(sample.sample_id)
             if preflight_result is not None:
                 result = preflight_result
             else:
+                if runtime is None:
+                    runtime = await _start_managed_runtime(
+                        args=args,
+                        base_cfg=base_cfg,
+                        summarizer_provider_config=summarizer_provider_config,
+                        critic_provider_config=critic_provider_config,
+                        judge_provider_config=judge_provider_config,
+                        embedding_profile=embedding_profile,
+                        transcript_only=transcript_only,
+                        calibration=calibration,
+                        voice_clone_orchestrator=voice_clone_orchestrator,
+                        logging_enabled=logging_enabled,
+                        force_dynamic_ports=force_dynamic_ports,
+                    )
+                    force_dynamic_ports = False
                 result = await _execute_sample(
                     sample=sample,
                     target_seconds=active_target_seconds,
                     preloaded_transcript=preloaded_transcripts.get(sample.sample_id),
-                    orchestrator=orchestrator,
-                    event_capture=event_capture,
-                    retrieval_enabled=retrieval_enabled,
+                    orchestrator=runtime.orchestrator,
+                    event_capture=runtime.event_capture,
+                    retrieval_enabled=runtime.retrieval_enabled,
                     duration_tolerance_ratio=duration_tolerance_ratio,
                     max_iterations=max_iterations,
-                    judge=judge,
+                    judge=runtime.judge,
                     calibration=calibration,
                     run_root=run_root,
                     audio_cfg=benchmark_audio_cfg,
@@ -1495,9 +2196,31 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     voice_clone_orchestrator=voice_clone_orchestrator,
                     force_download_audio=bool(args.force_download_audio),
                 )
-            results.append(result)
+            results_by_sample_id[sample.sample_id] = result
+            progress_tracker.clear_active_sample()
+            _persist_checkpoint()
+            final_report = _write_execution_report_snapshot(
+                run_root=run_root,
+                run_id=run_id,
+                dataset_manifest=dataset_manifest,
+                summarizer_provider=summarizer_profile.provider_id,
+                critic_provider=critic_profile.provider_id,
+                judge_provider=judge_profile.provider_id,
+                embedding_mode=embedding_profile.embedding_id,
+                sample_order=sample_order,
+                results_by_sample_id=results_by_sample_id,
+                duration_tolerance_ratio=duration_tolerance_ratio,
+                transcript_only=transcript_only,
+                duration_preset=duration_preset,
+                override_target_seconds=override_target_seconds,
+                sample_seed=sample_seed,
+                checkpoint_path=checkpoint_path,
+                resumed_from_checkpoint=resumed_from_checkpoint,
+                resume_count=resume_count,
+            )
+            completed_after_sample = len(results_by_sample_id)
             remaining_samples, average_text, eta_text = _progress_snapshot(
-                completed_samples=sample_index,
+                completed_samples=completed_after_sample,
                 total_samples=total_samples,
                 elapsed_seconds=time.perf_counter() - benchmark_started,
             )
@@ -1523,32 +2246,11 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     f"composite={result.metrics.composite:.3f} elapsed={result.duration_seconds:.1f}s"
                 ),
             )
+            if result.status == "failed" and preflight_result is None:
+                await _stop_managed_runtime(runtime)
+                runtime = None
+                force_dynamic_ports = True
 
-        provisional_report = _build_execution_report(
-            run_id=run_id,
-            dataset_manifest=dataset_manifest,
-            summarizer_provider=summarizer_profile.provider_id,
-            critic_provider=critic_profile.provider_id,
-            judge_provider=judge_profile.provider_id,
-            embedding_mode=embedding_profile.embedding_id,
-            results=results,
-            duration_tolerance_ratio=duration_tolerance_ratio,
-            transcript_only=transcript_only,
-            duration_preset=duration_preset,
-            override_target_seconds=override_target_seconds,
-            sample_seed=sample_seed,
-        )
-        report_path, notes_path, results_path = write_execution_artifacts(
-            run_root=run_root,
-            report=provisional_report,
-        )
-        final_report = replace(
-            provisional_report,
-            report_path=str(report_path),
-            notes_path=str(notes_path),
-            results_path=str(results_path),
-        )
-        write_execution_artifacts(run_root=run_root, report=final_report)
         _emit_progress_event(
             args,
             event="run_complete",
@@ -1557,16 +2259,16 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 "run_id": run_id,
                 "status": final_report.status,
                 "sample_count": total_samples,
-                "report_path": str(report_path),
-                "results_path": str(results_path),
+                "report_path": final_report.report_path,
+                "results_path": final_report.results_path,
             },
         )
         return final_report
     finally:
-        event_capture.stop()
-        for server in reversed(servers):
-            _stop_server(server)
-        await shared_agent_client.close()
+        if progress_tracker is not None:
+            progress_tracker.stop()
+            progress_tracker.unsubscribe()
+        await _stop_managed_runtime(runtime)
 
 
 def execute_benchmark(args: argparse.Namespace) -> BenchmarkExecutionReport:
@@ -1686,4 +2388,30 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         "--emit-progress-events",
         action="store_true",
         help="Emit machine-readable sample progress events on stdout.",
+    )
+    parser.add_argument(
+        "--emit-progress-heartbeats",
+        action="store_true",
+        help="Emit periodic machine-readable heartbeat events for the active sample.",
+    )
+    parser.add_argument(
+        "--progress-heartbeat-seconds",
+        type=float,
+        default=30.0,
+        help="Heartbeat interval for --emit-progress-heartbeats.",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        default="",
+        help="Optional execute checkpoint path used for sweep recovery.",
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        action="store_true",
+        help="Resume a prior execute run from --checkpoint-path.",
+    )
+    parser.add_argument(
+        "--resume-failure-reason",
+        default=_RESUME_FAILURE_DEFAULT_STATUS,
+        help="Final-status label used when resuming an orphaned active sample.",
     )
