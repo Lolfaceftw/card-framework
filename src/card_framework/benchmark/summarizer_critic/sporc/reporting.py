@@ -26,6 +26,8 @@ def render_sample_results_table(results: list[SampleBenchmarkResult]) -> str:
     headers = [
         "sample",
         "status",
+        "counted",
+        "replacement",
         "target_s",
         "cand_s",
         "factual",
@@ -37,6 +39,8 @@ def render_sample_results_table(results: list[SampleBenchmarkResult]) -> str:
         [
             result.sample_id,
             result.status,
+            "yes" if result.counts_toward_target else "no",
+            result.replacement_reason or "-",
             str(result.target_seconds),
             f"{result.candidate_seconds:.1f}",
             f"{result.metrics.factualness:.3f}",
@@ -75,6 +79,8 @@ def render_duration_sweep_table(
         "preset",
         "status",
         "examples",
+        "attempted",
+        "replaced",
         "executed",
         "skipped",
         "restarts",
@@ -94,6 +100,8 @@ def render_duration_sweep_table(
             summary.duration_preset,
             summary.status,
             str(summary.sample_count),
+            str(summary.attempted_candidate_count),
+            str(summary.replacement_count),
             str(summary.executed_count),
             str(summary.skipped_count),
             str(summary.restart_count),
@@ -124,7 +132,9 @@ def render_duration_sweep_table(
 def _render_aggregate_metrics_table(report: BenchmarkExecutionReport) -> str:
     """Render executed-sample means plus 95% confidence intervals."""
     executed_samples = [
-        sample for sample in report.samples if sample.status != "skipped"
+        sample
+        for sample in report.samples
+        if sample.counts_toward_target and sample.status != "skipped"
     ]
     return render_markdown_table(
         ["metric", "mean", "95% CI"],
@@ -292,7 +302,10 @@ def write_execution_artifacts(
         f"- Resumed from checkpoint: `{report.resumed_from_checkpoint}`",
         f"- Resume count: `{report.resume_count}`",
         f"- Duration tolerance ratio: `{report.duration_tolerance_ratio:.3f}`",
-        f"- Sample count: `{report.summary.sample_count}`",
+        f"- Target retained sample count: `{report.summary.target_sample_count}`",
+        f"- Retained sample count: `{report.summary.sample_count}`",
+        f"- Attempted candidate count: `{report.summary.attempted_candidate_count}`",
+        f"- Replacement count: `{report.summary.replacement_count}`",
         f"- Executed count: `{report.summary.executed_count}`",
         f"- Skipped count: `{report.summary.skipped_count}`",
         f"- Success count: `{report.summary.success_count}`",
@@ -318,18 +331,40 @@ def write_execution_artifacts(
     results_lines = [
         "# SPoRC Summarizer-Critic Benchmark Results",
         "",
-        "## Sample Results",
+        "## Retained Sample Results",
         "",
-        render_sample_results_table(report.samples),
+        render_sample_results_table(
+            [sample for sample in report.samples if sample.counts_toward_target]
+        ),
         "",
         "## Aggregate Metrics",
         "",
+        f"- Target retained samples: `{report.summary.target_sample_count}`",
+        f"- Retained samples: `{report.summary.sample_count}`",
+        f"- Attempted candidates: `{report.summary.attempted_candidate_count}`",
+        f"- Replacement-excluded candidates: `{report.summary.replacement_count}`",
         f"- Executed samples: `{report.summary.executed_count}`",
         f"- Skipped samples: `{report.summary.skipped_count}`",
         "",
         _render_aggregate_metrics_table(report),
     ]
-    skipped_samples = [sample for sample in report.samples if sample.status == "skipped"]
+    excluded_samples = [
+        sample for sample in report.samples if not sample.counts_toward_target
+    ]
+    if excluded_samples:
+        results_lines.extend(
+            [
+                "",
+                "## Replacement-Excluded Candidates",
+                "",
+                render_sample_results_table(excluded_samples),
+            ]
+        )
+    skipped_samples = [
+        sample
+        for sample in report.samples
+        if sample.status == "skipped" and not sample.counts_toward_target
+    ]
     if skipped_samples:
         results_lines.extend(["", "## Preflight Skips", ""])
         for sample in skipped_samples:

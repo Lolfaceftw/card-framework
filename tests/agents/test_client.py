@@ -298,3 +298,27 @@ def test_send_task_rejects_invalid_retry_count() -> None:
                 max_retries=0,
             )
         )
+
+
+def test_agent_client_defaults_preserve_shared_transport_behavior() -> None:
+    """Keep the repo-wide AgentClient defaults stable outside SPoRC."""
+    client = AgentClient()
+
+    timeout = client._build_http_timeout(12.0)
+
+    assert client._trust_env is True
+    assert client._pool_timeout_seconds is None
+    assert timeout.connect == 5.0
+    assert timeout.pool == 12.0
+
+
+def test_agent_client_allows_explicit_sporc_pool_timeout_override() -> None:
+    """Let SPoRC opt into a tighter connection-pool timeout explicitly."""
+    client = AgentClient(pool_timeout_seconds=5.0, trust_env=False)
+
+    timeout = client._build_http_timeout(12.0)
+
+    assert client._trust_env is False
+    assert client._pool_timeout_seconds == 5.0
+    assert timeout.connect == 5.0
+    assert timeout.pool == 5.0

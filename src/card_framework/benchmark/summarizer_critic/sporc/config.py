@@ -138,13 +138,19 @@ class SampleBenchmarkResult:
     error_message: str | None = None
     preflight_reason: str | None = None
     preflight_stats: dict[str, int | float | str] = field(default_factory=dict)
+    counts_toward_target: bool = True
+    replacement_reason: str | None = None
+    infra_retry_attempts: int = 0
 
 
 @dataclass(slots=True, frozen=True)
 class BenchmarkSummary:
     """Aggregate benchmark metrics across selected and executed samples."""
 
+    target_sample_count: int
     sample_count: int
+    attempted_candidate_count: int
+    replacement_count: int
     executed_count: int
     skipped_count: int
     success_count: int
@@ -217,6 +223,8 @@ class DurationSweepPresetSummary:
     duration_preset: str
     target_seconds: int
     status: str
+    attempted_candidate_count: int
+    replacement_count: int
     sample_count: int
     executed_count: int
     skipped_count: int

@@ -21,6 +21,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 import hydra
+import httpx
 from omegaconf import OmegaConf
 import requests
 
@@ -139,12 +140,35 @@ _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
 _PROGRESS_EVENT_KEY = "sporc_progress_event"
 _STAGE_TIMEOUT_FINAL_STATUS = "stage_timeout"
+_STARTUP_UNAVAILABLE_FINAL_STATUS = "startup_unavailable"
+_CONNECTION_UNAVAILABLE_FINAL_STATUS = "connection_unavailable"
 _RESUME_FAILURE_DEFAULT_STATUS = "resume_interrupted_sample"
 _SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
 _CHECKPOINT_VERSION = 1
 _TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS = 250
 _TRANSCRIPT_ONLY_ALNUM_PATTERN = re.compile(r"[A-Za-z0-9]")
 _TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
+_REPLACEMENT_ELIGIBLE_FINAL_STATUSES = frozenset(
+    {
+        "preflight_failed",
+        _STAGE_TIMEOUT_FINAL_STATUS,
+        _STARTUP_UNAVAILABLE_FINAL_STATUS,
+        _CONNECTION_UNAVAILABLE_FINAL_STATUS,
+        _RESUME_FAILURE_DEFAULT_STATUS,
+        _SWEEP_STALL_FINAL_STATUS,
+    }
+)
+_RETRYABLE_INFRA_FINAL_STATUSES = frozenset(
+    {
+        _STARTUP_UNAVAILABLE_FINAL_STATUS,
+        _CONNECTION_UNAVAILABLE_FINAL_STATUS,
+    }
+)
+_SAMPLE_INFRA_RETRY_LIMIT = 2
+_AGENT_CLIENT_MAX_KEEPALIVE_CONNECTIONS = 20
+_AGENT_CLIENT_MAX_CONNECTIONS = 100
+_AGENT_CLIENT_KEEPALIVE_EXPIRY_SECONDS = 30.0
+_AGENT_CLIENT_POOL_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(slots=True)
@@ -902,7 +926,7 @@ def _deserialize_sample_result(raw_payload: dict[str, Any]) -> SampleBenchmarkRe
     raw_metrics = sample_payload.pop("metrics", None) or {}
     if not isinstance(raw_metrics, dict):
         raw_metrics = {}
-    return SampleBenchmarkResult(
+    result = SampleBenchmarkResult(
         metrics=SampleMetricBundle(
             factualness=float(raw_metrics.get("factualness", 0.0) or 0.0),
             naturalness=float(raw_metrics.get("naturalness", 0.0) or 0.0),
@@ -913,6 +937,9 @@ def _deserialize_sample_result(raw_payload: dict[str, Any]) -> SampleBenchmarkRe
         ),
         **sample_payload,
     )
+    if "counts_toward_target" in raw_payload:
+        return result
+    return _finalize_result_target_membership(result)
 
 
 def _load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
@@ -948,11 +975,83 @@ def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
     """Map one sample exception to a stable terminal status and message."""
     message = str(exc).strip() or exc.__class__.__name__
     lowered = message.lower()
+    if (
+        "health check failed" in lowered
+        or "server not responding" in lowered
+        or "state=failed" in lowered
+    ):
+        return _STARTUP_UNAVAILABLE_FINAL_STATUS, message
+    if (
+        "pooltimeout" in lowered
+        or "connecterror" in lowered
+        or "connecttimeout" in lowered
+        or "connection refused" in lowered
+        or "all connection attempts failed" in lowered
+        or "nodename nor servname provided" in lowered
+    ):
+        return _CONNECTION_UNAVAILABLE_FINAL_STATUS, message
     if "timeout=" in lowered or "readtimeout" in lowered or "writetimeout" in lowered:
         return _STAGE_TIMEOUT_FINAL_STATUS, message
     if "timed out" in lowered or "timeout" in lowered:
         return _STAGE_TIMEOUT_FINAL_STATUS, message
     return "execution_error", message
+
+
+def _build_failed_result(
+    *,
+    sample: PreparedBenchmarkSample,
+    target_seconds: int,
+    final_status: str,
+    error_message: str,
+    duration_seconds: float,
+    retrieval_events: int = 0,
+    tool_invocations: int = 0,
+) -> SampleBenchmarkResult:
+    """Build one failed result outside the normal success path."""
+    counts_toward_target = _counts_toward_target_for_status(final_status)
+    return SampleBenchmarkResult(
+        sample_id=sample.sample_id,
+        dataset=sample.dataset,
+        episode_key=sample.episode_key,
+        status="failed",
+        target_seconds=target_seconds,
+        candidate_seconds=0.0,
+        converged=False,
+        iterations_run=0,
+        final_status=final_status,
+        duration_seconds=duration_seconds,
+        retrieval_events=retrieval_events,
+        tool_invocations=tool_invocations,
+        metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
+        error_message=error_message,
+        counts_toward_target=counts_toward_target,
+        replacement_reason=(
+            final_status if not counts_toward_target else None
+        ),
+    )
+
+
+def _counts_toward_target_for_status(final_status: str) -> bool:
+    """Return whether one terminal status should consume a retained sample slot."""
+    return final_status not in _REPLACEMENT_ELIGIBLE_FINAL_STATUSES
+
+
+def _count_target_results(
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+) -> int:
+    """Count results that consume the retained benchmark target."""
+    return sum(
+        1
+        for result in results_by_sample_id.values()
+        if bool(result.counts_toward_target)
+    )
+
+
+def _count_attempted_candidates(
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+) -> int:
+    """Count all candidates that reached a terminal recorded result."""
+    return len(results_by_sample_id)
 
 
 def _build_resume_failure_result(
@@ -987,6 +1086,8 @@ def _build_resume_failure_result(
             "Marked failed while resuming from checkpoint after the previous child "
             f"stopped during stage={stage}{iteration_text}."
         ),
+        counts_toward_target=False,
+        replacement_reason=reason,
     )
 
 
@@ -1000,6 +1101,55 @@ def _ordered_results(
         for sample_id in sample_order
         if sample_id in results_by_sample_id
     ]
+
+
+def _retained_results(
+    results: list[SampleBenchmarkResult],
+) -> list[SampleBenchmarkResult]:
+    """Return the sample results that count toward the retained cohort."""
+    return [result for result in results if result.counts_toward_target]
+
+
+def _replacement_excluded_results(
+    results: list[SampleBenchmarkResult],
+) -> list[SampleBenchmarkResult]:
+    """Return attempted candidates that were excluded and backfilled."""
+    return [result for result in results if not result.counts_toward_target]
+
+
+def _retained_result_count(
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+) -> int:
+    """Count results that consume one retained benchmark slot."""
+    return sum(
+        1 for result in results_by_sample_id.values() if result.counts_toward_target
+    )
+
+
+def _counts_toward_target(result: SampleBenchmarkResult) -> bool:
+    """Return whether one result belongs in the retained benchmark cohort."""
+    return _counts_toward_target_for_status(result.final_status)
+
+
+def _finalize_result_target_membership(
+    result: SampleBenchmarkResult,
+    *,
+    infra_retry_attempts: int = 0,
+) -> SampleBenchmarkResult:
+    """Apply retained-cohort membership and retry metadata to one result."""
+    counts_toward_target = _counts_toward_target(result)
+    replacement_reason = None if counts_toward_target else result.final_status
+    return replace(
+        result,
+        counts_toward_target=counts_toward_target,
+        replacement_reason=replacement_reason,
+        infra_retry_attempts=infra_retry_attempts,
+    )
+
+
+def _is_retryable_infra_result(result: SampleBenchmarkResult) -> bool:
+    """Return whether one failed result deserves same-sample infra retry."""
+    return result.final_status in _RETRYABLE_INFRA_FINAL_STATUSES
 
 
 def _prepare_provider_config(
@@ -1191,21 +1341,36 @@ def _build_preflight_failed_result(
         error_message=reason,
         preflight_reason=reason,
         preflight_stats=dict(stats),
+        counts_toward_target=False,
+        replacement_reason="preflight_failed",
     )
 
 
-def _summarize_results(results: list[SampleBenchmarkResult]) -> BenchmarkSummary:
-    """Summarize results with skipped samples excluded from execution aggregates."""
-    executed_results = [result for result in results if result.status != "skipped"]
+def _summarize_results(
+    results: list[SampleBenchmarkResult],
+    *,
+    target_sample_count: int,
+) -> BenchmarkSummary:
+    """Summarize retained results while keeping attempted candidates auditable."""
+    retained_results = _retained_results(results)
+    executed_results = [
+        result for result in retained_results if result.status != "skipped"
+    ]
     successful_results = [
         result for result in executed_results if result.status == "completed"
     ]
     failed_results = [
         result for result in executed_results if result.status == "failed"
     ]
-    skipped_results = [result for result in results if result.status == "skipped"]
+    skipped_results = [
+        result for result in retained_results if result.status == "skipped"
+    ]
+    replacement_results = _replacement_excluded_results(results)
     return BenchmarkSummary(
-        sample_count=len(results),
+        target_sample_count=target_sample_count,
+        sample_count=len(retained_results),
+        attempted_candidate_count=len(results),
+        replacement_count=len(replacement_results),
         executed_count=len(executed_results),
         skipped_count=len(skipped_results),
         success_count=len(successful_results),
@@ -1243,6 +1408,8 @@ def _report_status_from_summary(summary: BenchmarkSummary) -> str:
     """Resolve the top-level report status from summary counts."""
     if summary.executed_count == 0:
         return "failed"
+    if summary.sample_count < summary.target_sample_count:
+        return "partial"
     if summary.failure_count == 0 and summary.skipped_count == 0:
         return "completed"
     return "partial"
@@ -1314,6 +1481,8 @@ def _open_shared_sample_queue_connection(queue_root: Path) -> sqlite3.Connection
             owner_label TEXT,
             owner_pid INTEGER,
             final_status TEXT,
+            counts_toward_target INTEGER NOT NULL DEFAULT 0,
+            replacement_reason TEXT,
             updated_at_utc TEXT NOT NULL
         )
         """
@@ -1325,19 +1494,28 @@ def _initialize_shared_sample_queue(
     connection: sqlite3.Connection,
     *,
     sample_order: list[str],
+    target_sample_count: int,
 ) -> None:
     """Create or validate the shared preset queue against the selected sample order."""
     serialized_order = json.dumps(sample_order, ensure_ascii=True)
+    serialized_target = str(target_sample_count)
     now_iso = datetime.now(timezone.utc).isoformat()
     connection.execute("BEGIN IMMEDIATE")
     try:
         row = connection.execute(
             "SELECT value FROM queue_metadata WHERE key = 'sample_order_json'"
         ).fetchone()
+        target_row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'target_sample_count'"
+        ).fetchone()
         if row is None:
             connection.execute(
                 "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
                 ("sample_order_json", serialized_order),
+            )
+            connection.execute(
+                "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+                ("target_sample_count", serialized_target),
             )
             connection.executemany(
                 """
@@ -1348,17 +1526,19 @@ def _initialize_shared_sample_queue(
                     owner_label,
                     owner_pid,
                     final_status,
+                    counts_toward_target,
+                    replacement_reason,
                     updated_at_utc
-                ) VALUES (?, ?, 'pending', NULL, NULL, NULL, ?)
+                ) VALUES (?, ?, 'pending', NULL, NULL, NULL, 0, NULL, ?)
                 """,
                 [
                     (sample_id, index, now_iso)
                     for index, sample_id in enumerate(sample_order, start=1)
                 ],
             )
-        elif str(row[0]) != serialized_order:
+        elif str(row[0]) != serialized_order or target_row is None or str(target_row[0]) != serialized_target:
             raise BenchmarkExecutionError(
-                "Shared sample queue does not match the selected benchmark sample order."
+                "Shared sample queue does not match the selected benchmark sample order or retained target."
             )
         connection.execute("COMMIT")
     except Exception:
@@ -1377,6 +1557,23 @@ def _claim_next_shared_sample_id(
     now_iso = datetime.now(timezone.utc).isoformat()
     connection.execute("BEGIN IMMEDIATE")
     try:
+        counted_row = connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'completed' AND counts_toward_target = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'claimed' THEN 1 ELSE 0 END), 0)
+            FROM sample_queue
+            """
+        ).fetchone()
+        target_row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'target_sample_count'"
+        ).fetchone()
+        counted_results = int(counted_row[0]) if counted_row is not None else 0
+        claimed_results = int(counted_row[1]) if counted_row is not None else 0
+        target_sample_count = int(target_row[0]) if target_row is not None else 0
+        if counted_results + claimed_results >= target_sample_count:
+            connection.execute("COMMIT")
+            return None
         row = connection.execute(
             """
             SELECT sample_id
@@ -1411,21 +1608,33 @@ def _mark_shared_sample_completed(
     *,
     sample_id: str,
     final_status: str,
+    counts_toward_target: bool,
+    replacement_reason: str | None = None,
 ) -> None:
     """Mark one shared-queue sample terminal so other workers skip it."""
+    resolved_status = "completed" if counts_toward_target else "replaced"
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(
             """
             UPDATE sample_queue
-            SET status = 'completed',
+            SET status = ?,
                 owner_label = NULL,
                 owner_pid = NULL,
                 final_status = ?,
+                counts_toward_target = ?,
+                replacement_reason = ?,
                 updated_at_utc = ?
             WHERE sample_id = ?
             """,
-            (final_status, datetime.now(timezone.utc).isoformat(), sample_id),
+            (
+                resolved_status,
+                final_status,
+                1 if counts_toward_target else 0,
+                replacement_reason,
+                datetime.now(timezone.utc).isoformat(),
+                sample_id,
+            ),
         )
         connection.execute("COMMIT")
     except Exception:
@@ -1447,6 +1656,7 @@ def _build_execution_report(
     duration_preset: str,
     override_target_seconds: int | None,
     sample_seed: int | None,
+    target_sample_count: int,
     checkpoint_path: Path | None,
     resumed_from_checkpoint: bool,
     resume_count: int,
@@ -1454,7 +1664,7 @@ def _build_execution_report(
     sample_shard_count: int,
 ) -> BenchmarkExecutionReport:
     """Build the SPoRC execution report before artifact paths are known."""
-    summary = _summarize_results(results)
+    summary = _summarize_results(results, target_sample_count=target_sample_count)
     git_commit, git_branch = git_info(REPO_ROOT)
     status = _report_status_from_summary(summary)
     if summary.sample_count == 0 and sample_shard_count > 1:
@@ -1508,6 +1718,7 @@ def _write_execution_report_snapshot(
     duration_preset: str,
     override_target_seconds: int | None,
     sample_seed: int | None,
+    target_sample_count: int,
     checkpoint_path: Path | None,
     resumed_from_checkpoint: bool,
     resume_count: int,
@@ -1531,6 +1742,7 @@ def _write_execution_report_snapshot(
             duration_preset=duration_preset,
             override_target_seconds=override_target_seconds,
             sample_seed=sample_seed,
+            target_sample_count=target_sample_count,
             checkpoint_path=checkpoint_path,
             resumed_from_checkpoint=resumed_from_checkpoint,
             resume_count=resume_count,
@@ -1655,7 +1867,16 @@ async def _start_managed_runtime(
         ["tool_invocation", "retrieval_stats", "orchestrator_iteration_completed"]
     )
     event_capture.start()
-    shared_agent_client = AgentClient(event_bus=event_bus)
+    shared_agent_client = AgentClient(
+        event_bus=event_bus,
+        limits=httpx.Limits(
+            max_keepalive_connections=_AGENT_CLIENT_MAX_KEEPALIVE_CONNECTIONS,
+            max_connections=_AGENT_CLIENT_MAX_CONNECTIONS,
+            keepalive_expiry=_AGENT_CLIENT_KEEPALIVE_EXPIRY_SECONDS,
+        ),
+        pool_timeout_seconds=_AGENT_CLIENT_POOL_TIMEOUT_SECONDS,
+        trust_env=False,
+    )
     servers: list[ManagedServer] = []
     reserved_ports: tuple[int, int, int] | None = None
     try:
@@ -2497,6 +2718,7 @@ async def _execute_sample(
     transcript_only: bool,
     voice_clone_orchestrator: Any | None,
     force_download_audio: bool,
+    infra_retry_attempts: int = 0,
 ) -> SampleBenchmarkResult:
     sample_started = time.perf_counter()
     retrieval_before = event_capture.count("retrieval_stats")
@@ -2697,20 +2919,16 @@ async def _execute_sample(
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
-        result = SampleBenchmarkResult(
-            sample_id=sample.sample_id,
-            dataset=sample.dataset,
-            episode_key=sample.episode_key,
-            status="failed",
-            target_seconds=target_seconds,
-            candidate_seconds=0.0,
-            converged=False,
-            iterations_run=0,
-            final_status=final_status,
-            duration_seconds=duration_seconds,
-            retrieval_events=max(0, retrieval_after - retrieval_before),
-            tool_invocations=max(0, tool_after - tool_before),
-            metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
+        result = replace(
+            _build_failed_result(
+                sample=sample,
+                target_seconds=target_seconds,
+                final_status=final_status,
+                error_message=error_message,
+                duration_seconds=duration_seconds,
+                retrieval_events=max(0, retrieval_after - retrieval_before),
+                tool_invocations=max(0, tool_after - tool_before),
+            ),
             source_audio_path=(str(source_audio_path) if source_audio_path else None),
             speaker_samples_manifest_path=(
                 str(speaker_samples_manifest_path)
@@ -2737,8 +2955,11 @@ async def _execute_sample(
                 if archived_voice_clone_merged_audio is not None
                 else None
             ),
-            error_message=error_message,
         )
+    result = _finalize_result_target_membership(
+        result,
+        infra_retry_attempts=infra_retry_attempts,
+    )
     try:
         artifact_paths = artifact_recorder.finalize_sample(
             result=result,
@@ -2761,6 +2982,115 @@ async def _execute_sample(
         return result
     finally:
         artifact_recorder.clear_active_sample()
+
+
+async def _run_sample_with_retries(
+    *,
+    sample: PreparedBenchmarkSample,
+    target_seconds: int,
+    preloaded_transcript: Transcript | None,
+    runtime: _ManagedBenchmarkRuntime | None,
+    args: argparse.Namespace,
+    run_root: Path,
+    base_cfg: Any,
+    summarizer_provider_config: dict[str, Any],
+    critic_provider_config: dict[str, Any],
+    judge_provider_config: dict[str, Any],
+    embedding_profile: EmbeddingProfile,
+    transcript_only: bool,
+    calibration: Any,
+    voice_clone_orchestrator: Any | None,
+    logging_enabled: bool,
+    force_dynamic_ports: bool,
+    duration_tolerance_ratio: float,
+    max_iterations: int | None,
+    benchmark_audio_cfg: dict[str, Any],
+) -> tuple[SampleBenchmarkResult, _ManagedBenchmarkRuntime | None, bool]:
+    """Run one sample with bounded infra retries before replacement."""
+    infra_retry_attempts = 0
+    while True:
+        if runtime is None:
+            try:
+                runtime = await _start_managed_runtime(
+                    args=args,
+                    run_root=run_root,
+                    base_cfg=base_cfg,
+                    summarizer_provider_config=summarizer_provider_config,
+                    critic_provider_config=critic_provider_config,
+                    judge_provider_config=judge_provider_config,
+                    embedding_profile=embedding_profile,
+                    transcript_only=transcript_only,
+                    calibration=calibration,
+                    voice_clone_orchestrator=voice_clone_orchestrator,
+                    logging_enabled=logging_enabled,
+                    force_dynamic_ports=force_dynamic_ports,
+                )
+                force_dynamic_ports = False
+            except Exception as exc:
+                final_status, error_message = _classify_sample_failure(exc)
+                if final_status not in _RETRYABLE_INFRA_FINAL_STATUSES:
+                    raise
+                infra_retry_attempts += 1
+                if infra_retry_attempts <= _SAMPLE_INFRA_RETRY_LIMIT:
+                    event_bus.publish(
+                        "status_message",
+                        (
+                            f"Infra retry {infra_retry_attempts}/{_SAMPLE_INFRA_RETRY_LIMIT} "
+                            f"for {sample.sample_id} after startup failure: {error_message}"
+                        ),
+                    )
+                    force_dynamic_ports = True
+                    continue
+                result = replace(
+                    _build_failed_result(
+                        sample=sample,
+                        target_seconds=target_seconds,
+                        final_status=final_status,
+                        error_message=error_message,
+                        duration_seconds=0.0,
+                    ),
+                    infra_retry_attempts=infra_retry_attempts,
+                )
+                return result, runtime, force_dynamic_ports
+
+        result = await _execute_sample(
+            sample=sample,
+            target_seconds=target_seconds,
+            preloaded_transcript=preloaded_transcript,
+            orchestrator=runtime.orchestrator,
+            event_capture=runtime.event_capture,
+            retrieval_enabled=runtime.retrieval_enabled,
+            duration_tolerance_ratio=duration_tolerance_ratio,
+            max_iterations=max_iterations,
+            judge=runtime.judge,
+            calibration=calibration,
+            run_root=run_root,
+            artifact_recorder=runtime.artifact_recorder,
+            audio_cfg=benchmark_audio_cfg,
+            transcript_only=transcript_only,
+            voice_clone_orchestrator=voice_clone_orchestrator,
+            force_download_audio=bool(args.force_download_audio),
+        )
+        if (
+            result.final_status in _RETRYABLE_INFRA_FINAL_STATUSES
+            and infra_retry_attempts < _SAMPLE_INFRA_RETRY_LIMIT
+        ):
+            infra_retry_attempts += 1
+            event_bus.publish(
+                "status_message",
+                (
+                    f"Infra retry {infra_retry_attempts}/{_SAMPLE_INFRA_RETRY_LIMIT} "
+                    f"for {sample.sample_id} after {result.final_status}: "
+                    f"{result.error_message or result.final_status}"
+                ),
+            )
+            await _stop_managed_runtime(runtime)
+            runtime = None
+            force_dynamic_ports = True
+            continue
+        if infra_retry_attempts:
+            result = replace(result, infra_retry_attempts=infra_retry_attempts)
+        return result, runtime, force_dynamic_ports
 
 
 async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionReport:
@@ -2835,33 +3165,44 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             "--shared-sample-queue-root cannot be combined with sample-shard selection."
         )
     sample_limit = int(args.max_samples)
-    selection_fetch_limit = None if sample_seed is not None else sample_limit
     prepared_samples = tuple(
         iter_prepared_dataset_samples(
             dataset_manifest.manifest_path,
-            max_samples=selection_fetch_limit,
+            max_samples=None,
         )
     )
-    selected_samples = _select_samples(
+    ordered_candidates = _select_samples(
         prepared_samples,
-        max_samples=sample_limit,
+        max_samples=0,
         sample_seed=sample_seed,
     )
-    samples_to_run = (
-        list(selected_samples)
+    target_candidates = (
+        list(ordered_candidates)
+        if sample_limit <= 0
+        else list(ordered_candidates[:sample_limit])
+    )
+    candidate_samples = (
+        list(ordered_candidates)
         if use_shared_sample_queue
         else _select_sample_shard(
-            selected_samples,
+            ordered_candidates,
             shard_index=sample_shard_index,
             shard_count=sample_shard_count,
         )
     )
-    total_samples = len(samples_to_run)
-    sample_lookup = {sample.sample_id: sample for sample in samples_to_run}
-    sample_order = [sample.sample_id for sample in samples_to_run]
-    sample_index_by_id = {
-        sample.sample_id: index for index, sample in enumerate(samples_to_run, start=1)
-    }
+    target_sample_count = (
+        len(target_candidates)
+        if use_shared_sample_queue
+        else len(
+            _select_sample_shard(
+                target_candidates,
+                shard_index=sample_shard_index,
+                shard_count=sample_shard_count,
+            )
+        )
+    )
+    sample_lookup = {sample.sample_id: sample for sample in candidate_samples}
+    sample_order = [sample.sample_id for sample in candidate_samples]
     shared_sample_queue_connection: sqlite3.Connection | None = None
     if resumed_from_checkpoint:
         checkpoint_shard_index = int(
@@ -2900,6 +3241,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         _initialize_shared_sample_queue(
             shared_sample_queue_connection,
             sample_order=sample_order,
+            target_sample_count=target_sample_count,
         )
     sample_selection_label = (
         f"seeded_random({sample_seed})" if sample_seed is not None else "manifest_order"
@@ -2945,56 +3287,11 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 f"{curated_long_form_manifest_path}"
             ),
         )
-    for sample in samples_to_run:
+    for sample in candidate_samples:
         active_target_seconds_by_sample_id[sample.sample_id] = (
             _resolve_sample_target_seconds(sample, args)
         )
-
-    if not use_shared_sample_queue:
-        for sample in samples_to_run:
-            active_target_seconds = active_target_seconds_by_sample_id[sample.sample_id]
-            if sample.sample_id in results_by_sample_id:
-                continue
-            transcript, stats, reason = _evaluate_sample_preflight(
-                sample=sample,
-                target_seconds=active_target_seconds,
-                reference_wpm=float(args.reference_wpm),
-            )
-            if reason is not None:
-                preflight_results[sample.sample_id] = _build_preflight_failed_result(
-                    sample=sample,
-                    target_seconds=active_target_seconds,
-                    reason=reason,
-                    stats=stats,
-                )
-                continue
-            preloaded_transcripts[sample.sample_id] = transcript
-
-        if preflight_results:
-            event_bus.publish(
-                "status_message",
-                (
-                    f"Preflight skipped {len(preflight_results)}/{total_samples} "
-                    "incompatible SPoRC sample(s) before provider startup."
-                ),
-            )
-            for sample in samples_to_run:
-                preflight_result = preflight_results.get(sample.sample_id)
-                if preflight_result is None:
-                    continue
-                event_bus.publish(
-                    "status_message",
-                    (
-                        f"Preflight skip: {sample.sample_id} "
-                        f"target={active_target_seconds_by_sample_id[sample.sample_id]}s "
-                        f"reason={preflight_result.preflight_reason}"
-                    ),
-                )
-
-        for sample_id, preflight_result in preflight_results.items():
-            results_by_sample_id.setdefault(sample_id, preflight_result)
-
-    if len(results_by_sample_id) >= total_samples:
+    if _count_target_results(results_by_sample_id) >= target_sample_count:
         final_report = _write_execution_report_snapshot(
             run_root=run_root,
             run_id=run_id,
@@ -3012,6 +3309,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             duration_preset=duration_preset,
             override_target_seconds=override_target_seconds,
             sample_seed=sample_seed,
+            target_sample_count=target_sample_count,
             checkpoint_path=checkpoint_path,
             resumed_from_checkpoint=resumed_from_checkpoint,
             resume_count=resume_count,
@@ -3032,6 +3330,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     "sample_seed": sample_seed,
                     "sample_shard_index": sample_shard_index,
                     "sample_shard_count": sample_shard_count,
+                    "target_sample_count": target_sample_count,
                     "sample_order": sample_order,
                     "completed_results": [
                         asdict(result)
@@ -3130,6 +3429,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 "sample_seed": sample_seed,
                 "sample_shard_index": sample_shard_index,
                 "sample_shard_count": sample_shard_count,
+                "target_sample_count": target_sample_count,
                 "sample_order": sample_order,
                 "completed_results": [
                     asdict(result)
@@ -3161,6 +3461,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         duration_preset=duration_preset,
         override_target_seconds=override_target_seconds,
         sample_seed=sample_seed,
+        target_sample_count=target_sample_count,
         checkpoint_path=checkpoint_path,
         resumed_from_checkpoint=resumed_from_checkpoint,
         resume_count=resume_count,
@@ -3194,11 +3495,13 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     ).strip()
                     if not resume_failure_reason:
                         resume_failure_reason = _RESUME_FAILURE_DEFAULT_STATUS
-                    resumed_failure = _build_resume_failure_result(
-                        sample=resumed_sample,
-                        target_seconds=active_target_seconds,
-                        reason=resume_failure_reason,
-                        active_sample=active_sample_payload,
+                    resumed_failure = _finalize_result_target_membership(
+                        _build_resume_failure_result(
+                            sample=resumed_sample,
+                            target_seconds=active_target_seconds,
+                            reason=resume_failure_reason,
+                            active_sample=active_sample_payload,
+                        )
                     )
                     results_by_sample_id[active_sample_id] = resumed_failure
                     if resume_failure_reason == _SWEEP_STALL_FINAL_STATUS:
@@ -3208,6 +3511,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                             shared_sample_queue_connection,
                             sample_id=active_sample_id,
                             final_status=resumed_failure.final_status,
+                            counts_toward_target=resumed_failure.counts_toward_target,
+                            replacement_reason=resumed_failure.replacement_reason,
                         )
                     _persist_checkpoint()
                     final_report = _write_execution_report_snapshot(
@@ -3225,6 +3530,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                         duration_preset=duration_preset,
                         override_target_seconds=override_target_seconds,
                         sample_seed=sample_seed,
+                        target_sample_count=target_sample_count,
                         checkpoint_path=checkpoint_path,
                         resumed_from_checkpoint=resumed_from_checkpoint,
                         resume_count=resume_count,
@@ -3236,10 +3542,14 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                         event="sample_done",
                         duration_preset=str(duration_preset or "dataset_default"),
                         payload={
-                            "sample_index": sample_index_by_id[active_sample_id],
-                            "sample_count": total_samples,
+                            "sample_index": min(
+                                _count_target_results(results_by_sample_id) + 1,
+                                max(target_sample_count, 1),
+                            ),
+                            "sample_count": target_sample_count,
                             "sample_id": active_sample_id,
                             "final_status": resumed_failure.final_status,
+                            "counts_toward_target": resumed_failure.counts_toward_target,
                             "composite": round(resumed_failure.metrics.composite, 4),
                             "duration_seconds": round(
                                 resumed_failure.duration_seconds,
@@ -3252,7 +3562,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         "status_message",
         (
             f"Starting SPoRC summarizer-critic benchmark run {run_id} with "
-            f"{total_samples} sample(s); summarizer={summarizer_profile.provider_id}; "
+            f"{target_sample_count} retained sample(s); summarizer={summarizer_profile.provider_id}; "
             f"critic={critic_profile.provider_id}; judge={judge_profile.provider_id}; "
             f"judge_dimensions={', '.join(DIMENSION_NAMES)}; "
             f"transcript_only={transcript_only}; "
@@ -3267,7 +3577,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         duration_preset=str(duration_preset or "dataset_default"),
         payload={
             "run_id": run_id,
-            "sample_count": total_samples,
+            "sample_count": target_sample_count,
             "transcript_only": transcript_only,
             "sample_seed": sample_seed,
             "resume_count": resume_count,
@@ -3279,7 +3589,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         },
     )
 
-    if len(results_by_sample_id) >= total_samples:
+    if _count_target_results(results_by_sample_id) >= target_sample_count:
         _emit_progress_event(
             args,
             event="run_complete",
@@ -3287,7 +3597,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             payload={
                 "run_id": run_id,
                 "status": final_report.status,
-                "sample_count": total_samples,
+                "sample_count": target_sample_count,
                 "report_path": final_report.report_path,
                 "results_path": final_report.results_path,
             },
@@ -3303,8 +3613,10 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             if checkpoint_path is not None
             else f"pid-{os.getpid()}"
         )
-        sample_iter = iter(samples_to_run)
+        sample_iter = iter(candidate_samples)
         while True:
+            if _count_target_results(results_by_sample_id) >= target_sample_count:
+                break
             if shared_sample_queue_connection is None:
                 try:
                     sample = next(sample_iter)
@@ -3325,21 +3637,23 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                         shared_sample_queue_connection,
                         sample_id=sample.sample_id,
                         final_status=restored_result.final_status,
+                        counts_toward_target=restored_result.counts_toward_target,
+                        replacement_reason=restored_result.replacement_reason,
                     )
                     continue
             if sample.sample_id in results_by_sample_id:
                 continue
             active_target_seconds = active_target_seconds_by_sample_id[sample.sample_id]
-            sample_index = sample_index_by_id[sample.sample_id]
-            completed_before_sample = len(results_by_sample_id)
+            retained_before_sample = _count_target_results(results_by_sample_id)
+            sample_index = min(retained_before_sample + 1, max(target_sample_count, 1))
             remaining_samples, average_text, eta_text = _progress_snapshot(
-                completed_samples=completed_before_sample,
-                total_samples=total_samples,
+                completed_samples=retained_before_sample,
+                total_samples=target_sample_count,
                 elapsed_seconds=time.perf_counter() - benchmark_started,
             )
             progress_tracker.activate_sample(
                 sample_index=sample_index,
-                sample_count=total_samples,
+                sample_count=target_sample_count,
                 sample_id=sample.sample_id,
                 target_seconds=active_target_seconds,
             )
@@ -3349,7 +3663,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 duration_preset=str(duration_preset or "dataset_default"),
                 payload={
                     "sample_index": sample_index,
-                    "sample_count": total_samples,
+                    "sample_count": target_sample_count,
                     "sample_id": sample.sample_id,
                     "target_seconds": active_target_seconds,
                     "max_iterations": (
@@ -3360,7 +3674,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             event_bus.publish(
                 "status_message",
                 (
-                    f"Sample {sample_index}/{len(samples_to_run)} start: "
+                    f"Sample slot {sample_index}/{target_sample_count} start: "
                     f"{sample.sample_id} target={active_target_seconds}s "
                     f"max_iterations={'unbounded' if max_iterations is None else str(max_iterations)} "
                     f"remaining={remaining_samples} rolling_avg={average_text} eta={eta_text}"
@@ -3368,7 +3682,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             )
             preflight_result = preflight_results.get(sample.sample_id)
             preloaded_transcript = preloaded_transcripts.get(sample.sample_id)
-            if use_shared_sample_queue and preflight_result is None:
+            if preflight_result is None and preloaded_transcript is None:
                 (
                     preloaded_transcript,
                     preflight_stats,
@@ -3385,6 +3699,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                         reason=preflight_reason,
                         stats=preflight_stats,
                     )
+                    preflight_results[sample.sample_id] = preflight_result
                     event_bus.publish(
                         "status_message",
                         (
@@ -3393,42 +3708,31 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                             f"reason={preflight_result.preflight_reason}"
                         ),
                     )
+                else:
+                    preloaded_transcripts[sample.sample_id] = preloaded_transcript
             if preflight_result is not None:
                 result = preflight_result
             else:
-                if runtime is None:
-                    runtime = await _start_managed_runtime(
-                        args=args,
-                        run_root=run_root,
-                        base_cfg=base_cfg,
-                        summarizer_provider_config=summarizer_provider_config,
-                        critic_provider_config=critic_provider_config,
-                        judge_provider_config=judge_provider_config,
-                        embedding_profile=embedding_profile,
-                        transcript_only=transcript_only,
-                        calibration=calibration,
-                        voice_clone_orchestrator=voice_clone_orchestrator,
-                        logging_enabled=logging_enabled,
-                        force_dynamic_ports=force_dynamic_ports,
-                    )
-                    force_dynamic_ports = False
-                result = await _execute_sample(
+                result, runtime, force_dynamic_ports = await _run_sample_with_retries(
                     sample=sample,
                     target_seconds=active_target_seconds,
                     preloaded_transcript=preloaded_transcript,
-                    orchestrator=runtime.orchestrator,
-                    event_capture=runtime.event_capture,
-                    retrieval_enabled=runtime.retrieval_enabled,
+                    runtime=runtime,
+                    args=args,
+                    run_root=run_root,
+                    base_cfg=base_cfg,
+                    summarizer_provider_config=summarizer_provider_config,
+                    critic_provider_config=critic_provider_config,
+                    judge_provider_config=judge_provider_config,
+                    embedding_profile=embedding_profile,
+                    transcript_only=transcript_only,
+                    calibration=calibration,
+                    voice_clone_orchestrator=voice_clone_orchestrator,
+                    logging_enabled=logging_enabled,
+                    force_dynamic_ports=force_dynamic_ports,
                     duration_tolerance_ratio=duration_tolerance_ratio,
                     max_iterations=max_iterations,
-                    judge=runtime.judge,
-                    calibration=calibration,
-                    run_root=run_root,
-                    artifact_recorder=runtime.artifact_recorder,
-                    audio_cfg=benchmark_audio_cfg,
-                    transcript_only=transcript_only,
-                    voice_clone_orchestrator=voice_clone_orchestrator,
-                    force_download_audio=bool(args.force_download_audio),
+                    benchmark_audio_cfg=benchmark_audio_cfg,
                 )
             results_by_sample_id[sample.sample_id] = result
             if shared_sample_queue_connection is not None:
@@ -3436,6 +3740,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     shared_sample_queue_connection,
                     sample_id=sample.sample_id,
                     final_status=result.final_status,
+                    counts_toward_target=result.counts_toward_target,
+                    replacement_reason=result.replacement_reason,
                 )
             progress_tracker.clear_active_sample()
             _persist_checkpoint()
@@ -3454,16 +3760,17 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 duration_preset=duration_preset,
                 override_target_seconds=override_target_seconds,
                 sample_seed=sample_seed,
+                target_sample_count=target_sample_count,
                 checkpoint_path=checkpoint_path,
                 resumed_from_checkpoint=resumed_from_checkpoint,
                 resume_count=resume_count,
                 sample_shard_index=sample_shard_index,
                 sample_shard_count=sample_shard_count,
             )
-            completed_after_sample = len(results_by_sample_id)
+            retained_after_sample = _count_target_results(results_by_sample_id)
             remaining_samples, average_text, eta_text = _progress_snapshot(
-                completed_samples=completed_after_sample,
-                total_samples=total_samples,
+                completed_samples=retained_after_sample,
+                total_samples=target_sample_count,
                 elapsed_seconds=time.perf_counter() - benchmark_started,
             )
             _emit_progress_event(
@@ -3472,9 +3779,10 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 duration_preset=str(duration_preset or "dataset_default"),
                 payload={
                     "sample_index": sample_index,
-                    "sample_count": total_samples,
+                    "sample_count": target_sample_count,
                     "sample_id": sample.sample_id,
                     "final_status": result.final_status,
+                    "counts_toward_target": result.counts_toward_target,
                     "composite": round(result.metrics.composite, 4),
                     "duration_seconds": round(result.duration_seconds, 3),
                 },
@@ -3482,8 +3790,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             event_bus.publish(
                 "status_message",
                 (
-                    f"Sample {sample_index}/{len(samples_to_run)} done: "
+                    f"Sample slot {sample_index}/{target_sample_count} done: "
                     f"{sample.sample_id} status={result.final_status} "
+                    f"counted={result.counts_toward_target} "
                     f"remaining={remaining_samples} rolling_avg={average_text} eta={eta_text} "
                     f"composite={result.metrics.composite:.3f} elapsed={result.duration_seconds:.1f}s"
                 ),
@@ -3500,7 +3809,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             payload={
                 "run_id": run_id,
                 "status": final_report.status,
-                "sample_count": total_samples,
+                "sample_count": target_sample_count,
                 "report_path": final_report.report_path,
                 "results_path": final_report.results_path,
             },
@@ -3571,7 +3880,10 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         "--max-samples",
         type=int,
         default=100,
-        help="Sample cap for execution. Use 0 to run all prepared SPoRC examples.",
+        help=(
+            "Retained sample target for execution. Replacement-eligible infra/preflight "
+            "outcomes do not consume this target. Use 0 to run all prepared SPoRC examples."
+        ),
     )
     parser.add_argument(
         "--sample-seed",

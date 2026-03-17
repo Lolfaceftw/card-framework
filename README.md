@@ -214,7 +214,7 @@ uv run python -m card_framework.benchmark.summarizer_critic.sporc export-transcr
 uv run python -m card_framework.benchmark.summarizer_critic.sporc human-sample --duration-preset 5m --episodes 20
 uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample --duration-preset 5m --episodes 20
 uv run python -m card_framework.benchmark.summarizer_critic.sporc execute --prepare-if-missing --max-samples 100 --summarizer-provider vllm_default
-uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --examples 10 --transcript-only --summarizer-provider vllm_default
+uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --max-samples 10 --summarizer-provider vllm_default
 uv run python -m card_framework.benchmark.summarizer_critic.sporc supervise --prepare-if-missing --max-runs 3
 ```
 
@@ -247,7 +247,13 @@ full-dataset preparation now defaults to
 `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full` and writes
 a compact `manifest.json` plus a streaming `samples.jsonl.gz` sidecar so the
 full prepare path and downstream readers do not materialize the entire SPoRC
-table in RAM at once. The SPoRC CLI also now prints timed stderr loading lines
+table in RAM at once. SPoRC `execute` and `duration-sweep` now treat
+`--max-samples` as a retained-sample target instead of a raw prefix length:
+infra-only exclusions such as preflight incompatibility, connection/startup
+unavailability, stage timeouts, or resumed stalled samples do not consume the
+target, so the runner will backfill with the next deterministic candidate and
+can inspect candidate `101` to retain `100` benchmarked samples. The SPoRC CLI
+also now prints timed stderr loading lines
 during long prepare phases so full prepares no longer appear blank after the
 Hugging Face download progress bars finish. The `curate-longform` subcommand
 now emits the same timed status lines while it loads the source manifest,

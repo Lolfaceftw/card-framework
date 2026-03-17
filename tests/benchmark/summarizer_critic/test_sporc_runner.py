@@ -798,10 +798,12 @@ def test_shared_sample_queue_claims_each_sample_once(tmp_path: Path) -> None:
         _initialize_shared_sample_queue(
             first_connection,
             sample_order=["sample-a", "sample-b", "sample-c"],
+            target_sample_count=3,
         )
         _initialize_shared_sample_queue(
             second_connection,
             sample_order=["sample-a", "sample-b", "sample-c"],
+            target_sample_count=3,
         )
 
         assert (
@@ -825,11 +827,13 @@ def test_shared_sample_queue_claims_each_sample_once(tmp_path: Path) -> None:
             first_connection,
             sample_id="sample-a",
             final_status="pass",
+            counts_toward_target=True,
         )
         _mark_shared_sample_completed(
             second_connection,
             sample_id="sample-b",
             final_status="pass",
+            counts_toward_target=True,
         )
 
         assert (
@@ -844,6 +848,7 @@ def test_shared_sample_queue_claims_each_sample_once(tmp_path: Path) -> None:
             first_connection,
             sample_id="sample-c",
             final_status="pass",
+            counts_toward_target=True,
         )
         assert (
             _claim_next_shared_sample_id(
@@ -864,13 +869,71 @@ def test_shared_sample_queue_rejects_mismatched_sample_order(tmp_path: Path) -> 
         _initialize_shared_sample_queue(
             connection,
             sample_order=["sample-a", "sample-b"],
+            target_sample_count=2,
         )
 
-        with pytest.raises(Exception, match="sample order"):
+        with pytest.raises(Exception, match="sample order|retained target"):
             _initialize_shared_sample_queue(
                 connection,
                 sample_order=["sample-b", "sample-a"],
+                target_sample_count=2,
             )
+    finally:
+        connection.close()
+
+
+def test_shared_sample_queue_replacement_exclusion_frees_one_retained_slot(
+    tmp_path: Path,
+) -> None:
+    connection = _open_shared_sample_queue_connection(tmp_path / "shared_queue")
+    try:
+        _initialize_shared_sample_queue(
+            connection,
+            sample_order=["sample-a", "sample-b", "sample-c"],
+            target_sample_count=2,
+        )
+
+        assert (
+            _claim_next_shared_sample_id(
+                connection,
+                worker_label="worker-1",
+                worker_pid=101,
+            )
+            == "sample-a"
+        )
+        assert (
+            _claim_next_shared_sample_id(
+                connection,
+                worker_label="worker-2",
+                worker_pid=202,
+            )
+            == "sample-b"
+        )
+        assert (
+            _claim_next_shared_sample_id(
+                connection,
+                worker_label="worker-3",
+                worker_pid=303,
+            )
+            is None
+        )
+
+        _mark_shared_sample_completed(
+            connection,
+            sample_id="sample-a",
+            final_status="connection_unavailable",
+            counts_toward_target=False,
+            replacement_reason="connection_unavailable",
+        )
+
+        assert (
+            _claim_next_shared_sample_id(
+                connection,
+                worker_label="worker-3",
+                worker_pid=303,
+            )
+            == "sample-c"
+        )
     finally:
         connection.close()
 
@@ -995,12 +1058,16 @@ def test_summarize_results_excludes_skipped_samples_from_aggregates() -> None:
     )
 
     summary = _summarize_results(
-        [skipped, _completed_result("ok"), _failed_result("bad")]
+        [skipped, _completed_result("ok"), _failed_result("bad")],
+        target_sample_count=2,
     )
 
-    assert summary.sample_count == 3
+    assert summary.target_sample_count == 2
+    assert summary.sample_count == 2
+    assert summary.attempted_candidate_count == 3
+    assert summary.replacement_count == 1
     assert summary.executed_count == 2
-    assert summary.skipped_count == 1
+    assert summary.skipped_count == 0
     assert summary.success_count == 1
     assert summary.failure_count == 1
     assert summary.mean_composite == 0.35
@@ -1124,11 +1191,15 @@ def test_execute_benchmark_short_circuits_when_all_samples_fail_preflight(
     report = execute_benchmark(args)
 
     assert report.status == "failed"
-    assert report.summary.sample_count == 1
+    assert report.summary.target_sample_count == 1
+    assert report.summary.sample_count == 0
+    assert report.summary.attempted_candidate_count == 1
+    assert report.summary.replacement_count == 1
     assert report.summary.executed_count == 0
-    assert report.summary.skipped_count == 1
+    assert report.summary.skipped_count == 0
     assert report.samples[0].status == "skipped"
     assert report.samples[0].final_status == "preflight_failed"
+    assert report.samples[0].counts_toward_target is False
 
 
 def test_build_execute_parser_accepts_sweep_child_progress_flags() -> None:
@@ -1271,6 +1342,7 @@ def test_execute_benchmark_treats_empty_shard_as_completed(
     report = execute_benchmark(args)
 
     assert report.status == "completed"
+    assert report.summary.target_sample_count == 0
     assert report.summary.sample_count == 0
     assert report.sample_shard_index == 3
     assert report.sample_shard_count == 3
@@ -1574,7 +1646,7 @@ def test_build_execute_parser_accepts_sample_seed() -> None:
     assert args.sample_seed == 29
 
 
-def test_execute_benchmark_reads_only_requested_sidecar_samples(
+def test_execute_benchmark_backfills_sidecar_candidates_until_target_or_exhaustion(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1640,9 +1712,16 @@ def test_execute_benchmark_reads_only_requested_sidecar_samples(
 
     report = execute_benchmark(args)
 
-    assert report.summary.sample_count == 1
-    assert [sample.sample_id for sample in report.samples] == ["sporc_00001_example"]
-    assert report.samples[0].status == "skipped"
+    assert report.summary.target_sample_count == 1
+    assert report.summary.sample_count == 0
+    assert report.summary.attempted_candidate_count == 2
+    assert report.summary.replacement_count == 2
+    assert [sample.sample_id for sample in report.samples] == [
+        "sporc_00001_example",
+        "sporc_00002_unused",
+    ]
+    assert all(sample.status == "skipped" for sample in report.samples)
+    assert all(sample.counts_toward_target is False for sample in report.samples)
 
 
 def test_prepare_provider_config_applies_judge_specific_vllm_overrides() -> None:

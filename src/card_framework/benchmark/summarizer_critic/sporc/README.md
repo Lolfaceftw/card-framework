@@ -94,15 +94,15 @@ Use `execute` when you want one benchmark configuration:
 
 - one transcript-only or voice-clone run,
 - one optional `--duration-preset` value or one `--target-seconds-override`,
-- one sample cap controlled by `--max-samples`.
+- one retained-sample target controlled by `--max-samples`.
 
 Use `duration-sweep` when you want multiple duration targets in one invocation:
 
 - `--mode single` runs one preset and uses `--duration-preset`,
 - `--mode batch-all` runs multiple presets and uses `--duration-presets`,
-- `--max-samples` controls how many prepared samples run per preset by default,
+- `--max-samples` controls how many retained samples each preset should finish with by default,
 - `--sample-seed` switches sample selection from manifest-order prefixing to deterministic seeded-random ordering,
-- `--examples` remains available as a sweep-only override for `--max-samples`,
+- `--examples` remains available as a sweep-only override for the same retained-sample target,
 - `--parallelism 0` runs every selected preset concurrently,
 - `--concurrency <int>` seeds that many worker children per active preset and donates those workers forward when earlier presets finish,
 - stalled preset children now heartbeat every `30s`, write per-preset checkpoints, and auto-restart from checkpoint when the active sample stops making progress,
@@ -113,6 +113,7 @@ Common flag mix-ups:
 - `execute` does not accept a comma-separated list in `--duration-preset`.
 - `duration-sweep --mode batch-all` should use `--duration-presets`, not `--duration-preset`.
 - `duration-sweep` now honors `--max-samples`; use `--examples` only when you want a sweep-only override.
+- `--max-samples 100` means "retain 100 benchmarked samples," not "stop after the first 100 candidates touched."
 
 Use `human-sample` when you want a human rater to choose transcript segments from
 the curated long-form manifest:
@@ -525,6 +526,10 @@ Important behavior:
 - add `--transcript-only` to skip source-audio download, speaker-sample generation, and live-draft voice cloning.
 - transcript-only runs still start from the prepared SPoRC transcript, but they now write a normalized working copy under `sporc_runs/<run_id>/working_transcripts/` before the summarizer-critic loop starts; that working copy only applies lossless cleanup and uncertainty tagging, not speaker reassignment.
 - use `--dataset-manifest` with the curated long-form manifest for `5m` and `15m` benchmark runs.
+- `--max-samples` is an exact retained-sample target. If one candidate is excluded for infra-only reasons, the runner keeps going until it retains the requested count or exhausts the manifest.
+- replacement-eligible outcomes are infra-only: `preflight_failed`, `startup_unavailable`, `connection_unavailable`, `stage_timeout`, and resume/watchdog orphan failures.
+- startup or connection-unavailable failures retry the same sample up to two additional times before that sample is excluded and replaced by the next deterministic candidate.
+- normal benchmark failures after the sample actually ran still count toward the retained target.
 - direct `execute` runs launched from a real terminal now stream live markdown-rendered panels for the Summarizer, Critic, and Judge, and each panel appears as soon as that agent request starts so long-prefill calls no longer look idle; piped or supervised runs still fall back to plain streamed `[THINKING]` and `[CONTENT]` text.
 - `--duration-preset` and `--target-seconds-override` are mutually exclusive.
 
@@ -579,14 +584,14 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
   --max-iterations 50
 ```
 
-Run a custom subset such as `30s`, `1m`, and `5m` for `10` examples each:
+Run a custom subset such as `30s`, `1m`, and `5m` for `100` retained examples each:
 
 ```bash
 HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
   --duration-presets "30s,1m,5m" \
   --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
-  --max-samples 10 \
+  --max-samples 100 \
   --parallelism 0 \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
@@ -605,8 +610,8 @@ Built-in presets:
 Sweep-specific flags:
 
 - `--mode menu|single|batch-all`
-- `--max-samples <int>` where `0` means all prepared examples per preset
-- `--examples <int>` to override `--max-samples` only for the sweep
+- `--max-samples <int>` where `0` means all prepared examples per preset and positive values mean retained samples per preset
+- `--examples <int>` to override `--max-samples` only for the sweep using the same retained-sample semantics
 - `--parallelism <int>` where `0` means run all selected presets concurrently
 - `--concurrency <int>` to seed multiple worker children per active preset
 - `--duration-presets 30s,1m,5m,15m`
@@ -623,13 +628,14 @@ Important behavior:
 - `--mode single` expects one `--duration-preset` such as `5m`.
 - `--mode batch-all` expects `--duration-presets "30s,1m,5m"` when you want a subset.
 - quote the comma-separated `--duration-presets` value in PowerShell to keep it as one argument.
-- `duration-sweep` defaults to `--max-samples` for per-preset sample count, and `--examples` overrides it only for the sweep.
+- `duration-sweep` defaults to `--max-samples` for the per-preset retained target, and `--examples` overrides it only for the sweep.
 - `--parallelism` controls how many presets are seeded at once, while `--concurrency` controls how many worker children each seeded preset starts with.
 - finished presets donate their worker slots forward to the next unfinished preset in duration order, so later presets can speed up as earlier presets complete.
 - `--sample-seed <int>` makes `execute`, `supervise`, and `duration-sweep` choose a reproducible seeded-random subset; omitting it preserves manifest order.
 - `duration-sweep` defaults to aggregate progress output with a donation-aware combined ETA instead of child token streams, and interactive terminals now render that aggregate view as a footer `tqdm` bar.
 - `duration-sweep` also applies sweep-only request timeout defaults of `900s` for summarizer/critic and `300s` for retrieval/index so a wedged backend becomes a failed sample instead of a permanently hung preset.
 - `Ctrl+C` during `duration-sweep` now shuts down every active child before the parent exits, so local A2A ports, pipes, and log handles do not linger.
+- run notes/results now expose retained sample count, attempted candidate count, and replacement-excluded candidates separately so backfill behavior stays auditable.
 
 ## Running A Custom Manifest
 
@@ -640,7 +646,7 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
   --mode batch-all \
   --duration-presets "30s,1m,5m" \
   --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
-  --max-samples 10 \
+  --max-samples 100 \
   --parallelism 0 \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
@@ -663,11 +669,11 @@ Shared execution flags users usually need:
 - `--embedding-mode disabled|enabled`
 - `--max-iterations <int>`
 - `--output-root <path>`
-- `execute`: `--max-samples <int>` where `0` means all prepared examples
+- `execute`: `--max-samples <int>` where `0` means all prepared examples and positive values mean retained samples
 - `execute`: `--sample-seed <int>` for deterministic seeded-random sample selection
 - `execute`: `--duration-preset <30s|1m|5m|15m>`
 - `execute`: `--target-seconds-override <int>`
-- `duration-sweep`: `--max-samples <int>` where `0` means all prepared examples per preset
+- `duration-sweep`: `--max-samples <int>` where `0` means all prepared examples per preset and positive values mean retained samples per preset
 - `duration-sweep`: `--sample-seed <int>` for deterministic seeded-random per-preset sample selection
 - `duration-sweep`: `--examples <int>` as a sweep-only override
 - `duration-sweep`: `--parallelism <int>`
@@ -742,7 +748,10 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 
 Start with `results.md` for native Markdown tables. Run reports now include
 95% confidence intervals for aggregate metric means, and duration-sweep reports
-also include a composite-score CI column per preset.
+also include a composite-score CI column per preset. SPoRC execute reports now
+separate retained sample results from replacement-excluded candidates, while
+`notes.md` records the retained target, attempted candidate count, and
+replacement count explicitly.
 
 Use `report.json` when you need:
 

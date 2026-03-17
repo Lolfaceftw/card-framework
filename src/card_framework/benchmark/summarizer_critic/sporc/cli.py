@@ -551,7 +551,7 @@ def _build_parser(
             type=int,
             default=None,
             help=(
-                "Optional per-preset sample cap for duration sweeps. "
+                "Optional per-preset retained sample target for duration sweeps. "
                 "Overrides --max-samples when provided; use 0 to run all prepared examples."
             ),
         )
@@ -627,6 +627,7 @@ def _render_duration_sweep_menu() -> str:
             "Notes:",
             "- The sweep defaults to a non-interactive menu because this CLI is automation-friendly.",
             "- Use --mode batch-all to bypass the menu and benchmark every preset.",
+            "- `--max-samples` and `--examples` target retained samples, so the sweep may inspect later manifest candidates when infra-only failures are replaced.",
             "- Use --parallelism 0 to run all selected presets concurrently.",
             "- Use --concurrency to seed multiple workers per active preset and let finished presets donate those workers forward.",
             "- Use --enable-voice-clone only when audio synthesis is part of the experiment.",
@@ -975,6 +976,8 @@ def _build_failed_preset_summary(
         duration_preset=duration_preset,
         target_seconds=int(DURATION_PRESET_SECONDS[duration_preset]),
         status="failed",
+        attempted_candidate_count=0,
+        replacement_count=0,
         sample_count=sample_count,
         executed_count=0,
         skipped_count=0,
@@ -1043,9 +1046,10 @@ def _summarize_duration_report(
     recovered_stall_count: int | None = None,
 ) -> DurationSweepPresetSummary:
     """Collapse one execute report into a sweep-level preset summary."""
-    sample_count = len(report.samples)
     executed_samples = [
-        sample for sample in report.samples if sample.status != "skipped"
+        sample
+        for sample in report.samples
+        if sample.counts_toward_target and sample.status != "skipped"
     ]
     executed_count = len(executed_samples)
     tolerance_ratio = float(report.duration_tolerance_ratio)
@@ -1081,7 +1085,9 @@ def _summarize_duration_report(
         duration_preset=duration_preset,
         target_seconds=int(DURATION_PRESET_SECONDS[duration_preset]),
         status=report.status,
-        sample_count=sample_count,
+        attempted_candidate_count=report.summary.attempted_candidate_count,
+        replacement_count=report.summary.replacement_count,
+        sample_count=report.summary.sample_count,
         executed_count=report.summary.executed_count,
         skipped_count=report.summary.skipped_count,
         success_count=report.summary.success_count,
@@ -1191,7 +1197,8 @@ def _update_duration_sweep_child_state(
         return
 
     if event_name == "sample_done":
-        state.completed_samples += 1
+        if bool(payload.get("counts_toward_target", True)):
+            state.completed_samples += 1
         raw_final_status = payload.get("final_status")
         if raw_final_status == _SWEEP_STALL_FINAL_STATUS:
             state.recovered_stall_count += 1
@@ -1676,6 +1683,8 @@ def _aggregate_duration_sweep_preset(
         return ordered_children[0]
 
     sample_count = 0
+    attempted_candidate_count = 0
+    replacement_count = 0
     executed_count = 0
     skipped_count = 0
     success_count = 0
@@ -1700,6 +1709,8 @@ def _aggregate_duration_sweep_preset(
 
     for child_summary in ordered_children:
         sample_count += int(child_summary.sample_count)
+        attempted_candidate_count += int(child_summary.attempted_candidate_count)
+        replacement_count += int(child_summary.replacement_count)
         executed_count += int(child_summary.executed_count)
         skipped_count += int(child_summary.skipped_count)
         success_count += int(child_summary.success_count)
@@ -1740,7 +1751,7 @@ def _aggregate_duration_sweep_preset(
         composite_values.extend(
             sample.metrics.composite
             for sample in child_report.samples
-            if sample.status != "skipped"
+            if sample.counts_toward_target and sample.status != "skipped"
         )
 
     if executed_count == 0:
@@ -1760,6 +1771,8 @@ def _aggregate_duration_sweep_preset(
         duration_preset=duration_preset,
         target_seconds=int(DURATION_PRESET_SECONDS[duration_preset]),
         status=status,
+        attempted_candidate_count=attempted_candidate_count,
+        replacement_count=replacement_count,
         sample_count=sample_count,
         executed_count=executed_count,
         skipped_count=skipped_count,
