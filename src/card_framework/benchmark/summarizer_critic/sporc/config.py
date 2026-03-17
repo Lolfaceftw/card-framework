@@ -26,6 +26,8 @@ DEFAULT_LONGFORM_AUDIT_PATH = (
 DEFAULT_RUNS_ROOT = DEFAULT_ARTIFACTS_ROOT / "sporc_runs"
 DEFAULT_SUPERVISOR_ROOT = DEFAULT_ARTIFACTS_ROOT / "sporc_supervisor"
 DEFAULT_SWEEP_ROOT = DEFAULT_ARTIFACTS_ROOT / "sweeps"
+DEFAULT_HUMAN_SAMPLING_ROOT = DEFAULT_ARTIFACTS_ROOT / "sporc_human_sampling"
+DEFAULT_LLM_SAMPLING_ROOT = DEFAULT_ARTIFACTS_ROOT / "sporc_llm_sampling"
 DEFAULT_RAM_THRESHOLD_PERCENT = 80.0
 DEFAULT_GPU_THRESHOLD_GIB = 12.0
 DEFAULT_DATASET_VARIANT = "sample"
@@ -124,6 +126,15 @@ class SampleBenchmarkResult:
     judge_scores: dict[str, float] | None = None
     judge_status: str = "not_scored"
     judge_error: str | None = None
+    sample_artifact_dir: str | None = None
+    artifact_manifest_path: str | None = None
+    summarizer_trace_dir: str | None = None
+    critic_trace_dir: str | None = None
+    judge_trace_dir: str | None = None
+    final_summary_path: str | None = None
+    final_critic_feedback_path: str | None = None
+    loop_diagnostics_path: str | None = None
+    sample_result_artifact_path: str | None = None
     error_message: str | None = None
     preflight_reason: str | None = None
     preflight_stats: dict[str, int | float | str] = field(default_factory=dict)
@@ -166,6 +177,7 @@ class BenchmarkExecutionReport:
     results_path: str
     samples: list[SampleBenchmarkResult]
     summary: BenchmarkSummary
+    sample_artifacts_root: str | None = None
     duration_tolerance_ratio: float = 0.0
     transcript_only: bool = False
     duration_preset: str = ""
@@ -174,6 +186,8 @@ class BenchmarkExecutionReport:
     checkpoint_path: str | None = None
     resumed_from_checkpoint: bool = False
     resume_count: int = 0
+    sample_shard_index: int = 1
+    sample_shard_count: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -244,3 +258,4 @@ class DurationSweepReport:
     report_path: str
     results_path: str
     sample_seed: int | None = None
+    preset_concurrency: int = 1

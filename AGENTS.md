@@ -2,7 +2,7 @@
 <repoEngineeringStandards repo="qa-eval" language="Python" pythonVersion="3.12+">
   <overview>
     <purpose>Define the engineering standards for contributors working in this repository.</purpose>
-    <time_first>Always check the current date and time today using scrapling MCP. Then, for all context, you are to assume today is that date as this is important for searching academic journals or data that changes fast.</time_first>
+    <time_first>Always check the current date and time today using standard web search. Then, for all context, you are to assume today is that date as this is important for searching academic journals or data that changes fast.</time_first>
     <principles>
       <principle>Prefer explicit, maintainable Python over clever shortcuts.</principle>
       <principle>Assume configuration exists; do not hardcode deploy-varying values.</principle>

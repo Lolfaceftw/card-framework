@@ -172,6 +172,79 @@ def _render_aggregate_metrics_table(report: BenchmarkExecutionReport) -> str:
     )
 
 
+def _write_sample_artifact_navigation(
+    *,
+    report: BenchmarkExecutionReport,
+) -> None:
+    """Write a developer-facing sample index and README under the samples root."""
+    if not report.sample_artifacts_root:
+        return
+    samples_root = Path(report.sample_artifacts_root)
+    samples_root.mkdir(parents=True, exist_ok=True)
+    index_path = samples_root / "index.json"
+    readme_path = samples_root / "README.md"
+    index_payload = {
+        "run_id": report.run_id,
+        "generated_at_utc": report.generated_at_utc,
+        "samples_root": str(samples_root),
+        "samples": [
+            {
+                "sample_id": sample.sample_id,
+                "status": sample.status,
+                "final_status": sample.final_status,
+                "sample_artifact_dir": sample.sample_artifact_dir,
+                "artifact_manifest_path": sample.artifact_manifest_path,
+                "final_outputs": {
+                    "summary_xml": sample.final_summary_path,
+                    "critic_feedback": sample.final_critic_feedback_path,
+                    "loop_diagnostics": sample.loop_diagnostics_path,
+                    "sample_result": sample.sample_result_artifact_path,
+                },
+                "llm_trace_dirs": {
+                    "summarizer": sample.summarizer_trace_dir,
+                    "critic": sample.critic_trace_dir,
+                    "judge": sample.judge_trace_dir,
+                },
+            }
+            for sample in report.samples
+            if sample.sample_artifact_dir
+        ],
+    }
+    write_json_with_hash(index_path, index_payload)
+
+    readme_lines = [
+        "# SPoRC Sample Artifacts",
+        "",
+        "Each sample folder mirrors one benchmark sample executed in this run.",
+        "",
+        "## Layout",
+        "",
+        "- `<sample_id>/manifest.json`: sample-local index of final outputs and raw LLM call files.",
+        "- `<sample_id>/final/summary.xml`: final summarizer output persisted for that sample.",
+        "- `<sample_id>/final/critic_feedback.txt`: final critic feedback captured from loop diagnostics when present.",
+        "- `<sample_id>/final/loop_diagnostics.json`: full loop diagnostics payload from the orchestrator.",
+        "- `<sample_id>/final/sample_result.json`: the same sample result payload that appears in `report.json`, with artifact paths resolved.",
+        "- `<sample_id>/llm/summarizer/call_XXX.json`: raw summarizer request, streamed reasoning/content, and final response payload.",
+        "- `<sample_id>/llm/critic/call_XXX.json`: raw critic request, streamed reasoning/content, and final response payload.",
+        "- `<sample_id>/llm/judge/call_XXX.json`: raw judge request, streamed reasoning/content, and final response payload.",
+        "",
+        f"Run-level index: `{index_path}`",
+        "",
+        "## Samples",
+        "",
+    ]
+    indexed_samples = [sample for sample in report.samples if sample.sample_artifact_dir]
+    if not indexed_samples:
+        readme_lines.append("- No executed sample artifact folders were written for this run.")
+    else:
+        for sample in indexed_samples:
+            sample_dir = Path(sample.sample_artifact_dir).name
+            readme_lines.append(
+                f"- `{sample.sample_id}`: `{sample_dir}/` status=`{sample.status}` final_status=`{sample.final_status}`"
+            )
+    readme_path.write_text("\n".join(readme_lines) + "\n", encoding="utf-8")
+
+
 def write_execution_artifacts(
     *,
     run_root: Path,
@@ -184,6 +257,7 @@ def write_execution_artifacts(
     results_path = run_root / "results.md"
 
     write_json_with_hash(report_path, asdict(report))
+    _write_sample_artifact_navigation(report=report)
     notes_lines = [
         "# SPoRC Summarizer-Critic Benchmark Notes",
         "",
@@ -201,9 +275,19 @@ def write_execution_artifacts(
             else "- Sample seed: `manifest_order`"
         ),
         (
+            f"- Sample shard: `{report.sample_shard_index}/{report.sample_shard_count}`"
+            if report.sample_shard_count > 1
+            else "- Sample shard: `full`"
+        ),
+        (
             f"- Checkpoint path: `{report.checkpoint_path}`"
             if report.checkpoint_path
             else "- Checkpoint path: `none`"
+        ),
+        (
+            f"- Sample artifacts root: `{report.sample_artifacts_root}`"
+            if report.sample_artifacts_root
+            else "- Sample artifacts root: `none`"
         ),
         f"- Resumed from checkpoint: `{report.resumed_from_checkpoint}`",
         f"- Resume count: `{report.resume_count}`",
@@ -224,6 +308,8 @@ def write_execution_artifacts(
             if report.override_target_seconds is not None
             else "- Explicit target override seconds: `none`"
         ),
+        "- Each `samples/<sample_id>/` directory contains `final/` outputs plus raw `llm/summarizer`, `llm/critic`, and `llm/judge` call traces.",
+        "- `samples/index.json` and `samples/README.md` provide a run-local entrypoint into the per-sample artifact tree.",
         "- `report.json` includes transcript and summary per-speaker message lists for speaker-style auditing.",
         "- When transcript_only is false, `report.json` also records source-audio, speaker-sample, and archived voice-clone artifact paths per sample.",
     ]
@@ -281,6 +367,7 @@ def write_duration_sweep_artifacts(
             if report.sample_seed is not None
             else "- Sample seed: `manifest_order`"
         ),
+        f"- Preset concurrency: `{report.preset_concurrency}`",
         "",
         render_duration_sweep_table(report.preset_summaries),
         "",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from dataclasses import asdict
 import gzip
 import json
@@ -10,19 +11,32 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
+import pytest
 
 from card_framework.benchmark.summarizer_critic.sporc.runner import (
+    _ArtifactCaptureLLMProvider,
+    _ArtifactCaptureResponseCallback,
+    _canonical_speaker_label,
+    _claim_next_shared_sample_id,
     _build_preflight_failed_result,
     _classify_sample_failure,
+    _copy_sample_transcript,
     _prepare_provider_config,
     _compute_composite_score,
+    _execute_sample,
     _evaluate_sample_preflight,
+    _initialize_shared_sample_queue,
     _normalize_max_iterations,
+    _mark_shared_sample_completed,
+    _open_shared_sample_queue_connection,
     _prepare_benchmark_audio_cfg,
     _resolve_override_target_seconds,
     _resolve_sample_target_seconds,
+    _resolve_sample_shard_args,
     _resolve_orchestrator_timeouts,
+    _SampleArtifactRecorder,
     _select_samples,
+    _select_sample_shard,
     _summarize_results,
     build_execute_parser,
     execute_benchmark,
@@ -32,7 +46,9 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     SampleBenchmarkResult,
     SampleMetricBundle,
 )
+from card_framework.benchmark.summarizer_critic.sporc.judge import SPoRCJudgeResult
 from card_framework.benchmark.types import EmbeddingProfile, ProviderProfile
+from card_framework.shared.llm_provider import LLMProvider, Message
 
 
 def _sample(
@@ -82,6 +98,10 @@ def _write_empty_transcript(path: Path) -> None:
     )
 
 
+def _write_transcript_payload(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _completed_result(sample_id: str) -> SampleBenchmarkResult:
     return SampleBenchmarkResult(
         sample_id=sample_id,
@@ -122,6 +142,536 @@ def _failed_result(sample_id: str) -> SampleBenchmarkResult:
         metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
         error_message="boom",
     )
+
+
+class _CallbackAwareProvider(LLMProvider):
+    """Test double that emits deterministic streamed reasoning and content."""
+
+    def __init__(
+        self,
+        *,
+        agent_name: str,
+        response_text: str = "",
+        response_message: Message | None = None,
+        reasoning_tokens: list[str] | None = None,
+        content_tokens: list[str] | None = None,
+    ) -> None:
+        self._agent_name = agent_name
+        self._response_text = response_text
+        self._response_message = response_message
+        self._reasoning_tokens = reasoning_tokens or []
+        self._content_tokens = content_tokens or []
+        self._callback = None
+
+    def set_response_callback(self, callback) -> None:  # type: ignore[no-untyped-def]
+        self._callback = callback
+
+    def _emit_stream(self) -> None:
+        if self._callback is None:
+            return
+        self._callback.on_start(self._agent_name)
+        for token in self._reasoning_tokens:
+            self._callback.on_thought_token(token)
+        for token in self._content_tokens:
+            self._callback.on_content_token(token)
+        self._callback.on_complete()
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        del system_prompt, user_prompt, max_tokens
+        self._emit_stream()
+        return self._response_text
+
+    def chat(
+        self,
+        messages,
+        tools=None,
+        tool_choice=None,
+        max_tokens: int | None = None,
+    ) -> Message:
+        del messages, tools, tool_choice, max_tokens
+        self._emit_stream()
+        if self._response_message is None:
+            raise AssertionError("response_message must be set for chat()")
+        return self._response_message
+
+
+class _StubEventCapture:
+    """Minimal event-capture stub for `_execute_sample` coverage."""
+
+    def __init__(self) -> None:
+        self._counts = {"retrieval_stats": 2, "tool_invocation": 4}
+
+    def count(self, name: str) -> int:
+        return int(self._counts.get(name, 0))
+
+
+class _StubOrchestrator:
+    """Minimal orchestrator stub for `_execute_sample` coverage."""
+
+    async def index_transcript(self, transcript_payload: dict[str, object]) -> None:
+        del transcript_payload
+
+    async def run_loop_with_diagnostics(
+        self,
+        *,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
+        max_iterations: int | None,
+        full_transcript_text: str,
+        speaker_samples_manifest_path: Path | None,
+        draft_audio_state_path: Path | None,
+    ) -> dict[str, object]:
+        del (
+            target_seconds,
+            duration_tolerance_ratio,
+            max_iterations,
+            full_transcript_text,
+            speaker_samples_manifest_path,
+            draft_audio_state_path,
+        )
+        return {
+            "draft": "plain summary output",
+            "final_estimated_seconds": 27.5,
+            "converged": True,
+            "iterations_run": 2,
+            "final_status": "pass",
+            "final_feedback": "critic accepted the draft",
+        }
+
+
+def test_sample_artifact_recorder_writes_hierarchical_llm_traces(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    sample = _sample("sample-a")
+    recorder = _SampleArtifactRecorder(run_root=run_root)
+    recorder.activate_sample(sample=sample, target_seconds=60)
+
+    summarizer_inner = _CallbackAwareProvider(
+        agent_name="Summarizer",
+        response_message=Message(
+            role="assistant",
+            content="plain summary output",
+            reasoning_content="summary reasoning",
+        ),
+        reasoning_tokens=["summary ", "reasoning"],
+        content_tokens=["plain ", "summary ", "output"],
+    )
+    summarizer_inner.set_response_callback(
+        _ArtifactCaptureResponseCallback(recorder=recorder, role="summarizer")
+    )
+    summarizer = _ArtifactCaptureLLMProvider(
+        inner_provider=summarizer_inner,
+        recorder=recorder,
+        role="summarizer",
+    )
+    summarizer.chat(
+        messages=[
+            {"role": "system", "content": "You are the summarizer."},
+            {"role": "user", "content": "Summarize this transcript."},
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_draft",
+                    "description": "Save the current draft.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        max_tokens=256,
+    )
+
+    critic_inner = _CallbackAwareProvider(
+        agent_name="Critic",
+        response_message=Message(
+            role="assistant",
+            content='{"verdict":"pass"}',
+            reasoning_content="critic reasoning",
+        ),
+        reasoning_tokens=["critic ", "reasoning"],
+        content_tokens=['{"verdict":"pass"}'],
+    )
+    critic_inner.set_response_callback(
+        _ArtifactCaptureResponseCallback(recorder=recorder, role="critic")
+    )
+    critic = _ArtifactCaptureLLMProvider(
+        inner_provider=critic_inner,
+        recorder=recorder,
+        role="critic",
+    )
+    critic.chat(
+        messages=[
+            {"role": "system", "content": "You are the critic."},
+            {"role": "user", "content": "Evaluate the draft."},
+        ],
+        max_tokens=128,
+    )
+
+    judge_inner = _CallbackAwareProvider(
+        agent_name="Judge",
+        response_text=(
+            '{"Factualness": 0.8, "Naturalness": 0.7, '
+            '"Speaker Grammar Similarity": 0.6}'
+        ),
+        reasoning_tokens=["judge ", "reasoning"],
+        content_tokens=['{"Factualness":0.8}'],
+    )
+    judge_inner.set_response_callback(
+        _ArtifactCaptureResponseCallback(recorder=recorder, role="judge")
+    )
+    judge = _ArtifactCaptureLLMProvider(
+        inner_provider=judge_inner,
+        recorder=recorder,
+        role="judge",
+    )
+    judge.generate(
+        system_prompt="You are the judge.",
+        user_prompt="Score the summary.",
+        max_tokens=64,
+    )
+
+    result = _completed_result(sample.sample_id)
+    artifact_paths = recorder.finalize_sample(
+        result=result,
+        diagnostics={
+            "draft": "plain summary output",
+            "final_feedback": "critic accepted the draft",
+        },
+        candidate_summary="plain summary output",
+    )
+    recorder.clear_active_sample()
+
+    assert artifact_paths is not None
+    sample_root = run_root / "samples" / sample.sample_id
+    assert (sample_root / "final" / "summary.xml").read_text(encoding="utf-8") == (
+        "plain summary output"
+    )
+    assert (
+        sample_root / "final" / "critic_feedback.txt"
+    ).read_text(encoding="utf-8") == "critic accepted the draft"
+
+    summarizer_trace = json.loads(
+        (sample_root / "llm" / "summarizer" / "call_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    critic_trace = json.loads(
+        (sample_root / "llm" / "critic" / "call_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    judge_trace = json.loads(
+        (sample_root / "llm" / "judge" / "call_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summarizer_trace["streamed_reasoning_content"] == "summary reasoning"
+    assert summarizer_trace["streamed_content"] == "plain summary output"
+    assert critic_trace["streamed_reasoning_content"] == "critic reasoning"
+    assert judge_trace["streamed_reasoning_content"] == "judge reasoning"
+    assert judge_trace["response_text"].startswith('{"Factualness": 0.8')
+
+    manifest_payload = json.loads(
+        (sample_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert Path(manifest_payload["final"]["sample_result"]).name == "sample_result.json"
+    assert (
+        Path(manifest_payload["llm_traces"]["summarizer"]["calls"][0]).name
+        == "call_001.json"
+    )
+
+    sample_result_payload = json.loads(
+        (sample_root / "final" / "sample_result.json").read_text(encoding="utf-8")
+    )
+    assert sample_result_payload["summarizer_trace_dir"] == str(
+        (sample_root / "llm" / "summarizer").resolve()
+    )
+    assert sample_result_payload["final_summary_path"] == str(
+        (sample_root / "final" / "summary.xml").resolve()
+    )
+
+
+def test_execute_sample_persists_artifact_paths_in_result(tmp_path: Path) -> None:
+    transcript_path = tmp_path / "sample.transcript.json"
+    _write_transcript(
+        transcript_path,
+        text="hello there from the podcast transcript",
+    )
+    run_root = tmp_path / "run"
+    sample = _sample("sample-a", transcript_path=str(transcript_path))
+    recorder = _SampleArtifactRecorder(run_root=run_root)
+    judge = SimpleNamespace(
+        evaluate=lambda **kwargs: SPoRCJudgeResult(
+            status="ok",
+            scores={
+                "Factualness": 0.8,
+                "Naturalness": 0.7,
+                "Speaker Grammar Similarity": 0.6,
+            },
+        )
+    )
+
+    result = asyncio.run(
+        _execute_sample(
+            sample=sample,
+            target_seconds=30,
+            preloaded_transcript=None,
+            orchestrator=_StubOrchestrator(),
+            event_capture=_StubEventCapture(),
+            retrieval_enabled=False,
+            duration_tolerance_ratio=0.25,
+            max_iterations=3,
+            judge=judge,
+            calibration=SimpleNamespace(),
+            run_root=run_root,
+            artifact_recorder=recorder,
+            audio_cfg={},
+            transcript_only=True,
+            voice_clone_orchestrator=None,
+            force_download_audio=False,
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.sample_artifact_dir == str(
+        (run_root / "samples" / sample.sample_id).resolve()
+    )
+    assert result.final_summary_path == str(
+        (run_root / "samples" / sample.sample_id / "final" / "summary.xml").resolve()
+    )
+    assert result.final_critic_feedback_path == str(
+        (
+            run_root
+            / "samples"
+            / sample.sample_id
+            / "final"
+            / "critic_feedback.txt"
+        ).resolve()
+    )
+    assert Path(result.sample_result_artifact_path or "").exists()
+    assert Path(result.artifact_manifest_path or "").exists()
+    assert Path(result.judge_trace_dir or "").exists()
+
+    sample_result_payload = json.loads(
+        Path(result.sample_result_artifact_path or "").read_text(encoding="utf-8")
+    )
+    assert sample_result_payload["sample_artifact_dir"] == result.sample_artifact_dir
+    assert sample_result_payload["final_summary_path"] == result.final_summary_path
+    assert Path(result.final_summary_path or "").read_text(encoding="utf-8") == (
+        "plain summary output"
+    )
+    assert Path(result.final_critic_feedback_path or "").read_text(
+        encoding="utf-8"
+    ) == "critic accepted the draft"
+
+
+def test_copy_sample_transcript_keeps_raw_speakers_and_marks_uncertainty(
+    tmp_path: Path,
+) -> None:
+    transcript_path = tmp_path / "noisy.transcript.json"
+    original_payload = {
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "text": "Welcome back to the show.",
+                "start_time": 0,
+                "end_time": 4000,
+            },
+            {
+                "speaker": "SPEAKER_09",
+                "text": "yeah",
+                "start_time": 4000,
+                "end_time": 4300,
+                "overlap_speakers": ["SPEAKER_00"],
+            },
+            {
+                "speaker": "SPEAKER_00",
+                "text": "Today we are discussing the launch.",
+                "start_time": 4300,
+                "end_time": 9000,
+            },
+            {
+                "speaker": "SPEAKER_42",
+                "text": "...",
+                "start_time": 9000,
+                "end_time": 9300,
+            },
+            {
+                "speaker": "SPEAKER_77",
+                "text": "absolutely",
+                "start_time": 9300,
+                "end_time": 9800,
+                "overlap_speakers": ["SPEAKER_01"],
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "text": "Thanks for having me on the podcast.",
+                "start_time": 9800,
+                "end_time": 15000,
+            },
+        ],
+        "metadata": {
+            "dataset": "sporc",
+            "speaker_alias_map": {
+                "SPEAKER_00": "SPEAKER_00",
+                "speaker_00": "SPEAKER_00",
+                "Alex Host": "SPEAKER_00",
+                "SPEAKER_01": "SPEAKER_01",
+                "speaker_01": "SPEAKER_01",
+                "Blair Guest": "SPEAKER_01",
+            },
+            "named_speaker_labels": ["SPEAKER_00", "SPEAKER_01"],
+            "main_speaker_labels": ["SPEAKER_00", "SPEAKER_01"],
+            "speaker_notes": ["mainEpSpeakers: SPEAKER_00, SPEAKER_01"],
+        },
+    }
+    _write_transcript_payload(transcript_path, original_payload)
+    sample = _sample(
+        "sample-noisy",
+        transcript_path=str(transcript_path),
+    )
+
+    copied_transcript, working_path = _copy_sample_transcript(
+        sample=sample,
+        run_root=tmp_path / "run",
+        normalize_for_transcript_only=True,
+    )
+
+    copied_payload = json.loads(working_path.read_text(encoding="utf-8"))
+    copied_speakers = [segment["speaker"] for segment in copied_payload["segments"]]
+    assert copied_speakers == [
+        "SPEAKER_00",
+        "SPEAKER_09",
+        "SPEAKER_00",
+        "SPEAKER_77",
+        "SPEAKER_01",
+    ]
+    assert copied_payload["segments"][1]["raw_speakers"] == ["SPEAKER_09", "SPEAKER_00"]
+    assert copied_payload["segments"][1]["speaker_candidates"] == [
+        "SPEAKER_09",
+        "SPEAKER_00",
+    ]
+    assert copied_payload["segments"][1]["speaker_uncertain"] is True
+    assert copied_payload["segments"][3]["raw_speakers"] == ["SPEAKER_77", "SPEAKER_01"]
+    assert copied_payload["segments"][3]["speaker_candidates"] == [
+        "SPEAKER_77",
+        "SPEAKER_01",
+    ]
+    assert copied_payload["segments"][3]["speaker_uncertain"] is True
+    assert copied_payload["segments"][4]["speaker_uncertain"] is False
+    assert copied_payload["metadata"]["speaker_alias_map"] == {
+        "SPEAKER_00": "SPEAKER_00",
+        "Alex Host": "SPEAKER_00",
+        "SPEAKER_01": "SPEAKER_01",
+        "Blair Guest": "SPEAKER_01",
+    }
+    assert copied_payload["metadata"]["speaker_normalization"]["raw_segment_count"] == 6
+    assert copied_payload["metadata"]["speaker_normalization"][
+        "speaker_assignment_mode"
+    ] == "raw_with_uncertainty"
+    assert copied_payload["metadata"]["speaker_normalization"][
+        "speaker_reassignment_enabled"
+    ] is False
+    assert (
+        copied_payload["metadata"]["speaker_normalization"][
+            "normalized_distinct_speaker_count"
+        ]
+        == 4
+    )
+    assert (
+        copied_payload["metadata"]["speaker_normalization"]["uncertain_segment_count"]
+        == 2
+    )
+    assert copied_transcript.metadata["speaker_normalization"]["mode"] == (
+        "transcript_only_benchmark"
+    )
+    assert json.loads(transcript_path.read_text(encoding="utf-8")) == original_payload
+
+
+def test_copy_sample_transcript_preserves_stable_main_speakers(
+    tmp_path: Path,
+) -> None:
+    transcript_path = tmp_path / "stable.transcript.json"
+    _write_transcript_payload(
+        transcript_path,
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Happy Father's Day to everyone listening.",
+                    "start_time": 0,
+                    "end_time": 5000,
+                },
+                {
+                    "speaker": "SPEAKER_02",
+                    "text": "Absolutely and thanks again for joining us today.",
+                    "start_time": 5000,
+                    "end_time": 10000,
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Let's get into the details now.",
+                    "start_time": 10000,
+                    "end_time": 14000,
+                },
+            ],
+            "metadata": {
+                "dataset": "sporc",
+                "speaker_alias_map": {
+                    "SPEAKER_00": "SPEAKER_00",
+                    "Host": "SPEAKER_00",
+                    "SPEAKER_02": "SPEAKER_02",
+                    "Guest": "SPEAKER_02",
+                },
+                "named_speaker_labels": ["SPEAKER_00", "SPEAKER_02"],
+                "main_speaker_labels": ["SPEAKER_00", "SPEAKER_02"],
+            },
+        },
+    )
+    sample = _sample(
+        "sample-stable",
+        transcript_path=str(transcript_path),
+    )
+
+    _, working_path = _copy_sample_transcript(
+        sample=sample,
+        run_root=tmp_path / "run",
+        normalize_for_transcript_only=True,
+    )
+
+    copied_payload = json.loads(working_path.read_text(encoding="utf-8"))
+    assert [segment["speaker"] for segment in copied_payload["segments"]] == [
+        "SPEAKER_00",
+        "SPEAKER_02",
+        "SPEAKER_00",
+    ]
+    assert copied_payload["segments"][0]["speaker_candidates"] == ["SPEAKER_00"]
+    assert copied_payload["segments"][0]["speaker_uncertain"] is False
+    assert copied_payload["metadata"]["named_speaker_labels"] == [
+        "SPEAKER_00",
+        "SPEAKER_02",
+    ]
+    assert copied_payload["metadata"]["main_speaker_labels"] == [
+        "SPEAKER_00",
+        "SPEAKER_02",
+    ]
+
+
+def test_canonical_speaker_label_is_case_insensitive_without_duplicate_alias_keys() -> None:
+    alias_map = {
+        "SPEAKER_00": "SPEAKER_00",
+        "Alex Host": "SPEAKER_00",
+    }
+
+    assert _canonical_speaker_label("speaker_00", alias_map) == "SPEAKER_00"
+    assert _canonical_speaker_label("alex host", alias_map) == "SPEAKER_00"
 
 
 def _benchmark_base_cfg(tmp_path: Path):
@@ -202,6 +752,127 @@ def test_select_samples_uses_seed_independent_of_manifest_order() -> None:
     ]
 
     assert forward_ids == reverse_ids
+
+
+def test_select_sample_shard_uses_deterministic_modulo_partition() -> None:
+    selected_samples = [_sample("a"), _sample("b"), _sample("c"), _sample("d"), _sample("e")]
+
+    assert [
+        sample.sample_id
+        for sample in _select_sample_shard(
+            selected_samples,
+            shard_index=1,
+            shard_count=3,
+        )
+    ] == ["a", "d"]
+    assert [
+        sample.sample_id
+        for sample in _select_sample_shard(
+            selected_samples,
+            shard_index=2,
+            shard_count=3,
+        )
+    ] == ["b", "e"]
+    assert [
+        sample.sample_id
+        for sample in _select_sample_shard(
+            selected_samples,
+            shard_index=3,
+            shard_count=3,
+        )
+    ] == ["c"]
+
+
+def test_resolve_sample_shard_args_rejects_out_of_range_index() -> None:
+    args = argparse.Namespace(sample_shard_index=4, sample_shard_count=3)
+
+    with pytest.raises(Exception, match="sample-shard-index"):
+        _resolve_sample_shard_args(args)
+
+
+def test_shared_sample_queue_claims_each_sample_once(tmp_path: Path) -> None:
+    queue_root = tmp_path / "shared_queue"
+    first_connection = _open_shared_sample_queue_connection(queue_root)
+    second_connection = _open_shared_sample_queue_connection(queue_root)
+    try:
+        _initialize_shared_sample_queue(
+            first_connection,
+            sample_order=["sample-a", "sample-b", "sample-c"],
+        )
+        _initialize_shared_sample_queue(
+            second_connection,
+            sample_order=["sample-a", "sample-b", "sample-c"],
+        )
+
+        assert (
+            _claim_next_shared_sample_id(
+                first_connection,
+                worker_label="worker-1",
+                worker_pid=101,
+            )
+            == "sample-a"
+        )
+        assert (
+            _claim_next_shared_sample_id(
+                second_connection,
+                worker_label="worker-2",
+                worker_pid=202,
+            )
+            == "sample-b"
+        )
+
+        _mark_shared_sample_completed(
+            first_connection,
+            sample_id="sample-a",
+            final_status="pass",
+        )
+        _mark_shared_sample_completed(
+            second_connection,
+            sample_id="sample-b",
+            final_status="pass",
+        )
+
+        assert (
+            _claim_next_shared_sample_id(
+                first_connection,
+                worker_label="worker-1",
+                worker_pid=101,
+            )
+            == "sample-c"
+        )
+        _mark_shared_sample_completed(
+            first_connection,
+            sample_id="sample-c",
+            final_status="pass",
+        )
+        assert (
+            _claim_next_shared_sample_id(
+                second_connection,
+                worker_label="worker-2",
+                worker_pid=202,
+            )
+            is None
+        )
+    finally:
+        first_connection.close()
+        second_connection.close()
+
+
+def test_shared_sample_queue_rejects_mismatched_sample_order(tmp_path: Path) -> None:
+    connection = _open_shared_sample_queue_connection(tmp_path / "shared_queue")
+    try:
+        _initialize_shared_sample_queue(
+            connection,
+            sample_order=["sample-a", "sample-b"],
+        )
+
+        with pytest.raises(Exception, match="sample order"):
+            _initialize_shared_sample_queue(
+                connection,
+                sample_order=["sample-b", "sample-a"],
+            )
+    finally:
+        connection.close()
 
 
 def test_normalize_max_iterations_maps_non_positive_values_to_none() -> None:
@@ -482,6 +1153,10 @@ def test_build_execute_parser_accepts_sweep_child_progress_flags() -> None:
             "--resume-from-checkpoint",
             "--resume-failure-reason",
             "sweep_watchdog_stalled",
+            "--sample-shard-index",
+            "2",
+            "--sample-shard-count",
+            "3",
         ]
     )
 
@@ -495,6 +1170,110 @@ def test_build_execute_parser_accepts_sweep_child_progress_flags() -> None:
     assert args.checkpoint_path == "checkpoint.json"
     assert args.resume_from_checkpoint is True
     assert args.resume_failure_reason == "sweep_watchdog_stalled"
+    assert args.sample_shard_index == 2
+    assert args.sample_shard_count == 3
+
+
+def test_execute_benchmark_treats_empty_shard_as_completed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    transcript_a = tmp_path / "a.transcript.json"
+    transcript_b = tmp_path / "b.transcript.json"
+    _write_transcript(transcript_a, text=" ".join(["word"] * 124))
+    _write_transcript(transcript_b, text=" ".join(["word"] * 124))
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_sample",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "sample",
+                "episode_data_path": str(tmp_path / "episode.jsonl.gz"),
+                "turn_data_path": str(tmp_path / "turn.jsonl.gz"),
+                "sample_count": 2,
+                "samples": [
+                    {
+                        "sample_id": "a",
+                        "dataset": "sporc_sample",
+                        "episode_key": "a.mp3",
+                        "transcript_path": str(transcript_a),
+                        "reference_summary": "reference a",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                    {
+                        "sample_id": "b",
+                        "dataset": "sporc_sample",
+                        "episode_key": "b.mp3",
+                        "transcript_path": str(transcript_b),
+                        "reference_summary": "reference b",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(manifest_path),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--transcript-only",
+            "--max-samples",
+            "2",
+            "--sample-shard-index",
+            "3",
+            "--sample-shard-count",
+            "3",
+        ]
+    )
+
+    provider_profile = _benchmark_provider_profile()
+    embedding_profile = _disabled_embedding_profile()
+
+    async def _unexpected_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        raise AssertionError("runtime startup should not happen for empty shards")
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._load_base_config",
+        lambda path: _benchmark_base_cfg(tmp_path),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.load_provider_profiles",
+        lambda path: [provider_profile],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._find_provider_profile",
+        lambda profiles, provider_id: provider_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.missing_required_env",
+        lambda profile: [],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._resolve_embedding_profile",
+        lambda base_cfg, embedding_mode: embedding_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _unexpected_start_runtime,
+    )
+
+    report = execute_benchmark(args)
+
+    assert report.status == "completed"
+    assert report.summary.sample_count == 0
+    assert report.sample_shard_index == 3
+    assert report.sample_shard_count == 3
 
 
 def test_execute_benchmark_resumes_checkpoint_and_marks_orphaned_sample_failed(
@@ -721,6 +1500,7 @@ def test_execute_benchmark_continues_after_failed_sample_and_rebuilds_runtime(
             orchestrator=object(),
             judge=object(),
             event_capture=object(),
+            artifact_recorder=_SampleArtifactRecorder(run_root=kwargs["run_root"]),
             retrieval_enabled=False,
             shared_agent_client=object(),
             servers=[],

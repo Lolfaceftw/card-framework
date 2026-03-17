@@ -6,11 +6,17 @@ import argparse
 import json
 import os
 from pathlib import Path
+import queue
 import time
 
+import pytest
+
 from card_framework.benchmark.summarizer_critic.sporc.cli import (
+    _aggregate_duration_sweep_preset,
+    _colorize_cli_status,
     _DurationSweepChildState,
     _build_execute_child_command,
+    _launch_duration_sweep_child,
     _child_environment,
     _build_parser,
     _detect_duration_sweep_child_stall,
@@ -62,6 +68,28 @@ class _MutableProcessStub:
         return self.returncode
 
 
+class _TtyStreamStub:
+    """Minimal tty-like stream stub used by color helper tests."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+class _PopenStub:
+    """Simple Popen stand-in that records launched child commands."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.stdout: list[str] = []
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
+
+
 def test_sporc_child_environment_enables_unbuffered_python_output(monkeypatch) -> None:
     monkeypatch.setenv("PYTHONPATH", "existing-path")
 
@@ -71,6 +99,27 @@ def test_sporc_child_environment_enables_unbuffered_python_output(monkeypatch) -
     pythonpath_entries = env["PYTHONPATH"].split(os.pathsep)
     assert str(REPO_ROOT / "src") in pythonpath_entries
     assert "existing-path" in pythonpath_entries
+
+
+def test_colorize_cli_status_adds_ansi_codes_for_terminal_messages(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    rendered = _colorize_cli_status(
+        "Started preset 5m[s1/3] (retrieval=5001, summarizer=5002, critic=5003).",
+        stream=_TtyStreamStub(),
+    )
+
+    assert rendered.startswith("\033[1m\033[36m")
+    assert rendered.endswith("\033[0m")
+
+
+def test_colorize_cli_status_respects_no_color(monkeypatch) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    message = "Started preset 5m."
+
+    assert _colorize_cli_status(message, stream=_TtyStreamStub()) == message
 
 
 def test_render_duration_sweep_menu_lists_presets() -> None:
@@ -103,6 +152,106 @@ def test_resolve_duration_sweep_examples_prefers_explicit_examples() -> None:
     args = argparse.Namespace(examples=12, max_samples=100)
 
     assert _resolve_duration_sweep_examples(args) == 12
+
+
+def test_build_parser_accepts_human_sample_command() -> None:
+    parser = _build_parser(target_command="human-sample")
+
+    args = parser.parse_args(
+        [
+            "human-sample",
+            "--dataset-manifest",
+            "manifest.json",
+            "--duration-preset",
+            "30s",
+            "--episodes",
+            "5",
+            "--words-per-minute",
+            "170",
+            "--sample-factor",
+            "5",
+        ]
+    )
+
+    assert args.command == "human-sample"
+    assert args.dataset_manifest == "manifest.json"
+    assert args.duration_preset == "30s"
+    assert args.episodes == 5
+
+
+def test_build_parser_accepts_llm_sample_command() -> None:
+    parser = _build_parser(target_command="llm-sample")
+
+    args = parser.parse_args(
+        [
+            "llm-sample",
+            "--dataset-manifest",
+            "manifest.json",
+            "--duration-preset",
+            "30s",
+            "--samples",
+            "20",
+            "--episodes",
+            "5",
+            "--select-episode",
+            "[7,10]",
+            "--model",
+            "claude-opus-4-6",
+            "--thinking-effort",
+            "medium",
+        ]
+    )
+
+    assert args.command == "llm-sample"
+    assert args.dataset_manifest == "manifest.json"
+    assert args.duration_preset == "30s"
+    assert args.samples == 20
+    assert args.episodes == 5
+    assert args.select_episode == "[7,10]"
+    assert args.model == "claude-opus-4-6"
+
+
+def test_build_parser_accepts_dedupe_manifest_command() -> None:
+    parser = _build_parser(target_command="dedupe-manifest")
+
+    args = parser.parse_args(
+        [
+            "dedupe-manifest",
+            "--manifest-path",
+            "manifest.json",
+            "--audit-path",
+            "audit.json",
+        ]
+    )
+
+    assert args.command == "dedupe-manifest"
+    assert args.manifest_path == "manifest.json"
+    assert args.audit_path == "audit.json"
+
+
+def test_build_parser_accepts_export_transcripts_command() -> None:
+    parser = _build_parser(target_command="export-transcripts")
+
+    args = parser.parse_args(
+        [
+            "export-transcripts",
+            "--manifest-path",
+            "manifest.json",
+            "--episodes",
+            "7-10",
+            "--output-path",
+            "combined.txt",
+            "--backwards-compat",
+            "--raw",
+        ]
+    )
+
+    assert args.command == "export-transcripts"
+    assert args.manifest_path == "manifest.json"
+    assert args.episodes == "7-10"
+    assert args.output_path == "combined.txt"
+    assert args.backwards_compat is True
+    assert args.raw is True
 
 
 def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
@@ -152,6 +301,8 @@ def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
         emit_progress_heartbeats=True,
         progress_heartbeat_seconds=30.0,
         apply_sweep_timeout_defaults=True,
+        sample_shard_index=2,
+        sample_shard_count=3,
     )
 
     assert "--duration-preset" in command
@@ -183,6 +334,88 @@ def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
     assert "--critic-timeout-seconds" in command
     assert "--retrieval-timeout-seconds" in command
     assert "--index-timeout-seconds" in command
+    assert "--sample-shard-index" in command
+    assert "2" in command
+    assert "--sample-shard-count" in command
+    assert "3" in command
+
+
+def test_launch_duration_sweep_child_uses_full_sample_scope_with_shared_queue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    launched_commands: list[list[str]] = []
+
+    def _fake_popen(command, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        launched_commands.append(list(command))
+        return _PopenStub(pid=9001)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._reserve_distinct_port_triplet",
+        lambda used_ports: (5201, 5202, 5203),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._start_duration_sweep_reader",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli.subprocess.Popen",
+        _fake_popen,
+    )
+
+    args = argparse.Namespace(
+        dataset_manifest="manifest.json",
+        dataset_variant="full",
+        episode_data_path="",
+        turn_data_path="",
+        reference_wpm=150.0,
+        output_root=str(tmp_path / "runs"),
+        provider_profiles="profiles.yaml",
+        config="config.yaml",
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="disabled",
+        judge_source_char_limit=30000,
+        duration_preset="",
+        target_seconds_override=None,
+        max_samples=25,
+        sample_seed=41,
+        max_iterations=3,
+        summarizer_timeout_seconds=None,
+        critic_timeout_seconds=None,
+        retrieval_timeout_seconds=None,
+        index_timeout_seconds=None,
+        prepare_if_missing=True,
+        force_download_dataset=False,
+        force_download_audio=False,
+        transcript_only=False,
+        enable_voice_clone=False,
+        progress_heartbeat_seconds=30.0,
+    )
+
+    state = _launch_duration_sweep_child(
+        args=args,
+        sweep_root=tmp_path / "sweep",
+        duration_preset="5m",
+        shard_index=7,
+        shard_count=9,
+        max_samples=100,
+        used_ports=set(),
+        event_queue=queue.Queue(),
+        shared_sample_queue_root=tmp_path / "queue-root",
+    )
+
+    try:
+        command = launched_commands[0]
+        assert "--shared-sample-queue-root" in command
+        assert command[command.index("--sample-shard-index") + 1] == "1"
+        assert command[command.index("--sample-shard-count") + 1] == "1"
+        assert state.shard_index == 7
+        assert state.shard_count == 9
+    finally:
+        state.log_handle.close()
 
 
 def test_update_duration_sweep_child_state_tracks_heartbeat_metadata(
@@ -343,15 +576,25 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    launched: list[tuple[str, int]] = []
+    launched: list[tuple[str, int, int, int]] = []
     finalized: list[tuple[str, int]] = []
     written_reports = []
+    sample_counts_by_worker = {
+        ("30s", 1): 100,
+        ("1m", 1): 50,
+        ("1m", 2): 50,
+        ("5m", 1): 33,
+        ("5m", 2): 33,
+        ("5m", 3): 34,
+    }
 
     def _fake_launch_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
         duration_preset = kwargs["duration_preset"]
+        shard_index = kwargs["shard_index"]
+        shard_count = kwargs["shard_count"]
         max_samples = kwargs["max_samples"]
-        launched.append((duration_preset, max_samples))
-        log_path = tmp_path / f"{duration_preset}.log"
+        launched.append((duration_preset, shard_index, shard_count, max_samples))
+        log_path = tmp_path / f"{duration_preset}.worker-{shard_index}.log"
         log_handle = log_path.open("w", encoding="utf-8")
         return _DurationSweepChildState(
             duration_preset=duration_preset,
@@ -363,8 +606,10 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
             summarizer_port=5101 + len(launched) * 3,
             critic_port=5102 + len(launched) * 3,
             max_samples=max_samples,
-            checkpoint_path=tmp_path / f"{duration_preset}.checkpoint.json",
+            checkpoint_path=tmp_path / f"{duration_preset}.worker-{shard_index}.checkpoint.json",
             output_root=tmp_path / "runs",
+            shard_index=shard_index,
+            shard_count=shard_count,
         )
 
     def _fake_finalize_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
@@ -373,16 +618,17 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
         finalized.append((state.duration_preset, fallback_sample_count))
         if not state.log_handle.closed:
             state.log_handle.close()
+        sample_count = sample_counts_by_worker[(state.duration_preset, state.shard_index)]
         return DurationSweepPresetSummary(
             duration_preset=state.duration_preset,
             target_seconds={"30s": 30, "1m": 60, "5m": 300}[state.duration_preset],
             status="completed",
-            sample_count=fallback_sample_count,
-            executed_count=fallback_sample_count,
+            sample_count=sample_count,
+            executed_count=sample_count,
             skipped_count=0,
-            success_count=fallback_sample_count,
+            success_count=sample_count,
             failure_count=0,
-            within_tolerance_count=fallback_sample_count,
+            within_tolerance_count=sample_count,
             within_tolerance_rate=1.0,
             mean_candidate_seconds=30.0,
             mean_absolute_duration_delta_seconds=0.0,
@@ -390,9 +636,9 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
             mean_naturalness=0.9,
             mean_speaker_grammar_similarity=0.9,
             mean_composite=0.9,
-            report_path=str(tmp_path / f"{state.duration_preset}.report.json"),
-            notes_path=str(tmp_path / f"{state.duration_preset}.notes.md"),
-            results_path=str(tmp_path / f"{state.duration_preset}.results.md"),
+            report_path=None,
+            notes_path=None,
+            results_path=None,
             mean_composite_ci95_lower=None,
             mean_composite_ci95_upper=None,
             error_message=None,
@@ -431,6 +677,7 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
         max_samples=100,
         sample_seed=19,
         parallelism=0,
+        concurrency=1,
         sweep_root=str(tmp_path),
         enable_voice_clone=False,
         summarizer_provider="vllm_default",
@@ -442,14 +689,336 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
     exit_code = _run_duration_sweep(args)
 
     assert exit_code == 0
-    assert launched == [("30s", 100), ("1m", 100), ("5m", 100)]
-    assert finalized == [("30s", 100), ("1m", 100), ("5m", 100)]
+    assert launched == [
+        ("30s", 1, 3, 100),
+        ("1m", 2, 3, 100),
+        ("5m", 3, 3, 100),
+        ("1m", 1, 3, 100),
+        ("5m", 1, 3, 100),
+        ("5m", 2, 3, 100),
+    ]
+    assert finalized == [
+        ("30s", 0),
+        ("1m", 0),
+        ("1m", 0),
+        ("5m", 0),
+        ("5m", 0),
+        ("5m", 0),
+    ]
     assert written_reports[-1].examples_per_preset == 100
     assert written_reports[-1].sample_seed == 19
+    assert [summary.sample_count for summary in written_reports[-1].preset_summaries] == [
+        100,
+        100,
+        100,
+    ]
     assert [summary.duration_preset for summary in written_reports[-1].preset_summaries] == [
         "30s",
         "1m",
         "5m",
+    ]
+
+
+def test_aggregate_duration_sweep_preset_weights_multi_shard_summaries() -> None:
+    aggregated = _aggregate_duration_sweep_preset(
+        duration_preset="5m",
+        child_summaries={
+            1: DurationSweepPresetSummary(
+                duration_preset="5m",
+                target_seconds=300,
+                status="partial",
+                sample_count=4,
+                executed_count=3,
+                skipped_count=1,
+                success_count=2,
+                failure_count=1,
+                within_tolerance_count=2,
+                within_tolerance_rate=0.6667,
+                mean_candidate_seconds=290.0,
+                mean_absolute_duration_delta_seconds=15.0,
+                mean_factualness=0.7,
+                mean_naturalness=0.8,
+                mean_speaker_grammar_similarity=0.9,
+                mean_composite=0.8,
+                report_path=None,
+                notes_path=None,
+                results_path=None,
+                restart_count=1,
+                recovered_stall_count=1,
+            ),
+            2: DurationSweepPresetSummary(
+                duration_preset="5m",
+                target_seconds=300,
+                status="completed",
+                sample_count=2,
+                executed_count=2,
+                skipped_count=0,
+                success_count=2,
+                failure_count=0,
+                within_tolerance_count=1,
+                within_tolerance_rate=0.5,
+                mean_candidate_seconds=310.0,
+                mean_absolute_duration_delta_seconds=20.0,
+                mean_factualness=0.4,
+                mean_naturalness=0.5,
+                mean_speaker_grammar_similarity=0.6,
+                mean_composite=0.5,
+                report_path=None,
+                notes_path=None,
+                results_path=None,
+                restart_count=2,
+                recovered_stall_count=0,
+            ),
+        },
+    )
+
+    assert aggregated.status == "partial"
+    assert aggregated.sample_count == 6
+    assert aggregated.executed_count == 5
+    assert aggregated.skipped_count == 1
+    assert aggregated.success_count == 4
+    assert aggregated.failure_count == 1
+    assert aggregated.within_tolerance_count == 3
+    assert aggregated.mean_candidate_seconds == 298.0
+    assert aggregated.mean_absolute_duration_delta_seconds == 17.0
+    assert aggregated.mean_factualness == 0.58
+    assert aggregated.mean_naturalness == 0.68
+    assert aggregated.mean_speaker_grammar_similarity == 0.78
+    assert aggregated.mean_composite == 0.68
+    assert aggregated.mean_composite_ci95_lower is None
+    assert aggregated.mean_composite_ci95_upper is None
+    assert aggregated.restart_count == 3
+    assert aggregated.recovered_stall_count == 1
+
+
+def test_run_duration_sweep_fans_out_each_preset_by_requested_concurrency(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    launched: list[tuple[str, int, int, int]] = []
+    written_reports = []
+    sample_counts_by_worker = {
+        ("30s", 1): 34,
+        ("30s", 3): 33,
+        ("30s", 5): 33,
+        ("1m", 1): 17,
+        ("1m", 2): 17,
+        ("1m", 3): 17,
+        ("1m", 4): 17,
+        ("1m", 5): 16,
+        ("1m", 6): 16,
+    }
+
+    def _fake_launch_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        duration_preset = kwargs["duration_preset"]
+        shard_index = kwargs["shard_index"]
+        shard_count = kwargs["shard_count"]
+        max_samples = kwargs["max_samples"]
+        launched.append((duration_preset, shard_index, shard_count, max_samples))
+        log_path = tmp_path / f"{duration_preset}.shard-{shard_index}.log"
+        log_handle = log_path.open("w", encoding="utf-8")
+        return _DurationSweepChildState(
+            duration_preset=duration_preset,
+            process=_CompletedProcessStub(pid=4000 + len(launched)),
+            log_path=log_path,
+            log_handle=log_handle,
+            reader_thread=None,
+            retrieval_port=7100 + len(launched) * 3,
+            summarizer_port=7101 + len(launched) * 3,
+            critic_port=7102 + len(launched) * 3,
+            max_samples=max_samples,
+            checkpoint_path=tmp_path / f"{duration_preset}.shard-{shard_index}.checkpoint.json",
+            output_root=tmp_path / "runs",
+            shard_index=shard_index,
+            shard_count=shard_count,
+        )
+
+    def _fake_finalize_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        state = kwargs["state"]
+        if not state.log_handle.closed:
+            state.log_handle.close()
+        sample_count = sample_counts_by_worker[(state.duration_preset, state.shard_index)]
+        return DurationSweepPresetSummary(
+            duration_preset=state.duration_preset,
+            target_seconds={"30s": 30, "1m": 60}[state.duration_preset],
+            status="completed",
+            sample_count=sample_count,
+            executed_count=sample_count,
+            skipped_count=0,
+            success_count=sample_count,
+            failure_count=0,
+            within_tolerance_count=sample_count,
+            within_tolerance_rate=1.0,
+            mean_candidate_seconds=30.0,
+            mean_absolute_duration_delta_seconds=0.0,
+            mean_factualness=0.9,
+            mean_naturalness=0.8,
+            mean_speaker_grammar_similarity=0.7,
+            mean_composite=0.8,
+            report_path=None,
+            notes_path=None,
+            results_path=None,
+            mean_composite_ci95_lower=None,
+            mean_composite_ci95_upper=None,
+            error_message=None,
+            restart_count=0,
+            recovered_stall_count=0,
+        )
+
+    def _fake_write_duration_sweep_artifacts(**kwargs):  # type: ignore[no-untyped-def]
+        report = kwargs["report"]
+        written_reports.append(report)
+        sweep_root = kwargs["sweep_root"]
+        return sweep_root / "report.json", sweep_root / "results.md"
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._launch_duration_sweep_child",
+        _fake_launch_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._finalize_duration_sweep_child",
+        _fake_finalize_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_reporting_helpers",
+        lambda **kwargs: (_fake_write_duration_sweep_artifacts, None),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._emit_cli_status",
+        lambda message: None,
+    )
+
+    args = argparse.Namespace(
+        mode="batch-all",
+        duration_preset="",
+        duration_presets="30s,1m",
+        examples=None,
+        max_samples=100,
+        sample_seed=None,
+        parallelism=0,
+        concurrency=3,
+        sweep_root=str(tmp_path),
+        enable_voice_clone=False,
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="disabled",
+    )
+
+    exit_code = _run_duration_sweep(args)
+
+    assert exit_code == 0
+    assert launched == [
+        ("30s", 1, 6, 100),
+        ("30s", 3, 6, 100),
+        ("30s", 5, 6, 100),
+        ("1m", 2, 6, 100),
+        ("1m", 4, 6, 100),
+        ("1m", 6, 6, 100),
+        ("1m", 1, 6, 100),
+        ("1m", 3, 6, 100),
+        ("1m", 5, 6, 100),
+    ]
+    assert written_reports[-1].preset_concurrency == 3
+    assert [summary.sample_count for summary in written_reports[-1].preset_summaries] == [
+        100,
+        100,
+    ]
+
+
+def test_run_duration_sweep_keyboard_interrupt_stops_active_children(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    stopped: list[tuple[str, int, str]] = []
+
+    def _fake_launch_duration_sweep_child(**kwargs):  # type: ignore[no-untyped-def]
+        duration_preset = kwargs["duration_preset"]
+        shard_index = kwargs["shard_index"]
+        shard_count = kwargs["shard_count"]
+        log_path = tmp_path / f"{duration_preset}.interrupt-{shard_index}.log"
+        log_handle = log_path.open("w", encoding="utf-8")
+        return _DurationSweepChildState(
+            duration_preset=duration_preset,
+            process=_MutableProcessStub(pid=5000 + shard_index, returncode=None),
+            log_path=log_path,
+            log_handle=log_handle,
+            reader_thread=None,
+            retrieval_port=8100 + shard_index * 3,
+            summarizer_port=8101 + shard_index * 3,
+            critic_port=8102 + shard_index * 3,
+            max_samples=kwargs["max_samples"],
+            checkpoint_path=tmp_path / f"{duration_preset}.interrupt-{shard_index}.checkpoint.json",
+            output_root=tmp_path / "runs",
+            shard_index=shard_index,
+            shard_count=shard_count,
+        )
+
+    def _fake_stop_duration_sweep_child(state, *, reason):  # type: ignore[no-untyped-def]
+        if state.process.poll() is not None and state.log_handle.closed:
+            return state.process.poll()
+        stopped.append((state.duration_preset, state.shard_index, reason))
+        state.process.returncode = -9
+        if not state.log_handle.closed:
+            state.log_handle.close()
+        return -9
+
+    def _raise_keyboard_interrupt(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._launch_duration_sweep_child",
+        _fake_launch_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._stop_duration_sweep_child",
+        _fake_stop_duration_sweep_child,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._format_duration_sweep_progress",
+        _raise_keyboard_interrupt,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._emit_cli_status",
+        lambda message: None,
+    )
+
+    args = argparse.Namespace(
+        mode="single",
+        duration_preset="5m",
+        duration_presets="5m",
+        examples=None,
+        max_samples=12,
+        sample_seed=None,
+        parallelism=1,
+        concurrency=2,
+        sweep_root=str(tmp_path),
+        enable_voice_clone=False,
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="disabled",
+        child_stall_seconds=600.0,
+        max_child_restarts=1,
+        progress_heartbeat_seconds=30.0,
+        output_root=str(tmp_path / "runs"),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_duration_sweep(args)
+
+    assert stopped == [
+        (
+            "5m",
+            1,
+            "Cancellation requested by operator; shutting down child.",
+        ),
+        (
+            "5m",
+            2,
+            "Cancellation requested by operator; shutting down child.",
+        ),
     ]
 
 
@@ -501,6 +1070,7 @@ def test_run_duration_sweep_restarts_stalled_child_and_records_recovery(
             kwargs["event_queue"].put(
                 (
                     duration_preset,
+                    1,
                     process.pid,
                     {
                         "sporc_progress_event": "sample_done",
@@ -579,6 +1149,7 @@ def test_run_duration_sweep_restarts_stalled_child_and_records_recovery(
         max_samples=100,
         sample_seed=None,
         parallelism=1,
+        concurrency=1,
         sweep_root=str(tmp_path),
         enable_voice_clone=False,
         summarizer_provider="vllm_default",
@@ -650,6 +1221,7 @@ def test_run_duration_sweep_continues_after_multiple_stalled_samples(
             kwargs["event_queue"].put(
                 (
                     duration_preset,
+                    1,
                     process.pid,
                     {
                         "sporc_progress_event": "sample_done",
@@ -663,6 +1235,7 @@ def test_run_duration_sweep_continues_after_multiple_stalled_samples(
             kwargs["event_queue"].put(
                 (
                     duration_preset,
+                    1,
                     process.pid,
                     {
                         "sporc_progress_event": "sample_heartbeat",
@@ -680,6 +1253,7 @@ def test_run_duration_sweep_continues_after_multiple_stalled_samples(
         kwargs["event_queue"].put(
             (
                 duration_preset,
+                1,
                 process.pid,
                 {
                     "sporc_progress_event": "sample_done",
@@ -758,6 +1332,7 @@ def test_run_duration_sweep_continues_after_multiple_stalled_samples(
         max_samples=100,
         sample_seed=None,
         parallelism=1,
+        concurrency=1,
         sweep_root=str(tmp_path),
         enable_voice_clone=False,
         summarizer_provider="vllm_default",

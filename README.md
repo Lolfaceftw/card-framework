@@ -209,6 +209,10 @@ uv run python -m card_framework.benchmark.summarizer_critic supervise --prepare-
 uv run python -m card_framework.benchmark.summarizer_critic.sporc prepare-dataset --dataset-variant sample
 uv run python -m card_framework.benchmark.summarizer_critic.sporc prepare-dataset --dataset-variant full
 uv run python -m card_framework.benchmark.summarizer_critic.sporc curate-longform
+uv run python -m card_framework.benchmark.summarizer_critic.sporc dedupe-manifest
+uv run python -m card_framework.benchmark.summarizer_critic.sporc export-transcripts --episodes 7-10
+uv run python -m card_framework.benchmark.summarizer_critic.sporc human-sample --duration-preset 5m --episodes 20
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample --duration-preset 5m --episodes 20
 uv run python -m card_framework.benchmark.summarizer_critic.sporc execute --prepare-if-missing --max-samples 100 --summarizer-provider vllm_default
 uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --examples 10 --transcript-only --summarizer-provider vllm_default
 uv run python -m card_framework.benchmark.summarizer_critic.sporc supervise --prepare-if-missing --max-runs 3
@@ -232,7 +236,12 @@ file paths. The execute path still supports the repo's faithful combined
 stage-2/stage-3 voice-clone integration, but it now also supports
 `--transcript-only` for transcript-first summarizer-critic benchmarking that
 skips source-audio downloads, speaker-sample generation, and live-draft voice
-cloning. Sample preparation still defaults to
+cloning. Transcript-only runs now also normalize the copied working transcript:
+they drop punctuation-only micro-segments, merge adjacent same-speaker spans,
+preserve raw dataset speaker lists in segment extras for auditability, and mark
+ambiguous turns with speaker-candidate metadata instead of forcing those turns
+onto a neighboring speaker so the working transcript stays faithful to the
+dataset-derived attribution. Sample preparation still defaults to
 `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_sample`, while
 full-dataset preparation now defaults to
 `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full` and writes
@@ -250,6 +259,44 @@ those stats. It filters a prepared full manifest down to strict long-form
 multi-speaker episodes using the released Hugging Face speaker-turn table as
 the diarized transcript source, requiring `15,000+` spoken words, multiple
 substantial speakers, strong turn counts, and low music/noise-token ratios.
+The new `dedupe-manifest` subcommand rewrites an inline SPoRC manifest in
+place, removing exact duplicate episodes with a metadata-first pipeline that
+only opens transcript JSON for small candidate-collision groups instead of
+hashing every transcript up front. It emits a sibling audit JSON describing the
+removed duplicates while preserving manifest order for the kept samples.
+The new `export-transcripts` subcommand reads a manifest plus an episode list or
+range and writes one combined raw transcript `.txt` file from the manifest's
+actual SPoRC `turn_data_path`, not from the prepared transcript JSON. It
+touches only the selected episode rows plus one streamed pass over the raw turn
+file, so export stays fast even when the full SPoRC manifest is large.
+The new `human-sample` subcommand turns that curated manifest into a Rich-based
+human annotation workflow: it takes the first `N` episodes in manifest order,
+computes a per-episode sampled-word budget from configurable `WPM` and factor
+defaults, splits each transcript into word-balanced windows, accepts transcript
+line numbers or `/override` text per window, writes live JSONL/CSV exports plus
+a SQLite session database under
+`artifacts/summarizer_critic_benchmark/sporc_human_sampling`, and resumes a
+paused session by UUID after `Ctrl+C`.
+The new `llm-sample` subcommand runs an Anthropic-backed automatic sampler over
+that same curated manifest prefix: it keeps the same per-episode word-budget
+formula, sends the whole transcript in one pass, streams summarized thinking
+plus the structured sample payload through the Rich callback path, and persists
+run-level JSONL, CSV, and per-episode request/stream/response traces under
+`artifacts/summarizer_critic_benchmark/sporc_llm_sampling`. It currently reads
+`ANTHROPIC_API_KEY` from `.env` and defaults to `claude-opus-4-6` with adaptive
+thinking enabled. If you pass `--samples <N>`, it skips the WPM-based budget
+and returns exactly `N` samples per transcript instead. Each saved sample now
+includes a direct `speaker_label`, and each episode also writes a plain-text
+`selected_segments.txt` export. The structured tool payload is the authoritative
+selection output. The prompt now explicitly favors readable reviewer-facing
+segments: it asks the model to preserve what the speaker said, including
+disfluencies, while lightly cleaning up only transcript formatting noise such
+as fragmentation, spacing, and punctuation so the result stays understandable
+to a human reviewer. It no longer rejects runs just because Anthropic chooses
+to skip or include extra prose around that tool call. If you pass
+`--disable-thinking`, it disables Anthropic thinking and sends `temperature=0.0`.
+If you pass `--select-episode "[7,10]"`, `llm-sample` runs only manifest
+episodes `7` through `10` inclusive instead of the default manifest prefix.
 The new `duration-sweep` subcommand exposes a non-interactive menu plus
 `--mode single` and `--mode batch-all` flows for preset duration benchmarking
 across `30s`, `1m`, `5m`, and `15m`, writes aggregate markdown and JSON sweep

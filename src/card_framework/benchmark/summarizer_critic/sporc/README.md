@@ -8,6 +8,12 @@ The benchmark can run in two modes:
 - `voice-clone`: run the faithful combined path that also prepares speaker samples and live-draft audio artifacts.
 
 For summarizer-quality benchmarking, `transcript-only` is the recommended mode.
+In transcript-only mode, the runner now normalizes the copied working transcript
+before scoring: it removes punctuation-only fragments, merges adjacent
+same-speaker spans, keeps the raw dataset speaker lists in segment extras for
+auditing, and marks ambiguous turns with speaker-candidate metadata instead of
+guessing a neighboring speaker so the working transcript remains faithful to
+the dataset's primary-speaker assignment.
 
 ## What This Benchmark Measures
 
@@ -59,6 +65,7 @@ If you use a local `.env`, make sure it contains at least:
 ```bash
 HF_ACCESS_TOKEN=hf_xxx
 VLLM_URL=http://host:8000/v1
+ANTHROPIC_API_KEY=
 ```
 
 ## Main Entry Point
@@ -73,6 +80,10 @@ Available subcommands:
 
 - `prepare-dataset`
 - `curate-longform`
+- `dedupe-manifest`
+- `export-transcripts`
+- `human-sample`
+- `llm-sample`
 - `execute`
 - `duration-sweep`
 - `supervise`
@@ -93,6 +104,7 @@ Use `duration-sweep` when you want multiple duration targets in one invocation:
 - `--sample-seed` switches sample selection from manifest-order prefixing to deterministic seeded-random ordering,
 - `--examples` remains available as a sweep-only override for `--max-samples`,
 - `--parallelism 0` runs every selected preset concurrently,
+- `--concurrency <int>` seeds that many worker children per active preset and donates those workers forward when earlier presets finish,
 - stalled preset children now heartbeat every `30s`, write per-preset checkpoints, and auto-restart from checkpoint when the active sample stops making progress,
 - `duration-sweep` is transcript-only by default unless you add `--enable-voice-clone`.
 
@@ -101,6 +113,50 @@ Common flag mix-ups:
 - `execute` does not accept a comma-separated list in `--duration-preset`.
 - `duration-sweep --mode batch-all` should use `--duration-presets`, not `--duration-preset`.
 - `duration-sweep` now honors `--max-samples`; use `--examples` only when you want a sweep-only override.
+
+Use `human-sample` when you want a human rater to choose transcript segments from
+the curated long-form manifest:
+
+- it defaults to `benchmark_longform_15k_manifest.json` and takes the first `N`
+  episodes in manifest order,
+- it computes a per-episode sampled-word budget from
+  `WPM * (preset_seconds / 60) * factor`, with interactive defaults of
+  `170 WPM` and factor `5`,
+- it estimates a target sample count from transcript line length, splits each
+  transcript into word-balanced windows, and shows a transcript-global line
+  number column for each window,
+- each window accepts up to its displayed quota via comma-separated line
+  numbers or `/override <segment>`,
+- `Ctrl+C` pauses the session, writes the live SQLite and export artifacts, and
+  lets the operator resume later with `--resume-session <uuid>`.
+
+Use `llm-sample` when you want Anthropic to choose transcript-grounded sample
+segments automatically:
+
+- it defaults to the same curated long-form manifest prefix and per-episode
+  budget formula used by `human-sample`,
+- it sends the full transcript in one request per episode instead of windowing,
+- it streams summarized thinking plus the structured sample payload to the
+  terminal through the shared Rich callback path,
+- it persists per-episode `request.json`, `stream.jsonl`, and `response.json`
+  traces plus run-level JSONL/CSV exports under `sporc_llm_sampling`,
+- every saved sample now includes a direct `speaker_label`, and each episode
+  also writes a `selected_segments.txt` export for quick inspection,
+- it currently reads `ANTHROPIC_API_KEY` from `.env` and defaults to
+  `claude-opus-4-6` with adaptive thinking enabled,
+- the structured tool payload is the authoritative output, but the sampler does
+  not enforce exact verbatim transcript matching on every returned segment,
+  explicitly favors readable reviewer-facing excerpts that preserve what the
+  speaker said, including disfluencies, while lightly cleaning up only
+  transcript formatting noise such as fragmentation, spacing, and punctuation,
+  and does not reject a run just because Anthropic decides to include or skip
+  prose around that tool call,
+- if you pass `--samples <N>`, it ignores the WPM-based target-word formula and
+  returns exactly `N` samples from each full transcript instead,
+- if you pass `--select-episode "[7,10]"`, it runs only manifest episodes `7`
+  through `10` inclusive and overrides the default manifest-prefix selection,
+- if you pass `--disable-thinking`, it disables Anthropic thinking and runs
+  with `temperature=0.0`.
 
 ## Artifact Locations
 
@@ -113,34 +169,91 @@ Default roots:
 - full samples sidecar: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/samples.jsonl.gz`
 - curated long-form manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json`
 - curated long-form audit: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_audit.json`
+- human sampling sessions: `artifacts/summarizer_critic_benchmark/sporc_human_sampling`
+- automatic LLM sampling runs: `artifacts/summarizer_critic_benchmark/sporc_llm_sampling`
 - execute runs: `artifacts/summarizer_critic_benchmark/sporc_runs`
 - sweep runs: `artifacts/summarizer_critic_benchmark/sweeps`
 - supervised sessions: `artifacts/summarizer_critic_benchmark/sporc_supervisor`
+
+Each `human-sample` session writes:
+
+- `<session_id>/session.sqlite3`
+- `<session_id>/session_summary.json`
+- `<session_id>/selected_samples.jsonl`
+- `<session_id>/selected_samples.csv`
+
+The human-sampling exports update immediately after each completed window, so a
+researcher can inspect saved selections without waiting for the whole session
+to finish.
+
+Each `llm-sample` run writes:
+
+- `<run_id>/run_summary.json`
+- `<run_id>/selected_samples.jsonl`
+- `<run_id>/selected_samples.csv`
+- `<run_id>/episodes/<sample_id>/request.json`
+- `<run_id>/episodes/<sample_id>/stream.jsonl`
+- `<run_id>/episodes/<sample_id>/response.json`
+- `<run_id>/episodes/<sample_id>/selected_segments.txt`
 
 Each `execute` run writes:
 
 - `report.json`
 - `results.md`
 - `notes.md`
+- `samples/index.json`
+- `samples/README.md`
+- `samples/<sample_id>/manifest.json`
+- `samples/<sample_id>/final/summary.xml`
+- `samples/<sample_id>/final/critic_feedback.txt` when loop diagnostics include final critic feedback
+- `samples/<sample_id>/final/loop_diagnostics.json`
+- `samples/<sample_id>/final/sample_result.json`
+- `samples/<sample_id>/llm/summarizer/call_XXX.json`
+- `samples/<sample_id>/llm/critic/call_XXX.json`
+- `samples/<sample_id>/llm/judge/call_XXX.json`
+
+The `samples/` subtree is the developer-facing entrypoint for raw per-sample artifacts:
+
+- `samples/index.json` lists every executed sample folder for the run.
+- `samples/README.md` explains the directory layout.
+- each `call_XXX.json` file keeps the normalized request payload, streamed reasoning tokens, streamed content tokens, and the final response or error for that model call.
+- each sample-local `manifest.json` points at that sample's final outputs plus all recorded call files.
 
 Each `duration-sweep` run writes:
 
 - `report.json`
 - `results.md`
-- `logs/<preset>.log`
-- `checkpoints/<preset>.checkpoint.json`
+- `logs/<preset>.log` or `logs/<preset>.shard-<i>-of-<n>.log`
+- `checkpoints/<preset>.checkpoint.json` or `checkpoints/<preset>.shard-<i>-of-<n>.checkpoint.json`
 
-Each preset inside a `duration-sweep` still launches a normal `execute` run, so
-the aggregate sweep artifacts live under `artifacts/summarizer_critic_benchmark/sweeps`
-while the detailed per-preset run artifacts still appear under
+Each preset inside a `duration-sweep` still launches one or more normal `execute`
+runs, so the aggregate sweep artifacts live under
+`artifacts/summarizer_critic_benchmark/sweeps` while the detailed per-child run
+artifacts still appear under
 `artifacts/summarizer_critic_benchmark/sporc_runs`. Sweep children suppress token
 stream rendering, report sample progress back to the parent, and persist
 checkpoint state after every terminal sample, so the sweep terminal view stays
-on aggregate sample positions and combined ETA while stalled children can be
-restarted without rerunning completed samples. When a child stalls, the resumed
+on aggregate sample positions and a donation-aware combined ETA while stalled children can be
+restarted without rerunning completed samples. On real terminals the parent now
+shows colorized status lines plus a footer `tqdm` progress bar with ETA instead
+of repeatedly printing raw `Sweep progress: ...` lines. When a child stalls, the resumed
 `execute` run records only the orphaned active sample failed with
 `sweep_watchdog_stalled` and then continues the rest of that preset from the
-checkpoint instead of aborting the whole preset.
+checkpoint instead of aborting the whole preset. When `--concurrency > 1`, each
+seeded preset gets multiple worker children that coordinate through a shared
+preset queue, so new workers can join a preset mid-run without overlapping
+samples and finished presets can donate their worker slots to the next
+unfinished preset in order. Pressing `Ctrl+C` now stops every active child,
+closes the footer bar cleanly, and exits the sweep with `Cancelled.` after the
+active child connections are torn down.
+
+To inspect one sweep shard end to end:
+
+1. Open `sweeps/<sweep_id>/logs/<preset>.shard-<i>-of-<n>.log`.
+2. Find the `run_start` event and note its child `run_id`.
+3. Open `sporc_runs/<run_id>/report.json` or `sporc_runs/<run_id>/notes.md`.
+4. Open `sporc_runs/<run_id>/samples/README.md` or `sporc_runs/<run_id>/samples/index.json`.
+5. Drill into `sporc_runs/<run_id>/samples/<sample_id>/` for that shard's final outputs and raw LLM traces.
 
 ## Step 1: Prepare The Dataset
 
@@ -211,6 +324,152 @@ Useful flags:
 - `curate-longform --source-manifest <path>`: prepared manifest to filter
 - `curate-longform --output-manifest <path>`: curated long-form manifest path
 - `curate-longform --audit-path <path>`: inclusion/exclusion audit JSON path
+- `dedupe-manifest --manifest-path <path>`: inline manifest to rewrite in place
+- `dedupe-manifest --audit-path <path>`: optional dedupe audit JSON path
+- `export-transcripts --manifest-path <path>`: manifest to read transcript paths from
+- `export-transcripts --episodes <spec>`: episode positions or ranges to export
+- `export-transcripts --output-path <path>`: optional combined transcript TXT path
+- `export-transcripts --backwards-compat`: interpret `--episodes` as curated longform positions and map them onto the target manifest by `episode_key`
+- `export-transcripts --raw`: write exact matching JSONL rows from the dataset with no formatting from us
+
+## Step 1.45: Dedupe A Curated Manifest In Place
+
+Rewrite the curated inline manifest in place and emit a sibling audit JSON:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc dedupe-manifest
+```
+
+Or target a custom inline manifest explicitly:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc dedupe-manifest \
+  --manifest-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --audit-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.dedupe_audit.json"
+```
+
+Important behavior:
+
+- `dedupe-manifest` rewrites the same manifest path atomically; it does not write a second manifest copy.
+- it keeps the first occurrence of each confirmed duplicate and preserves the kept-sample order.
+- it is optimized for large manifests: it groups rows by cheap metadata fingerprints first and only opens transcript JSON for small collision groups that need confirmation.
+- it currently supports manifests with inline `samples` arrays, which matches the curated long-form manifest produced by `curate-longform`.
+
+## Step 1.46: Export Combined Raw Transcript Text
+
+Write one combined `.txt` file for selected manifest episodes:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc export-transcripts \
+  --episodes "7,10-12"
+```
+
+Or target a custom manifest and output path:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc export-transcripts \
+  --manifest-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --episodes "[7,10]" \
+  --output-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/episodes_7_10.txt"
+```
+
+Or write the exact matching raw dataset rows instead of the human-formatted transcript view:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc export-transcripts \
+  --episodes "7,10-12" \
+  --raw
+```
+
+Important behavior:
+
+- `export-transcripts` writes one combined raw transcript text file for the selected manifest positions by default.
+- `--episodes` accepts comma-separated positions, ranges like `7-10`, and bracket form like `[7,10]` for an inclusive range.
+- `--backwards-compat` keeps `--episodes` on curated longform positions even if `--manifest-path` points at the original prepared manifest, and maps those selections onto the target manifest by `episode_key`.
+- it uses the manifest's actual raw `turn_data_path`, not the prepared transcript JSON files.
+- `--raw` writes the exact matching JSONL rows from that dataset file with no headers, no timestamp rendering, no speaker-label formatting, and no normalization from us.
+- it is optimized for speed: it only reads the selected manifest rows plus a streamed pass over the raw turn file that stops as soon as the final requested episode block has been collected.
+
+## Step 1.5: Run Human Transcript Sampling
+
+Launch the interactive sampler with the curated long-form manifest:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc human-sample
+```
+
+Or provide the session settings up front:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc human-sample \
+  --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --duration-preset 5m \
+  --episodes 20 \
+  --words-per-minute 170 \
+  --sample-factor 5 \
+  --max-windows-per-episode 10
+```
+
+Resume a paused session:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc human-sample \
+  --resume-session "<session-uuid>"
+```
+
+Window input examples:
+
+- `12`
+- `12,13`
+- `12,/override [SPEAKER_04] Replacement segment text`
+- `"/override [SPEAKER_04] Replacement, with comma"`
+- `/skip`
+
+## Step 1.6: Run Automatic Anthropic Sampling
+
+Launch the automatic sampler with the curated long-form manifest:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample
+```
+
+Override the main defaults up front:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample \
+  --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --duration-preset 5m \
+  --episodes 20 \
+  --words-per-minute 170 \
+  --sample-factor 5 \
+  --model claude-opus-4-6 \
+  --thinking-effort medium
+```
+
+Use a fixed sample count instead of the WPM formula:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample \
+  --episodes 20 \
+  --samples 20
+```
+
+Rerun only a specific inclusive manifest span:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample \
+  --select-episode "[7,10]"
+```
+
+Important behavior:
+
+- `llm-sample` is non-interactive and does not support resume yet.
+- it fails fast when `ANTHROPIC_API_KEY` is missing.
+- `--samples <N>` overrides the WPM-based target-word mode.
+- `--select-episode "[start,end]"` uses 1-based inclusive manifest positions and overrides `--episodes`.
+- `--disable-thinking` disables Anthropic thinking and uses `temperature=0.0`.
+- it retries one invalid out-of-budget or malformed structured submission per
+  episode, then records the episode as failed and continues.
 
 ## Step 2: Run One Benchmark
 
@@ -264,6 +523,7 @@ Important behavior:
 
 - `execute` defaults to the voice-clone path.
 - add `--transcript-only` to skip source-audio download, speaker-sample generation, and live-draft voice cloning.
+- transcript-only runs still start from the prepared SPoRC transcript, but they now write a normalized working copy under `sporc_runs/<run_id>/working_transcripts/` before the summarizer-critic loop starts; that working copy only applies lossless cleanup and uncertainty tagging, not speaker reassignment.
 - use `--dataset-manifest` with the curated long-form manifest for `5m` and `15m` benchmark runs.
 - direct `execute` runs launched from a real terminal now stream live markdown-rendered panels for the Summarizer, Critic, and Judge, and each panel appears as soon as that agent request starts so long-prefill calls no longer look idle; piped or supervised runs still fall back to plain streamed `[THINKING]` and `[CONTENT]` text.
 - `--duration-preset` and `--target-seconds-override` are mutually exclusive.
@@ -304,6 +564,21 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
   --max-iterations 50
 ```
 
+Run all presets concurrently with `3` worker children per seeded preset:
+
+```bash
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+  --mode batch-all \
+  --max-samples 30 \
+  --parallelism 0 \
+  --concurrency 3 \
+  --summarizer-provider vllm_default \
+  --critic-provider vllm_default \
+  --judge-provider vllm_default \
+  --embedding-mode disabled \
+  --max-iterations 50
+```
+
 Run a custom subset such as `30s`, `1m`, and `5m` for `10` examples each:
 
 ```bash
@@ -333,6 +608,7 @@ Sweep-specific flags:
 - `--max-samples <int>` where `0` means all prepared examples per preset
 - `--examples <int>` to override `--max-samples` only for the sweep
 - `--parallelism <int>` where `0` means run all selected presets concurrently
+- `--concurrency <int>` to seed multiple worker children per active preset
 - `--duration-presets 30s,1m,5m,15m`
 - `--sweep-root <path>`
 - `--enable-voice-clone`
@@ -348,9 +624,12 @@ Important behavior:
 - `--mode batch-all` expects `--duration-presets "30s,1m,5m"` when you want a subset.
 - quote the comma-separated `--duration-presets` value in PowerShell to keep it as one argument.
 - `duration-sweep` defaults to `--max-samples` for per-preset sample count, and `--examples` overrides it only for the sweep.
+- `--parallelism` controls how many presets are seeded at once, while `--concurrency` controls how many worker children each seeded preset starts with.
+- finished presets donate their worker slots forward to the next unfinished preset in duration order, so later presets can speed up as earlier presets complete.
 - `--sample-seed <int>` makes `execute`, `supervise`, and `duration-sweep` choose a reproducible seeded-random subset; omitting it preserves manifest order.
-- `duration-sweep` defaults to aggregate progress output with combined ETA instead of child token streams.
+- `duration-sweep` defaults to aggregate progress output with a donation-aware combined ETA instead of child token streams, and interactive terminals now render that aggregate view as a footer `tqdm` bar.
 - `duration-sweep` also applies sweep-only request timeout defaults of `900s` for summarizer/critic and `300s` for retrieval/index so a wedged backend becomes a failed sample instead of a permanently hung preset.
+- `Ctrl+C` during `duration-sweep` now shuts down every active child before the parent exits, so local A2A ports, pipes, and log handles do not linger.
 
 ## Running A Custom Manifest
 
@@ -392,6 +671,7 @@ Shared execution flags users usually need:
 - `duration-sweep`: `--sample-seed <int>` for deterministic seeded-random per-preset sample selection
 - `duration-sweep`: `--examples <int>` as a sweep-only override
 - `duration-sweep`: `--parallelism <int>`
+- `duration-sweep`: `--concurrency <int>`
 - `duration-sweep`: `--duration-presets 30s,1m,5m,15m`
 
 ## Timeouts

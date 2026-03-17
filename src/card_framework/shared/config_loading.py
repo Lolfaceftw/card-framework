@@ -19,6 +19,9 @@ _HF_ENV_NAMES: tuple[str, ...] = (
     "HF_API_TOKEN",
 )
 _PROVIDER_SECRET_ENV_NAMES: dict[str, tuple[str, ...]] = {
+    "card_framework.providers.anthropic_provider.AnthropicProvider": (
+        "ANTHROPIC_API_KEY",
+    ),
     "card_framework.providers.deepseek_provider.DeepSeekProvider": (
         "DEEPSEEK_API_KEY",
     ),

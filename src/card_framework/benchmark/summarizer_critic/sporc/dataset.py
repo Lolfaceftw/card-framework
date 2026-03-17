@@ -280,19 +280,74 @@ def _timestamp_milliseconds(payload: dict[str, Any], *field_names: str) -> int |
     return None
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _coerce_text(value)
+        if not cleaned or cleaned in seen:
+            continue
+        deduped.append(cleaned)
+        seen.add(cleaned)
+    return deduped
+
+
+def _speaker_labels(value: Any) -> list[str]:
+    labels = _coerce_list_of_strings(value)
+    if len(labels) != 1:
+        return _dedupe_preserve_order(labels)
+    only_value = labels[0]
+    if "," not in only_value:
+        return labels
+    return _dedupe_preserve_order(
+        [part.strip() for part in only_value.split(",") if part.strip()]
+    )
+
+
+def _looks_like_speaker_label(value: str) -> bool:
+    cleaned = _coerce_text(value)
+    return bool(cleaned) and cleaned.upper().startswith("SPEAKER_")
+
+
 def _speaker_alias_map(record: dict[str, Any], speakers: list[str]) -> dict[str, str]:
     alias_map: dict[str, str] = {}
     for speaker in speakers:
         alias_map[speaker] = speaker
-        alias_map[speaker.lower()] = speaker
     for field_name in ("hostSpeakerLabels", "guestSpeakerLabels"):
         for name, raw_labels in _coerce_mapping(record.get(field_name)).items():
-            labels = _coerce_list_of_strings(raw_labels)
+            labels = _speaker_labels(raw_labels)
             for label in labels:
                 if label:
                     alias_map[name] = label
-                    alias_map[name.lower()] = label
     return alias_map
+
+
+def _named_speaker_labels(record: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for field_name in ("hostSpeakerLabels", "guestSpeakerLabels"):
+        for raw_labels in _coerce_mapping(record.get(field_name)).values():
+            labels.extend(_speaker_labels(raw_labels))
+    return _dedupe_preserve_order(labels)
+
+
+def _main_speaker_labels(record: dict[str, Any]) -> list[str]:
+    return _speaker_labels(record.get("mainEpSpeakers"))
+
+
+def _named_speaker_labels_from_alias_map(alias_map: dict[str, str]) -> list[str]:
+    labels = [
+        value
+        for key, value in alias_map.items()
+        if not _looks_like_speaker_label(key)
+    ]
+    return _dedupe_preserve_order(labels)
+
+
+def _main_speaker_labels_from_notes(speaker_notes: list[str]) -> list[str]:
+    for note in speaker_notes:
+        if note.startswith("mainEpSpeakers:"):
+            return _speaker_labels(note.split(":", 1)[1])
+    return []
 
 
 def _speaker_notes(record: dict[str, Any]) -> list[str]:
@@ -303,7 +358,11 @@ def _speaker_notes(record: dict[str, Any]) -> list[str]:
         "neitherPredictedNames",
         "mainEpSpeakers",
     ):
-        values = _coerce_list_of_strings(record.get(field_name))
+        values = (
+            _speaker_labels(record.get(field_name))
+            if field_name == "mainEpSpeakers"
+            else _coerce_list_of_strings(record.get(field_name))
+        )
         if values:
             notes.append(f"{field_name}: {', '.join(values)}")
     for field_name in ("hostSpeakerLabels", "guestSpeakerLabels"):
@@ -554,7 +613,6 @@ def _augment_speaker_alias_map(
     alias_map = dict(base_alias_map)
     for speaker in unique_speakers:
         alias_map[speaker] = speaker
-        alias_map[speaker.lower()] = speaker
     return alias_map
 
 
@@ -635,6 +693,12 @@ def _build_prepared_sample(
         base_alias_map=base_speaker_alias_map,
         unique_speakers=unique_speakers,
     )
+    named_speaker_labels = _named_speaker_labels_from_alias_map(speaker_alias_map)
+    main_speaker_labels = _main_speaker_labels_from_notes(speaker_notes)
+    speaker_normalization = {
+        "raw_segment_count": len(segments),
+        "raw_distinct_speaker_count": len(unique_speakers),
+    }
     transcript_payload = {
         "segments": segments,
         "metadata": {
@@ -643,6 +707,9 @@ def _build_prepared_sample(
             "episode_title": episode_title,
             "speaker_alias_map": speaker_alias_map,
             "speaker_notes": speaker_notes,
+            "named_speaker_labels": named_speaker_labels,
+            "main_speaker_labels": main_speaker_labels,
+            "speaker_normalization": speaker_normalization,
             "source_audio_url": source_audio_url,
             "source_episode_data_path": str(episode_data_path),
             "source_turn_data_path": str(turn_data_path),
@@ -675,6 +742,9 @@ def _build_prepared_sample(
             "source_audio_url": source_audio_url,
             "speaker_alias_map": speaker_alias_map,
             "speaker_notes": speaker_notes,
+            "named_speaker_labels": named_speaker_labels,
+            "main_speaker_labels": main_speaker_labels,
+            "speaker_normalization": speaker_normalization,
             _LONGFORM_CURATION_CANDIDATE_METADATA_KEY: longform_curation_candidate,
         },
     )

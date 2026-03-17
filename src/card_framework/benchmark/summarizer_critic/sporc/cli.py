@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -16,6 +16,8 @@ import threading
 import time
 from typing import TextIO
 
+from tqdm.auto import tqdm
+
 from card_framework.benchmark.process_utils import (
     detached_popen_kwargs,
     terminate_process_tree,
@@ -23,6 +25,8 @@ from card_framework.benchmark.process_utils import (
 from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_FULL_DATASET_MANIFEST_PATH,
     DEFAULT_GPU_THRESHOLD_GIB,
+    DEFAULT_HUMAN_SAMPLING_ROOT,
+    DEFAULT_LLM_SAMPLING_ROOT,
     DEFAULT_LONGFORM_AUDIT_PATH,
     DEFAULT_LONGFORM_MANIFEST_PATH,
     DEFAULT_PREPARED_FULL_ROOT,
@@ -61,6 +65,14 @@ _SWEEP_PROGRESS_HEARTBEAT_SECONDS = 15.0
 _SWEEP_CHILD_NO_HEARTBEAT_SECONDS = 90.0
 _SWEEP_CHILD_DEFAULT_STALL_SECONDS = 600.0
 _SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
+_ANSI_RESET = "\033[0m"
+_ANSI_DIM = "\033[2m"
+_ANSI_BOLD = "\033[1m"
+_ANSI_RED = "\033[31m"
+_ANSI_GREEN = "\033[32m"
+_ANSI_YELLOW = "\033[33m"
+_ANSI_BLUE = "\033[34m"
+_ANSI_CYAN = "\033[36m"
 
 
 @dataclass(slots=True)
@@ -78,6 +90,9 @@ class _DurationSweepChildState:
     max_samples: int
     checkpoint_path: Path
     output_root: Path
+    shared_sample_queue_root: Path | None = None
+    shard_index: int = 1
+    shard_count: int = 1
     sample_count: int | None = None
     completed_samples: int = 0
     active_sample_index: int | None = None
@@ -91,16 +106,149 @@ class _DurationSweepChildState:
     recovered_stall_count: int = 0
 
 
+@dataclass(slots=True)
+class _DurationSweepPresetState:
+    """Track all shard children for one active duration preset."""
+
+    duration_preset: str
+    max_samples: int
+    worker_budget: int
+    queue_root: Path
+    sample_count: int | None = None
+    child_states: dict[int, _DurationSweepChildState] = field(default_factory=dict)
+    completed_child_summaries: dict[int, DurationSweepPresetSummary] = field(
+        default_factory=dict
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class _DurationSweepProgressState:
     """Snapshot aggregate sweep progress for operator-facing status lines."""
 
     rendered: str
+    total_completed: int
+    total_samples: int | None
+    active_text: str
+    completed_presets: int
+    preset_count: int
+
+
+class _SweepProgressBar:
+    """Manage an optional footer tqdm bar for duration sweeps."""
+
+    def __init__(self, *, stream: TextIO) -> None:
+        self._stream = stream
+        self._bar: tqdm | None = None
+
+    def is_enabled(self) -> bool:
+        """Return whether a footer bar is active."""
+        return self._bar is not None
+
+    def start(self) -> None:
+        """Create the footer tqdm bar when stderr is interactive."""
+        if not _supports_terminal_ui(self._stream):
+            return
+        self._bar = tqdm(
+            total=None,
+            desc="Sweep 0/0 presets",
+            unit="sample",
+            dynamic_ncols=True,
+            leave=True,
+            file=self._stream,
+        )
+
+    def update(self, progress_state: _DurationSweepProgressState) -> bool:
+        """Update the active tqdm bar from aggregate sweep progress."""
+        if self._bar is None:
+            return False
+        self._bar.set_description(
+            (
+                f"Sweep {progress_state.completed_presets}/"
+                f"{progress_state.preset_count} presets"
+            ),
+            refresh=False,
+        )
+        self._bar.total = progress_state.total_samples
+        self._bar.n = progress_state.total_completed
+        self._bar.set_postfix_str(
+            f"active={_truncate_sweep_active_text(progress_state.active_text)}",
+            refresh=False,
+        )
+        self._bar.refresh()
+        return True
+
+    def write(self, message: str) -> bool:
+        """Write one status line without breaking the footer bar."""
+        if self._bar is None:
+            return False
+        self._bar.write(message, file=self._stream)
+        return True
+
+    def close(self) -> None:
+        """Close the footer bar if it is active."""
+        if self._bar is None:
+            return
+        self._bar.close()
+        self._bar = None
+
+
+_ACTIVE_SWEEP_PROGRESS_BAR: _SweepProgressBar | None = None
+
+
+def _supports_terminal_ui(stream: TextIO) -> bool:
+    """Return whether terminal-oriented UI should target this stream."""
+    is_tty = bool(getattr(stream, "isatty", lambda: False)())
+    if not is_tty:
+        return False
+    return str(os.environ.get("TERM", "")).lower() != "dumb"
+
+
+def _supports_terminal_color(stream: TextIO) -> bool:
+    """Return whether ANSI color should target this stream."""
+    if not _supports_terminal_ui(stream):
+        return False
+    return not bool(os.environ.get("NO_COLOR"))
+
+
+def _colorize_cli_status(message: str, *, stream: TextIO) -> str:
+    """Apply lightweight ANSI colors to operator-facing CLI status lines."""
+    if not _supports_terminal_color(stream):
+        return message
+    lowered = message.lower()
+    style = ""
+    if "failed" in lowered or "error" in lowered or "threshold breach" in lowered:
+        style = f"{_ANSI_BOLD}{_ANSI_RED}"
+    elif "cancel" in lowered or "restart" in lowered or "continuing preset" in lowered:
+        style = f"{_ANSI_BOLD}{_ANSI_YELLOW}"
+    elif "finished preset" in lowered or "loaded " in lowered or "status=completed" in lowered:
+        style = f"{_ANSI_BOLD}{_ANSI_GREEN}"
+    elif "starting duration sweep" in lowered or "started preset" in lowered:
+        style = f"{_ANSI_BOLD}{_ANSI_CYAN}"
+    elif lowered.startswith("loading "):
+        style = f"{_ANSI_BOLD}{_ANSI_BLUE}"
+    elif lowered.startswith("sweep progress:"):
+        style = f"{_ANSI_DIM}{_ANSI_CYAN}"
+    if not style:
+        return message
+    return f"{style}{message}{_ANSI_RESET}"
+
+
+def _truncate_sweep_active_text(active_text: str, *, max_chars: int = 80) -> str:
+    """Keep the tqdm postfix readable when many shards are active."""
+    normalized = " ".join(active_text.split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[: max_chars - 3]}..."
 
 
 def _emit_cli_status(message: str) -> None:
     """Emit one operator-facing status line for CLI progress."""
-    print(message, file=sys.stderr, flush=True)
+    rendered_message = _colorize_cli_status(message, stream=sys.stderr)
+    if _ACTIVE_SWEEP_PROGRESS_BAR is not None and _ACTIVE_SWEEP_PROGRESS_BAR.write(
+        rendered_message
+    ):
+        return
+    print(rendered_message, file=sys.stderr, flush=True)
 
 
 def _load_dataset_helpers(
@@ -243,6 +391,126 @@ def _build_parser(
         default=str(DEFAULT_LONGFORM_AUDIT_PATH),
     )
 
+    dedupe_manifest = subparsers.add_parser(
+        "dedupe-manifest",
+        help="Dedupe an inline SPoRC manifest in place using metadata-first checks",
+    )
+    dedupe_manifest.add_argument(
+        "--manifest-path",
+        default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
+    )
+    dedupe_manifest.add_argument(
+        "--audit-path",
+        default="",
+        help="Optional audit JSON path. Defaults to a sibling *.dedupe_audit.json file.",
+    )
+
+    export_transcripts = subparsers.add_parser(
+        "export-transcripts",
+        help="Export one combined raw transcript text file for selected manifest episodes",
+    )
+    export_transcripts.add_argument(
+        "--manifest-path",
+        default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
+    )
+    export_transcripts.add_argument(
+        "--episodes",
+        required=True,
+        help=(
+            "Episode positions to export, for example `7,10,15` or `7-10`. "
+            'Bracket form like "[7,10]" is treated as the inclusive range 7-10.'
+        ),
+    )
+    export_transcripts.add_argument(
+        "--output-path",
+        default="",
+        help="Optional combined transcript TXT output path.",
+    )
+    export_transcripts.add_argument(
+        "--backwards-compat",
+        action="store_true",
+        help=(
+            "Interpret --episodes as curated longform manifest positions even "
+            "when --manifest-path points at the original prepared manifest. "
+            "Selections are mapped back onto the target manifest by episode_key."
+        ),
+    )
+    export_transcripts.add_argument(
+        "--raw",
+        action="store_true",
+        help=(
+            "Write exact matching JSONL rows from the dataset turn_data_path "
+            "with no transcript formatting, headers, or normalization from us."
+        ),
+    )
+
+    human_sample = subparsers.add_parser(
+        "human-sample",
+        help="Run an interactive Rich workflow for human transcript segment sampling",
+    )
+    human_sample.add_argument(
+        "--dataset-manifest",
+        default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
+    )
+    human_sample.add_argument(
+        "--sampling-root",
+        default=str(DEFAULT_HUMAN_SAMPLING_ROOT),
+    )
+    human_sample.add_argument("--resume-session", default="")
+    human_sample.add_argument(
+        "--duration-preset",
+        choices=("30s", "1m", "5m"),
+        default="",
+    )
+    human_sample.add_argument("--episodes", type=int, default=0)
+    human_sample.add_argument("--words-per-minute", type=float, default=0.0)
+    human_sample.add_argument("--sample-factor", type=float, default=0.0)
+    human_sample.add_argument("--max-windows-per-episode", type=int, default=0)
+
+    llm_sample = subparsers.add_parser(
+        "llm-sample",
+        help="Run an automatic Anthropic-backed transcript sampling workflow",
+    )
+    llm_sample.add_argument(
+        "--dataset-manifest",
+        default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
+    )
+    llm_sample.add_argument(
+        "--sampling-root",
+        default=str(DEFAULT_LLM_SAMPLING_ROOT),
+    )
+    llm_sample.add_argument(
+        "--duration-preset",
+        choices=("30s", "1m", "5m"),
+        default="30s",
+    )
+    llm_sample.add_argument(
+        "--samples",
+        type=int,
+        default=0,
+        help="Optional fixed number of samples to request per transcript. Overrides the WPM-based budget mode when greater than zero.",
+    )
+    llm_sample.add_argument("--episodes", type=int, default=20)
+    llm_sample.add_argument(
+        "--select-episode",
+        default="",
+        help=(
+            "Optional 1-based inclusive manifest episode range for llm-sample, "
+            'for example "[7,10]" to select episodes 7 through 10. '
+            "Overrides --episodes when provided."
+        ),
+    )
+    llm_sample.add_argument("--words-per-minute", type=float, default=170.0)
+    llm_sample.add_argument("--sample-factor", type=float, default=5.0)
+    llm_sample.add_argument("--model", default="claude-opus-4-6")
+    llm_sample.add_argument(
+        "--thinking-effort",
+        choices=("low", "medium", "high", "max"),
+        default="medium",
+    )
+    llm_sample.add_argument("--disable-thinking", action="store_true")
+    llm_sample.add_argument("--max-output-tokens", type=int, default=16000)
+
     if target_command in {None, "execute", "supervise", "duration-sweep"}:
         _, build_execute_parser, _ = _load_runner_helpers(
             status_reporter=status_reporter,
@@ -312,6 +580,16 @@ def _build_parser(
             ),
         )
         duration_sweep.add_argument(
+            "--concurrency",
+            type=int,
+            default=1,
+            help=(
+                "How many execute workers to seed per active preset. "
+                "When an earlier preset finishes, its workers move forward to the "
+                "next unfinished preset in order."
+            ),
+        )
+        duration_sweep.add_argument(
             "--child-stall-seconds",
             type=float,
             default=_SWEEP_CHILD_DEFAULT_STALL_SECONDS,
@@ -344,11 +622,13 @@ def _render_duration_sweep_menu() -> str:
             "Recommended commands:",
             "- Single preset: uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode single --duration-preset 5m --max-samples 10 --transcript-only",
             "- All presets: uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --max-samples 10 --parallelism 0 --transcript-only",
+            "- All presets with 3 workers per seeded preset: uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --max-samples 30 --parallelism 0 --concurrency 3 --transcript-only",
             "",
             "Notes:",
             "- The sweep defaults to a non-interactive menu because this CLI is automation-friendly.",
             "- Use --mode batch-all to bypass the menu and benchmark every preset.",
             "- Use --parallelism 0 to run all selected presets concurrently.",
+            "- Use --concurrency to seed multiple workers per active preset and let finished presets donate those workers forward.",
             "- Use --enable-voice-clone only when audio synthesis is part of the experiment.",
         ]
     )
@@ -458,6 +738,209 @@ def _resolve_duration_sweep_parallelism(
     if requested_parallelism == 0:
         return preset_count
     return min(requested_parallelism, preset_count)
+
+
+def _resolve_duration_sweep_concurrency(*, requested_concurrency: int) -> int:
+    """Resolve the per-preset shard fan-out for duration sweeps."""
+    if requested_concurrency <= 0:
+        raise _benchmark_execution_error_type()(
+            "Duration sweep concurrency must be greater than zero."
+        )
+    return requested_concurrency
+
+
+def _format_duration_sweep_child_label(
+    duration_preset: str,
+    *,
+    shard_index: int,
+    shard_count: int,
+) -> str:
+    """Render one operator-facing preset child label."""
+    if shard_count <= 1:
+        return duration_preset
+    return f"{duration_preset}[s{shard_index}/{shard_count}]"
+
+
+def _build_duration_sweep_child_stem(
+    duration_preset: str,
+    *,
+    shard_index: int,
+    shard_count: int,
+) -> str:
+    """Build the filesystem stem for one duration-sweep child."""
+    if shard_count <= 1:
+        return duration_preset
+    return f"{duration_preset}.shard-{shard_index}-of-{shard_count}"
+
+
+def _estimate_duration_sweep_shard_sample_count(
+    *,
+    max_samples: int,
+    shard_index: int,
+    shard_count: int,
+) -> int:
+    """Estimate one shard's selected sample count from a bounded preset cap."""
+    if max_samples <= 0:
+        return 0
+    base_count, remainder = divmod(max_samples, shard_count)
+    return base_count + (1 if shard_index <= remainder else 0)
+
+
+def _build_initial_duration_sweep_worker_assignments(
+    *,
+    presets: list[str],
+    seeded_preset_count: int,
+    preset_concurrency: int,
+) -> tuple[dict[str, list[int]], list[str], int]:
+    """Distribute the initial worker slots round-robin across seeded presets."""
+    seeded_presets = presets[:seeded_preset_count]
+    assignments = {duration_preset: [] for duration_preset in seeded_presets}
+    total_worker_budget = seeded_preset_count * preset_concurrency
+    for worker_id in range(1, total_worker_budget + 1):
+        duration_preset = seeded_presets[(worker_id - 1) % seeded_preset_count]
+        assignments[duration_preset].append(worker_id)
+    return assignments, presets[seeded_preset_count:], total_worker_budget
+
+
+def _count_duration_sweep_preset_completed_samples(
+    preset_state: _DurationSweepPresetState,
+) -> int:
+    """Count finished samples across active and completed children for one preset."""
+    return sum(
+        summary.sample_count for summary in preset_state.completed_child_summaries.values()
+    ) + sum(child_state.completed_samples for child_state in preset_state.child_states.values())
+
+
+def _resolve_duration_sweep_preset_sample_count(
+    *,
+    preset_state: _DurationSweepPresetState | None,
+    completed_summary: DurationSweepPresetSummary | None,
+    examples_per_preset: int,
+) -> int | None:
+    """Resolve the planned sample count for one preset when it is known."""
+    if completed_summary is not None:
+        return completed_summary.sample_count
+    if preset_state is not None and preset_state.sample_count is not None:
+        return preset_state.sample_count
+    if examples_per_preset > 0:
+        return examples_per_preset
+    return None
+
+
+def _find_next_duration_sweep_donation_target(
+    *,
+    presets: list[str],
+    completed_summaries: dict[str, DurationSweepPresetSummary],
+    current_preset: str,
+) -> str | None:
+    """Return the next unfinished preset after the completed donor preset."""
+    current_index = presets.index(current_preset)
+    for candidate in presets[current_index + 1 :]:
+        if candidate not in completed_summaries:
+            return candidate
+    return None
+
+
+def _estimate_duration_sweep_eta_seconds(
+    *,
+    presets: list[str],
+    active_presets: dict[str, _DurationSweepPresetState],
+    completed_summaries: dict[str, DurationSweepPresetSummary],
+    examples_per_preset: int,
+    accumulated_worker_seconds: float,
+) -> float | None:
+    """Estimate sweep ETA from observed per-worker throughput and future worker donations."""
+    observed_completed_work = 0.0
+    remaining_work_by_preset: dict[str, float] = {}
+    active_workers_by_preset: dict[str, int] = {}
+
+    for duration_preset in presets:
+        target_seconds = float(DURATION_PRESET_SECONDS[duration_preset])
+        completed_summary = completed_summaries.get(duration_preset)
+        preset_state = active_presets.get(duration_preset)
+        planned_samples = _resolve_duration_sweep_preset_sample_count(
+            preset_state=preset_state,
+            completed_summary=completed_summary,
+            examples_per_preset=examples_per_preset,
+        )
+        if planned_samples is None:
+            return None
+        if completed_summary is not None:
+            observed_completed_work += planned_samples * target_seconds
+            continue
+        completed_samples = (
+            _count_duration_sweep_preset_completed_samples(preset_state)
+            if preset_state is not None
+            else 0
+        )
+        observed_completed_work += completed_samples * target_seconds
+        remaining_work_by_preset[duration_preset] = (
+            max(planned_samples - completed_samples, 0) * target_seconds
+        )
+        active_workers_by_preset[duration_preset] = (
+            len(preset_state.child_states) if preset_state is not None else 0
+        )
+
+    if not remaining_work_by_preset:
+        return 0.0
+    if observed_completed_work <= 0.0 or accumulated_worker_seconds <= 0.0:
+        return None
+    per_worker_work_rate = observed_completed_work / accumulated_worker_seconds
+    if per_worker_work_rate <= 0.0:
+        return None
+
+    simulated_remaining_seconds = 0.0
+    simulated_remaining_work = dict(remaining_work_by_preset)
+    simulated_workers = dict(active_workers_by_preset)
+    while True:
+        active_work_items = [
+            (duration_preset, remaining_work, simulated_workers.get(duration_preset, 0))
+            for duration_preset, remaining_work in simulated_remaining_work.items()
+            if remaining_work > 0.0 and simulated_workers.get(duration_preset, 0) > 0
+        ]
+        if not active_work_items:
+            return (
+                0.0
+                if all(remaining_work <= 0.0 for remaining_work in simulated_remaining_work.values())
+                else None
+            )
+        next_completion_seconds = min(
+            remaining_work / (worker_count * per_worker_work_rate)
+            for _, remaining_work, worker_count in active_work_items
+        )
+        if next_completion_seconds <= 0.0:
+            return None
+        simulated_remaining_seconds += next_completion_seconds
+        finished_presets: list[str] = []
+        for duration_preset, remaining_work, worker_count in active_work_items:
+            updated_work = remaining_work - (
+                worker_count * per_worker_work_rate * next_completion_seconds
+            )
+            if updated_work <= 1e-9:
+                simulated_remaining_work[duration_preset] = 0.0
+                finished_presets.append(duration_preset)
+            else:
+                simulated_remaining_work[duration_preset] = updated_work
+        if not finished_presets:
+            return None
+        for duration_preset in finished_presets:
+            donated_workers = simulated_workers.get(duration_preset, 0)
+            simulated_workers[duration_preset] = 0
+            donor_index = presets.index(duration_preset)
+            donation_target = next(
+                (
+                    candidate
+                    for candidate in presets[donor_index + 1 :]
+                    if simulated_remaining_work.get(candidate, 0.0) > 0.0
+                ),
+                None,
+            )
+            if donation_target is not None:
+                simulated_workers[donation_target] = (
+                    simulated_workers.get(donation_target, 0) + donated_workers
+                )
+        if all(remaining_work <= 0.0 for remaining_work in simulated_remaining_work.values()):
+            return simulated_remaining_seconds
 
 
 def _reserve_port() -> int:
@@ -708,9 +1191,7 @@ def _update_duration_sweep_child_state(
         return
 
     if event_name == "sample_done":
-        raw_sample_index = payload.get("sample_index")
-        if isinstance(raw_sample_index, int) and raw_sample_index >= 0:
-            state.completed_samples = max(state.completed_samples, raw_sample_index)
+        state.completed_samples += 1
         raw_final_status = payload.get("final_status")
         if raw_final_status == _SWEEP_STALL_FINAL_STATUS:
             state.recovered_stall_count += 1
@@ -723,13 +1204,24 @@ def _update_duration_sweep_child_state(
         state.last_activity_age_seconds = None
 
 
+def _update_duration_sweep_preset_state(
+    preset_state: _DurationSweepPresetState,
+    payload: dict[str, object],
+) -> None:
+    """Apply preset-level progress metadata derived from one child payload."""
+    raw_sample_count = payload.get("sample_count")
+    if isinstance(raw_sample_count, int) and raw_sample_count >= 0:
+        preset_state.sample_count = raw_sample_count
+
+
 def _format_duration_sweep_progress(
     *,
     presets: list[str],
-    running_children: dict[str, _DurationSweepChildState],
+    active_presets: dict[str, _DurationSweepPresetState],
     completed_summaries: dict[str, DurationSweepPresetSummary],
     timer: PerfTimer,
     examples_per_preset: int,
+    accumulated_worker_seconds: float,
 ) -> _DurationSweepProgressState:
     """Render one aggregate duration-sweep progress line."""
     active_labels: list[str] = []
@@ -744,51 +1236,76 @@ def _format_duration_sweep_progress(
             total_samples += completed_summary.sample_count
             continue
 
-        state = running_children.get(duration_preset)
-        if state is None:
+        preset_state = active_presets.get(duration_preset)
+        if preset_state is None:
             if examples_per_preset > 0:
                 total_samples += examples_per_preset
             else:
                 total_known = False
             continue
 
-        total_completed += state.completed_samples
-        planned_samples = state.sample_count
+        total_completed += _count_duration_sweep_preset_completed_samples(preset_state)
+        planned_samples = _resolve_duration_sweep_preset_sample_count(
+            preset_state=preset_state,
+            completed_summary=None,
+            examples_per_preset=examples_per_preset,
+        )
         if planned_samples is None:
-            if examples_per_preset > 0:
-                planned_samples = examples_per_preset
-            else:
-                total_known = False
-        if planned_samples is not None:
+            total_known = False
+        else:
             total_samples += planned_samples
 
-        if state.process.poll() is not None:
-            continue
-
-        if state.active_sample_index is not None and planned_samples is not None:
-            label = f"{duration_preset}:{state.active_sample_index}/{planned_samples}"
-        elif state.active_sample_index is not None:
-            label = f"{duration_preset}:{state.active_sample_index}/?"
-        elif planned_samples is not None:
-            label = f"{duration_preset}:{state.completed_samples}/{planned_samples}"
-        else:
-            label = f"{duration_preset}:starting"
-        if state.active_stage:
-            label = (
-                f"{label}@{state.active_stage}"
-                if state.active_iteration is None
-                else f"{label}@{state.active_stage}#{state.active_iteration}"
+        for child_state in sorted(
+            preset_state.child_states.values(),
+            key=lambda state: state.shard_index,
+        ):
+            if child_state.process.poll() is not None:
+                continue
+            child_label = _format_duration_sweep_child_label(
+                duration_preset,
+                shard_index=child_state.shard_index,
+                shard_count=child_state.shard_count,
             )
-        if state.restart_count > 0:
-            label = f"{label}(r{state.restart_count})"
-        active_labels.append(label)
+            planned_samples = child_state.sample_count
+            if (
+                child_state.active_sample_index is not None
+                and planned_samples is not None
+            ):
+                label = (
+                    f"{child_label}:{child_state.active_sample_index}/{planned_samples}"
+                )
+            elif child_state.active_sample_index is not None:
+                label = f"{child_label}:{child_state.active_sample_index}/?"
+            elif planned_samples is not None:
+                label = (
+                    f"{child_label}:{child_state.completed_samples}/{planned_samples}"
+                )
+            else:
+                label = f"{child_label}:starting"
+            if child_state.active_stage:
+                label = (
+                    f"{label}@{child_state.active_stage}"
+                    if child_state.active_iteration is None
+                    else f"{label}@{child_state.active_stage}#{child_state.active_iteration}"
+                )
+            if child_state.restart_count > 0:
+                label = f"{label}(r{child_state.restart_count})"
+            active_labels.append(label)
 
     if total_known and total_samples > 0:
-        _, average_text, eta_text = _progress_snapshot(
+        _, average_text, _ = _progress_snapshot(
             completed_samples=total_completed,
             total_samples=total_samples,
             elapsed_seconds=timer.elapsed_seconds(),
         )
+        eta_seconds = _estimate_duration_sweep_eta_seconds(
+            presets=presets,
+            active_presets=active_presets,
+            completed_summaries=completed_summaries,
+            examples_per_preset=examples_per_preset,
+            accumulated_worker_seconds=accumulated_worker_seconds,
+        )
+        eta_text = _format_eta(eta_seconds)
         overall_text = f"{total_completed}/{total_samples}"
     else:
         average_text = "n/a"
@@ -803,14 +1320,19 @@ def _format_duration_sweep_progress(
             f"completed_presets={len(completed_summaries)}/{len(presets)} "
             f"rolling_avg={average_text} eta={eta_text} "
             f"elapsed={timer.elapsed_seconds():.1f}s"
-        )
+        ),
+        total_completed=total_completed,
+        total_samples=total_samples if total_known else None,
+        active_text=active_text,
+        completed_presets=len(completed_summaries),
+        preset_count=len(presets),
     )
 
 
 def _start_duration_sweep_reader(
     *,
     state: _DurationSweepChildState,
-    event_queue: queue.Queue[tuple[str, int, dict[str, object]]],
+    event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
 ) -> threading.Thread | None:
     """Start a background line pump for one duration-sweep child."""
     stream = state.process.stdout
@@ -823,11 +1345,22 @@ def _start_duration_sweep_reader(
             state.log_handle.flush()
             payload = _parse_duration_sweep_progress_line(line)
             if payload is not None:
-                event_queue.put((state.duration_preset, state.process.pid, payload))
+                event_queue.put(
+                    (
+                        state.duration_preset,
+                        state.shard_index,
+                        state.process.pid,
+                        payload,
+                    )
+                )
 
     thread = threading.Thread(
         target=_pump,
-        name=f"sporc-duration-sweep-{state.duration_preset}-{state.process.pid}",
+        name=(
+            "sporc-duration-sweep-"
+            f"{_build_duration_sweep_child_stem(state.duration_preset, shard_index=state.shard_index, shard_count=state.shard_count)}-"
+            f"{state.process.pid}"
+        ),
         daemon=True,
     )
     thread.start()
@@ -839,9 +1372,12 @@ def _launch_duration_sweep_child(
     args: argparse.Namespace,
     sweep_root: Path,
     duration_preset: str,
+    shard_index: int,
+    shard_count: int,
     max_samples: int,
     used_ports: set[int],
-    event_queue: queue.Queue[tuple[str, int, dict[str, object]]],
+    event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
+    shared_sample_queue_root: Path | None = None,
     checkpoint_path: Path | None = None,
     resume_from_checkpoint: bool = False,
     resume_failure_reason: str | None = None,
@@ -856,11 +1392,21 @@ def _launch_duration_sweep_child(
     logs_root.mkdir(parents=True, exist_ok=True)
     checkpoints_root = sweep_root / "checkpoints"
     checkpoints_root.mkdir(parents=True, exist_ok=True)
-    log_path = logs_root / f"{duration_preset}.log"
+    child_stem = _build_duration_sweep_child_stem(
+        duration_preset,
+        shard_index=shard_index,
+        shard_count=shard_count,
+    )
+    child_label = _format_duration_sweep_child_label(
+        duration_preset,
+        shard_index=shard_index,
+        shard_count=shard_count,
+    )
+    log_path = logs_root / f"{child_stem}.log"
     resolved_checkpoint_path = (
         checkpoint_path
         if checkpoint_path is not None
-        else checkpoints_root / f"{duration_preset}.checkpoint.json"
+        else checkpoints_root / f"{child_stem}.checkpoint.json"
     )
     log_handle = log_path.open(
         "a" if resume_from_checkpoint and log_path.exists() else "w",
@@ -886,10 +1432,13 @@ def _launch_duration_sweep_child(
         emit_progress_heartbeats=True,
         progress_heartbeat_seconds=progress_heartbeat_seconds,
         apply_sweep_timeout_defaults=True,
+        shared_sample_queue_root=shared_sample_queue_root,
+        sample_shard_index=(1 if shared_sample_queue_root is not None else shard_index),
+        sample_shard_count=(1 if shared_sample_queue_root is not None else shard_count),
     )
     log_handle.write(
         (
-            f"[Sweep] {'Restarting' if resume_from_checkpoint else 'Starting'} preset {duration_preset}\n"
+            f"[Sweep] {'Restarting' if resume_from_checkpoint else 'Starting'} preset {child_label}\n"
             f"[Sweep] Command: {' '.join(child_command)}\n"
             f"[Sweep] Ports: retrieval={retrieval_port} "
             f"summarizer={summarizer_port} critic={critic_port}\n"
@@ -915,6 +1464,8 @@ def _launch_duration_sweep_child(
         raise
     state = _DurationSweepChildState(
         duration_preset=duration_preset,
+        shard_index=shard_index,
+        shard_count=shard_count,
         process=process,
         log_path=log_path,
         log_handle=log_handle,
@@ -927,6 +1478,7 @@ def _launch_duration_sweep_child(
         output_root=Path(
             getattr(args, "output_root", REPO_ROOT / "artifacts" / "sporc_runs")
         ).resolve(),
+        shared_sample_queue_root=shared_sample_queue_root,
         restart_count=restart_count,
         recovered_stall_count=recovered_stall_count,
     )
@@ -964,8 +1516,11 @@ def _stop_duration_sweep_child(
     reason: str,
 ) -> int | None:
     """Terminate one running sweep child and close its background reader."""
-    state.log_handle.write(f"[Sweep] {reason}\n")
-    state.log_handle.flush()
+    if state.process.poll() is not None and state.log_handle.closed:
+        return state.process.poll()
+    if not state.log_handle.closed:
+        state.log_handle.write(f"[Sweep] {reason}\n")
+        state.log_handle.flush()
     if state.process.poll() is None:
         _terminate_process_tree(state.process)
     try:
@@ -974,12 +1529,23 @@ def _stop_duration_sweep_child(
         exit_code = state.process.poll()
     if state.reader_thread is not None:
         state.reader_thread.join(timeout=5.0)
-    if exit_code is not None:
+    if exit_code is not None and not state.log_handle.closed:
         state.log_handle.write(f"[Sweep] Child exited with code {exit_code}\n")
         state.log_handle.flush()
     if not state.log_handle.closed:
         state.log_handle.close()
     return exit_code
+
+
+def _stop_active_duration_sweep_children(
+    active_presets: dict[str, _DurationSweepPresetState],
+    *,
+    reason: str,
+) -> None:
+    """Stop every still-running sweep child and close its active resources."""
+    for preset_state in active_presets.values():
+        for child_state in preset_state.child_states.values():
+            _stop_duration_sweep_child(child_state, reason=reason)
 
 
 def _detect_duration_sweep_child_stall(
@@ -1018,23 +1584,28 @@ def _restart_duration_sweep_child(
     args: argparse.Namespace,
     sweep_root: Path,
     used_ports: set[int],
-    event_queue: queue.Queue[tuple[str, int, dict[str, object]]],
+    event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
     reason: str,
 ) -> _DurationSweepChildState:
     """Restart one stalled preset child from its execute checkpoint."""
     _stop_duration_sweep_child(
         state,
         reason=(
-            f"Watchdog restarting preset {state.duration_preset} after stall: {reason}"
+            "Watchdog restarting preset "
+            f"{_format_duration_sweep_child_label(state.duration_preset, shard_index=state.shard_index, shard_count=state.shard_count)} "
+            f"after stall: {reason}"
         ),
     )
     restarted_state = _launch_duration_sweep_child(
         args=args,
         sweep_root=sweep_root,
         duration_preset=state.duration_preset,
+        shard_index=state.shard_index,
+        shard_count=state.shard_count,
         max_samples=state.max_samples,
         used_ports=used_ports,
         event_queue=event_queue,
+        shared_sample_queue_root=state.shared_sample_queue_root,
         checkpoint_path=state.checkpoint_path,
         resume_from_checkpoint=True,
         resume_failure_reason=_SWEEP_STALL_FINAL_STATUS,
@@ -1044,6 +1615,202 @@ def _restart_duration_sweep_child(
     restarted_state.sample_count = state.sample_count
     restarted_state.completed_samples = state.completed_samples
     return restarted_state
+
+
+def _launch_duration_sweep_preset(
+    *,
+    args: argparse.Namespace,
+    sweep_root: Path,
+    duration_preset: str,
+    max_samples: int,
+    worker_ids: list[int],
+    worker_budget: int,
+    used_ports: set[int],
+    event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
+    preset_state: _DurationSweepPresetState | None = None,
+) -> _DurationSweepPresetState:
+    """Launch one or more worker-slot children for a duration preset."""
+    if not worker_ids:
+        raise ValueError("Duration sweep launch requires at least one worker id.")
+    resolved_preset_state = preset_state or _DurationSweepPresetState(
+        duration_preset=duration_preset,
+        max_samples=max_samples,
+        worker_budget=worker_budget,
+        queue_root=(sweep_root / "queues" / duration_preset),
+    )
+    try:
+        for worker_id in worker_ids:
+            resolved_preset_state.child_states[worker_id] = _launch_duration_sweep_child(
+                args=args,
+                sweep_root=sweep_root,
+                duration_preset=duration_preset,
+                shard_index=worker_id,
+                shard_count=worker_budget,
+                max_samples=max_samples,
+                used_ports=used_ports,
+                event_queue=event_queue,
+                shared_sample_queue_root=resolved_preset_state.queue_root,
+            )
+    except Exception:
+        for child_state in resolved_preset_state.child_states.values():
+            _stop_duration_sweep_child(
+                child_state,
+                reason=(
+                    "Aborting preset launch after a sibling shard failed to start."
+                ),
+            )
+        raise
+    return resolved_preset_state
+
+
+def _aggregate_duration_sweep_preset(
+    *,
+    duration_preset: str,
+    child_summaries: dict[int, DurationSweepPresetSummary],
+) -> DurationSweepPresetSummary:
+    """Combine shard child summaries into one preset-level sweep summary."""
+    ordered_children = [
+        child_summaries[shard_index] for shard_index in sorted(child_summaries)
+    ]
+    if len(ordered_children) == 1:
+        return ordered_children[0]
+
+    sample_count = 0
+    executed_count = 0
+    skipped_count = 0
+    success_count = 0
+    failure_count = 0
+    within_tolerance_count = 0
+    candidate_seconds_total = 0.0
+    absolute_delta_total = 0.0
+    factualness_total = 0.0
+    naturalness_total = 0.0
+    speaker_grammar_total = 0.0
+    composite_total = 0.0
+    composite_values: list[float] = []
+    ci_available = True
+    error_messages: list[str] = []
+    restart_count = 0
+    recovered_stall_count = 0
+
+    artifact_children = [
+        summary for summary in ordered_children if summary.sample_count > 0
+    ]
+    selected_artifact_child = artifact_children[0] if len(artifact_children) == 1 else None
+
+    for child_summary in ordered_children:
+        sample_count += int(child_summary.sample_count)
+        executed_count += int(child_summary.executed_count)
+        skipped_count += int(child_summary.skipped_count)
+        success_count += int(child_summary.success_count)
+        failure_count += int(child_summary.failure_count)
+        within_tolerance_count += int(child_summary.within_tolerance_count)
+        candidate_seconds_total += (
+            float(child_summary.mean_candidate_seconds) * int(child_summary.executed_count)
+        )
+        absolute_delta_total += (
+            float(child_summary.mean_absolute_duration_delta_seconds)
+            * int(child_summary.executed_count)
+        )
+        factualness_total += (
+            float(child_summary.mean_factualness) * int(child_summary.executed_count)
+        )
+        naturalness_total += (
+            float(child_summary.mean_naturalness) * int(child_summary.executed_count)
+        )
+        speaker_grammar_total += (
+            float(child_summary.mean_speaker_grammar_similarity)
+            * int(child_summary.executed_count)
+        )
+        composite_total += (
+            float(child_summary.mean_composite) * int(child_summary.executed_count)
+        )
+        restart_count += int(child_summary.restart_count)
+        recovered_stall_count += int(child_summary.recovered_stall_count)
+        if child_summary.error_message:
+            error_messages.append(child_summary.error_message)
+
+        child_report_path = str(child_summary.report_path or "").strip()
+        if child_summary.executed_count <= 0:
+            continue
+        if not child_report_path:
+            ci_available = False
+            continue
+        child_report = _load_execution_report(Path(child_report_path))
+        composite_values.extend(
+            sample.metrics.composite
+            for sample in child_report.samples
+            if sample.status != "skipped"
+        )
+
+    if executed_count == 0:
+        status = "failed"
+    elif failure_count == 0 and skipped_count == 0:
+        status = "completed"
+    else:
+        status = "partial"
+
+    composite_ci95 = (
+        mean_confidence_interval_95(composite_values)
+        if ci_available and len(composite_values) == executed_count
+        else None
+    )
+
+    return DurationSweepPresetSummary(
+        duration_preset=duration_preset,
+        target_seconds=int(DURATION_PRESET_SECONDS[duration_preset]),
+        status=status,
+        sample_count=sample_count,
+        executed_count=executed_count,
+        skipped_count=skipped_count,
+        success_count=success_count,
+        failure_count=failure_count,
+        within_tolerance_count=within_tolerance_count,
+        within_tolerance_rate=(
+            round(within_tolerance_count / executed_count, 4)
+            if executed_count
+            else 0.0
+        ),
+        mean_candidate_seconds=round(
+            candidate_seconds_total / executed_count,
+            4,
+        )
+        if executed_count
+        else 0.0,
+        mean_absolute_duration_delta_seconds=round(
+            absolute_delta_total / executed_count,
+            4,
+        )
+        if executed_count
+        else 0.0,
+        mean_factualness=round(factualness_total / executed_count, 4)
+        if executed_count
+        else 0.0,
+        mean_naturalness=round(naturalness_total / executed_count, 4)
+        if executed_count
+        else 0.0,
+        mean_speaker_grammar_similarity=round(
+            speaker_grammar_total / executed_count,
+            4,
+        )
+        if executed_count
+        else 0.0,
+        mean_composite=round(composite_total / executed_count, 4)
+        if executed_count
+        else 0.0,
+        report_path=selected_artifact_child.report_path if selected_artifact_child else None,
+        notes_path=selected_artifact_child.notes_path if selected_artifact_child else None,
+        results_path=selected_artifact_child.results_path if selected_artifact_child else None,
+        mean_composite_ci95_lower=(
+            round(composite_ci95[0], 4) if composite_ci95 is not None else None
+        ),
+        mean_composite_ci95_upper=(
+            round(composite_ci95[1], 4) if composite_ci95 is not None else None
+        ),
+        error_message="; ".join(error_messages) if error_messages else None,
+        restart_count=restart_count,
+        recovered_stall_count=recovered_stall_count,
+    )
 
 
 def _finalize_duration_sweep_child(
@@ -1109,6 +1876,7 @@ def _finalize_duration_sweep_child(
 
 def _run_duration_sweep(args: argparse.Namespace) -> int:
     """Execute one or more duration presets and write aggregate artifacts."""
+    global _ACTIVE_SWEEP_PROGRESS_BAR
     if args.mode == "menu":
         print(_render_duration_sweep_menu())
         return 0
@@ -1127,6 +1895,9 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
         requested_parallelism=int(args.parallelism),
         preset_count=len(presets),
     )
+    preset_concurrency = _resolve_duration_sweep_concurrency(
+        requested_concurrency=int(getattr(args, "concurrency", 1))
+    )
     write_duration_sweep_artifacts, _ = _load_reporting_helpers(
         status_reporter=_emit_cli_status,
     )
@@ -1134,22 +1905,37 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
     sweep_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     sweep_root = Path(args.sweep_root).resolve() / sweep_id
     sweep_root.mkdir(parents=True, exist_ok=True)
-    pending_presets = list(presets)
-    running_children: dict[str, _DurationSweepChildState] = {}
+    initial_worker_assignments, pending_presets, total_worker_budget = (
+        _build_initial_duration_sweep_worker_assignments(
+            presets=presets,
+            seeded_preset_count=effective_parallelism,
+            preset_concurrency=preset_concurrency,
+        )
+    )
+    active_presets: dict[str, _DurationSweepPresetState] = {}
     preset_summaries_by_preset: dict[str, DurationSweepPresetSummary] = {}
     used_ports: set[int] = set()
-    event_queue: queue.Queue[tuple[str, int, dict[str, object]]] = queue.Queue()
+    event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]] = queue.Queue()
     last_progress: str | None = None
     next_heartbeat_at = 0.0
+    accumulated_worker_seconds = 0.0
     child_stall_seconds = float(
         getattr(args, "child_stall_seconds", _SWEEP_CHILD_DEFAULT_STALL_SECONDS)
     )
     max_child_restarts = int(getattr(args, "max_child_restarts", 2))
+    previous_progress_bar = _ACTIVE_SWEEP_PROGRESS_BAR
+    sweep_progress_bar = _SweepProgressBar(stream=sys.stderr)
+    sweep_progress_bar.start()
+    _ACTIVE_SWEEP_PROGRESS_BAR = (
+        sweep_progress_bar if sweep_progress_bar.is_enabled() else None
+    )
 
     _emit_cli_status(
         (
             f"Starting duration sweep {sweep_id} with presets={', '.join(presets)} "
             f"parallelism={effective_parallelism} "
+            f"preset_concurrency={preset_concurrency} "
+            f"worker_budget={total_worker_budget} "
             f"examples_per_preset={examples if examples > 0 else 'all'} "
             f"transcript_only={not bool(args.enable_voice_clone)}."
         )
@@ -1157,105 +1943,167 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
 
     try:
         with measure_elapsed_time() as sweep_timer:
-            while pending_presets or running_children:
-                while (
-                    pending_presets
-                    and len(running_children) < effective_parallelism
+            previous_worker_sample_at = time.monotonic()
+            for duration_preset in presets[:effective_parallelism]:
+                preset_state = _launch_duration_sweep_preset(
+                    args=args,
+                    sweep_root=sweep_root,
+                    duration_preset=duration_preset,
+                    max_samples=examples,
+                    worker_ids=initial_worker_assignments[duration_preset],
+                    worker_budget=total_worker_budget,
+                    used_ports=used_ports,
+                    event_queue=event_queue,
+                )
+                active_presets[duration_preset] = preset_state
+                for child_state in sorted(
+                    preset_state.child_states.values(),
+                    key=lambda state: state.shard_index,
                 ):
-                    duration_preset = pending_presets.pop(0)
-                    child_state = _launch_duration_sweep_child(
-                        args=args,
-                        sweep_root=sweep_root,
-                        duration_preset=duration_preset,
-                        max_samples=examples,
-                        used_ports=used_ports,
-                        event_queue=event_queue,
+                    child_label = _format_duration_sweep_child_label(
+                        duration_preset,
+                        shard_index=child_state.shard_index,
+                        shard_count=child_state.shard_count,
                     )
-                    running_children[duration_preset] = child_state
                     _emit_cli_status(
                         (
-                            f"Started preset {duration_preset} "
+                            f"Started preset {child_label} "
                             f"(retrieval={child_state.retrieval_port}, "
                             f"summarizer={child_state.summarizer_port}, "
                             f"critic={child_state.critic_port})."
                         )
                     )
 
+            while active_presets:
                 progress_changed = False
                 try:
-                    duration_preset, child_pid, payload = event_queue.get(timeout=0.5)
+                    duration_preset, shard_index, child_pid, payload = event_queue.get(
+                        timeout=0.5
+                    )
                 except queue.Empty:
                     pass
                 else:
-                    child_state = running_children.get(duration_preset)
+                    preset_state = active_presets.get(duration_preset)
+                    child_state = (
+                        preset_state.child_states.get(shard_index)
+                        if preset_state is not None
+                        else None
+                    )
                     if child_state is not None and child_state.process.pid == child_pid:
                         _update_duration_sweep_child_state(child_state, payload)
+                        _update_duration_sweep_preset_state(preset_state, payload)
                         progress_changed = True
                     while True:
                         try:
-                            duration_preset, child_pid, payload = event_queue.get_nowait()
+                            (
+                                duration_preset,
+                                shard_index,
+                                child_pid,
+                                payload,
+                            ) = event_queue.get_nowait()
                         except queue.Empty:
                             break
-                        child_state = running_children.get(duration_preset)
+                        preset_state = active_presets.get(duration_preset)
+                        child_state = (
+                            preset_state.child_states.get(shard_index)
+                            if preset_state is not None
+                            else None
+                        )
                         if child_state is not None and child_state.process.pid == child_pid:
                             _update_duration_sweep_child_state(child_state, payload)
+                            _update_duration_sweep_preset_state(preset_state, payload)
                             progress_changed = True
 
                 now_monotonic = time.monotonic()
-                for duration_preset, child_state in list(running_children.items()):
-                    stall_reason = _detect_duration_sweep_child_stall(
-                        child_state,
-                        now_monotonic=now_monotonic,
-                        child_stall_seconds=child_stall_seconds,
-                    )
-                    if stall_reason is not None:
-                        if child_state.restart_count >= max_child_restarts:
-                            child_state.log_handle.write(
-                                "[Sweep] Watchdog exceeded the configured restart "
-                                f"threshold for preset {duration_preset}; "
-                                "marking the stalled sample failed and "
-                                f"continuing the preset from checkpoint: "
-                                f"{stall_reason}\n"
-                            )
-                            child_state.log_handle.flush()
-                        restarted_state = _restart_duration_sweep_child(
-                            state=child_state,
-                            args=args,
-                            sweep_root=sweep_root,
-                            used_ports=used_ports,
-                            event_queue=event_queue,
-                            reason=stall_reason,
+                active_worker_count = sum(
+                    len(preset_state.child_states)
+                    for preset_state in active_presets.values()
+                )
+                accumulated_worker_seconds += (
+                    max(now_monotonic - previous_worker_sample_at, 0.0)
+                    * active_worker_count
+                )
+                previous_worker_sample_at = now_monotonic
+                for duration_preset, preset_state in list(active_presets.items()):
+                    for shard_index, child_state in list(preset_state.child_states.items()):
+                        child_label = _format_duration_sweep_child_label(
+                            duration_preset,
+                            shard_index=child_state.shard_index,
+                            shard_count=child_state.shard_count,
                         )
-                        running_children[duration_preset] = restarted_state
+                        stall_reason = _detect_duration_sweep_child_stall(
+                            child_state,
+                            now_monotonic=now_monotonic,
+                            child_stall_seconds=child_stall_seconds,
+                        )
+                        if stall_reason is not None:
+                            if child_state.restart_count >= max_child_restarts:
+                                child_state.log_handle.write(
+                                    "[Sweep] Watchdog exceeded the configured "
+                                    "restart threshold for preset "
+                                    f"{child_label}; marking the stalled sample "
+                                    "failed and continuing the preset from "
+                                    f"checkpoint: {stall_reason}\n"
+                                )
+                                child_state.log_handle.flush()
+                            restarted_state = _restart_duration_sweep_child(
+                                state=child_state,
+                                args=args,
+                                sweep_root=sweep_root,
+                                used_ports=used_ports,
+                                event_queue=event_queue,
+                                reason=stall_reason,
+                            )
+                            preset_state.child_states[shard_index] = restarted_state
+                            progress_changed = True
+                            if child_state.restart_count >= max_child_restarts:
+                                _emit_cli_status(
+                                    (
+                                        f"Continuing preset {child_label} after "
+                                        "stalled sample exceeded the configured "
+                                        f"restart threshold ({max_child_restarts}): "
+                                        f"{stall_reason}"
+                                    )
+                                )
+                            else:
+                                _emit_cli_status(
+                                    (
+                                        f"Restarted preset {child_label} "
+                                        f"restart={restarted_state.restart_count}/"
+                                        f"{max_child_restarts} "
+                                        f"reason={stall_reason}"
+                                    )
+                                )
+                            continue
+                        if child_state.process.poll() is None:
+                            continue
+                        preset_state.completed_child_summaries[shard_index] = (
+                            _finalize_duration_sweep_child(
+                                state=child_state,
+                                fallback_sample_count=child_state.completed_samples,
+                            )
+                        )
+                        del preset_state.child_states[shard_index]
                         progress_changed = True
-                        if child_state.restart_count >= max_child_restarts:
-                            _emit_cli_status(
-                                (
-                                    f"Continuing preset {duration_preset} after "
-                                    "stalled sample exceeded the configured "
-                                    f"restart threshold ({max_child_restarts}): "
-                                    f"{stall_reason}"
-                                )
+                        _emit_cli_status(
+                            (
+                                f"Finished preset {child_label} "
+                                f"status={preset_state.completed_child_summaries[shard_index].status}."
                             )
-                        else:
-                            _emit_cli_status(
-                                (
-                                    f"Restarted preset {duration_preset} "
-                                    f"restart={restarted_state.restart_count}/"
-                                    f"{max_child_restarts} "
-                                    f"reason={stall_reason}"
-                                )
-                            )
-                        continue
-                    if child_state.process.poll() is None:
+                        )
+
+                    if preset_state.child_states:
                         continue
                     preset_summaries_by_preset[duration_preset] = (
-                        _finalize_duration_sweep_child(
-                            state=child_state,
-                            fallback_sample_count=examples,
+                        _aggregate_duration_sweep_preset(
+                            duration_preset=duration_preset,
+                            child_summaries=preset_state.completed_child_summaries,
                         )
                     )
-                    del running_children[duration_preset]
+                    donated_worker_ids = sorted(
+                        preset_state.completed_child_summaries.keys()
+                    )
+                    del active_presets[duration_preset]
                     progress_changed = True
                     _emit_cli_status(
                         (
@@ -1263,6 +2111,43 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                             f"status={preset_summaries_by_preset[duration_preset].status}."
                         )
                     )
+                    donation_target = _find_next_duration_sweep_donation_target(
+                        presets=presets,
+                        completed_summaries=preset_summaries_by_preset,
+                        current_preset=duration_preset,
+                    )
+                    if donation_target is not None:
+                        if donation_target in pending_presets:
+                            pending_presets.remove(donation_target)
+                        target_state = active_presets.get(donation_target)
+                        target_state = _launch_duration_sweep_preset(
+                            args=args,
+                            sweep_root=sweep_root,
+                            duration_preset=donation_target,
+                            max_samples=examples,
+                            worker_ids=donated_worker_ids,
+                            worker_budget=total_worker_budget,
+                            used_ports=used_ports,
+                            event_queue=event_queue,
+                            preset_state=target_state,
+                        )
+                        active_presets[donation_target] = target_state
+                        for worker_id in donated_worker_ids:
+                            child_state = target_state.child_states[worker_id]
+                            child_label = _format_duration_sweep_child_label(
+                                donation_target,
+                                shard_index=child_state.shard_index,
+                                shard_count=child_state.shard_count,
+                            )
+                            _emit_cli_status(
+                                (
+                                    f"Moved worker {worker_id} from {duration_preset} "
+                                    f"to {child_label} "
+                                    f"(retrieval={child_state.retrieval_port}, "
+                                    f"summarizer={child_state.summarizer_port}, "
+                                    f"critic={child_state.critic_port})."
+                                )
+                            )
 
                 elapsed_seconds = sweep_timer.elapsed_seconds()
                 if (
@@ -1272,29 +2157,36 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                 ):
                     progress_state = _format_duration_sweep_progress(
                         presets=presets,
-                        running_children=running_children,
+                        active_presets=active_presets,
                         completed_summaries=preset_summaries_by_preset,
                         timer=sweep_timer,
                         examples_per_preset=examples,
+                        accumulated_worker_seconds=accumulated_worker_seconds,
                     )
-                    if progress_state.rendered != last_progress:
+                    if sweep_progress_bar.update(progress_state):
+                        last_progress = progress_state.rendered
+                    elif progress_state.rendered != last_progress:
                         _emit_cli_status(progress_state.rendered)
                         last_progress = progress_state.rendered
                     next_heartbeat_at = (
                         elapsed_seconds + _SWEEP_PROGRESS_HEARTBEAT_SECONDS
                     )
     except KeyboardInterrupt:
-        for child_state in running_children.values():
-            _terminate_process_tree(child_state.process)
+        _emit_cli_status(
+            "Cancelling duration sweep; closing active child connections..."
+        )
+        _stop_active_duration_sweep_children(
+            active_presets,
+            reason="Cancellation requested by operator; shutting down child.",
+        )
         raise
     finally:
-        for child_state in running_children.values():
-            if child_state.process.poll() is None:
-                _terminate_process_tree(child_state.process)
-            if child_state.reader_thread is not None:
-                child_state.reader_thread.join(timeout=5.0)
-            if not child_state.log_handle.closed:
-                child_state.log_handle.close()
+        _stop_active_duration_sweep_children(
+            active_presets,
+            reason="Sweep cleanup closing active child resources.",
+        )
+        sweep_progress_bar.close()
+        _ACTIVE_SWEEP_PROGRESS_BAR = previous_progress_bar
 
     preset_summaries = [
         preset_summaries_by_preset[duration_preset] for duration_preset in presets
@@ -1321,6 +2213,7 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
             if getattr(args, "sample_seed", None) is not None
             else None
         ),
+        preset_concurrency=preset_concurrency,
     )
     report_path, results_path = write_duration_sweep_artifacts(
         sweep_root=sweep_root,
@@ -1437,6 +2330,9 @@ def _build_execute_child_command(
     emit_progress_heartbeats: bool = False,
     progress_heartbeat_seconds: float | None = None,
     apply_sweep_timeout_defaults: bool = False,
+    shared_sample_queue_root: Path | None = None,
+    sample_shard_index: int | None = None,
+    sample_shard_count: int | None = None,
 ) -> list[str]:
     """Build a child execute command with optional sweep-specific overrides."""
     command = [
@@ -1494,6 +2390,19 @@ def _build_execute_child_command(
         "--checkpoint-path": str(checkpoint_path) if checkpoint_path is not None else "",
         "--progress-heartbeat-seconds": progress_heartbeat_seconds,
         "--resume-failure-reason": resume_failure_reason,
+        "--shared-sample-queue-root": (
+            str(shared_sample_queue_root) if shared_sample_queue_root is not None else ""
+        ),
+        "--sample-shard-index": (
+            sample_shard_index
+            if sample_shard_index is not None
+            else getattr(args, "sample_shard_index", 1)
+        ),
+        "--sample-shard-count": (
+            sample_shard_count
+            if sample_shard_count is not None
+            else getattr(args, "sample_shard_count", 1)
+        ),
     }
     if args.prepare_if_missing:
         command.append("--prepare-if-missing")
@@ -1773,6 +2682,65 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "dedupe-manifest":
+            from card_framework.benchmark.summarizer_critic.sporc.dedupe_manifest import (
+                run_dedupe_manifest_cli,
+            )
+
+            result = run_dedupe_manifest_cli(
+                str(args.manifest_path),
+                audit_path=str(args.audit_path),
+                status_reporter=_emit_cli_status,
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "manifest_path": str(result.manifest_path),
+                        "audit_path": str(result.audit_path),
+                        "original_sample_count": result.original_sample_count,
+                        "deduped_sample_count": result.deduped_sample_count,
+                        "removed_sample_count": result.removed_sample_count,
+                        "candidate_group_count": result.candidate_group_count,
+                        "transcript_signature_reads": result.transcript_signature_reads,
+                    }
+                )
+            )
+            return 0
+        if args.command == "export-transcripts":
+            from card_framework.benchmark.summarizer_critic.sporc.export_transcripts import (
+                run_export_transcripts_cli,
+            )
+
+            result = run_export_transcripts_cli(
+                args,
+                status_reporter=_emit_cli_status,
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "manifest_path": str(result.manifest_path),
+                        "output_path": str(result.output_path),
+                        "episode_positions": list(result.episode_positions),
+                        "episode_count": result.episode_count,
+                        "line_count": result.line_count,
+                    }
+                )
+            )
+            return 0
+        if args.command == "human-sample":
+            from card_framework.benchmark.summarizer_critic.sporc.human_sampler import (
+                run_human_sampling_session,
+            )
+
+            return run_human_sampling_session(args)
+        if args.command == "llm-sample":
+            from card_framework.benchmark.summarizer_critic.sporc.llm_sampler import (
+                run_llm_sampling_session,
+            )
+
+            return run_llm_sampling_session(args)
         if args.command == "execute":
             benchmark_execution_error, _, execute_benchmark = _load_runner_helpers(
                 status_reporter=_emit_cli_status,

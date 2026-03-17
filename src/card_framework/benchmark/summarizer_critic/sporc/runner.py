@@ -9,9 +9,11 @@ import asyncio
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -39,7 +41,6 @@ from card_framework.benchmark.matrix import (
 from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     BenchmarkExecutionError,
     ManagedServer,
-    _attach_stream_callback,
     _build_stub_calibration,
     _coerce_mapping,
     _configure_benchmark_logging,
@@ -96,12 +97,22 @@ from card_framework.audio_pipeline.speaker_samples import (
     resolve_sample_source_audio_path,
 )
 from card_framework.cli.main import _build_a2a_app
-from card_framework.orchestration.transcript import Transcript
+from card_framework.orchestration.transcript import Transcript, TranscriptSegment
 from card_framework.providers.logging_provider import LoggingLLMProvider
+from card_framework.providers.response_callbacks import (
+    CompositeResponseCallback,
+    RichConsoleResponseCallback,
+)
 from card_framework.retrieval.embeddings import TranscriptIndex
 from card_framework.runtime.loop_orchestrator import Orchestrator
 from card_framework.shared.events import event_bus
-from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
+from card_framework.shared.llm_provider import (
+    EmbeddingProvider,
+    LLMProvider,
+    LLMResponseCallback,
+    normalize_messages,
+    normalize_tools,
+)
 from card_framework.shared.paths import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_PROVIDER_PROFILES_PATH,
@@ -122,6 +133,7 @@ _SOURCE_AUDIO_HEADERS = {
     "Accept": "audio/*,*/*;q=0.8",
     "Referer": "https://www.buzzsprout.com/",
 }
+_SHARED_SAMPLE_QUEUE_DB_NAME = "sample_queue.sqlite3"
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
@@ -130,6 +142,9 @@ _STAGE_TIMEOUT_FINAL_STATUS = "stage_timeout"
 _RESUME_FAILURE_DEFAULT_STATUS = "resume_interrupted_sample"
 _SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
 _CHECKPOINT_VERSION = 1
+_TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS = 250
+_TRANSCRIPT_ONLY_ALNUM_PATTERN = re.compile(r"[A-Za-z0-9]")
+_TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -139,12 +154,502 @@ class _ManagedBenchmarkRuntime:
     orchestrator: Orchestrator
     judge: SPoRCJudge
     event_capture: EventCapture
+    artifact_recorder: "_SampleArtifactRecorder"
     retrieval_enabled: bool
     shared_agent_client: AgentClient
     servers: list[ManagedServer]
     retrieval_port: int
     summarizer_port: int
     critic_port: int
+
+
+@dataclass(slots=True)
+class _PendingTraceRecord:
+    """Track one in-flight streamed response before it is persisted."""
+
+    role: str
+    call_index: int
+    agent_name: str
+    started_at_utc: str
+    completed_at_utc: str | None = None
+    reasoning_content: str = ""
+    content: str = ""
+
+
+@dataclass(slots=True)
+class _SampleArtifactState:
+    """Track one active sample's artifact directories and recorded call files."""
+
+    sample_id: str
+    sample_root: Path
+    manifest_path: Path
+    final_dir: Path
+    llm_root: Path
+    llm_dirs: dict[str, Path]
+    target_seconds: int
+    dataset: str
+    episode_key: str
+    call_counts: dict[str, int]
+    recorded_call_paths: dict[str, list[Path]]
+    pending_calls: dict[str, _PendingTraceRecord]
+
+
+@dataclass(slots=True, frozen=True)
+class _SampleArtifactPaths:
+    """Expose persisted sample artifact locations back to report payloads."""
+
+    sample_artifact_dir: str
+    artifact_manifest_path: str
+    summarizer_trace_dir: str
+    critic_trace_dir: str
+    judge_trace_dir: str
+    final_summary_path: str | None
+    final_critic_feedback_path: str | None
+    loop_diagnostics_path: str | None
+    sample_result_artifact_path: str
+
+
+def _json_default(value: object) -> object:
+    """Serialize model-like objects safely for artifact JSON dumps."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    return str(value)
+
+
+def _serialize_provider_response(response_message: Any) -> dict[str, Any]:
+    """Return a stable JSON-friendly response payload for trace artifacts."""
+    if isinstance(response_message, dict):
+        return deepcopy(response_message)
+    serialized: dict[str, Any] = {
+        "role": getattr(response_message, "role", "assistant"),
+        "content": getattr(response_message, "content", ""),
+    }
+    reasoning_content = getattr(response_message, "reasoning_content", None)
+    if reasoning_content is None:
+        reasoning_content = getattr(response_message, "reasoning", None)
+    if reasoning_content is not None:
+        serialized["reasoning_content"] = reasoning_content
+    tool_calls = getattr(response_message, "tool_calls", None)
+    if tool_calls:
+        serialized["tool_calls"] = json.loads(
+            json.dumps(tool_calls, default=_json_default)
+        )
+    return serialized
+
+
+def _attach_response_callback(
+    llm: LLMProvider,
+    callback: LLMResponseCallback,
+) -> bool:
+    """Attach a streaming callback to a provider or wrapped inner provider."""
+    callback_setter = getattr(llm, "set_response_callback", None)
+    if callable(callback_setter):
+        callback_setter(callback)
+        return True
+
+    inner_provider = getattr(llm, "inner_provider", None)
+    if isinstance(inner_provider, LLMProvider):
+        return _attach_response_callback(inner_provider, callback)
+    return False
+
+
+class _SampleArtifactRecorder:
+    """Persist per-sample trace and final-output artifacts for one execute run."""
+
+    def __init__(self, *, run_root: Path) -> None:
+        self._run_root = run_root
+        self._samples_root = (run_root / "samples").resolve()
+        self._lock = threading.RLock()
+        self._active_sample: _SampleArtifactState | None = None
+        self._samples_root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def samples_root(self) -> Path:
+        """Return the root directory that contains per-sample artifacts."""
+        return self._samples_root
+
+    def activate_sample(
+        self,
+        *,
+        sample: PreparedBenchmarkSample,
+        target_seconds: int,
+    ) -> None:
+        """Create and register the per-sample artifact tree for a run sample."""
+        sample_root = (self._samples_root / sample.sample_id).resolve()
+        final_dir = (sample_root / "final").resolve()
+        llm_root = (sample_root / "llm").resolve()
+        llm_dirs = {
+            role: (llm_root / role).resolve()
+            for role in ("summarizer", "critic", "judge")
+        }
+        for directory in (sample_root, final_dir, llm_root, *llm_dirs.values()):
+            directory.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._active_sample = _SampleArtifactState(
+                sample_id=sample.sample_id,
+                sample_root=sample_root,
+                manifest_path=(sample_root / "manifest.json").resolve(),
+                final_dir=final_dir,
+                llm_root=llm_root,
+                llm_dirs=llm_dirs,
+                target_seconds=target_seconds,
+                dataset=sample.dataset,
+                episode_key=sample.episode_key,
+                call_counts=defaultdict(int),
+                recorded_call_paths=defaultdict(list),
+                pending_calls={},
+            )
+
+    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        """Write one JSON artifact with stable formatting."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                payload,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=_json_default,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def begin_stream(self, *, role: str, agent_name: str) -> None:
+        """Start buffering one streamed response for the active sample."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            state = self._active_sample
+            state.call_counts[role] += 1
+            state.pending_calls[role] = _PendingTraceRecord(
+                role=role,
+                call_index=state.call_counts[role],
+                agent_name=agent_name,
+                started_at_utc=utc_now_iso(),
+            )
+
+    def append_reasoning(self, *, role: str, token: str) -> None:
+        """Append one streamed reasoning token for the active sample."""
+        if not token:
+            return
+        with self._lock:
+            if self._active_sample is None:
+                return
+            pending = self._active_sample.pending_calls.get(role)
+            if pending is not None:
+                pending.reasoning_content += token
+
+    def append_content(self, *, role: str, token: str) -> None:
+        """Append one streamed content token for the active sample."""
+        if not token:
+            return
+        with self._lock:
+            if self._active_sample is None:
+                return
+            pending = self._active_sample.pending_calls.get(role)
+            if pending is not None:
+                pending.content += token
+
+    def complete_stream(self, *, role: str) -> None:
+        """Mark one streamed response complete for the active sample."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            pending = self._active_sample.pending_calls.get(role)
+            if pending is not None:
+                pending.completed_at_utc = utc_now_iso()
+
+    def record_call(self, *, role: str, payload: dict[str, Any]) -> None:
+        """Persist one finalized provider request/response trace."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            state = self._active_sample
+            pending = state.pending_calls.pop(role, None)
+            if pending is None:
+                state.call_counts[role] += 1
+                pending = _PendingTraceRecord(
+                    role=role,
+                    call_index=state.call_counts[role],
+                    agent_name=str(payload.get("agent_name") or role.title()),
+                    started_at_utc=utc_now_iso(),
+                    completed_at_utc=utc_now_iso(),
+                )
+            elif pending.completed_at_utc is None:
+                pending.completed_at_utc = utc_now_iso()
+
+            call_path = (
+                state.llm_dirs[role] / f"call_{pending.call_index:03d}.json"
+            ).resolve()
+            self._write_json(
+                call_path,
+                {
+                    "sample_id": state.sample_id,
+                    "dataset": state.dataset,
+                    "episode_key": state.episode_key,
+                    "target_seconds": state.target_seconds,
+                    "role": role,
+                    "call_index": pending.call_index,
+                    "agent_name": pending.agent_name,
+                    "stream_started_at_utc": pending.started_at_utc,
+                    "stream_completed_at_utc": pending.completed_at_utc,
+                    "streamed_reasoning_content": pending.reasoning_content,
+                    "streamed_content": pending.content,
+                    **payload,
+                },
+            )
+            state.recorded_call_paths[role].append(call_path)
+
+    def _active_paths(self) -> _SampleArtifactPaths | None:
+        """Return current sample artifact paths without mutating state."""
+        with self._lock:
+            if self._active_sample is None:
+                return None
+            state = self._active_sample
+            return _SampleArtifactPaths(
+                sample_artifact_dir=str(state.sample_root),
+                artifact_manifest_path=str(state.manifest_path),
+                summarizer_trace_dir=str(state.llm_dirs["summarizer"]),
+                critic_trace_dir=str(state.llm_dirs["critic"]),
+                judge_trace_dir=str(state.llm_dirs["judge"]),
+                final_summary_path=None,
+                final_critic_feedback_path=None,
+                loop_diagnostics_path=None,
+                sample_result_artifact_path=str(
+                    (state.final_dir / "sample_result.json").resolve()
+                ),
+            )
+
+    def finalize_sample(
+        self,
+        *,
+        result: SampleBenchmarkResult,
+        diagnostics: dict[str, Any] | None,
+        candidate_summary: str,
+    ) -> _SampleArtifactPaths | None:
+        """Write final sample artifacts and return their resolved locations."""
+        with self._lock:
+            if self._active_sample is None:
+                return None
+            state = self._active_sample
+            final_summary_path: Path | None = None
+            critic_feedback_path: Path | None = None
+            loop_diagnostics_path: Path | None = None
+            sample_result_path = (state.final_dir / "sample_result.json").resolve()
+
+            if candidate_summary.strip():
+                final_summary_path = (state.final_dir / "summary.xml").resolve()
+                final_summary_path.write_text(candidate_summary, encoding="utf-8")
+
+            if diagnostics is not None:
+                loop_diagnostics_path = (
+                    state.final_dir / "loop_diagnostics.json"
+                ).resolve()
+                self._write_json(loop_diagnostics_path, diagnostics)
+                critic_feedback = str(diagnostics.get("final_feedback", "") or "").strip()
+                if critic_feedback:
+                    critic_feedback_path = (
+                        state.final_dir / "critic_feedback.txt"
+                    ).resolve()
+                    critic_feedback_path.write_text(critic_feedback, encoding="utf-8")
+
+            artifact_paths = _SampleArtifactPaths(
+                sample_artifact_dir=str(state.sample_root),
+                artifact_manifest_path=str(state.manifest_path),
+                summarizer_trace_dir=str(state.llm_dirs["summarizer"]),
+                critic_trace_dir=str(state.llm_dirs["critic"]),
+                judge_trace_dir=str(state.llm_dirs["judge"]),
+                final_summary_path=(
+                    str(final_summary_path) if final_summary_path is not None else None
+                ),
+                final_critic_feedback_path=(
+                    str(critic_feedback_path)
+                    if critic_feedback_path is not None
+                    else None
+                ),
+                loop_diagnostics_path=(
+                    str(loop_diagnostics_path)
+                    if loop_diagnostics_path is not None
+                    else None
+                ),
+                sample_result_artifact_path=str(sample_result_path),
+            )
+            result_with_artifacts = replace(
+                result,
+                sample_artifact_dir=artifact_paths.sample_artifact_dir,
+                artifact_manifest_path=artifact_paths.artifact_manifest_path,
+                summarizer_trace_dir=artifact_paths.summarizer_trace_dir,
+                critic_trace_dir=artifact_paths.critic_trace_dir,
+                judge_trace_dir=artifact_paths.judge_trace_dir,
+                final_summary_path=artifact_paths.final_summary_path,
+                final_critic_feedback_path=artifact_paths.final_critic_feedback_path,
+                loop_diagnostics_path=artifact_paths.loop_diagnostics_path,
+                sample_result_artifact_path=artifact_paths.sample_result_artifact_path,
+            )
+            self._write_json(sample_result_path, asdict(result_with_artifacts))
+            self._write_json(
+                state.manifest_path,
+                {
+                    "sample_id": state.sample_id,
+                    "dataset": state.dataset,
+                    "episode_key": state.episode_key,
+                    "target_seconds": state.target_seconds,
+                    "sample_artifact_dir": str(state.sample_root),
+                    "final": {
+                        "summary_xml": (
+                            str(final_summary_path) if final_summary_path is not None else ""
+                        ),
+                        "critic_feedback": (
+                            str(critic_feedback_path)
+                            if critic_feedback_path is not None
+                            else ""
+                        ),
+                        "loop_diagnostics": (
+                            str(loop_diagnostics_path)
+                            if loop_diagnostics_path is not None
+                            else ""
+                        ),
+                        "sample_result": str(sample_result_path),
+                    },
+                    "llm_traces": {
+                        role: {
+                            "directory": str(state.llm_dirs[role]),
+                            "calls": [str(path) for path in state.recorded_call_paths[role]],
+                        }
+                        for role in ("summarizer", "critic", "judge")
+                    },
+                },
+            )
+            return artifact_paths
+
+    def clear_active_sample(self) -> None:
+        """Drop any active sample context after sample completion."""
+        with self._lock:
+            self._active_sample = None
+
+
+class _ArtifactCaptureResponseCallback(LLMResponseCallback):
+    """Buffer streamed reasoning/content so per-call artifacts keep raw text."""
+
+    def __init__(self, *, recorder: _SampleArtifactRecorder, role: str) -> None:
+        self._recorder = recorder
+        self._role = role
+
+    def on_start(self, agent_name: str) -> None:
+        self._recorder.begin_stream(role=self._role, agent_name=agent_name)
+
+    def on_thought_token(self, token: str) -> None:
+        self._recorder.append_reasoning(role=self._role, token=token)
+
+    def on_content_token(self, token: str) -> None:
+        self._recorder.append_content(role=self._role, token=token)
+
+    def on_complete(self) -> None:
+        self._recorder.complete_stream(role=self._role)
+
+
+class _ArtifactCaptureLLMProvider(LLMProvider):
+    """Wrap an LLM provider and persist structured request/response trace payloads."""
+
+    def __init__(
+        self,
+        *,
+        inner_provider: LLMProvider,
+        recorder: _SampleArtifactRecorder,
+        role: str,
+    ) -> None:
+        self.inner_provider = inner_provider
+        self._recorder = recorder
+        self._role = role
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        started = time.perf_counter()
+        try:
+            response = self.inner_provider.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            self._recorder.record_call(
+                role=self._role,
+                payload={
+                    "operation": "generate",
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                    "max_tokens": max_tokens,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise
+
+        self._recorder.record_call(
+            role=self._role,
+            payload={
+                "operation": "generate",
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "max_tokens": max_tokens,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "response_text": response,
+            },
+        )
+        return response
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]] | tuple[dict[str, Any], ...] | Any,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+    ) -> Any:
+        started = time.perf_counter()
+        normalized_messages = normalize_messages(messages)
+        normalized_tools = normalize_tools(tools)
+        try:
+            response = self.inner_provider.chat(
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            self._recorder.record_call(
+                role=self._role,
+                payload={
+                    "operation": "chat",
+                    "messages": normalized_messages,
+                    "tools": normalized_tools,
+                    "tool_choice": tool_choice,
+                    "max_tokens": max_tokens,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise
+
+        self._recorder.record_call(
+            role=self._role,
+            payload={
+                "operation": "chat",
+                "messages": normalized_messages,
+                "tools": normalized_tools,
+                "tool_choice": tool_choice,
+                "max_tokens": max_tokens,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "response": _serialize_provider_response(response),
+            },
+        )
+        return response
 
 
 class _BenchmarkProgressTracker:
@@ -743,6 +1248,191 @@ def _report_status_from_summary(summary: BenchmarkSummary) -> str:
     return "partial"
 
 
+def _resolve_sample_shard_args(args: argparse.Namespace) -> tuple[int, int]:
+    """Resolve and validate optional sample-shard selection arguments."""
+    shard_index = int(getattr(args, "sample_shard_index", 1) or 1)
+    shard_count = int(getattr(args, "sample_shard_count", 1) or 1)
+    if shard_count <= 0:
+        raise BenchmarkExecutionError("--sample-shard-count must be positive.")
+    if shard_index <= 0 or shard_index > shard_count:
+        raise BenchmarkExecutionError(
+            "--sample-shard-index must be between 1 and --sample-shard-count."
+        )
+    return shard_index, shard_count
+
+
+def _select_sample_shard(
+    samples: list[PreparedBenchmarkSample],
+    *,
+    shard_index: int,
+    shard_count: int,
+) -> list[PreparedBenchmarkSample]:
+    """Filter a selected sample list down to one deterministic shard."""
+    if shard_count == 1:
+        return list(samples)
+    zero_based_index = shard_index - 1
+    return [
+        sample
+        for sample_position, sample in enumerate(samples)
+        if sample_position % shard_count == zero_based_index
+    ]
+
+
+def _resolve_shared_sample_queue_root(args: argparse.Namespace) -> Path | None:
+    """Resolve an optional shared sample-queue root for pooled sweep workers."""
+    raw_value = str(getattr(args, "shared_sample_queue_root", "") or "").strip()
+    if not raw_value:
+        return None
+    return Path(raw_value).resolve()
+
+
+def _open_shared_sample_queue_connection(queue_root: Path) -> sqlite3.Connection:
+    """Open the preset-level SQLite queue used by pooled sweep workers."""
+    queue_root.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(
+        queue_root / _SHARED_SAMPLE_QUEUE_DB_NAME,
+        timeout=30.0,
+        isolation_level=None,
+    )
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS queue_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sample_queue (
+            sample_id TEXT PRIMARY KEY,
+            sample_position INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            owner_label TEXT,
+            owner_pid INTEGER,
+            final_status TEXT,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    return connection
+
+
+def _initialize_shared_sample_queue(
+    connection: sqlite3.Connection,
+    *,
+    sample_order: list[str],
+) -> None:
+    """Create or validate the shared preset queue against the selected sample order."""
+    serialized_order = json.dumps(sample_order, ensure_ascii=True)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'sample_order_json'"
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+                ("sample_order_json", serialized_order),
+            )
+            connection.executemany(
+                """
+                INSERT INTO sample_queue(
+                    sample_id,
+                    sample_position,
+                    status,
+                    owner_label,
+                    owner_pid,
+                    final_status,
+                    updated_at_utc
+                ) VALUES (?, ?, 'pending', NULL, NULL, NULL, ?)
+                """,
+                [
+                    (sample_id, index, now_iso)
+                    for index, sample_id in enumerate(sample_order, start=1)
+                ],
+            )
+        elif str(row[0]) != serialized_order:
+            raise BenchmarkExecutionError(
+                "Shared sample queue does not match the selected benchmark sample order."
+            )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
+def _claim_next_shared_sample_id(
+    connection: sqlite3.Connection,
+    *,
+    worker_label: str,
+    worker_pid: int,
+) -> str | None:
+    """Claim the next pending sample from a preset-level shared queue."""
+    claimed_sample_id: str | None = None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            """
+            SELECT sample_id
+            FROM sample_queue
+            WHERE status = 'pending'
+            ORDER BY sample_position ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is not None:
+            claimed_sample_id = str(row[0])
+            connection.execute(
+                """
+                UPDATE sample_queue
+                SET status = 'claimed',
+                    owner_label = ?,
+                    owner_pid = ?,
+                    updated_at_utc = ?
+                WHERE sample_id = ?
+                """,
+                (worker_label, worker_pid, now_iso, claimed_sample_id),
+            )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return claimed_sample_id
+
+
+def _mark_shared_sample_completed(
+    connection: sqlite3.Connection,
+    *,
+    sample_id: str,
+    final_status: str,
+) -> None:
+    """Mark one shared-queue sample terminal so other workers skip it."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            UPDATE sample_queue
+            SET status = 'completed',
+                owner_label = NULL,
+                owner_pid = NULL,
+                final_status = ?,
+                updated_at_utc = ?
+            WHERE sample_id = ?
+            """,
+            (final_status, datetime.now(timezone.utc).isoformat(), sample_id),
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
 def _build_execution_report(
     *,
     run_id: str,
@@ -760,14 +1450,19 @@ def _build_execution_report(
     checkpoint_path: Path | None,
     resumed_from_checkpoint: bool,
     resume_count: int,
+    sample_shard_index: int,
+    sample_shard_count: int,
 ) -> BenchmarkExecutionReport:
     """Build the SPoRC execution report before artifact paths are known."""
     summary = _summarize_results(results)
     git_commit, git_branch = git_info(REPO_ROOT)
+    status = _report_status_from_summary(summary)
+    if summary.sample_count == 0 and sample_shard_count > 1:
+        status = "completed"
     return BenchmarkExecutionReport(
         run_id=run_id,
         generated_at_utc=utc_now_iso(),
-        status=_report_status_from_summary(summary),
+        status=status,
         dataset_manifest_path=str(dataset_manifest.manifest_path),
         sporc_dataset_id=dataset_manifest.sporc_dataset_id,
         dataset_variant=dataset_manifest.dataset_variant,
@@ -783,6 +1478,7 @@ def _build_execution_report(
         results_path="",
         samples=results,
         summary=summary,
+        sample_artifacts_root=None,
         duration_tolerance_ratio=duration_tolerance_ratio,
         transcript_only=transcript_only,
         duration_preset=duration_preset,
@@ -791,6 +1487,8 @@ def _build_execution_report(
         checkpoint_path=(str(checkpoint_path) if checkpoint_path is not None else None),
         resumed_from_checkpoint=resumed_from_checkpoint,
         resume_count=resume_count,
+        sample_shard_index=sample_shard_index,
+        sample_shard_count=sample_shard_count,
     )
 
 
@@ -813,24 +1511,33 @@ def _write_execution_report_snapshot(
     checkpoint_path: Path | None,
     resumed_from_checkpoint: bool,
     resume_count: int,
+    sample_shard_index: int,
+    sample_shard_count: int,
 ) -> BenchmarkExecutionReport:
     """Write one partial or final execution report snapshot."""
-    provisional_report = _build_execution_report(
-        run_id=run_id,
-        dataset_manifest=dataset_manifest,
-        summarizer_provider=summarizer_provider,
-        critic_provider=critic_provider,
-        judge_provider=judge_provider,
-        embedding_mode=embedding_mode,
-        results=_ordered_results(sample_order, results_by_sample_id),
-        duration_tolerance_ratio=duration_tolerance_ratio,
-        transcript_only=transcript_only,
-        duration_preset=duration_preset,
-        override_target_seconds=override_target_seconds,
-        sample_seed=sample_seed,
-        checkpoint_path=checkpoint_path,
-        resumed_from_checkpoint=resumed_from_checkpoint,
-        resume_count=resume_count,
+    samples_root = (run_root / "samples").resolve()
+    sample_artifacts_root = str(samples_root) if samples_root.exists() else None
+    provisional_report = replace(
+        _build_execution_report(
+            run_id=run_id,
+            dataset_manifest=dataset_manifest,
+            summarizer_provider=summarizer_provider,
+            critic_provider=critic_provider,
+            judge_provider=judge_provider,
+            embedding_mode=embedding_mode,
+            results=_ordered_results(sample_order, results_by_sample_id),
+            duration_tolerance_ratio=duration_tolerance_ratio,
+            transcript_only=transcript_only,
+            duration_preset=duration_preset,
+            override_target_seconds=override_target_seconds,
+            sample_seed=sample_seed,
+            checkpoint_path=checkpoint_path,
+            resumed_from_checkpoint=resumed_from_checkpoint,
+            resume_count=resume_count,
+            sample_shard_index=sample_shard_index,
+            sample_shard_count=sample_shard_count,
+        ),
+        sample_artifacts_root=sample_artifacts_root,
     )
     report_path, notes_path, results_path = write_execution_artifacts(
         run_root=run_root,
@@ -864,6 +1571,7 @@ def _build_runtime_port_args(
 async def _start_managed_runtime(
     *,
     args: argparse.Namespace,
+    run_root: Path,
     base_cfg: Any,
     summarizer_provider_config: dict[str, Any],
     critic_provider_config: dict[str, Any],
@@ -885,14 +1593,54 @@ async def _start_managed_runtime(
     llm_judge: LLMProvider = hydra.utils.instantiate(
         OmegaConf.create(judge_provider_config)
     )
+    artifact_recorder = _SampleArtifactRecorder(run_root=run_root)
+    summarizer_callback: LLMResponseCallback = _ArtifactCaptureResponseCallback(
+        recorder=artifact_recorder,
+        role="summarizer",
+    )
+    critic_callback: LLMResponseCallback = _ArtifactCaptureResponseCallback(
+        recorder=artifact_recorder,
+        role="critic",
+    )
+    judge_callback: LLMResponseCallback = _ArtifactCaptureResponseCallback(
+        recorder=artifact_recorder,
+        role="judge",
+    )
     if not bool(args.disable_stream_output):
-        _attach_stream_callback(llm_summarizer)
-        _attach_stream_callback(llm_critic)
-        _attach_stream_callback(llm_judge)
+        summarizer_callback = CompositeResponseCallback(
+            summarizer_callback,
+            RichConsoleResponseCallback(),
+        )
+        critic_callback = CompositeResponseCallback(
+            critic_callback,
+            RichConsoleResponseCallback(),
+        )
+        judge_callback = CompositeResponseCallback(
+            judge_callback,
+            RichConsoleResponseCallback(),
+        )
+    _attach_response_callback(llm_summarizer, summarizer_callback)
+    _attach_response_callback(llm_critic, critic_callback)
+    _attach_response_callback(llm_judge, judge_callback)
     if logging_enabled:
         llm_summarizer = LoggingLLMProvider(inner_provider=llm_summarizer)
         llm_critic = LoggingLLMProvider(inner_provider=llm_critic)
         llm_judge = LoggingLLMProvider(inner_provider=llm_judge)
+    llm_summarizer = _ArtifactCaptureLLMProvider(
+        inner_provider=llm_summarizer,
+        recorder=artifact_recorder,
+        role="summarizer",
+    )
+    llm_critic = _ArtifactCaptureLLMProvider(
+        inner_provider=llm_critic,
+        recorder=artifact_recorder,
+        role="critic",
+    )
+    llm_judge = _ArtifactCaptureLLMProvider(
+        inner_provider=llm_judge,
+        recorder=artifact_recorder,
+        role="judge",
+    )
 
     embedding: EmbeddingProvider = hydra.utils.instantiate(
         OmegaConf.create(embedding_profile.embedding_config)
@@ -1002,6 +1750,7 @@ async def _start_managed_runtime(
             orchestrator=orchestrator,
             judge=judge,
             event_capture=event_capture,
+            artifact_recorder=artifact_recorder,
             retrieval_enabled=retrieval_enabled,
             shared_agent_client=shared_agent_client,
             servers=servers,
@@ -1044,22 +1793,34 @@ def _format_transcript(transcript: dict[str, Any]) -> str:
 def _coerce_alias_map(
     transcript: dict[str, Any], sample: PreparedBenchmarkSample
 ) -> dict[str, str]:
+    def _normalize_alias_map(raw_alias_map: dict[str, Any]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        seen_casefold: set[str] = set()
+        for key, value in raw_alias_map.items():
+            cleaned_key = str(key).strip()
+            cleaned_value = str(value).strip()
+            if not cleaned_key or not cleaned_value:
+                continue
+            canonical_key = (
+                cleaned_key.upper()
+                if _TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN.match(cleaned_key)
+                else cleaned_key
+            )
+            casefold_key = canonical_key.casefold()
+            if casefold_key in seen_casefold:
+                continue
+            normalized[canonical_key] = cleaned_value
+            seen_casefold.add(casefold_key)
+        return normalized
+
     metadata = transcript.get("metadata", {})
     if isinstance(metadata, dict) and isinstance(
         metadata.get("speaker_alias_map"), dict
     ):
-        return {
-            str(key): str(value)
-            for key, value in metadata["speaker_alias_map"].items()
-            if str(key).strip() and str(value).strip()
-        }
+        return _normalize_alias_map(metadata["speaker_alias_map"])
     raw_alias_map = sample.metadata.get("speaker_alias_map", {})
     if isinstance(raw_alias_map, dict):
-        return {
-            str(key): str(value)
-            for key, value in raw_alias_map.items()
-            if str(key).strip() and str(value).strip()
-        }
+        return _normalize_alias_map(raw_alias_map)
     return {}
 
 
@@ -1079,7 +1840,304 @@ def _canonical_speaker_label(label: str, alias_map: dict[str, str]) -> str:
     cleaned = label.strip()
     if not cleaned:
         return "UNKNOWN"
-    return alias_map.get(cleaned, alias_map.get(cleaned.lower(), cleaned))
+    direct_match = alias_map.get(cleaned)
+    if direct_match:
+        return direct_match
+    cleaned_casefold = cleaned.casefold()
+    for alias_key, canonical_label in alias_map.items():
+        if alias_key.casefold() == cleaned_casefold:
+            return canonical_label
+    return cleaned
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    return [text]
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        deduped.append(cleaned)
+        seen.add(cleaned)
+    return deduped
+
+
+def _join_segment_text(left_text: str, right_text: str) -> str:
+    left = left_text.rstrip()
+    right = right_text.lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if right[:1] in ",.;:?!)]}" or left.endswith(("(", "/", "-", "'")):
+        return f"{left}{right}"
+    return f"{left} {right}"
+
+
+def _segment_duration_ms(segment: TranscriptSegment) -> int:
+    return max(0, int(segment.end_time) - int(segment.start_time))
+
+
+def _segment_word_count(segment: TranscriptSegment) -> int:
+    return count_words(segment.text)
+
+
+def _merge_segment_extras(
+    left_extras: dict[str, Any],
+    right_extras: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(left_extras)
+    for key, value in right_extras.items():
+        merged.setdefault(key, value)
+    left_raw_primary = str(
+        left_extras.get("raw_primary_speaker", merged.get("raw_primary_speaker", ""))
+    ).strip()
+    right_raw_primary = str(
+        right_extras.get("raw_primary_speaker", merged.get("raw_primary_speaker", ""))
+    ).strip()
+    raw_overlap_speakers = _dedupe_preserve_order(
+        _coerce_string_list(left_extras.get("raw_overlap_speakers"))
+        + _coerce_string_list(right_extras.get("raw_overlap_speakers"))
+    )
+    raw_speakers = _dedupe_preserve_order(
+        _coerce_string_list(left_extras.get("raw_speakers"))
+        + _coerce_string_list(right_extras.get("raw_speakers"))
+        + [left_raw_primary, right_raw_primary]
+        + raw_overlap_speakers
+    )
+    speaker_candidates = _dedupe_preserve_order(
+        _coerce_string_list(left_extras.get("speaker_candidates"))
+        + _coerce_string_list(right_extras.get("speaker_candidates"))
+        + raw_speakers
+    )
+    merged["raw_primary_speaker"] = left_raw_primary or right_raw_primary
+    merged["raw_overlap_speakers"] = raw_overlap_speakers
+    merged["raw_speakers"] = raw_speakers
+    merged["speaker_candidates"] = speaker_candidates
+    merged["speaker_uncertain"] = (
+        bool(left_extras.get("speaker_uncertain"))
+        or bool(right_extras.get("speaker_uncertain"))
+        or len(speaker_candidates) > 1
+    )
+    return merged
+
+
+def _merge_adjacent_same_speaker_segments(
+    segments: list[TranscriptSegment],
+    *,
+    merge_gap_ms: int,
+) -> list[TranscriptSegment]:
+    if not segments:
+        return []
+    merged: list[TranscriptSegment] = [segments[0]]
+    for segment in segments[1:]:
+        previous = merged[-1]
+        gap_ms = max(0, int(segment.start_time) - int(previous.end_time))
+        if previous.speaker == segment.speaker and gap_ms <= merge_gap_ms:
+            merged[-1] = TranscriptSegment(
+                speaker=previous.speaker,
+                text=_join_segment_text(previous.text, segment.text),
+                start_time=previous.start_time,
+                end_time=max(previous.end_time, segment.end_time),
+                extras=_merge_segment_extras(previous.extras, segment.extras),
+            )
+            continue
+        merged.append(segment)
+    return merged
+
+
+def _extract_named_speaker_labels(
+    *,
+    metadata: dict[str, Any],
+    sample: PreparedBenchmarkSample,
+    alias_map: dict[str, str],
+) -> list[str]:
+    metadata_labels = metadata.get("named_speaker_labels")
+    if isinstance(metadata_labels, list):
+        return _dedupe_preserve_order(
+            [
+                _canonical_speaker_label(str(label), alias_map)
+                for label in metadata_labels
+                if str(label).strip()
+            ]
+        )
+    sample_labels = sample.metadata.get("named_speaker_labels")
+    if isinstance(sample_labels, list):
+        return _dedupe_preserve_order(
+            [
+                _canonical_speaker_label(str(label), alias_map)
+                for label in sample_labels
+                if str(label).strip()
+            ]
+        )
+    return _dedupe_preserve_order(
+        [
+            canonical_label
+            for alias_key, canonical_label in alias_map.items()
+            if not _TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN.match(alias_key)
+        ]
+    )
+
+
+def _extract_main_speaker_labels(
+    *,
+    metadata: dict[str, Any],
+    sample: PreparedBenchmarkSample,
+    alias_map: dict[str, str],
+) -> list[str]:
+    for raw_value in (
+        metadata.get("main_speaker_labels"),
+        sample.metadata.get("main_speaker_labels"),
+    ):
+        if isinstance(raw_value, list):
+            return _dedupe_preserve_order(
+                [
+                    _canonical_speaker_label(str(label), alias_map)
+                    for label in raw_value
+                    if str(label).strip()
+                ]
+            )
+    speaker_notes = metadata.get("speaker_notes")
+    if not isinstance(speaker_notes, list):
+        speaker_notes = sample.metadata.get("speaker_notes", [])
+    if isinstance(speaker_notes, list):
+        for note in speaker_notes:
+            note_text = str(note)
+            if not note_text.startswith("mainEpSpeakers:"):
+                continue
+            raw_labels = [
+                part.strip()
+                for part in note_text.split(":", 1)[1].split(",")
+                if part.strip()
+            ]
+            return _dedupe_preserve_order(
+                [
+                    _canonical_speaker_label(label, alias_map)
+                    for label in raw_labels
+                ]
+            )
+    return []
+
+
+def _normalize_transcript_for_transcript_only_benchmark(
+    *,
+    transcript: Transcript,
+    sample: PreparedBenchmarkSample,
+) -> Transcript:
+    alias_map = _coerce_alias_map(transcript.to_payload(), sample)
+    prepared_segments: list[TranscriptSegment] = []
+    raw_speakers_seen: list[str] = []
+    for segment in sorted(
+        transcript.segments,
+        key=lambda item: (int(item.start_time), int(item.end_time)),
+    ):
+        cleaned_text = str(segment.text).strip()
+        if not cleaned_text or not _TRANSCRIPT_ONLY_ALNUM_PATTERN.search(cleaned_text):
+            continue
+        raw_primary_speaker = str(
+            segment.extras.get("raw_primary_speaker", segment.speaker)
+        ).strip() or str(segment.speaker).strip() or "UNKNOWN"
+        raw_overlap_speakers = _dedupe_preserve_order(
+            _coerce_string_list(
+                segment.extras.get(
+                    "raw_overlap_speakers",
+                    segment.extras.get("overlap_speakers"),
+                )
+            )
+        )
+        raw_speakers = _dedupe_preserve_order(
+            _coerce_string_list(segment.extras.get("raw_speakers"))
+            + [raw_primary_speaker]
+            + raw_overlap_speakers
+        )
+        canonical_speaker = _canonical_speaker_label(str(segment.speaker), alias_map)
+        speaker_candidates = _dedupe_preserve_order(
+            [
+                _canonical_speaker_label(candidate, alias_map)
+                for candidate in raw_speakers
+                if candidate
+            ]
+        )
+        speaker_uncertain = len(speaker_candidates) > 1
+        raw_speakers_seen.extend(raw_speakers)
+        extras = dict(segment.extras)
+        extras["raw_primary_speaker"] = raw_primary_speaker
+        extras["raw_overlap_speakers"] = raw_overlap_speakers
+        extras["raw_speakers"] = raw_speakers
+        extras["speaker_candidates"] = speaker_candidates
+        extras["speaker_uncertain"] = speaker_uncertain
+        prepared_segments.append(
+            TranscriptSegment(
+                speaker=canonical_speaker,
+                text=cleaned_text,
+                start_time=int(segment.start_time),
+                end_time=int(segment.end_time),
+                extras=extras,
+            )
+        )
+
+    normalized_segments = _merge_adjacent_same_speaker_segments(
+        prepared_segments,
+        merge_gap_ms=_TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS,
+    )
+    named_speaker_labels = _extract_named_speaker_labels(
+        metadata=transcript.metadata,
+        sample=sample,
+        alias_map=alias_map,
+    )
+    main_speaker_labels = _extract_main_speaker_labels(
+        metadata=transcript.metadata,
+        sample=sample,
+        alias_map=alias_map,
+    )
+    updated_metadata = dict(transcript.metadata)
+    updated_metadata["speaker_alias_map"] = alias_map
+    updated_metadata["named_speaker_labels"] = named_speaker_labels
+    updated_metadata["main_speaker_labels"] = main_speaker_labels
+    raw_normalization = updated_metadata.get("speaker_normalization", {})
+    normalization_metadata = (
+        dict(raw_normalization)
+        if isinstance(raw_normalization, dict)
+        else {}
+    )
+    normalization_metadata.pop("core_speaker_min_share", None)
+    normalization_metadata.pop("core_speaker_labels", None)
+    normalization_metadata.update(
+        {
+            "mode": "transcript_only_benchmark",
+            "speaker_assignment_mode": "raw_with_uncertainty",
+            "speaker_reassignment_enabled": False,
+            "merge_gap_ms": _TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS,
+            "raw_segment_count": len(transcript.segments),
+            "raw_distinct_speaker_count": len(_dedupe_preserve_order(raw_speakers_seen)),
+            "normalized_segment_count": len(normalized_segments),
+            "normalized_distinct_speaker_count": len(
+                {segment.speaker for segment in normalized_segments}
+            ),
+            "uncertain_segment_count": sum(
+                1
+                for segment in normalized_segments
+                if bool(segment.extras.get("speaker_uncertain"))
+            ),
+        }
+    )
+    updated_metadata["speaker_normalization"] = normalization_metadata
+    return Transcript(
+        segments=tuple(normalized_segments),
+        metadata=updated_metadata,
+        extras=dict(transcript.extras),
+    )
 
 
 def _speaker_message_lists_from_transcript(
@@ -1214,6 +2272,7 @@ def _copy_sample_transcript(
     sample: PreparedBenchmarkSample,
     run_root: Path,
     transcript: Transcript | None = None,
+    normalize_for_transcript_only: bool = False,
 ) -> tuple[Transcript, Path]:
     source_transcript = transcript
     if source_transcript is None:
@@ -1221,6 +2280,11 @@ def _copy_sample_transcript(
             Path(sample.transcript_path).read_text(encoding="utf-8")
         )
         source_transcript = Transcript.from_mapping(source_payload)
+    if normalize_for_transcript_only:
+        source_transcript = _normalize_transcript_for_transcript_only_benchmark(
+            transcript=source_transcript,
+            sample=sample,
+        )
     working_path = _working_transcript_path(run_root=run_root, sample=sample)
     _write_transcript_payload(working_path, source_transcript)
     return source_transcript, working_path
@@ -1428,6 +2492,7 @@ async def _execute_sample(
     judge: SPoRCJudge,
     calibration: Any,
     run_root: Path,
+    artifact_recorder: _SampleArtifactRecorder,
     audio_cfg: dict[str, Any],
     transcript_only: bool,
     voice_clone_orchestrator: Any | None,
@@ -1442,11 +2507,15 @@ async def _execute_sample(
     archived_voice_clone_dir: Path | None = None
     archived_voice_clone_manifest: Path | None = None
     archived_voice_clone_merged_audio: Path | None = None
+    diagnostics: dict[str, Any] | None = None
+    candidate_summary = ""
+    artifact_recorder.activate_sample(sample=sample, target_seconds=target_seconds)
     try:
         transcript, working_transcript_path = _copy_sample_transcript(
             sample=sample,
             run_root=run_root,
             transcript=preloaded_transcript,
+            normalize_for_transcript_only=transcript_only,
         )
         if transcript_only:
             prepared_transcript = transcript
@@ -1571,7 +2640,7 @@ async def _execute_sample(
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
-        return SampleBenchmarkResult(
+        result = SampleBenchmarkResult(
             sample_id=sample.sample_id,
             dataset=sample.dataset,
             episode_key=sample.episode_key,
@@ -1628,7 +2697,7 @@ async def _execute_sample(
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
-        return SampleBenchmarkResult(
+        result = SampleBenchmarkResult(
             sample_id=sample.sample_id,
             dataset=sample.dataset,
             episode_key=sample.episode_key,
@@ -1670,6 +2739,28 @@ async def _execute_sample(
             ),
             error_message=error_message,
         )
+    try:
+        artifact_paths = artifact_recorder.finalize_sample(
+            result=result,
+            diagnostics=diagnostics,
+            candidate_summary=candidate_summary,
+        )
+        if artifact_paths is not None:
+            result = replace(
+                result,
+                sample_artifact_dir=artifact_paths.sample_artifact_dir,
+                artifact_manifest_path=artifact_paths.artifact_manifest_path,
+                summarizer_trace_dir=artifact_paths.summarizer_trace_dir,
+                critic_trace_dir=artifact_paths.critic_trace_dir,
+                judge_trace_dir=artifact_paths.judge_trace_dir,
+                final_summary_path=artifact_paths.final_summary_path,
+                final_critic_feedback_path=artifact_paths.final_critic_feedback_path,
+                loop_diagnostics_path=artifact_paths.loop_diagnostics_path,
+                sample_result_artifact_path=artifact_paths.sample_result_artifact_path,
+            )
+        return result
+    finally:
+        artifact_recorder.clear_active_sample()
 
 
 async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionReport:
@@ -1734,6 +2825,15 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         if getattr(args, "sample_seed", None) is not None
         else None
     )
+    sample_shard_index, sample_shard_count = _resolve_sample_shard_args(args)
+    shared_sample_queue_root = _resolve_shared_sample_queue_root(args)
+    use_shared_sample_queue = shared_sample_queue_root is not None
+    if use_shared_sample_queue and (
+        sample_shard_index != 1 or sample_shard_count != 1
+    ):
+        raise BenchmarkExecutionError(
+            "--shared-sample-queue-root cannot be combined with sample-shard selection."
+        )
     sample_limit = int(args.max_samples)
     selection_fetch_limit = None if sample_seed is not None else sample_limit
     prepared_samples = tuple(
@@ -1742,10 +2842,19 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             max_samples=selection_fetch_limit,
         )
     )
-    samples_to_run = _select_samples(
+    selected_samples = _select_samples(
         prepared_samples,
         max_samples=sample_limit,
         sample_seed=sample_seed,
+    )
+    samples_to_run = (
+        list(selected_samples)
+        if use_shared_sample_queue
+        else _select_sample_shard(
+            selected_samples,
+            shard_index=sample_shard_index,
+            shard_count=sample_shard_count,
+        )
     )
     total_samples = len(samples_to_run)
     sample_lookup = {sample.sample_id: sample for sample in samples_to_run}
@@ -1753,7 +2862,21 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     sample_index_by_id = {
         sample.sample_id: index for index, sample in enumerate(samples_to_run, start=1)
     }
+    shared_sample_queue_connection: sqlite3.Connection | None = None
     if resumed_from_checkpoint:
+        checkpoint_shard_index = int(
+            checkpoint_payload.get("sample_shard_index", 1) or 1
+        )
+        checkpoint_shard_count = int(
+            checkpoint_payload.get("sample_shard_count", 1) or 1
+        )
+        if (
+            checkpoint_shard_index != sample_shard_index
+            or checkpoint_shard_count != sample_shard_count
+        ):
+            raise BenchmarkExecutionError(
+                "Resume checkpoint sample shard does not match the requested execute shard."
+            )
         checkpoint_order = checkpoint_payload.get("sample_order", [])
         if checkpoint_order and list(checkpoint_order) != sample_order:
             raise BenchmarkExecutionError(
@@ -1770,8 +2893,21 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             raise BenchmarkExecutionError(
                 "Resume checkpoint dataset manifest does not match the requested dataset manifest."
             )
+    if shared_sample_queue_root is not None:
+        shared_sample_queue_connection = _open_shared_sample_queue_connection(
+            shared_sample_queue_root
+        )
+        _initialize_shared_sample_queue(
+            shared_sample_queue_connection,
+            sample_order=sample_order,
+        )
     sample_selection_label = (
         f"seeded_random({sample_seed})" if sample_seed is not None else "manifest_order"
+    )
+    shard_label = (
+        f"{sample_shard_index}/{sample_shard_count}"
+        if sample_shard_count > 1
+        else "full"
     )
     results_by_sample_id: dict[str, SampleBenchmarkResult] = {}
     for raw_result in checkpoint_payload.get("completed_results", []):
@@ -1810,48 +2946,53 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             ),
         )
     for sample in samples_to_run:
-        active_target_seconds = _resolve_sample_target_seconds(sample, args)
-        active_target_seconds_by_sample_id[sample.sample_id] = active_target_seconds
-        if sample.sample_id in results_by_sample_id:
-            continue
-        transcript, stats, reason = _evaluate_sample_preflight(
-            sample=sample,
-            target_seconds=active_target_seconds,
-            reference_wpm=float(args.reference_wpm),
+        active_target_seconds_by_sample_id[sample.sample_id] = (
+            _resolve_sample_target_seconds(sample, args)
         )
-        if reason is not None:
-            preflight_results[sample.sample_id] = _build_preflight_failed_result(
+
+    if not use_shared_sample_queue:
+        for sample in samples_to_run:
+            active_target_seconds = active_target_seconds_by_sample_id[sample.sample_id]
+            if sample.sample_id in results_by_sample_id:
+                continue
+            transcript, stats, reason = _evaluate_sample_preflight(
                 sample=sample,
                 target_seconds=active_target_seconds,
-                reason=reason,
-                stats=stats,
+                reference_wpm=float(args.reference_wpm),
             )
-            continue
-        preloaded_transcripts[sample.sample_id] = transcript
-
-    if preflight_results:
-        event_bus.publish(
-            "status_message",
-            (
-                f"Preflight skipped {len(preflight_results)}/{total_samples} "
-                "incompatible SPoRC sample(s) before provider startup."
-            ),
-        )
-        for sample in samples_to_run:
-            preflight_result = preflight_results.get(sample.sample_id)
-            if preflight_result is None:
+            if reason is not None:
+                preflight_results[sample.sample_id] = _build_preflight_failed_result(
+                    sample=sample,
+                    target_seconds=active_target_seconds,
+                    reason=reason,
+                    stats=stats,
+                )
                 continue
+            preloaded_transcripts[sample.sample_id] = transcript
+
+        if preflight_results:
             event_bus.publish(
                 "status_message",
                 (
-                    f"Preflight skip: {sample.sample_id} "
-                    f"target={active_target_seconds_by_sample_id[sample.sample_id]}s "
-                    f"reason={preflight_result.preflight_reason}"
+                    f"Preflight skipped {len(preflight_results)}/{total_samples} "
+                    "incompatible SPoRC sample(s) before provider startup."
                 ),
             )
+            for sample in samples_to_run:
+                preflight_result = preflight_results.get(sample.sample_id)
+                if preflight_result is None:
+                    continue
+                event_bus.publish(
+                    "status_message",
+                    (
+                        f"Preflight skip: {sample.sample_id} "
+                        f"target={active_target_seconds_by_sample_id[sample.sample_id]}s "
+                        f"reason={preflight_result.preflight_reason}"
+                    ),
+                )
 
-    for sample_id, preflight_result in preflight_results.items():
-        results_by_sample_id.setdefault(sample_id, preflight_result)
+        for sample_id, preflight_result in preflight_results.items():
+            results_by_sample_id.setdefault(sample_id, preflight_result)
 
     if len(results_by_sample_id) >= total_samples:
         final_report = _write_execution_report_snapshot(
@@ -1874,6 +3015,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             checkpoint_path=checkpoint_path,
             resumed_from_checkpoint=resumed_from_checkpoint,
             resume_count=resume_count,
+            sample_shard_index=sample_shard_index,
+            sample_shard_count=sample_shard_count,
         )
         if checkpoint_path is not None:
             _write_checkpoint_payload(
@@ -1887,6 +3030,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     "override_target_seconds": override_target_seconds,
                     "transcript_only": transcript_only,
                     "sample_seed": sample_seed,
+                    "sample_shard_index": sample_shard_index,
+                    "sample_shard_count": sample_shard_count,
                     "sample_order": sample_order,
                     "completed_results": [
                         asdict(result)
@@ -1901,6 +3046,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                 },
             )
+        if shared_sample_queue_connection is not None:
+            shared_sample_queue_connection.close()
         return final_report
 
     profiles = load_provider_profiles(Path(args.provider_profiles).resolve())
@@ -1981,6 +3128,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 "override_target_seconds": override_target_seconds,
                 "transcript_only": transcript_only,
                 "sample_seed": sample_seed,
+                "sample_shard_index": sample_shard_index,
+                "sample_shard_count": sample_shard_count,
                 "sample_order": sample_order,
                 "completed_results": [
                     asdict(result)
@@ -2015,6 +3164,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         checkpoint_path=checkpoint_path,
         resumed_from_checkpoint=resumed_from_checkpoint,
         resume_count=resume_count,
+        sample_shard_index=sample_shard_index,
+        sample_shard_count=sample_shard_count,
     )
     progress_tracker = _BenchmarkProgressTracker(
         args=args,
@@ -2052,6 +3203,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     results_by_sample_id[active_sample_id] = resumed_failure
                     if resume_failure_reason == _SWEEP_STALL_FINAL_STATUS:
                         recovered_stall_count += 1
+                    if shared_sample_queue_connection is not None:
+                        _mark_shared_sample_completed(
+                            shared_sample_queue_connection,
+                            sample_id=active_sample_id,
+                            final_status=resumed_failure.final_status,
+                        )
                     _persist_checkpoint()
                     final_report = _write_execution_report_snapshot(
                         run_root=run_root,
@@ -2071,6 +3228,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                         checkpoint_path=checkpoint_path,
                         resumed_from_checkpoint=resumed_from_checkpoint,
                         resume_count=resume_count,
+                        sample_shard_index=sample_shard_index,
+                        sample_shard_count=sample_shard_count,
                     )
                     _emit_progress_event(
                         args,
@@ -2098,7 +3257,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             f"judge_dimensions={', '.join(DIMENSION_NAMES)}; "
             f"transcript_only={transcript_only}; "
             f"target_override={override_target_seconds if override_target_seconds is not None else 'dataset_default'}; "
-            f"sample_selection={sample_selection_label}; resume_count={resume_count}."
+            f"sample_selection={sample_selection_label}; "
+            f"sample_shard={shard_label}; resume_count={resume_count}."
         ),
     )
     _emit_progress_event(
@@ -2111,6 +3271,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             "transcript_only": transcript_only,
             "sample_seed": sample_seed,
             "resume_count": resume_count,
+            "sample_shard_index": sample_shard_index,
+            "sample_shard_count": sample_shard_count,
             "checkpoint_path": str(checkpoint_path)
             if checkpoint_path is not None
             else "",
@@ -2136,7 +3298,35 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
 
     benchmark_started = time.perf_counter()
     try:
-        for sample in samples_to_run:
+        shared_queue_worker_label = (
+            checkpoint_path.name
+            if checkpoint_path is not None
+            else f"pid-{os.getpid()}"
+        )
+        sample_iter = iter(samples_to_run)
+        while True:
+            if shared_sample_queue_connection is None:
+                try:
+                    sample = next(sample_iter)
+                except StopIteration:
+                    break
+            else:
+                claimed_sample_id = _claim_next_shared_sample_id(
+                    shared_sample_queue_connection,
+                    worker_label=shared_queue_worker_label,
+                    worker_pid=os.getpid(),
+                )
+                if claimed_sample_id is None:
+                    break
+                sample = sample_lookup[claimed_sample_id]
+                restored_result = results_by_sample_id.get(sample.sample_id)
+                if restored_result is not None:
+                    _mark_shared_sample_completed(
+                        shared_sample_queue_connection,
+                        sample_id=sample.sample_id,
+                        final_status=restored_result.final_status,
+                    )
+                    continue
             if sample.sample_id in results_by_sample_id:
                 continue
             active_target_seconds = active_target_seconds_by_sample_id[sample.sample_id]
@@ -2177,12 +3367,39 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 ),
             )
             preflight_result = preflight_results.get(sample.sample_id)
+            preloaded_transcript = preloaded_transcripts.get(sample.sample_id)
+            if use_shared_sample_queue and preflight_result is None:
+                (
+                    preloaded_transcript,
+                    preflight_stats,
+                    preflight_reason,
+                ) = _evaluate_sample_preflight(
+                    sample=sample,
+                    target_seconds=active_target_seconds,
+                    reference_wpm=float(args.reference_wpm),
+                )
+                if preflight_reason is not None:
+                    preflight_result = _build_preflight_failed_result(
+                        sample=sample,
+                        target_seconds=active_target_seconds,
+                        reason=preflight_reason,
+                        stats=preflight_stats,
+                    )
+                    event_bus.publish(
+                        "status_message",
+                        (
+                            f"Preflight skip: {sample.sample_id} "
+                            f"target={active_target_seconds}s "
+                            f"reason={preflight_result.preflight_reason}"
+                        ),
+                    )
             if preflight_result is not None:
                 result = preflight_result
             else:
                 if runtime is None:
                     runtime = await _start_managed_runtime(
                         args=args,
+                        run_root=run_root,
                         base_cfg=base_cfg,
                         summarizer_provider_config=summarizer_provider_config,
                         critic_provider_config=critic_provider_config,
@@ -2198,7 +3415,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 result = await _execute_sample(
                     sample=sample,
                     target_seconds=active_target_seconds,
-                    preloaded_transcript=preloaded_transcripts.get(sample.sample_id),
+                    preloaded_transcript=preloaded_transcript,
                     orchestrator=runtime.orchestrator,
                     event_capture=runtime.event_capture,
                     retrieval_enabled=runtime.retrieval_enabled,
@@ -2207,12 +3424,19 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     judge=runtime.judge,
                     calibration=calibration,
                     run_root=run_root,
+                    artifact_recorder=runtime.artifact_recorder,
                     audio_cfg=benchmark_audio_cfg,
                     transcript_only=transcript_only,
                     voice_clone_orchestrator=voice_clone_orchestrator,
                     force_download_audio=bool(args.force_download_audio),
                 )
             results_by_sample_id[sample.sample_id] = result
+            if shared_sample_queue_connection is not None:
+                _mark_shared_sample_completed(
+                    shared_sample_queue_connection,
+                    sample_id=sample.sample_id,
+                    final_status=result.final_status,
+                )
             progress_tracker.clear_active_sample()
             _persist_checkpoint()
             final_report = _write_execution_report_snapshot(
@@ -2233,6 +3457,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 checkpoint_path=checkpoint_path,
                 resumed_from_checkpoint=resumed_from_checkpoint,
                 resume_count=resume_count,
+                sample_shard_index=sample_shard_index,
+                sample_shard_count=sample_shard_count,
             )
             completed_after_sample = len(results_by_sample_id)
             remaining_samples, average_text, eta_text = _progress_snapshot(
@@ -2284,6 +3510,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         if progress_tracker is not None:
             progress_tracker.stop()
             progress_tracker.unsubscribe()
+        if shared_sample_queue_connection is not None:
+            shared_sample_queue_connection.close()
         await _stop_managed_runtime(runtime)
 
 
@@ -2430,4 +3658,30 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         "--resume-failure-reason",
         default=_RESUME_FAILURE_DEFAULT_STATUS,
         help="Final-status label used when resuming an orphaned active sample.",
+    )
+    parser.add_argument(
+        "--shared-sample-queue-root",
+        default="",
+        help=(
+            "Optional internal preset-level queue root used by duration-sweep "
+            "worker pooling."
+        ),
+    )
+    parser.add_argument(
+        "--sample-shard-index",
+        type=int,
+        default=1,
+        help=(
+            "Optional 1-based shard index used by duration-sweep fan-out. "
+            "Run the whole selected sample set by leaving this at 1."
+        ),
+    )
+    parser.add_argument(
+        "--sample-shard-count",
+        type=int,
+        default=1,
+        help=(
+            "Optional shard count used by duration-sweep fan-out. "
+            "Each shard executes a disjoint modulo partition of the selected samples."
+        ),
     )

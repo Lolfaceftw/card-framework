@@ -154,10 +154,24 @@ def test_build_prepared_dataset_manifest_uses_sporc_episode_and_turn_files(
     assert (
         transcript_payload["metadata"]["speaker_alias_map"]["Alex Host"] == "SPEAKER_00"
     )
+    assert "speaker_00" not in transcript_payload["metadata"]["speaker_alias_map"]
+    assert transcript_payload["metadata"]["named_speaker_labels"] == [
+        "SPEAKER_00",
+        "SPEAKER_01",
+    ]
+    assert transcript_payload["metadata"]["main_speaker_labels"] == []
+    assert (
+        transcript_payload["metadata"]["speaker_normalization"][
+            "raw_distinct_speaker_count"
+        ]
+        == 2
+    )
     assert transcript_payload["metadata"]["source_audio_url"] == episode_key
     assert sample.target_seconds == 12
     assert sample.metadata["longform_curation_candidate"]["segment_count"] == 2
     assert sample.metadata["longform_curation_candidate"]["unique_speaker_count"] == 2
+    assert sample.metadata["named_speaker_labels"] == ["SPEAKER_00", "SPEAKER_01"]
+    assert sample.metadata["main_speaker_labels"] == []
 
 
 def test_build_prepared_dataset_manifest_supports_real_sporc_field_names(
@@ -206,7 +220,64 @@ def test_build_prepared_dataset_manifest_supports_real_sporc_field_names(
     assert transcript_payload["segments"][0]["text"] == "Welcome back to the show."
     assert transcript_payload["segments"][0]["end_time"] == 5000
     assert transcript_payload["metadata"]["source_audio_url"] == episode_key
+    assert transcript_payload["metadata"]["named_speaker_labels"] == ["SPEAKER_00"]
     assert sample.target_seconds == 12
+
+
+def test_build_prepared_dataset_manifest_persists_main_speaker_hints(
+    tmp_path: Path,
+) -> None:
+    episode_path = tmp_path / "episodeLevelDataSample.jsonl.gz"
+    turn_path = tmp_path / "speakerTurnDataSample.jsonl.gz"
+    episode_key = "https://example.com/podcast.mp3"
+    _write_jsonl_gz(
+        episode_path,
+        [
+            {
+                "mp3url": episode_key,
+                "epDescription": "Episode level summary text.",
+                "epTitle": "Main Speaker Episode",
+                "hostSpeakerLabels": {"Alex Host": ["SPEAKER_00"]},
+                "mainEpSpeakers": ["SPEAKER_00", "SPEAKER_02"],
+            }
+        ],
+    )
+    _write_jsonl_gz(
+        turn_path,
+        [
+            {
+                "mp3url": episode_key,
+                "startTime": 0.0,
+                "endTime": 5.0,
+                "speaker": ["SPEAKER_00"],
+                "turnText": "Welcome back to the show.",
+            },
+            {
+                "mp3url": episode_key,
+                "startTime": 5.0,
+                "endTime": 10.0,
+                "speaker": ["SPEAKER_02"],
+                "turnText": "Thanks for having me.",
+            },
+        ],
+    )
+
+    manifest = build_prepared_dataset_manifest(
+        episode_data_path=episode_path,
+        turn_data_path=turn_path,
+        prepared_root=tmp_path / "prepared_main_speakers",
+        dataset_variant="sample",
+    )
+
+    sample = manifest.samples[0]
+    transcript_payload = json.loads(
+        Path(sample.transcript_path).read_text(encoding="utf-8")
+    )
+    assert transcript_payload["metadata"]["main_speaker_labels"] == [
+        "SPEAKER_00",
+        "SPEAKER_02",
+    ]
+    assert sample.metadata["main_speaker_labels"] == ["SPEAKER_00", "SPEAKER_02"]
 
 
 def test_build_prepared_dataset_manifest_full_variant_uses_sidecar_and_episode_order(
