@@ -82,7 +82,7 @@
     </runtimeFlow>
     <retrievalPolicy>
       <rule>When a real embedding provider is configured, transcript segments are indexed into embeddings.TranscriptIndex and retrieved through the retrieval agent.</rule>
-      <rule>When embedding is disabled or configured as the no-op provider, the critic still receives the full transcript text directly, while the summarizer falls back to a bounded coverage-sampled transcript excerpt that preserves start, middle, and end coverage instead of retrieval results.</rule>
+      <rule>When embedding is disabled or configured as the no-op provider, both the summarizer and critic receive the full transcript text directly instead of retrieval results.</rule>
       <rule>Timeout floors are increased automatically for full-transcript mode because prompt payloads become much larger.</rule>
       <rule>When live-draft stage-2 or merged stage-2/stage-3 voice cloning is active, the summarizer timeout floor is raised further to `max(900s, target_seconds * 6)` because tool mutations can block on real IndexTTS renders before the localhost A2A request returns.</rule>
     </retrievalPolicy>
