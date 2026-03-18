@@ -13,7 +13,10 @@ from card_framework.audio_pipeline.contracts import (
 )
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
-from card_framework.audio_pipeline.runtime import ensure_command_available
+from card_framework.audio_pipeline.runtime import (
+    ensure_command_available,
+    release_torch_device_memory,
+)
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
 
 
@@ -242,6 +245,22 @@ class FasterWhisperTranscriber(SpeechTranscriber):
         )
         self._model_cache[cache_key] = model
         return model
+
+    def release_cached_resources(self, *, device: str) -> None:
+        """Drop cached whisper models for one device and release CUDA allocator slack."""
+        cache_keys = [key for key in self._model_cache if key[0] == device]
+        for cache_key in cache_keys:
+            model = self._model_cache.pop(cache_key, None)
+            if model is None:
+                continue
+            close = getattr(model, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            del model
+        release_torch_device_memory(device)
 
     def _find_numeral_symbol_tokens(self, tokenizer: object | None) -> list[int]:
         """Identify token ids containing numerals/symbols for suppression."""

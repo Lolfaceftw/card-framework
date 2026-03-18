@@ -135,6 +135,11 @@ class AudioToScriptOrchestrator:
                     progress_callback=progress_callback,
                 ),
             )
+            self._release_stage_component_resources(
+                component=self.transcriber,
+                stage="transcription",
+                device=device,
+            )
 
             diarization_turns = self._run_stage_with_eta(
                 stage="diarization",
@@ -149,6 +154,11 @@ class AudioToScriptOrchestrator:
                     device=device,
                     progress_callback=progress_callback,
                 ),
+            )
+            self._release_stage_component_resources(
+                component=self.diarizer,
+                stage="diarization",
+                device=device,
             )
             if len(diarization_turns) <= 1:
                 warnings.append(
@@ -195,6 +205,16 @@ class AudioToScriptOrchestrator:
                 warnings=warnings,
             )
         finally:
+            self._release_stage_component_resources(
+                component=self.transcriber,
+                stage="transcription",
+                device=device,
+            )
+            self._release_stage_component_resources(
+                component=self.diarizer,
+                stage="diarization",
+                device=device,
+            )
             self._save_eta_profile(
                 profile_path=eta_profile_path,
                 context=eta_profile_context,
@@ -555,4 +575,23 @@ class AudioToScriptOrchestrator:
                 )
             ),
         }
+
+    def _release_stage_component_resources(
+        self,
+        *,
+        component: object,
+        stage: AudioStageName,
+        device: str,
+    ) -> None:
+        """Best-effort release for cached stage resources that are no longer needed."""
+        release_cached_resources = getattr(component, "release_cached_resources", None)
+        if not callable(release_cached_resources):
+            return
+        try:
+            release_cached_resources(device=device)
+        except Exception:
+            event_bus.publish(
+                "system_message",
+                f"Audio stage: {stage} resource release skipped.",
+            )
 

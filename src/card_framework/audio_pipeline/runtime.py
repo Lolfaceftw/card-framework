@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import gc
 import importlib
 import importlib.util
 import os
@@ -92,6 +93,42 @@ def resolve_device(preferred_device: str) -> str:
     except Exception:
         pass
     return "cpu"
+
+
+def release_torch_device_memory(device: str) -> None:
+    """Best-effort release of process-local CUDA allocator state."""
+    if device.strip().lower() != "cuda":
+        return
+    try:
+        import torch
+    except Exception:
+        return
+
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None:
+        return
+    is_available = getattr(cuda, "is_available", None)
+    if not callable(is_available) or not is_available():
+        return
+
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    empty_cache = getattr(cuda, "empty_cache", None)
+    if callable(empty_cache):
+        try:
+            empty_cache()
+        except Exception:
+            pass
+
+    ipc_collect = getattr(cuda, "ipc_collect", None)
+    if callable(ipc_collect):
+        try:
+            ipc_collect()
+        except Exception:
+            pass
 
 
 def resolve_path(path_value: str, *, base_dir: Path) -> Path:

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 
 import numpy as np
 
+from card_framework.audio_pipeline.gateways import granite_speech_gateway
 from card_framework.audio_pipeline.gateways.granite_speech_gateway import (
     GraniteSpeechTranscriber,
+    _GraniteRuntime,
     _dedupe_chunk_text,
+    _strip_prompt_echo,
 )
 from card_framework.shared.events import event_bus
 
@@ -39,6 +43,20 @@ def test_dedupe_chunk_text_removes_repeated_boundary_tokens() -> None:
     )
 
     assert deduped == "Kenobi arrives"
+
+
+def test_strip_prompt_echo_removes_role_tagged_prompt_echo_inside_chunk() -> None:
+    """Strip Granite's chat-style USER/ASSISTANT prompt echo anywhere in the chunk."""
+    cleaned = _strip_prompt_echo(
+        text=(
+            "can you imagine this is our four. USER: can you transcribe the speech "
+            "into a written format? ASSISTANT:of pwl capital."
+        ),
+        prompt="<|audio|>can you transcribe the speech into a written format?",
+        rendered_prompt="USER: can you transcribe the speech into a written format? ASSISTANT:",
+    )
+
+    assert cleaned == "can you imagine this is our four. of pwl capital."
 
 
 def test_granite_transcribe_chunks_audio_and_reports_progress(
@@ -100,6 +118,63 @@ def test_granite_transcribe_chunks_audio_and_reports_progress(
     assert len(result.word_timestamps) == 6
 
 
+def test_granite_transcribe_chunk_uses_rendered_prompt_cleanup(monkeypatch) -> None:
+    """Use the rendered Granite chat prompt when stripping echoed role labels."""
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(inference_mode=nullcontext),
+    )
+
+    class _FakeTokenizer:
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+            del messages, tokenize, add_generation_prompt
+            return "USER: can you transcribe the speech into a written format? ASSISTANT:"
+
+    class _FakeModelInputs(dict):
+        def to(self, device):
+            del device
+            return self
+
+    class _FakeProcessor:
+        def __call__(self, prompt, audio_chunk, device, return_tensors):
+            del audio_chunk, device, return_tensors
+            assert (
+                prompt
+                == "USER: can you transcribe the speech into a written format? ASSISTANT:"
+            )
+            return _FakeModelInputs()
+
+        def batch_decode(self, generated, skip_special_tokens):
+            del generated, skip_special_tokens
+            return [
+                (
+                    "can you imagine this is our four. USER: can you transcribe the "
+                    "speech into a written format? ASSISTANT:of pwl capital."
+                )
+            ]
+
+    class _FakeModel:
+        def generate(self, **kwargs):
+            del kwargs
+            return [[1, 2, 3]]
+
+    transcriber = GraniteSpeechTranscriber(enable_forced_alignment=False)
+    runtime = SimpleNamespace(
+        tokenizer=_FakeTokenizer(),
+        processor=_FakeProcessor(),
+        model=_FakeModel(),
+        device=SimpleNamespace(type="cpu"),
+    )
+
+    chunk_text = transcriber._transcribe_chunk(
+        runtime=runtime,
+        audio_chunk=np.zeros(16_000, dtype=np.float32),
+    )
+
+    assert chunk_text == "can you imagine this is our four. of pwl capital."
+
+
 def test_granite_runtime_reports_loading_messages(monkeypatch) -> None:
     """Emit the shared loading-context messages around model initialization."""
     fake_torch = SimpleNamespace(
@@ -150,3 +225,26 @@ def test_granite_runtime_reports_loading_messages(monkeypatch) -> None:
     assert messages[1].startswith(
         "Loaded Granite Speech ASR model 'ibm-granite/granite-4.0-1b-speech' in "
     )
+
+
+def test_granite_release_cached_resources_clears_device_cache(monkeypatch) -> None:
+    """Drop the cached runtime bundle and release device memory for one device."""
+    transcriber = GraniteSpeechTranscriber()
+    transcriber._runtime_cache["cuda"] = _GraniteRuntime(
+        model=object(),
+        processor=object(),
+        tokenizer=object(),
+        device="cuda",
+    )
+    released_devices: list[str] = []
+
+    monkeypatch.setattr(
+        granite_speech_gateway,
+        "release_torch_device_memory",
+        lambda device: released_devices.append(device),
+    )
+
+    transcriber.release_cached_resources(device="cuda")
+
+    assert transcriber._runtime_cache == {}
+    assert released_devices == ["cuda"]

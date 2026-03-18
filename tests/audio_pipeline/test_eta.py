@@ -10,6 +10,12 @@ from card_framework.audio_pipeline.eta import (
     StageProgressUpdate,
     format_eta_seconds,
 )
+from card_framework.audio_pipeline.contracts import (
+    DiarizationTurn,
+    TimedTextSegment,
+    TranscriptSegment,
+    TranscriptionResult,
+)
 from card_framework.audio_pipeline.orchestrator import AudioToScriptOrchestrator
 
 
@@ -446,4 +452,122 @@ def test_audio_orchestrator_uses_default_eta_without_history(
         message.startswith(f"Audio stage: {stage} {note}; estimated time left ")
         for message in status_messages
     )
+
+
+def test_audio_orchestrator_releases_stage_models_between_transcription_and_diarization(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Release transcriber resources before diarization and diarizer resources after use."""
+
+    class _FakeSeparator:
+        def __init__(self, vocals_path: Path) -> None:
+            self.vocals_path = vocals_path
+
+        def separate_vocals(
+            self,
+            *,
+            input_audio_path: Path,
+            output_dir: Path,
+            device: str,
+            progress_callback=None,
+        ) -> Path:
+            del input_audio_path, output_dir, device, progress_callback
+            self.vocals_path.parent.mkdir(parents=True, exist_ok=True)
+            self.vocals_path.write_bytes(b"vocals")
+            return self.vocals_path
+
+    class _FakeTranscriber:
+        def __init__(self, release_order: list[str]) -> None:
+            self.release_order = release_order
+
+        def transcribe(
+            self,
+            audio_path: Path,
+            *,
+            device: str,
+            progress_callback=None,
+        ) -> TranscriptionResult:
+            del audio_path, device, progress_callback
+            return TranscriptionResult(
+                segments=[
+                    TimedTextSegment(
+                        start_time_ms=0,
+                        end_time_ms=1000,
+                        text="hello world",
+                    )
+                ],
+                word_timestamps=[],
+                language="en",
+            )
+
+        def release_cached_resources(self, *, device: str) -> None:
+            self.release_order.append(f"transcriber:{device}")
+
+    class _FakeDiarizer:
+        def __init__(self, release_order: list[str]) -> None:
+            self.release_order = release_order
+
+        def diarize(
+            self,
+            audio_path: Path,
+            output_dir: Path,
+            *,
+            device: str,
+            progress_callback=None,
+        ) -> list[DiarizationTurn]:
+            del audio_path, output_dir, device, progress_callback
+            assert self.release_order == ["transcriber:cuda"]
+            return [
+                DiarizationTurn(
+                    speaker="SPEAKER_00",
+                    start_time_ms=0,
+                    end_time_ms=1000,
+                )
+            ]
+
+        def release_cached_resources(self, *, device: str) -> None:
+            self.release_order.append(f"diarizer:{device}")
+
+    release_order: list[str] = []
+    input_audio_path = tmp_path / "input.wav"
+    input_audio_path.write_bytes(b"RIFF")
+    output_transcript_path = tmp_path / "transcript.json"
+    vocals_path = tmp_path / "work" / "separation" / "vocals.wav"
+    orchestrator = AudioToScriptOrchestrator(
+        separator=_FakeSeparator(vocals_path),
+        transcriber=_FakeTranscriber(release_order),
+        diarizer=_FakeDiarizer(release_order),
+        eta_update_interval_seconds=0.0,
+    )
+
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.orchestrator.probe_audio_duration_ms",
+        lambda path: 1000,
+    )
+    monkeypatch.setattr(
+        AudioToScriptOrchestrator,
+        "_align_transcript_segments",
+        lambda self, *, asr_result, diarization_turns, warnings: (
+            [
+                TranscriptSegment(
+                    speaker="SPEAKER_00",
+                    start_time=0,
+                    end_time=1000,
+                    text="hello world",
+                )
+            ],
+            True,
+        ),
+    )
+
+    result = orchestrator.run(
+        input_audio_path=input_audio_path,
+        output_transcript_path=output_transcript_path,
+        work_dir=tmp_path / "work",
+        device="cuda",
+    )
+
+    assert result.segment_count == 1
+    assert release_order[:2] == ["transcriber:cuda", "diarizer:cuda"]
 

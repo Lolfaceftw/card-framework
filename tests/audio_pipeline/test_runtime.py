@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from card_framework.audio_pipeline.errors import DependencyMissingError
 from card_framework.audio_pipeline.runtime import (
     ensure_command_available,
     probe_audio_duration_ms,
+    release_torch_device_memory,
     resolve_command_path,
 )
 
@@ -125,3 +127,27 @@ def test_probe_audio_duration_ms_parses_ffmpeg_duration_output(
     assert duration_ms == 83_450
     assert observed_kwargs["encoding"] == "utf-8"
     assert observed_kwargs["errors"] == "replace"
+
+
+def test_release_torch_device_memory_clears_cuda_allocator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run garbage collection plus the CUDA allocator cleanup hooks."""
+    calls: list[str] = []
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            empty_cache=lambda: calls.append("empty_cache"),
+            ipc_collect=lambda: calls.append("ipc_collect"),
+        )
+    )
+
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.runtime.gc.collect",
+        lambda: calls.append("gc.collect"),
+    )
+
+    release_torch_device_memory("cuda")
+
+    assert calls == ["gc.collect", "empty_cache", "ipc_collect"]

@@ -18,12 +18,15 @@ from card_framework.audio_pipeline.contracts import (
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
+from card_framework.audio_pipeline.runtime import release_torch_device_memory
 from card_framework.shared.events import event_bus
 from card_framework.shared.perf import report_loading_duration
 
 _TARGET_SAMPLE_RATE_HZ = 16_000
 _DEFAULT_PROMPT = "<|audio|>can you transcribe the speech into a written format?"
 _NON_WORD_EDGE_PATTERN = re.compile(r"^\W+|\W+$")
+_SPECIAL_TOKEN_PATTERN = re.compile(r"<\|[^>]+?\|>")
+_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
 @dataclass(slots=True, frozen=True)
@@ -199,6 +202,13 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         self._runtime_cache[device] = runtime
         return runtime
 
+    def release_cached_resources(self, *, device: str) -> None:
+        """Drop cached model state for one device and release CUDA allocator slack."""
+        runtime = self._runtime_cache.pop(device, None)
+        if runtime is not None:
+            del runtime
+        release_torch_device_memory(device)
+
     def _load_audio_waveform(self, audio_path: Path):
         """Load one audio file into a tensor waveform."""
         try:
@@ -309,7 +319,11 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
             ) from exc
         if not decoded:
             return ""
-        return _strip_prompt_echo(text=str(decoded[0]), prompt=self.prompt)
+        return _strip_prompt_echo(
+            text=str(decoded[0]),
+            prompt=self.prompt,
+            rendered_prompt=prompt,
+        )
 
     def _build_prompt(self, *, tokenizer: Any) -> str:
         """Build the chat-templated Granite transcription prompt."""
@@ -408,14 +422,83 @@ def _samples_to_milliseconds(sample_count: int) -> int:
     return max(0, int(round((sample_count / _TARGET_SAMPLE_RATE_HZ) * 1000.0)))
 
 
-def _strip_prompt_echo(*, text: str, prompt: str) -> str:
-    """Remove prompt echoes from model output when present."""
+def _strip_prompt_echo(
+    *,
+    text: str,
+    prompt: str,
+    rendered_prompt: str | None = None,
+) -> str:
+    """Remove Granite prompt echoes from model output when present."""
     normalized = text.strip()
     if not normalized:
         return ""
-    if normalized.startswith(prompt):
-        normalized = normalized[len(prompt) :].strip()
-    return normalized
+
+    for candidate in _iter_prompt_echo_candidates(
+        prompt=prompt,
+        rendered_prompt=rendered_prompt,
+    ):
+        candidate_has_role_labels = any(
+            role_label in candidate.casefold() for role_label in ("user:", "assistant:")
+        )
+        if candidate_has_role_labels:
+            normalized = _remove_flexible_match(
+                text=normalized,
+                candidate=candidate,
+                replace_all=True,
+            )
+            continue
+        normalized = _remove_flexible_match(
+            text=normalized,
+            candidate=candidate,
+            replace_all=False,
+        )
+    return _collapse_inline_whitespace(normalized)
+
+
+def _iter_prompt_echo_candidates(
+    *,
+    prompt: str,
+    rendered_prompt: str | None,
+) -> list[str]:
+    """Build normalized prompt-echo candidates for cleanup."""
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for raw_candidate in (rendered_prompt, prompt):
+        if not raw_candidate:
+            continue
+        for candidate in (
+            _collapse_inline_whitespace(raw_candidate),
+            _collapse_inline_whitespace(_SPECIAL_TOKEN_PATTERN.sub(" ", raw_candidate)),
+        ):
+            if not candidate:
+                continue
+            dedupe_key = candidate.casefold()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            candidates.append(candidate)
+    return candidates
+
+
+def _remove_flexible_match(
+    *,
+    text: str,
+    candidate: str,
+    replace_all: bool,
+) -> str:
+    """Remove one prompt echo candidate with whitespace-tolerant matching."""
+    collapsed_candidate = _collapse_inline_whitespace(candidate)
+    if not collapsed_candidate:
+        return text
+    pattern = re.escape(collapsed_candidate).replace(r"\ ", r"\s+")
+    if replace_all:
+        return re.sub(pattern, " ", text, flags=re.IGNORECASE)
+    return re.sub(rf"^{pattern}", "", text, count=1, flags=re.IGNORECASE).lstrip()
+
+
+def _collapse_inline_whitespace(text: str) -> str:
+    """Collapse repeated whitespace inside one transcript chunk."""
+    return _WHITESPACE_PATTERN.sub(" ", text).strip()
 
 
 def _dedupe_chunk_text(*, previous_text: str, current_text: str) -> str:

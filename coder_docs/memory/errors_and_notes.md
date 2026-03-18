@@ -1,3 +1,7 @@
+### 2026-03-18T14:58:16+08:00 - Stage-1 Needed Explicit ASR And Diarizer Resource Release To Avoid Carrying VRAM Forward
+- Problem: Stage-1 kept heavyweight transcription and diarization model objects alive in-process after their outputs were already materialized. On CUDA runs that could leave Granite or diarization allocations resident into the next stage, raising peak VRAM and making Windows report spillover into shared GPU memory even after diarization finished.
+- Solution: Add best-effort `release_cached_resources(...)` hooks for the GPU-backed ASR and diarization adapters, release the transcriber before NeMo diarization begins, release the diarizer right after it completes, and clear the CUDA allocator slack after the references are dropped.
+
 ### 2026-03-18T14:43:09+08:00 - NeMo Diarization Startup Needed The Shared Loading Reporter For Wrapper Runs
 - Problem: `card_framework.cli.setup_and_run` already surfaced timed `Loading ...` / `Loaded ... in X.XX seconds.` lines for its own bootstrap phases, but stage-1 NeMo diarization still only showed the generic `running NeMo diarization` stage log. That left a long silent-feeling gap during NeMo model startup in wrapper-driven runs.
 - Solution: Wrap NeMo MSDD diarizer startup with the shared loading-duration reporter inside the gateway itself, and add a gateway regression test so wrapper and direct runtime runs both emit the same timed operator-facing loading messages as Demucs and Granite Speech.
