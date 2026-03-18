@@ -1,0 +1,42 @@
+x-setup-and-run-base: &setup-and-run-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  platform: linux/amd64
+  working_dir: /workspace/card-framework
+  env_file:
+    - .env
+  environment:
+    CARD_FRAMEWORK_FFMPEG_EXECUTABLE: /usr/bin/ffmpeg
+    CARD_FRAMEWORK_REPO_DIR: /workspace/card-framework
+    HF_HOME: /root/.cache/huggingface
+    HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+    PYTHONUNBUFFERED: "1"
+    TRANSFORMERS_CACHE: /root/.cache/huggingface/transformers
+  shm_size: "16gb"
+  stdin_open: true
+  tty: true
+  volumes:
+    - .:/workspace/card-framework
+    - card-framework-root-venv:/workspace/card-framework/.venv
+    - card-framework-index-tts-venv:/workspace/card-framework/src/card_framework/_vendor/index_tts/.venv
+    - card-framework-uv-cache:/root/.cache/uv
+    - card-framework-hf-cache:/root/.cache/huggingface
+  command:
+    - --help
+
+services:
+  setup-and-run:
+    <<: *setup-and-run-base
+
+  setup-and-run-gpu:
+    <<: *setup-and-run-base
+    profiles:
+      - gpu
+    gpus: all
+
+volumes:
+  card-framework-hf-cache:
+  card-framework-index-tts-venv:
+  card-framework-root-venv:
+  card-framework-uv-cache:

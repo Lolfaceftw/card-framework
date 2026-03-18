@@ -12,6 +12,38 @@ installs when the repo-root config is not available.
 4. Leave the concrete provider definitions in `profiles` alone unless you are
    intentionally changing a model, base URL, or local embedding choice.
 
+## Docker setup_and_run path
+
+The repository now ships a Docker workflow centered on
+`card_framework.cli.setup_and_run`.
+
+Build the image:
+
+```bash
+docker compose build setup-and-run
+```
+
+Run the wrapper from source audio:
+
+```bash
+docker compose run --rm setup-and-run --audio-path audio.wav
+```
+
+Run the GPU profile for Windows or Linux NVIDIA hosts:
+
+```bash
+docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
+```
+
+The Compose services bind-mount the repository checkout, so the container sees
+the same `conf/config.yaml`, `.env`, `audio.wav`, `transcript.json`, and
+`summary.xml` files you use locally. The root `.venv` and vendored
+`src/card_framework/_vendor/index_tts/.venv` are redirected to Docker volumes
+so the host checkout does not receive Linux virtual environments.
+
+For the full container workflow and Windows + NeMo guidance, see
+[`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md).
+
 ## What To Edit
 
 Most day-to-day changes happen in this block:
@@ -112,6 +144,10 @@ HF_TOKEN=
 The runtime also accepts older aliases and mirrors them automatically. That
 means existing values such as `VLLM_API_KEY`, `GOOGLE_API_KEY`, `GLM_API_KEY`,
 `HF_ACCESS_TOKEN`, and `HF_API_TOKEN` still work.
+
+The Docker Compose services load that same `.env` file through `env_file`, so
+you do not need a second container-specific secrets file for the standard
+`setup_and_run` workflow.
 
 The new SPoRC automatic sampler also reads `ANTHROPIC_API_KEY` from `.env` or
 the process environment when you run:

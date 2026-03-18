@@ -42,6 +42,8 @@ Markdown files under `coder_docs/`.
   `coder_docs/logging_standards.md`
 - Testing expectations:
   `coder_docs/testing_standards.md`
+- Docker and containerized runtime workflow:
+  `coder_docs/docker_workflow.md`
 - Methodology-sensitive or academically grounded implementations:
   `coder_docs/academic_standards.md`
 - Bug triage and failing-test workflow:

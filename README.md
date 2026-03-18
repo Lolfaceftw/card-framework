@@ -135,6 +135,8 @@ Other important locations:
 - `artifacts/`: generated transcripts, cloned audio, benchmark outputs, and
   other runtime artifacts
 - `checkpoints/`: local model/runtime checkpoints
+- `compose.yml`: Docker Compose operator workflow centered on `setup_and_run`
+- `Dockerfile`: base container runtime used by the Compose services
 - `conf/config.yaml`: canonical human-edited runtime config for source checkouts
 - `src/card_framework/config/config.yaml`: packaged fallback config bundled into
   the installed distribution
@@ -146,6 +148,8 @@ Other important locations:
 
 ```bash
 uv sync --dev
+docker compose build setup-and-run
+docker compose run --rm setup-and-run --help
 uv run python -m card_framework.cli.main --help
 uv run python -m card_framework.cli.setup_and_run --help
 uv run python -m card_framework.cli.calibrate --help
@@ -164,6 +168,8 @@ uv run pytest
 Common execution entrypoints:
 
 ```bash
+docker compose run --rm setup-and-run --audio-path <path-to-audio>
+docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path <path-to-audio>
 uv run python -m card_framework.cli.setup_and_run --audio-path <path-to-audio>
 uv run python -m card_framework.cli.main
 uv run python -m card_framework.cli.calibrate
@@ -181,6 +187,23 @@ also emits timed Demucs loading/status lines and the same first-run ETA
 behavior, while long source files are separated in bounded outer windows so RAM
 does not scale with the full recording length.
 
+## Docker Workflow
+
+The repository now includes a Docker operator path centered on
+`card_framework.cli.setup_and_run`.
+
+- Use `docker compose run --rm setup-and-run ...` for the generic containerized
+  wrapper flow.
+- Use `docker compose --profile gpu run --rm setup-and-run-gpu ...` on Windows
+  or Linux NVIDIA hosts when you want the Linux-container path for NeMo-backed
+  diarization.
+- The Compose services bind-mount the repo checkout, reuse `conf/config.yaml`
+  and `.env`, and isolate the Linux `.venv` directories into Docker volumes so
+  the host checkout does not get container-built virtual environments.
+
+For the full command set, host caveats, and Windows + NeMo guidance, see
+[`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md).
+
 ## Configuration
 
 The repository now uses a small selector-based config instead of a long
@@ -190,6 +213,8 @@ comment-and-uncomment provider block.
 - Keep real secrets in `.env`, not in tracked YAML files.
 - Copy `.env.example` to `.env` and fill only the provider keys you actually
   use.
+- The Docker Compose workflow also loads that same `.env` file and uses the
+  repo-root `conf/config.yaml` from the bind-mounted checkout.
 - Long stage-1 separations now default to `audio.separation.window_length_seconds=600`
   with `audio.separation.window_context_seconds=5` so Demucs works on bounded
   outer windows before stitching the vocals stem back together.
@@ -472,6 +497,8 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
   manuscript
 - [`CONFIG.MD`](./CONFIG.MD): runtime config, `.env`, provider profiles, and
   common configuration examples
+- [`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md):
+  containerized `setup_and_run` workflow and Docker commands
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current
   architecture, runtime flow, commands, and maintenance expectations
 - [`AGENTS.md`](./AGENTS.md): compact agent entrypoint that routes developers to

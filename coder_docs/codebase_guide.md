@@ -38,9 +38,12 @@
     <directory path="src/card_framework/config">Hydra application configuration, including provider selection, stage controls, audio settings, ports, orchestrator limits, and logging.</directory>
     <directory path="src/card_framework/_vendor/index_tts">Vendored third-party IndexTTS runtime source required by the voice-clone pipeline.</directory>
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
+    <directory path="docker">Container entrypoint helpers for the Docker Compose `setup_and_run` workflow.</directory>
     <directory path=".github/workflows">Repository automation. `ci.yml` runs the targeted cross-platform CPU compatibility matrix on `windows-2025`, `ubuntu-24.04`, and `macos-14`, while `publish-pypi.yml` builds tagged release distributions, smoke-checks the built wheel and source distribution, and publishes them to PyPI through GitHub OIDC trusted publishing.</directory>
     <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover delegation workflow, Python standards, security, logging, testing, methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
     <file path="AGENTS.md">Repo-local coding-agent entrypoint that should stay a compact pointer into the topic-specific files under coder_docs.</file>
+    <file path="compose.yml">Docker Compose workflow centered on `card_framework.cli.setup_and_run`, including CPU and GPU services that mount the repo checkout and keep Linux virtual environments in named Docker volumes.</file>
+    <file path="coder_docs/docker_workflow.md">Operator-facing Docker guide for the containerized `setup_and_run` path, host caveats, and Windows plus NeMo recommendations.</file>
     <entrypoints>
       <entrypoint path="src/card_framework/api.py">Public installed-package entrypoint exposing `card_framework.infer(audio_wav, output_dir, target_duration_seconds, *, device, vllm_url=None, vllm_api_key=None)` and the typed `InferenceResult` artifact bundle.</entrypoint>
       <entrypoint path="src/card_framework/cli/main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
@@ -262,6 +265,7 @@
       <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa, including `deepseek_chat` for `deepseek-chat` and `deepseek_judge` for `deepseek-reasoner` when running reference-free judge sweeps.</file>
       <file path="src/card_framework/benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts. The benchmark vLLM API key is env-backed now instead of being stored literally in YAML.</file>
       <file path="CONFIG.MD">Operator-facing guide for `.env`, provider profile names, stage override selection, and common runtime configuration examples.</file>
+      <file path="coder_docs/docker_workflow.md">Operator-facing Docker workflow centered on `setup_and_run`, including Compose commands, volume layout, and Windows plus NeMo guidance.</file>
       <file path="pyproject.toml">Python version floor, dependencies, uv source/index policy, and pytest configuration.</file>
       <file path="uv.lock">Committed lockfile for the uv-managed environment.</file>
     </configurationFiles>
@@ -273,6 +277,9 @@
     </providerPolicy>
     <canonicalCommands>
       <command>uv sync --dev</command>
+      <command>docker compose build setup-and-run</command>
+      <command>docker compose run --rm setup-and-run --audio-path &lt;path-to-audio&gt;</command>
+      <command>docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path &lt;path-to-audio&gt;</command>
       <command>uv run python -m card_framework.cli.calibrate</command>
       <command>uv run python -m card_framework.cli.main</command>
       <command>uv run python -m card_framework.cli.setup_and_run --audio-path &lt;path-to-audio&gt;</command>
@@ -294,6 +301,8 @@
     </canonicalCommands>
     <commandNotes>
       <note>Use uv run for repo commands so execution stays inside the locked environment.</note>
+      <note>The Docker operator path is intentionally centered on `card_framework.cli.setup_and_run`. `compose.yml` bind-mounts the repo checkout, loads `.env`, reuses `conf/config.yaml`, and isolates both repo `.venv` directories into Docker named volumes so container runs do not leave Linux virtual environments in the host checkout.</note>
+      <note>For Windows hosts that need NeMo-backed diarization, prefer the Docker GPU profile over native Windows execution. That path is a Linux container fallback on a Windows host, not native Windows NeMo support.</note>
       <note>Benchmark, diarization benchmark, QA, runtime, calibration, and setup helpers are all package module entrypoints under `card_framework.*`.</note>
       <note>The installed-package library entrypoint is `from card_framework import infer`. It accepts `(audio_wav, output_dir, target_duration_seconds, *, device, vllm_url=None, vllm_api_key=None)`, treats the duration target and the packaged device choice as required per call, reads an optional full-config override from `CARD_FRAMEWORK_CONFIG`, and uses `CARD_FRAMEWORK_HOME` for writable runtime assets when set.</note>
       <note>Packaged `infer(...)` now delegates to `card_framework.cli.setup_and_run` instead of invoking `card_framework.cli.main` directly, so pip-installed runs regain live wrapper/pipeline streaming while the wrapper resolves relative reusable transcripts, audio, and summary inputs from the caller workspace rather than site-packages-shaped `REPO_ROOT` paths.</note>
