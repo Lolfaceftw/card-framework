@@ -375,11 +375,11 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
             ),
             language=(str(asr_cfg.get("language", "en")).strip() or "en"),
             chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 25)),
-            chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 2)),
+            chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 1)),
             max_new_tokens=int(asr_cfg.get("max_new_tokens", 96)),
             repetition_penalty=_configured_float(
                 asr_cfg.get("repetition_penalty"),
-                default=1.15,
+                default=1.25,
             ),
             enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
             require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),

@@ -180,3 +180,18 @@ Rationale:
 - Keep `min_speakers` unset by default for flexibility and use exact-count
   overrides only for tightly controlled episodes where the speaker count is
   known in advance.
+
+## 2026-03-18 - Follow-up after Granite-only fixed-vocals loop
+
+Context:
+- Later fixed-vocals Granite-only Docker experiments moved the ASR defaults
+  again without changing the winning NeMo settings from pass 5.
+
+Current note:
+- Keep the pass-5 NeMo defaults as written above.
+- Granite defaults are now tracked separately in
+  `granite_transcription_tuning.md` and currently use:
+  `chunk_length_seconds: 25`
+  `chunk_overlap_seconds: 1`
+  `max_new_tokens: 96`
+  `repetition_penalty: 1.25`

@@ -109,7 +109,7 @@ def test_granite_transcribe_chunks_audio_and_reports_progress(
         "segment 2/3",
         "segment 3/3",
     ]
-    assert [update.processed_audio_ms for update in updates] == [25_000, 48_000, 70_000]
+    assert [update.processed_audio_ms for update in updates] == [25_000, 49_000, 70_000]
     assert [segment.text for segment in result.segments] == [
         "hello there",
         "general kenobi",
@@ -177,7 +177,7 @@ def test_granite_transcribe_chunk_uses_rendered_prompt_cleanup(monkeypatch) -> N
 
     assert chunk_text == "can you imagine this is our four. of pwl capital."
     assert generate_calls[0]["max_new_tokens"] == 96
-    assert generate_calls[0]["repetition_penalty"] == pytest.approx(1.15)
+    assert generate_calls[0]["repetition_penalty"] == pytest.approx(1.25)
 
 
 def test_granite_runtime_reports_loading_messages(monkeypatch) -> None:

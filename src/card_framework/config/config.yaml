@@ -121,9 +121,9 @@ audio:
     provider: "granite_speech"
     model: "ibm-granite/granite-4.0-1b-speech"
     chunk_length_seconds: 25
-    chunk_overlap_seconds: 2
+    chunk_overlap_seconds: 1
     max_new_tokens: 96
-    repetition_penalty: 1.15
+    repetition_penalty: 1.25
     language: "en"
     suppress_numerals: false
     forced_alignment:

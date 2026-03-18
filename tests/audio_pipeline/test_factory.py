@@ -71,7 +71,7 @@ def test_factory_builds_default_strategies() -> None:
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is False
-    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.15)
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.25)
     assert orchestrator.diarizer.max_speakers == 10
     assert orchestrator.diarizer.vad_onset == pytest.approx(0.8)
     assert orchestrator.diarizer.vad_offset == pytest.approx(0.6)
@@ -342,9 +342,9 @@ def test_factory_builds_granite_transcriber_defaults() -> None:
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert orchestrator.transcriber.model_name == "ibm-granite/granite-4.0-1b-speech"
     assert orchestrator.transcriber.chunk_length_seconds == 25
-    assert orchestrator.transcriber.chunk_overlap_seconds == 2
+    assert orchestrator.transcriber.chunk_overlap_seconds == 1
     assert orchestrator.transcriber.max_new_tokens == 96
-    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.15)
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.25)
     assert orchestrator.transcriber.language == "en"
 
 

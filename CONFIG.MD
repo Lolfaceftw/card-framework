@@ -113,9 +113,9 @@ audio:
     provider: "granite_speech"
     model: "ibm-granite/granite-4.0-1b-speech"
     chunk_length_seconds: 25
-    chunk_overlap_seconds: 2
+    chunk_overlap_seconds: 1
     max_new_tokens: 96
-    repetition_penalty: 1.15
+    repetition_penalty: 1.25
     language: "en"
     forced_alignment:
       enabled: true
@@ -124,7 +124,7 @@ audio:
 ```
 
 - `granite_speech` is the default ASR backend for new runs.
-- The runtime chunks preprocessed audio into `25s` windows with `2s` overlap.
+- The runtime chunks preprocessed audio into `25s` windows with `1s` overlap.
 - Stage-1 now emits timed Granite model loading messages and inline
   transcription progress such as `segment 2/9` plus an ETA on the first run
   from the configured/default audio ETA profile, then refines later runs with
@@ -167,9 +167,12 @@ audio:
   `clustering_sparse_search_volume` when NeMo consistently undercounts
   speakers, and consider `clustering_maj_vote_spk_count: true` when you want a
   more conservative speaker-count estimate across scales.
-- The current fifth-pass podcast experiment lowers Granite
-  `max_new_tokens` to `96`, raises Granite `repetition_penalty` to `1.15`,
-  rolls NeMo back to the better-behaving `vad_pad_offset: 0.0`,
+- The latest fixed-vocals Granite pass keeps `max_new_tokens: 96`, drops
+  Granite overlap to `1s`, and raises Granite `repetition_penalty` to `1.25`
+  because that combination cut seam-style duplicate candidates much more than
+  the old `25s/2s/96/1.15` default while preserving more words than the
+  tighter `80`-token cap.
+- The current NeMo pass keeps the better-behaving `vad_pad_offset: 0.0`,
   `vad_min_duration_on: 0.2`, and `vad_min_duration_off: 0.6` values, then
   broadens NeMo's clustering search with `max_speakers: 10`,
   `clustering_max_rp_threshold: 0.4`,

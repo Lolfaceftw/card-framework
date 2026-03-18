@@ -80,6 +80,13 @@ transcript is written:
 docker compose --profile gpu run --rm --entrypoint bash setup-and-run-gpu -lc "uv run python scripts/run_audio_stage_only.py --audio-path audio.wav --device cuda"
 ```
 
+Run only Granite ASR on an existing `vocals.wav` artifact and write raw chunked
+transcription output plus seam-oriented metrics:
+
+```bash
+docker compose --profile gpu run --rm --entrypoint bash setup-and-run-gpu -lc "uv run python scripts/run_transcription_experiment.py --audio-path artifacts/audio_stage/runs/<run-id>/separation/htdemucs/audio/vocals.wav --device cuda --override audio.asr.forced_alignment.enabled=false --override audio.asr.forced_alignment.required=false"
+```
+
 Rerun only diarization against a fixed separated `vocals.wav` artifact and
 write a quick speaker-preview transcript from an existing timed transcript:
 
