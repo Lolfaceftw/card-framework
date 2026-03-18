@@ -421,19 +421,20 @@ Installed-package runtime notes:
 This repository now includes a GitHub Actions trusted-publishing workflow at
 `.github/workflows/publish-pypi.yml` that publishes tags matching `v*` to PyPI.
 
-The public PyPI project already exists. As of March 9, 2026:
+The public PyPI project already exists. As of March 18, 2026:
 
 - `1.0.1` is the first public release, but it published the wrong bare
   `ctc-forced-aligner` dependency name for downstream `pip` users.
 - `v1.0.2` was tagged but never published because PyPI rejected the direct Git
   dependency metadata.
-- `1.0.4` is the current public release.
-- The next install-path fix must ship under a new version such as `1.0.5`; do
+- `1.1.0` is the current public release.
+- The next release from the post-`1.1.0` commit line must ship under a new
+  version such as `1.2.0`; do
   not reuse a failed or already-published version number.
 
 Repository-side release steps:
 
-1. Create a dedicated release-preparation branch such as `release/v1.0.5` from
+1. Create a dedicated release-preparation branch such as `release/v1.2.0` from
    the target integration branch, then run the release preflight in
    [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_release_spec.md),
    including build, targeted tests, and artifact-scoped `uv publish --dry-run`.
@@ -441,8 +442,8 @@ Repository-side release steps:
    commit and push it, for example:
 
    ```bash
-   git tag -a v1.0.5 -m v1.0.5
-   git push origin v1.0.5
+   git tag -a v1.2.0 -m v1.2.0
+   git push origin v1.2.0
    ```
 
 3. Do not assume the release is complete just because the tag push succeeded.
