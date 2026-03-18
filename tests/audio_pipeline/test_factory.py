@@ -74,9 +74,9 @@ def test_factory_builds_default_strategies() -> None:
     assert orchestrator.diarizer.vad_onset == pytest.approx(0.8)
     assert orchestrator.diarizer.vad_offset == pytest.approx(0.6)
     assert orchestrator.diarizer.vad_pad_onset == pytest.approx(0.1)
-    assert orchestrator.diarizer.vad_pad_offset == pytest.approx(0.0)
-    assert orchestrator.diarizer.vad_min_duration_on == pytest.approx(0.2)
-    assert orchestrator.diarizer.vad_min_duration_off == pytest.approx(0.6)
+    assert orchestrator.diarizer.vad_pad_offset == pytest.approx(0.05)
+    assert orchestrator.diarizer.vad_min_duration_on == pytest.approx(0.3)
+    assert orchestrator.diarizer.vad_min_duration_off == pytest.approx(0.8)
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
 
 
@@ -306,7 +306,7 @@ def test_factory_builds_granite_transcriber_defaults() -> None:
     assert orchestrator.transcriber.model_name == "ibm-granite/granite-4.0-1b-speech"
     assert orchestrator.transcriber.chunk_length_seconds == 25
     assert orchestrator.transcriber.chunk_overlap_seconds == 2
-    assert orchestrator.transcriber.max_new_tokens == 200
+    assert orchestrator.transcriber.max_new_tokens == 128
     assert orchestrator.transcriber.language == "en"
 
 

@@ -376,7 +376,7 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
             language=(str(asr_cfg.get("language", "en")).strip() or "en"),
             chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 25)),
             chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 2)),
-            max_new_tokens=int(asr_cfg.get("max_new_tokens", 200)),
+            max_new_tokens=int(asr_cfg.get("max_new_tokens", 128)),
             enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
             require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),
             forced_alignment_batch_size=int(forced_alignment_cfg.get("batch_size", 8)),
@@ -436,15 +436,15 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
             ),
             vad_pad_offset=_configured_float(
                 diarization_cfg.get("vad_pad_offset"),
-                default=0.0,
+                default=0.05,
             ),
             vad_min_duration_on=_configured_float(
                 diarization_cfg.get("vad_min_duration_on"),
-                default=0.2,
+                default=0.3,
             ),
             vad_min_duration_off=_configured_float(
                 diarization_cfg.get("vad_min_duration_off"),
-                default=0.6,
+                default=0.8,
             ),
         )
     if provider in {"pyannote", "pyannote_community1"}:

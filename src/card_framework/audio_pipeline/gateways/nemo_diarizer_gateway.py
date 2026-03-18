@@ -45,9 +45,9 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         vad_onset: float = 0.8,
         vad_offset: float = 0.6,
         vad_pad_onset: float = 0.1,
-        vad_pad_offset: float = 0.0,
-        vad_min_duration_on: float = 0.2,
-        vad_min_duration_off: float = 0.6,
+        vad_pad_offset: float = 0.05,
+        vad_min_duration_on: float = 0.3,
+        vad_min_duration_off: float = 0.8,
     ) -> None:
         self.msdd_model = msdd_model
         self.vad_model = vad_model

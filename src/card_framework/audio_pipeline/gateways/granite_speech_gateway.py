@@ -49,7 +49,7 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         language: str | None = "en",
         chunk_length_seconds: int = 25,
         chunk_overlap_seconds: int = 2,
-        max_new_tokens: int = 200,
+        max_new_tokens: int = 128,
         prompt: str = _DEFAULT_PROMPT,
         enable_forced_alignment: bool = True,
         require_forced_alignment: bool = True,

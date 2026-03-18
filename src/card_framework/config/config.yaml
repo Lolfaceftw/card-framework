@@ -122,7 +122,7 @@ audio:
     model: "ibm-granite/granite-4.0-1b-speech"
     chunk_length_seconds: 25
     chunk_overlap_seconds: 2
-    max_new_tokens: 200
+    max_new_tokens: 128
     language: "en"
     suppress_numerals: false
     forced_alignment:
@@ -140,9 +140,9 @@ audio:
     vad_onset: 0.8
     vad_offset: 0.6
     vad_pad_onset: 0.1
-    vad_pad_offset: 0.0
-    vad_min_duration_on: 0.2
-    vad_min_duration_off: 0.6
+    vad_pad_offset: 0.05
+    vad_min_duration_on: 0.3
+    vad_min_duration_off: 0.8
     pyannote:
       pipeline_name: "pyannote/speaker-diarization-community-1"
       auth_token: ${oc.env:HF_TOKEN,""}
@@ -265,11 +265,11 @@ agents:
     loop_guardrails:
       enabled: true
       target_models:
-        - "qwen"
+      - "qwen"
       target_providers:
-        - "vllmprovider"
-        - "transformersprovider"
-        - "huggingfaceprovider"
+      - "vllmprovider"
+      - "transformersprovider"
+      - "huggingfaceprovider"
       enable_stall_guidance: true
       enable_noop_edit_detection: true
       enable_extended_text_tool_parser: true

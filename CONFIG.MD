@@ -114,7 +114,7 @@ audio:
     model: "ibm-granite/granite-4.0-1b-speech"
     chunk_length_seconds: 25
     chunk_overlap_seconds: 2
-    max_new_tokens: 200
+    max_new_tokens: 128
     language: "en"
     forced_alignment:
       enabled: true
@@ -146,18 +146,19 @@ audio:
     vad_onset: 0.8
     vad_offset: 0.6
     vad_pad_onset: 0.1
-    vad_pad_offset: 0.0
-    vad_min_duration_on: 0.2
-    vad_min_duration_off: 0.6
+    vad_pad_offset: 0.05
+    vad_min_duration_on: 0.3
+    vad_min_duration_off: 0.8
 ```
 
 - Leave `min_speakers` and `max_speakers` blank when episodes can include a
   variable number of guests.
 - The `vad_*` keys are NeMo-only tuning controls for boundary sensitivity and
   micro-turn suppression.
-- The current first-pass podcast experiment removes the negative NeMo
-  `pad_offset`, deletes sub-`0.2s` speech bursts, and merges sub-`0.6s`
-  nonspeech gaps without constraining speaker count.
+- The current second-pass podcast experiment lowers Granite
+  `max_new_tokens` to `128`, keeps speaker count unconstrained, extends NeMo
+  speech tails slightly with `vad_pad_offset: 0.05`, deletes sub-`0.3s`
+  speech bursts, and merges sub-`0.8s` nonspeech gaps.
 
 ## Built-In LLM Profiles
 
