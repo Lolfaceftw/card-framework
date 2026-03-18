@@ -474,7 +474,7 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current
   architecture, runtime flow, commands, and maintenance expectations
 - [`coder_docs/research_agents.md`](./coder_docs/research_agents.md):
-  authoritative Codex research-agent usage and delegated web-research workflow
+  authoritative Codex delegation and delegated web-research workflow
 - [`coder_docs/memory/errors_and_notes.md`](./coder_docs/memory/errors_and_notes.md):
   repository memory for recurring pitfalls and prior fixes
 - [`coder_docs/fault_localization_workflow.md`](./coder_docs/fault_localization_workflow.md):
@@ -484,9 +484,9 @@ If you are changing behavior, prompts, workflows, or commands, start with
 `coder_docs/codebase_guide.md`.
 
 If you are working through Codex, follow `AGENTS.md` plus
-`coder_docs/research_agents.md` so delegated open-web research goes through the
-configured `researcher` agent while local repository work stays in the main
-thread.
+`coder_docs/research_agents.md` so delegation stays aligned with the configured
+sub-agents in `../.codex/config.toml` and any delegated open-web work still
+follows the repo Scrapling workflow.
 
 ## License
 
