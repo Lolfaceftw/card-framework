@@ -106,6 +106,7 @@ Use `duration-sweep` when you want multiple duration targets in one invocation:
 - `--examples` remains available as a sweep-only override for the same retained-sample target,
 - `--parallelism 0` runs every selected preset concurrently,
 - `--concurrency <int>` seeds that many worker children per active preset and donates those workers forward when earlier presets finish,
+- when `--embedding-mode enabled`, `duration-sweep` now starts one parent-owned retrieval service for the whole sweep, namespaces each worker, and serializes embedding/index/retrieve requests so the configured embedding model loads once per sweep instead of once per child,
 - stalled preset children now heartbeat every `30s`, write per-preset checkpoints, and auto-restart from checkpoint when the active sample stops making progress,
 - `duration-sweep` is transcript-only by default unless you add `--enable-voice-clone`.
 
@@ -248,7 +249,11 @@ preset queue, so new workers can join a preset mid-run without overlapping
 samples and finished presets can donate their worker slots to the next
 unfinished preset in order. Pressing `Ctrl+C` now stops every active child,
 closes the footer bar cleanly, and exits the sweep with `Cancelled.` after the
-active child connections are torn down.
+active child connections are torn down. With embeddings enabled, those child
+workers now share one retrieval service and one embedding model for the sweep;
+worker namespaces prevent transcript collisions, and the shared service
+serializes requests so only one embedding/index/retrieve operation runs at a
+time.
 
 To inspect one sweep shard end to end:
 
@@ -683,6 +688,11 @@ Shared execution flags users usually need:
 - `duration-sweep`: `--parallelism <int>`
 - `duration-sweep`: `--concurrency <int>`
 - `duration-sweep`: `--duration-presets 30s,1m,5m,15m`
+
+`--embedding-mode enabled` uses the active embedding profile from config rather
+than a hard-coded benchmark-only model. In the repository defaults that profile
+is `qwen3_4b`, so enabling embeddings now points SPoRC sweeps at
+`Qwen/Qwen3-Embedding-4B` unless you change `selection.embedding`.
 
 ## Timeouts
 

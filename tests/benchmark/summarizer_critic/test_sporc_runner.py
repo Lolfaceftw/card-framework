@@ -243,8 +243,16 @@ class _StubEventCapture:
 class _StubOrchestrator:
     """Minimal orchestrator stub for `_execute_sample` coverage."""
 
+    def __init__(self) -> None:
+        self.index_calls = 0
+        self.clear_calls = 0
+
     async def index_transcript(self, transcript_payload: dict[str, object]) -> None:
         del transcript_payload
+        self.index_calls += 1
+
+    async def clear_transcript_index(self) -> None:
+        self.clear_calls += 1
 
     async def run_loop_with_diagnostics(
         self,
@@ -272,6 +280,30 @@ class _StubOrchestrator:
             "final_status": "pass",
             "final_feedback": "critic accepted the draft",
         }
+
+
+class _FailingStubOrchestrator(_StubOrchestrator):
+    """Orchestrator stub that raises after indexing to exercise cleanup paths."""
+
+    async def run_loop_with_diagnostics(
+        self,
+        *,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
+        max_iterations: int | None,
+        full_transcript_text: str,
+        speaker_samples_manifest_path: Path | None,
+        draft_audio_state_path: Path | None,
+    ) -> dict[str, object]:
+        del (
+            target_seconds,
+            duration_tolerance_ratio,
+            max_iterations,
+            full_transcript_text,
+            speaker_samples_manifest_path,
+            draft_audio_state_path,
+        )
+        raise RuntimeError("retrieval cleanup retry")
 
 
 def test_sample_artifact_recorder_writes_hierarchical_llm_traces(
@@ -500,6 +532,84 @@ def test_execute_sample_persists_artifact_paths_in_result(tmp_path: Path) -> Non
     assert Path(result.final_critic_feedback_path or "").read_text(
         encoding="utf-8"
     ) == "critic accepted the draft"
+
+
+def test_execute_sample_clears_retrieval_namespace_after_success(tmp_path: Path) -> None:
+    transcript_path = tmp_path / "sample.transcript.json"
+    _write_transcript(transcript_path, text="apple banana cherry")
+    run_root = tmp_path / "run"
+    sample = _sample("sample-a", transcript_path=str(transcript_path))
+    recorder = _SampleArtifactRecorder(run_root=run_root)
+    judge = SimpleNamespace(
+        evaluate=lambda **kwargs: SPoRCJudgeResult(
+            status="ok",
+            scores={
+                "Factualness": 0.8,
+                "Naturalness": 0.7,
+                "Speaker Grammar Similarity": 0.6,
+            },
+        )
+    )
+    orchestrator = _StubOrchestrator()
+
+    result = asyncio.run(
+        _execute_sample(
+            sample=sample,
+            target_seconds=30,
+            preloaded_transcript=None,
+            orchestrator=orchestrator,
+            event_capture=_StubEventCapture(),
+            retrieval_enabled=True,
+            duration_tolerance_ratio=0.25,
+            max_iterations=3,
+            judge=judge,
+            calibration=SimpleNamespace(),
+            run_root=run_root,
+            artifact_recorder=recorder,
+            audio_cfg={},
+            transcript_only=True,
+            voice_clone_orchestrator=None,
+            force_download_audio=False,
+        )
+    )
+
+    assert result.status == "completed"
+    assert orchestrator.index_calls == 1
+    assert orchestrator.clear_calls == 1
+
+
+def test_execute_sample_clears_retrieval_namespace_after_failure(tmp_path: Path) -> None:
+    transcript_path = tmp_path / "sample.transcript.json"
+    _write_transcript(transcript_path, text="apple banana cherry")
+    run_root = tmp_path / "run"
+    sample = _sample("sample-a", transcript_path=str(transcript_path))
+    recorder = _SampleArtifactRecorder(run_root=run_root)
+    orchestrator = _FailingStubOrchestrator()
+
+    result = asyncio.run(
+        _execute_sample(
+            sample=sample,
+            target_seconds=30,
+            preloaded_transcript=None,
+            orchestrator=orchestrator,
+            event_capture=_StubEventCapture(),
+            retrieval_enabled=True,
+            duration_tolerance_ratio=0.25,
+            max_iterations=3,
+            judge=SimpleNamespace(),
+            calibration=SimpleNamespace(),
+            run_root=run_root,
+            artifact_recorder=recorder,
+            audio_cfg={},
+            transcript_only=True,
+            voice_clone_orchestrator=None,
+            force_download_audio=False,
+        )
+    )
+
+    assert result.status == "failed"
+    assert orchestrator.index_calls == 1
+    assert orchestrator.clear_calls == 1
 
 
 def test_copy_sample_transcript_keeps_raw_speakers_and_marks_uncertainty(

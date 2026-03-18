@@ -6,6 +6,7 @@ EmbeddingProvider strategy interface.
 """
 
 import time
+import threading
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -36,6 +37,9 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
         import torch
 
         self.batch_size = batch_size
+        self._device = device
+        self._encode_lock = threading.Lock()
+        self._closed = False
         # Build the lookup once
         if not self._DTYPE_MAP:
             self._DTYPE_MAP.update(
@@ -72,6 +76,8 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
         show_progress: bool = False,
         prompt_name: str | None = None,
     ) -> np.ndarray:
+        if self._closed:
+            raise RuntimeError("Embedding provider has been closed.")
         kwargs: dict = dict(
             batch_size=self.batch_size,
             show_progress_bar=show_progress,
@@ -80,5 +86,26 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
         if prompt_name is not None:
             kwargs["prompt_name"] = prompt_name
 
-        return self._model.encode(texts, **kwargs)
+        with self._encode_lock:
+            if self._closed:
+                raise RuntimeError("Embedding provider has been closed.")
+            return self._model.encode(texts, **kwargs)
+
+    def close(self) -> None:
+        """Release the loaded sentence-transformer model and CUDA cache."""
+        if self._closed:
+            return
+        self._closed = True
+        model = getattr(self, "_model", None)
+        self._model = None
+        del model
+        try:
+            import gc
+            import torch
+
+            gc.collect()
+            if str(self._device).lower().startswith("cuda") and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            return None
 

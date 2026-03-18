@@ -72,6 +72,7 @@ class SummarizerExecutor(BaseA2AExecutor):
         voice_clone_orchestrator: VoiceCloneOrchestrator | None = None,
         live_draft_audio_enabled: bool = False,
         emo_preset_catalog: dict[str, str] | None = None,
+        retrieval_namespace: str = "default",
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
     ) -> None:
@@ -79,6 +80,9 @@ class SummarizerExecutor(BaseA2AExecutor):
         super().__init__("Summarizer")
         self.llm = llm
         self.retrieval_port = retrieval_port
+        self.retrieval_namespace = (
+            str(retrieval_namespace or "").strip() or "default"
+        )
         self.max_tool_turns = max_tool_turns
         self.calibration = calibration
         self.is_embedding_enabled = is_embedding_enabled
@@ -373,6 +377,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             tool_registry = build_revise_tools(
                 registry,
                 retrieval_port,
+                self.retrieval_namespace,
                 self.calibration,
                 target_seconds,
                 duration_tolerance_ratio,
@@ -392,6 +397,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             tool_registry = build_summarizer_tools(
                 registry,
                 retrieval_port,
+                self.retrieval_namespace,
                 self.calibration,
                 target_seconds,
                 duration_tolerance_ratio,
@@ -425,7 +431,10 @@ class SummarizerExecutor(BaseA2AExecutor):
             )
 
             retrieve_task = RetrieveTaskRequest(
-                action="retrieve", query=retrieve_query, top_k=20
+                action="retrieve",
+                query=retrieve_query,
+                top_k=20,
+                namespace=self.retrieval_namespace,
             )
 
             self.event_bus.publish(

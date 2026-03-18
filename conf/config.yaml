@@ -3,7 +3,7 @@
 
 selection:
   llm: "vllm_local"
-  embedding: "disabled"
+  embedding: "qwen3_4b"
   stage_llm:
     summarizer: "default"
     critic: "default"

@@ -185,6 +185,16 @@ def _resolve_benchmark_ports(args: argparse.Namespace) -> tuple[int, int, int]:
     return retrieval_port, summarizer_port, critic_port
 
 
+def _close_embedding_provider(embedding: EmbeddingProvider | None) -> None:
+    """Release one embedding provider's cached resources when available."""
+    if embedding is None:
+        return
+    try:
+        embedding.close()
+    except Exception:
+        return
+
+
 def _run_server_in_thread(name: str, app: Any, port: int) -> ManagedServer:
     reserved_socket = _consume_reserved_port_socket(port)
     config = uvicorn.Config(
@@ -416,6 +426,11 @@ async def _execute_sample(
     sample_started = time.perf_counter()
     retrieval_before = event_capture.count("retrieval_stats")
     tool_before = event_capture.count("tool_invocation")
+
+    async def _clear_retrieval_namespace() -> None:
+        if retrieval_enabled:
+            await orchestrator.clear_transcript_index()
+
     try:
         transcript = load_transcript(
             BenchmarkSample(
@@ -497,6 +512,7 @@ async def _execute_sample(
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
+        await _clear_retrieval_namespace()
         return SampleBenchmarkResult(
             sample_id=sample.sample_id,
             dataset=sample.dataset,
@@ -530,6 +546,10 @@ async def _execute_sample(
             ),
         )
     except Exception as exc:
+        try:
+            await _clear_retrieval_namespace()
+        except Exception:
+            pass
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
@@ -652,6 +672,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             executor=SummarizerExecutor(
                 llm=llm_summarizer,
                 retrieval_port=retrieval_port,
+                retrieval_namespace="default",
                 max_tool_turns=int(base_cfg.agents.summarizer.max_tool_turns),
                 calibration=calibration,
                 is_embedding_enabled=retrieval_enabled,
@@ -678,6 +699,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 calibration=calibration,
                 max_tool_turns=int(base_cfg.agents.critic.max_tool_turns),
                 retrieval_port=retrieval_port,
+                retrieval_namespace="default",
                 is_embedding_enabled=retrieval_enabled,
                 reasoning_loop_guard=_coerce_mapping(
                     OmegaConf.to_container(
@@ -880,6 +902,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             for port in reserved_ports:
                 _release_reserved_port(port)
         await shared_agent_client.close()
+        _close_embedding_provider(embedding)
 
 
 def execute_benchmark(args: argparse.Namespace) -> BenchmarkExecutionReport:

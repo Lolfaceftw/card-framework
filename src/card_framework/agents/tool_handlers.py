@@ -516,9 +516,11 @@ class QueryTranscriptHandler(ToolHandler):
     def __init__(
         self,
         retrieval_port: int,
+        retrieval_namespace: str = "default",
         agent_client: AgentTaskClient | None = None,
     ) -> None:
         self._retrieval_port = retrieval_port
+        self._retrieval_namespace = str(retrieval_namespace or "").strip() or "default"
         self._agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
         )
@@ -562,7 +564,12 @@ class QueryTranscriptHandler(ToolHandler):
             return query_error
 
         top_k = arguments.get("top_k", 5)
-        retrieve_task = RetrieveTaskRequest(action="retrieve", query=query, top_k=top_k)
+        retrieve_task = RetrieveTaskRequest(
+            action="retrieve",
+            query=query,
+            top_k=top_k,
+            namespace=self._retrieval_namespace,
+        )
         raw_response = await self._agent_client.send_task(
             self._retrieval_port, retrieve_task, timeout=30.0
         )
@@ -666,6 +673,7 @@ def _snapshot_to_xml(snapshot: list[dict[str, Any]]) -> str:
 def build_summarizer_tools(
     registry: MessageRegistry,
     retrieval_port: int,
+    retrieval_namespace: str,
     calibration: VoiceCloneCalibration | None,
     target_seconds: int,
     duration_tolerance_ratio: float,
@@ -709,7 +717,11 @@ def build_summarizer_tools(
     )
     if is_embedding_enabled:
         tool_registry.register(
-            QueryTranscriptHandler(retrieval_port, agent_client=agent_client)
+            QueryTranscriptHandler(
+                retrieval_port,
+                retrieval_namespace=retrieval_namespace,
+                agent_client=agent_client,
+            )
         )
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))
@@ -719,6 +731,7 @@ def build_summarizer_tools(
 def build_revise_tools(
     registry: MessageRegistry,
     retrieval_port: int,
+    retrieval_namespace: str,
     calibration: VoiceCloneCalibration | None,
     target_seconds: int,
     duration_tolerance_ratio: float,
@@ -762,7 +775,11 @@ def build_revise_tools(
     )
     if is_embedding_enabled:
         tool_registry.register(
-            QueryTranscriptHandler(retrieval_port, agent_client=agent_client)
+            QueryTranscriptHandler(
+                retrieval_port,
+                retrieval_namespace=retrieval_namespace,
+                agent_client=agent_client,
+            )
         )
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))

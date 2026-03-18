@@ -418,6 +418,84 @@ def test_launch_duration_sweep_child_uses_full_sample_scope_with_shared_queue(
         state.log_handle.close()
 
 
+def test_launch_duration_sweep_child_uses_shared_retrieval_port_and_namespace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    launched_commands: list[list[str]] = []
+
+    def _fake_popen(command, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        launched_commands.append(list(command))
+        return _PopenStub(pid=9002)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._reserve_distinct_ports",
+        lambda used_ports, count: [6202, 6203] if count == 2 else [6201],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._start_duration_sweep_reader",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli.subprocess.Popen",
+        _fake_popen,
+    )
+
+    args = argparse.Namespace(
+        dataset_manifest="manifest.json",
+        dataset_variant="full",
+        episode_data_path="",
+        turn_data_path="",
+        reference_wpm=150.0,
+        output_root=str(tmp_path / "runs"),
+        provider_profiles="profiles.yaml",
+        config="config.yaml",
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="enabled",
+        judge_source_char_limit=30000,
+        duration_preset="",
+        target_seconds_override=None,
+        max_samples=25,
+        sample_seed=41,
+        max_iterations=3,
+        summarizer_timeout_seconds=None,
+        critic_timeout_seconds=None,
+        retrieval_timeout_seconds=None,
+        index_timeout_seconds=None,
+        prepare_if_missing=True,
+        force_download_dataset=False,
+        force_download_audio=False,
+        transcript_only=False,
+        enable_voice_clone=False,
+        progress_heartbeat_seconds=30.0,
+    )
+
+    state = _launch_duration_sweep_child(
+        args=args,
+        sweep_root=tmp_path / "sweep",
+        duration_preset="5m",
+        shard_index=4,
+        shard_count=9,
+        max_samples=100,
+        used_ports=set(),
+        event_queue=queue.Queue(),
+        shared_retrieval_port=6201,
+    )
+
+    try:
+        command = launched_commands[0]
+        assert command[command.index("--retrieval-port") + 1] == "6201"
+        assert command[command.index("--shared-retrieval-port") + 1] == "6201"
+        assert command[command.index("--retrieval-namespace") + 1] == "sweep-worker-4"
+        assert state.retrieval_port == 6201
+        assert state.retrieval_namespace == "sweep-worker-4"
+    finally:
+        state.log_handle.close()
+
+
 def test_update_duration_sweep_child_state_tracks_heartbeat_metadata(
     tmp_path: Path,
 ) -> None:

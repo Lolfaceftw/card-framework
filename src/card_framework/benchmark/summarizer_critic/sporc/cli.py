@@ -92,6 +92,7 @@ class _DurationSweepChildState:
     checkpoint_path: Path
     output_root: Path
     shared_sample_queue_root: Path | None = None
+    retrieval_namespace: str = "default"
     shard_index: int = 1
     shard_count: int = 1
     sample_count: int | None = None
@@ -120,6 +121,15 @@ class _DurationSweepPresetState:
     completed_child_summaries: dict[int, DurationSweepPresetSummary] = field(
         default_factory=dict
     )
+
+
+@dataclass(slots=True)
+class _SharedSweepRetrievalService:
+    """Track one parent-owned retrieval service shared across sweep workers."""
+
+    port: int
+    server: object
+    registry: object
 
 
 @dataclass(slots=True, frozen=True)
@@ -971,16 +981,116 @@ def _reserve_port() -> int:
         return int(handle.getsockname()[1])
 
 
-def _reserve_distinct_port_triplet(used_ports: set[int]) -> tuple[int, int, int]:
-    """Reserve three distinct localhost ports not yet used in this sweep."""
+def _reserve_distinct_ports(used_ports: set[int], count: int) -> list[int]:
+    """Reserve ``count`` distinct localhost ports not yet used in this sweep."""
     ports: list[int] = []
-    while len(ports) < 3:
+    while len(ports) < count:
         port = _reserve_port()
         if port in used_ports:
             continue
         used_ports.add(port)
         ports.append(port)
+    return ports
+
+
+def _reserve_distinct_port_triplet(used_ports: set[int]) -> tuple[int, int, int]:
+    """Reserve three distinct localhost ports not yet used in this sweep."""
+    ports = _reserve_distinct_ports(used_ports, 3)
     return ports[0], ports[1], ports[2]
+
+
+def _start_duration_sweep_shared_retrieval_service(
+    *,
+    args: argparse.Namespace,
+    used_ports: set[int],
+) -> _SharedSweepRetrievalService | None:
+    """Start one parent-owned retrieval service when embeddings are enabled."""
+    if str(getattr(args, "embedding_mode", "disabled")) != "enabled":
+        return None
+
+    from card_framework.agents.health import AgentHealthChecker
+    from card_framework.agents.retrieval import InfoRetrievalExecutor
+    from card_framework.benchmark.matrix import build_embedding_profiles
+    from card_framework.benchmark.summarizer_critic.qmsum.runner import (
+        _run_server_in_thread,
+        _stop_server,
+    )
+    from card_framework.cli.main import _build_a2a_app
+    from card_framework.retrieval.embeddings import NamespacedTranscriptIndexRegistry
+    from card_framework.shared.config_loading import load_runtime_config
+    import hydra
+    from omegaconf import OmegaConf
+
+    server: object | None = None
+    registry: object | None = None
+    port = _reserve_distinct_ports(used_ports, 1)[0]
+    try:
+        with report_loading_duration(
+            "shared duration-sweep retrieval service",
+            reporter=_emit_cli_status,
+        ):
+            base_cfg = load_runtime_config(Path(args.config).resolve())
+            embedding_profile = build_embedding_profiles(base_cfg)["enabled"]
+            embedding_provider = hydra.utils.instantiate(
+                OmegaConf.create(embedding_profile.embedding_config)
+            )
+            registry = NamespacedTranscriptIndexRegistry(
+                embedding_provider,
+                serialize_requests=True,
+            )
+            retrieval_app = _build_a2a_app(
+                name="InfoRetrieval",
+                description=(
+                    "Shared duration-sweep retrieval service with one embedding model "
+                    "and namespaced transcript indices."
+                ),
+                port=port,
+                executor=InfoRetrievalExecutor(registry),
+            )
+            server = _run_server_in_thread(
+                "sporc-shared-retrieval",
+                retrieval_app,
+                port,
+            )
+            checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
+            if not checker.check("InfoRetrieval", port):
+                raise RuntimeError(
+                    f"Health check failed for shared retrieval service:{port}"
+                )
+        _emit_cli_status(
+            (
+                f"Started shared retrieval service on port {port}; "
+                "embedding requests are serialized across workers."
+            )
+        )
+        return _SharedSweepRetrievalService(
+            port=port,
+            server=server,
+            registry=registry,
+        )
+    except Exception:
+        if server is not None:
+            _stop_server(server)
+        close_registry = getattr(registry, "close", None)
+        if callable(close_registry):
+            close_registry()
+        raise
+
+
+def _stop_duration_sweep_shared_retrieval_service(
+    service: _SharedSweepRetrievalService | None,
+) -> None:
+    """Stop the parent-owned shared retrieval service and release its model."""
+    if service is None:
+        return
+    from card_framework.benchmark.summarizer_critic.qmsum.runner import _stop_server
+
+    try:
+        _stop_server(service.server)
+    finally:
+        close_registry = getattr(service.registry, "close", None)
+        if callable(close_registry):
+            close_registry()
 
 
 def _build_failed_preset_summary(
@@ -1405,6 +1515,7 @@ def _launch_duration_sweep_child(
     used_ports: set[int],
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
     shared_sample_queue_root: Path | None = None,
+    shared_retrieval_port: int | None = None,
     checkpoint_path: Path | None = None,
     resume_from_checkpoint: bool = False,
     resume_failure_reason: str | None = None,
@@ -1439,9 +1550,14 @@ def _launch_duration_sweep_child(
         "a" if resume_from_checkpoint and log_path.exists() else "w",
         encoding="utf-8",
     )
-    retrieval_port, summarizer_port, critic_port = _reserve_distinct_port_triplet(
-        used_ports
-    )
+    retrieval_namespace = f"sweep-worker-{shard_index}"
+    if shared_retrieval_port is None:
+        retrieval_port, summarizer_port, critic_port = _reserve_distinct_port_triplet(
+            used_ports
+        )
+    else:
+        summarizer_port, critic_port = _reserve_distinct_ports(used_ports, 2)
+        retrieval_port = shared_retrieval_port
     child_command = _build_execute_child_command(
         args,
         duration_preset=duration_preset,
@@ -1462,6 +1578,8 @@ def _launch_duration_sweep_child(
         shared_sample_queue_root=shared_sample_queue_root,
         sample_shard_index=(1 if shared_sample_queue_root is not None else shard_index),
         sample_shard_count=(1 if shared_sample_queue_root is not None else shard_count),
+        shared_retrieval_port=shared_retrieval_port,
+        retrieval_namespace=retrieval_namespace,
     )
     log_handle.write(
         (
@@ -1506,6 +1624,7 @@ def _launch_duration_sweep_child(
             getattr(args, "output_root", REPO_ROOT / "artifacts" / "sporc_runs")
         ).resolve(),
         shared_sample_queue_root=shared_sample_queue_root,
+        retrieval_namespace=retrieval_namespace,
         restart_count=restart_count,
         recovered_stall_count=recovered_stall_count,
     )
@@ -1612,6 +1731,7 @@ def _restart_duration_sweep_child(
     sweep_root: Path,
     used_ports: set[int],
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
+    shared_retrieval_port: int | None,
     reason: str,
 ) -> _DurationSweepChildState:
     """Restart one stalled preset child from its execute checkpoint."""
@@ -1633,6 +1753,7 @@ def _restart_duration_sweep_child(
         used_ports=used_ports,
         event_queue=event_queue,
         shared_sample_queue_root=state.shared_sample_queue_root,
+        shared_retrieval_port=shared_retrieval_port,
         checkpoint_path=state.checkpoint_path,
         resume_from_checkpoint=True,
         resume_failure_reason=_SWEEP_STALL_FINAL_STATUS,
@@ -1654,6 +1775,7 @@ def _launch_duration_sweep_preset(
     worker_budget: int,
     used_ports: set[int],
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
+    shared_retrieval_port: int | None,
     preset_state: _DurationSweepPresetState | None = None,
 ) -> _DurationSweepPresetState:
     """Launch one or more worker-slot children for a duration preset."""
@@ -1677,6 +1799,7 @@ def _launch_duration_sweep_preset(
                 used_ports=used_ports,
                 event_queue=event_queue,
                 shared_sample_queue_root=resolved_preset_state.queue_root,
+                shared_retrieval_port=shared_retrieval_port,
             )
     except Exception:
         for child_state in resolved_preset_state.child_states.values():
@@ -1964,6 +2087,10 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
     active_presets: dict[str, _DurationSweepPresetState] = {}
     preset_summaries_by_preset: dict[str, DurationSweepPresetSummary] = {}
     used_ports: set[int] = set()
+    shared_retrieval_service = _start_duration_sweep_shared_retrieval_service(
+        args=args,
+        used_ports=used_ports,
+    )
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]] = queue.Queue()
     last_progress: str | None = None
     next_heartbeat_at = 0.0
@@ -2003,6 +2130,11 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                     worker_budget=total_worker_budget,
                     used_ports=used_ports,
                     event_queue=event_queue,
+                    shared_retrieval_port=(
+                        shared_retrieval_service.port
+                        if shared_retrieval_service is not None
+                        else None
+                    ),
                 )
                 active_presets[duration_preset] = preset_state
                 for child_state in sorted(
@@ -2101,6 +2233,11 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                                 sweep_root=sweep_root,
                                 used_ports=used_ports,
                                 event_queue=event_queue,
+                                shared_retrieval_port=(
+                                    shared_retrieval_service.port
+                                    if shared_retrieval_service is not None
+                                    else None
+                                ),
                                 reason=stall_reason,
                             )
                             preset_state.child_states[shard_index] = restarted_state
@@ -2178,6 +2315,11 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                             worker_budget=total_worker_budget,
                             used_ports=used_ports,
                             event_queue=event_queue,
+                            shared_retrieval_port=(
+                                shared_retrieval_service.port
+                                if shared_retrieval_service is not None
+                                else None
+                            ),
                             preset_state=target_state,
                         )
                         active_presets[donation_target] = target_state
@@ -2234,6 +2376,7 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
             active_presets,
             reason="Sweep cleanup closing active child resources.",
         )
+        _stop_duration_sweep_shared_retrieval_service(shared_retrieval_service)
         sweep_progress_bar.close()
         _ACTIVE_SWEEP_PROGRESS_BAR = previous_progress_bar
 
@@ -2382,6 +2525,8 @@ def _build_execute_child_command(
     shared_sample_queue_root: Path | None = None,
     sample_shard_index: int | None = None,
     sample_shard_count: int | None = None,
+    shared_retrieval_port: int | None = None,
+    retrieval_namespace: str | None = None,
 ) -> list[str]:
     """Build a child execute command with optional sweep-specific overrides."""
     command = [
@@ -2436,6 +2581,8 @@ def _build_execute_child_command(
         "--retrieval-port": retrieval_port,
         "--summarizer-port": summarizer_port,
         "--critic-port": critic_port,
+        "--shared-retrieval-port": shared_retrieval_port,
+        "--retrieval-namespace": retrieval_namespace,
         "--checkpoint-path": str(checkpoint_path) if checkpoint_path is not None else "",
         "--progress-heartbeat-seconds": progress_heartbeat_seconds,
         "--resume-failure-reason": resume_failure_reason,

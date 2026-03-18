@@ -328,3 +328,7 @@ class EmbeddingProvider(ABC):
     ) -> np.ndarray:
         """Encode a list of texts into an (N, D) embedding matrix."""
         ...
+
+    def close(self) -> None:
+        """Release provider-owned resources when the runtime is finished."""
+        return None

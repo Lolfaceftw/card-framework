@@ -44,6 +44,7 @@ from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     BenchmarkExecutionError,
     ManagedServer,
     _build_stub_calibration,
+    _close_embedding_provider,
     _coerce_mapping,
     _configure_benchmark_logging,
     _find_provider_profile,
@@ -182,11 +183,13 @@ class _ManagedBenchmarkRuntime:
     event_capture: EventCapture
     artifact_recorder: "_SampleArtifactRecorder"
     retrieval_enabled: bool
+    retrieval_namespace: str
     shared_agent_client: AgentClient
     servers: list[ManagedServer]
     retrieval_port: int
     summarizer_port: int
     critic_port: int
+    embedding_provider: EmbeddingProvider | None = None
 
 
 @dataclass(slots=True)
@@ -1974,7 +1977,8 @@ def _build_runtime_port_args(
     if not force_dynamic_ports:
         return args
     runtime_args = argparse.Namespace(**vars(args))
-    runtime_args.retrieval_port = None
+    if getattr(runtime_args, "shared_retrieval_port", None) is None:
+        runtime_args.retrieval_port = None
     runtime_args.summarizer_port = None
     runtime_args.critic_port = None
     return runtime_args
@@ -1996,6 +2000,10 @@ async def _start_managed_runtime(
     force_dynamic_ports: bool,
 ) -> _ManagedBenchmarkRuntime:
     """Instantiate providers, local agents, and the orchestrator for one run phase."""
+    retrieval_namespace = (
+        str(getattr(args, "retrieval_namespace", "") or "").strip() or "default"
+    )
+    shared_retrieval_port = getattr(args, "shared_retrieval_port", None)
     llm_summarizer: LLMProvider = hydra.utils.instantiate(
         OmegaConf.create(summarizer_provider_config)
     )
@@ -2054,11 +2062,15 @@ async def _start_managed_runtime(
         role="judge",
     )
 
-    embedding: EmbeddingProvider = hydra.utils.instantiate(
-        OmegaConf.create(embedding_profile.embedding_config)
-    )
     retrieval_enabled = embedding_profile.embedding_id != "disabled"
-    transcript_index = TranscriptIndex(embedding_provider=embedding)
+    using_shared_retrieval = retrieval_enabled and shared_retrieval_port is not None
+    embedding: EmbeddingProvider | None = None
+    transcript_index: TranscriptIndex | None = None
+    if retrieval_enabled and not using_shared_retrieval:
+        embedding = hydra.utils.instantiate(
+            OmegaConf.create(embedding_profile.embedding_config)
+        )
+        transcript_index = TranscriptIndex(embedding_provider=embedding)
     judge = SPoRCJudge(
         judge_llm=llm_judge,
         config=SPoRCJudgeConfig(source_char_limit=int(args.judge_source_char_limit)),
@@ -2078,7 +2090,7 @@ async def _start_managed_runtime(
         trust_env=False,
     )
     servers: list[ManagedServer] = []
-    reserved_ports: tuple[int, int, int] | None = None
+    reserved_ports: tuple[int, ...] | None = None
     try:
         runtime_args = _build_runtime_port_args(
             args,
@@ -2087,12 +2099,12 @@ async def _start_managed_runtime(
         retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(
             runtime_args
         )
-        reserved_ports = (retrieval_port, summarizer_port, critic_port)
+        if using_shared_retrieval or not retrieval_enabled:
+            reserved_ports = (summarizer_port, critic_port)
+        else:
+            reserved_ports = (retrieval_port, summarizer_port, critic_port)
 
-        if not retrieval_enabled:
-            _release_reserved_port(retrieval_port)
-
-        if retrieval_enabled:
+        if retrieval_enabled and not using_shared_retrieval:
             retrieval_app = _build_a2a_app(
                 name="InfoRetrieval",
                 description="Indexes transcript segments and retrieves relevant ones.",
@@ -2110,6 +2122,7 @@ async def _start_managed_runtime(
             executor=SummarizerExecutor(
                 llm=llm_summarizer,
                 retrieval_port=retrieval_port,
+                retrieval_namespace=retrieval_namespace,
                 max_tool_turns=int(base_cfg.agents.summarizer.max_tool_turns),
                 calibration=calibration,
                 is_embedding_enabled=retrieval_enabled,
@@ -2138,6 +2151,7 @@ async def _start_managed_runtime(
                 calibration=calibration,
                 max_tool_turns=int(base_cfg.agents.critic.max_tool_turns),
                 retrieval_port=retrieval_port,
+                retrieval_namespace=retrieval_namespace,
                 is_embedding_enabled=retrieval_enabled,
                 reasoning_loop_guard=_coerce_mapping(
                     OmegaConf.to_container(
@@ -2163,6 +2177,7 @@ async def _start_managed_runtime(
             retrieval_port=retrieval_port,
             summarizer_port=summarizer_port,
             critic_port=critic_port,
+            retrieval_namespace=retrieval_namespace,
             timeouts=_resolve_orchestrator_timeouts(args),
             agent_client=shared_agent_client,
             event_bus=event_bus,
@@ -2173,11 +2188,13 @@ async def _start_managed_runtime(
             event_capture=event_capture,
             artifact_recorder=artifact_recorder,
             retrieval_enabled=retrieval_enabled,
+            retrieval_namespace=retrieval_namespace,
             shared_agent_client=shared_agent_client,
             servers=servers,
             retrieval_port=retrieval_port,
             summarizer_port=summarizer_port,
             critic_port=critic_port,
+            embedding_provider=embedding,
         )
     except Exception:
         event_capture.stop()
@@ -2187,6 +2204,7 @@ async def _start_managed_runtime(
             for port in reserved_ports:
                 _release_reserved_port(port)
         await shared_agent_client.close()
+        _close_embedding_provider(embedding)
         raise
 
 
@@ -2198,6 +2216,7 @@ async def _stop_managed_runtime(runtime: _ManagedBenchmarkRuntime | None) -> Non
     for server in reversed(runtime.servers):
         _stop_server(server)
     await runtime.shared_agent_client.close()
+    _close_embedding_provider(runtime.embedding_provider)
 
 
 def _format_transcript(transcript: dict[str, Any]) -> str:
@@ -2932,6 +2951,11 @@ async def _execute_sample(
     diagnostics: dict[str, Any] | None = None
     candidate_summary = ""
     artifact_recorder.activate_sample(sample=sample, target_seconds=target_seconds)
+
+    async def _clear_retrieval_namespace() -> None:
+        if retrieval_enabled:
+            await orchestrator.clear_transcript_index()
+
     try:
         transcript, working_transcript_path = _copy_sample_transcript(
             sample=sample,
@@ -3114,7 +3138,12 @@ async def _execute_sample(
             if judge_result is not None
             else None,
         )
+        await _clear_retrieval_namespace()
     except Exception as exc:
+        try:
+            await _clear_retrieval_namespace()
+        except Exception:
+            pass
         final_status, error_message = _classify_sample_failure(exc)
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
@@ -3947,6 +3976,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     benchmark_audio_cfg=benchmark_audio_cfg,
                 )
             results_by_sample_id[sample.sample_id] = result
+            preloaded_transcripts.pop(sample.sample_id, None)
             if shared_sample_queue_connection is not None:
                 _mark_shared_sample_completed(
                     shared_sample_queue_connection,
@@ -4147,6 +4177,17 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--retrieval-port", type=int, default=None)
     parser.add_argument("--summarizer-port", type=int, default=None)
     parser.add_argument("--critic-port", type=int, default=None)
+    parser.add_argument(
+        "--shared-retrieval-port",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--retrieval-namespace",
+        default="default",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--disable-stream-output",
         action="store_true",

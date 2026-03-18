@@ -127,6 +127,54 @@ def test_run_critic_once_raises_for_invalid_json() -> None:
         )
 
 
+def test_index_and_clear_transcript_include_retrieval_namespace() -> None:
+    sent_tasks: list[tuple[int, object, dict | None]] = []
+
+    async def _fake_send_task(
+        port, task_data, timeout=120.0, max_retries=3, metadata=None
+    ):
+        del timeout, max_retries
+        sent_tasks.append((port, task_data, metadata))
+        if getattr(task_data, "action", "") == "index":
+            return '{"status":"ok","count":1}'
+        if getattr(task_data, "action", "") == "clear":
+            return '{"status":"ok"}'
+        raise AssertionError(f"Unexpected action: {getattr(task_data, 'action', '')}")
+
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        retrieval_namespace="worker-3",
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
+
+    indexed = asyncio.run(
+        orchestrator.index_transcript(
+            {
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "hello world",
+                        "start_time": 0,
+                        "end_time": 1200,
+                    }
+                ]
+            }
+        )
+    )
+    asyncio.run(orchestrator.clear_transcript_index())
+
+    assert indexed == 1
+    assert sent_tasks[0][0] == 9012
+    assert getattr(sent_tasks[0][1], "action", "") == "index"
+    assert getattr(sent_tasks[0][1], "namespace", "") == "worker-3"
+    assert sent_tasks[0][2] == {"component": "orchestrator", "stage": "index"}
+    assert getattr(sent_tasks[1][1], "action", "") == "clear"
+    assert getattr(sent_tasks[1][1], "namespace", "") == "worker-3"
+    assert sent_tasks[1][2] == {"component": "orchestrator", "stage": "clear"}
+
+
 def test_run_loop_sends_empty_loop_context_on_first_pass() -> None:
     summarizer_loop_contexts: list[str] = []
 

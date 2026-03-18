@@ -12,6 +12,7 @@ class SegmentDTO(BaseModel):
 class IndexTaskRequest(BaseModel):
     action: str = Field(pattern="^index$")
     segments: List[SegmentDTO]
+    namespace: str = "default"
 
 
 class IndexTaskResponse(BaseModel):
@@ -24,11 +25,21 @@ class RetrieveTaskRequest(BaseModel):
     query: str
     top_k: int = 15
     lambda_param: float = 0.7
+    namespace: str = "default"
 
 
 class RetrieveTaskResponse(BaseModel):
     segments: List[SegmentDTO]
     total_words: int
+
+
+class ClearTaskRequest(BaseModel):
+    action: str = Field(pattern="^clear$")
+    namespace: str = "default"
+
+
+class ClearTaskResponse(BaseModel):
+    status: str
 
 
 # Summarizer DTOs

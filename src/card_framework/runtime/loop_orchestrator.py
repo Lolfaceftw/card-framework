@@ -71,6 +71,7 @@ class Orchestrator:
         retrieval_port: int,
         summarizer_port: int,
         critic_port: int,
+        retrieval_namespace: str = "default",
         timeouts: dict[str, float | None] | None = None,
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
@@ -79,6 +80,9 @@ class Orchestrator:
         self.retrieval_port = retrieval_port
         self.summarizer_port = summarizer_port
         self.critic_port = critic_port
+        self.retrieval_namespace = (
+            str(retrieval_namespace or "").strip() or "default"
+        )
         self.timeouts = {**self._DEFAULT_TIMEOUTS, **(timeouts or {})}
         self.agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
@@ -130,7 +134,11 @@ class Orchestrator:
         """Index transcript segments in retrieval service and return indexed count."""
         transcript_dto = coerce_transcript(transcript)
         segments = transcript_dto.retrieval_segments()
-        index_task = IndexTaskRequest(action="index", segments=segments)
+        index_task = IndexTaskRequest(
+            action="index",
+            segments=segments,
+            namespace=self.retrieval_namespace,
+        )
         self.event_bus.publish(
             "system_message",
             message=f"Indexing {len(segments)} segments in Retrieval Agent...",
@@ -151,6 +159,28 @@ class Orchestrator:
                 "error_message", f"Index response: {index_response_raw[:200]}"
             )
             return 0
+
+    async def clear_transcript_index(self) -> None:
+        """Clear the active retrieval namespace after a sample completes."""
+        from card_framework.agents.dtos import ClearTaskRequest
+
+        clear_task = ClearTaskRequest(
+            action="clear",
+            namespace=self.retrieval_namespace,
+        )
+        self.event_bus.publish(
+            "system_message",
+            message=(
+                "Clearing Retrieval Agent transcript index "
+                f"for namespace {self.retrieval_namespace!r}..."
+            ),
+        )
+        await self.agent_client.send_task(
+            self.retrieval_port,
+            clear_task,
+            timeout=self.timeouts["index"],
+            metadata={"component": "orchestrator", "stage": "clear"},
+        )
 
     async def run_loop(
         self,

@@ -54,6 +54,7 @@ class CriticExecutor(BaseA2AExecutor):
         calibration: VoiceCloneCalibration | None,
         max_tool_turns: int = 5,
         retrieval_port: int = 9012,
+        retrieval_namespace: str = "default",
         is_embedding_enabled: bool = True,
         reasoning_loop_guard: Mapping[str, Any] | None = None,
         agent_client: AgentTaskClient | None = None,
@@ -65,6 +66,9 @@ class CriticExecutor(BaseA2AExecutor):
         self.calibration = calibration
         self.max_tool_turns = max_tool_turns
         self.retrieval_port = retrieval_port
+        self.retrieval_namespace = (
+            str(retrieval_namespace or "").strip() or "default"
+        )
         self.is_embedding_enabled = is_embedding_enabled
         self.reasoning_loop_guard = self._resolve_reasoning_loop_guard(
             reasoning_loop_guard
@@ -477,7 +481,10 @@ class CriticExecutor(BaseA2AExecutor):
             elif name == "verify_against_transcript":
                 query_text = args.get("query", "")
                 retrieve_task = RetrieveTaskRequest(
-                    action="retrieve", query=query_text, top_k=10
+                    action="retrieve",
+                    query=query_text,
+                    top_k=10,
+                    namespace=self.retrieval_namespace,
                 )
                 raw_resp = await self.agent_client.send_task(
                     self.retrieval_port, retrieve_task
