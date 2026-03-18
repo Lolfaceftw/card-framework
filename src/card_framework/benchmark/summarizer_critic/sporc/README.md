@@ -50,7 +50,8 @@ The repository now auto-loads the root `.env` file on package import when it exi
 It also mirrors common aliases automatically, including:
 
 - `HF_ACCESS_TOKEN` -> `HF_TOKEN`, `HUGGINGFACE_HUB_TOKEN`, `HUGGINGFACE_TOKEN`
-- `VLLM_URL` -> `CARD_FRAMEWORK_VLLM_URL`, `VLLM_BASE_URL`
+- `VLLM_URL` -> `CARD_FRAMEWORK_VLLM_URL`, `CARD_FRAMEWORK_VLLM_BASE_URL`,
+  `VLLM_BASE_URL`
 
 So for SPoRC benchmark runs, a root `.env` containing `HF_ACCESS_TOKEN` and `VLLM_URL` is enough.
 

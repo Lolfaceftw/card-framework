@@ -20,7 +20,8 @@ tracks with different datasets and operator workflows.
   `src/card_framework/benchmark/provider_profiles.yaml`.
 - The tracked `vllm_default` profile points at `http://127.0.0.1:8000/v1`.
 - To override that tracked vLLM base URL at runtime without editing YAML, set
-  one of `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`, or `VLLM_BASE_URL`.
+  one of `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`,
+  `CARD_FRAMEWORK_VLLM_BASE_URL`, or `VLLM_BASE_URL`.
 - `--sample-seed <int>` enables deterministic seeded-random sample selection.
   Omitting the flag preserves manifest order.
 - `--max-samples 0` means "all prepared samples" for both benchmark families.

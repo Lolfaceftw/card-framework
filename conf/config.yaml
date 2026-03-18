@@ -13,7 +13,7 @@ profiles:
   llm:
     vllm_local:
       _target_: card_framework.providers.vllm_provider.VLLMProvider
-      base_url: "http://localhost:8000/v1"
+      base_url: ${oc.env:CARD_FRAMEWORK_VLLM_BASE_URL}
       api_key: ${oc.env:CARD_FRAMEWORK_VLLM_API_KEY,EMPTY}
     transformers_local:
       _target_: card_framework.providers.transformers_provider.TransformersProvider
@@ -269,11 +269,11 @@ agents:
     loop_guardrails:
       enabled: true
       target_models:
-        - "qwen"
+      - "qwen"
       target_providers:
-        - "vllmprovider"
-        - "transformersprovider"
-        - "huggingfaceprovider"
+      - "vllmprovider"
+      - "transformersprovider"
+      - "huggingfaceprovider"
       enable_stall_guidance: true
       enable_noop_edit_detection: true
       enable_extended_text_tool_parser: true

@@ -29,7 +29,8 @@ uv run python -m card_framework.benchmark.summarizer_critic.qmsum --help
 - The tracked `vllm_default` provider profile points at
   `http://127.0.0.1:8000/v1`.
 - To override that vLLM endpoint without editing YAML, set one of
-  `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`, or `VLLM_BASE_URL`.
+  `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`,
+  `CARD_FRAMEWORK_VLLM_BASE_URL`, or `VLLM_BASE_URL`.
 
 Example PowerShell override:
 

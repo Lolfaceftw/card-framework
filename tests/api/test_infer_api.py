@@ -64,6 +64,7 @@ def _clear_runtime_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep infer API tests deterministic against host credential env vars."""
     for env_var in (
         "CARD_FRAMEWORK_VLLM_URL",
+        "CARD_FRAMEWORK_VLLM_BASE_URL",
         "VLLM_BASE_URL",
         "CARD_FRAMEWORK_VLLM_API_KEY",
         "VLLM_API_KEY",
