@@ -68,7 +68,8 @@ class AudioToScriptOrchestrator:
     eta_progress_smoothing: float = 0.25
     eta_overrun_factor: float = 1.15
     eta_headroom_seconds: float = 1.0
-    eta_profile_filename: str = "eta_profile.json"
+    eta_profile_filename: str = "eta_history.sqlite3"
+    eta_profile_path: Path | None = None
 
     def run(
         self,
@@ -94,7 +95,7 @@ class AudioToScriptOrchestrator:
         """
         warnings: list[str] = []
         eta_profile_context = self._build_eta_profile_context(device=device)
-        eta_profile_path = work_dir / self.eta_profile_filename
+        eta_profile_path = self.eta_profile_path or (work_dir / self.eta_profile_filename)
         self._load_eta_profile(
             profile_path=eta_profile_path,
             context=eta_profile_context,

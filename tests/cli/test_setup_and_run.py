@@ -34,11 +34,48 @@ def test_build_run_overrides_uses_explicit_output_root(
     overrides = setup_and_run.build_run_overrides(run_id="run123")
 
     assert f"audio.work_dir={output_root.joinpath('audio_stage').resolve().as_posix()}" in overrides
+    assert (
+        f"audio.eta.store_path={output_root.joinpath('audio_stage', 'eta_history.sqlite3').resolve().as_posix()}"
+        in overrides
+    )
     assert f"audio.output_transcript_path={output_root.joinpath('transcript.json').resolve().as_posix()}" in overrides
     assert f"transcript_path={output_root.joinpath('transcript.json').resolve().as_posix()}" in overrides
     assert f"audio.voice_clone.runner_project_dir={runner_dir.resolve().as_posix()}" in overrides
     assert f"audio.voice_clone.cfg_path={checkpoints_dir.joinpath('config.yaml').resolve().as_posix()}" in overrides
     assert f"audio.voice_clone.model_dir={checkpoints_dir.resolve().as_posix()}" in overrides
+
+
+def test_build_run_overrides_uses_shared_eta_store_for_workspace_runs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Keep ETA history in one workspace-level store even when work dirs are per-run."""
+    runner_dir = tmp_path / "runtime_vendor"
+    checkpoints_dir = tmp_path / "runtime_checkpoints"
+
+    monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(setup_and_run, "OUTPUT_ROOT", None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_index_tts_runner_project_dir",
+        lambda: runner_dir,
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_index_tts_checkpoints_dir",
+        lambda: checkpoints_dir,
+    )
+
+    overrides = setup_and_run.build_run_overrides(run_id="run123")
+
+    assert (
+        f"audio.work_dir={tmp_path.joinpath('artifacts', 'audio_stage', 'runs', 'run123').resolve().as_posix()}"
+        in overrides
+    )
+    assert (
+        f"audio.eta.store_path={tmp_path.joinpath('artifacts', 'audio_stage', 'eta_history.sqlite3').resolve().as_posix()}"
+        in overrides
+    )
 
 
 def test_resolve_audio_input_uses_workspace_root(

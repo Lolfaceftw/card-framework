@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sqlite3
 from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 AudioStageName: TypeAlias = Literal["separation", "transcription", "diarization"]
@@ -30,6 +32,36 @@ _MANAGED_PROFILE_KEYS = {
     "stages",
     "audio_stages",
     "unit_stages",
+}
+_AUDIO_STAGE_CONTEXT_KEYS = frozenset(
+    {
+        "device",
+        "separator",
+        "separator_model",
+        "transcriber",
+        "transcriber_model",
+        "diarizer",
+        "diarizer_model",
+    }
+)
+_UNIT_STAGE_CONTEXT_KEYS: dict[EtaUnitStageName, frozenset[str]] = {
+    "speaker_samples": frozenset(
+        {
+            "speaker_samples_source_audio",
+            "speaker_samples_target_duration_seconds",
+            "speaker_samples_selection_order",
+            "speaker_samples_low_data_policy",
+        }
+    ),
+    "voice_clone": frozenset(
+        {
+            "voice_clone_provider",
+            "voice_clone_device",
+            "voice_clone_execution_backend",
+            "voice_clone_cfg_path",
+            "voice_clone_model_dir",
+        }
+    ),
 }
 
 
@@ -66,6 +98,20 @@ class ObservedUnitThroughput:
 
     seconds_per_unit: float
     samples: int
+
+
+@dataclass(slots=True, frozen=True)
+class PendingEtaObservation:
+    """One ETA observation waiting to be flushed into persistent history."""
+
+    observed_at_utc: str
+    stage_type: Literal["audio", "unit"]
+    stage_name: str
+    device: EtaDeviceName | None
+    audio_duration_ms: int | None
+    total_units: int | None
+    elapsed_seconds: float
+    observed_value: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -348,6 +394,7 @@ class LinearStageEtaStrategy(
     observed_unit_throughput: dict[EtaUnitStageName, ObservedUnitThroughput] = field(
         default_factory=dict
     )
+    pending_observations: list[PendingEtaObservation] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Validate adaptive ETA parameters."""
@@ -485,19 +532,30 @@ class LinearStageEtaStrategy(
                 multiplier=observed_multiplier,
                 samples=1,
             )
-            return
-
-        updated_multiplier = (
-            (1.0 - self.learning_rate) * previous.multiplier
-            + self.learning_rate * observed_multiplier
-        )
-        updated_multiplier = min(
-            self.max_multiplier,
-            max(self.min_multiplier, updated_multiplier),
-        )
-        self.observed_throughput[key] = ObservedStageThroughput(
-            multiplier=updated_multiplier,
-            samples=previous.samples + 1,
+        else:
+            updated_multiplier = (
+                (1.0 - self.learning_rate) * previous.multiplier
+                + self.learning_rate * observed_multiplier
+            )
+            updated_multiplier = min(
+                self.max_multiplier,
+                max(self.min_multiplier, updated_multiplier),
+            )
+            self.observed_throughput[key] = ObservedStageThroughput(
+                multiplier=updated_multiplier,
+                samples=previous.samples + 1,
+            )
+        self.pending_observations.append(
+            PendingEtaObservation(
+                observed_at_utc=_utc_now_iso(),
+                stage_type="audio",
+                stage_name=stage,
+                device=normalized_device,
+                audio_duration_ms=audio_duration_ms,
+                total_units=None,
+                elapsed_seconds=max(0.0, elapsed_seconds),
+                observed_value=observed_multiplier,
+            )
         )
 
     def observe_unit_stage_duration(
@@ -528,18 +586,30 @@ class LinearStageEtaStrategy(
                 seconds_per_unit=observed_seconds_per_unit,
                 samples=1,
             )
-            return
-        updated_seconds_per_unit = (
-            (1.0 - self.learning_rate) * previous.seconds_per_unit
-            + self.learning_rate * observed_seconds_per_unit
-        )
-        updated_seconds_per_unit = min(
-            self.max_unit_seconds_per_unit,
-            max(self.min_unit_seconds_per_unit, updated_seconds_per_unit),
-        )
-        self.observed_unit_throughput[stage] = ObservedUnitThroughput(
-            seconds_per_unit=updated_seconds_per_unit,
-            samples=previous.samples + 1,
+        else:
+            updated_seconds_per_unit = (
+                (1.0 - self.learning_rate) * previous.seconds_per_unit
+                + self.learning_rate * observed_seconds_per_unit
+            )
+            updated_seconds_per_unit = min(
+                self.max_unit_seconds_per_unit,
+                max(self.min_unit_seconds_per_unit, updated_seconds_per_unit),
+            )
+            self.observed_unit_throughput[stage] = ObservedUnitThroughput(
+                seconds_per_unit=updated_seconds_per_unit,
+                samples=previous.samples + 1,
+            )
+        self.pending_observations.append(
+            PendingEtaObservation(
+                observed_at_utc=_utc_now_iso(),
+                stage_type="unit",
+                stage_name=stage,
+                device=None,
+                audio_duration_ms=None,
+                total_units=total_units,
+                elapsed_seconds=max(0.0, elapsed_seconds),
+                observed_value=observed_seconds_per_unit,
+            )
         )
 
     def load_profile(
@@ -548,11 +618,36 @@ class LinearStageEtaStrategy(
         *,
         context: EtaProfileContext | None = None,
     ) -> None:
-        """Load adaptive ETA profile from JSON file when available."""
+        """Load adaptive ETA profile from JSON or SQLite persistence."""
         self.observed_throughput.clear()
         self.observed_unit_throughput.clear()
+        self.pending_observations.clear()
         if not profile_path.exists():
             return
+        if self._is_legacy_json_profile(profile_path):
+            self._load_legacy_json_profile(profile_path=profile_path, context=context)
+            return
+        self._load_sqlite_profile(profile_path=profile_path, context=context)
+
+    def save_profile(
+        self,
+        profile_path: Path,
+        *,
+        context: EtaProfileContext | None = None,
+    ) -> None:
+        """Persist adaptive ETA profile to JSON or SQLite storage."""
+        if self._is_legacy_json_profile(profile_path):
+            self._save_legacy_json_profile(profile_path=profile_path, context=context)
+            return
+        self._save_sqlite_profile(profile_path=profile_path, context=context)
+
+    def _load_legacy_json_profile(
+        self,
+        *,
+        profile_path: Path,
+        context: EtaProfileContext | None,
+    ) -> None:
+        """Load the legacy JSON ETA snapshot payload."""
         payload = json.loads(profile_path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             return
@@ -573,13 +668,13 @@ class LinearStageEtaStrategy(
             self._parse_unit_stage_throughput(unit_stages_payload)
         )
 
-    def save_profile(
+    def _save_legacy_json_profile(
         self,
-        profile_path: Path,
         *,
-        context: EtaProfileContext | None = None,
+        profile_path: Path,
+        context: EtaProfileContext | None,
     ) -> None:
-        """Persist adaptive ETA profile to JSON file."""
+        """Persist the legacy JSON ETA snapshot payload."""
         profile_path.parent.mkdir(parents=True, exist_ok=True)
         audio_payload = self._serialize_audio_stage_throughput()
         unit_payload = self._serialize_unit_stage_throughput()
@@ -601,6 +696,265 @@ class LinearStageEtaStrategy(
             encoding="utf-8",
         )
         tmp_path.replace(profile_path)
+
+    def _load_sqlite_profile(
+        self,
+        *,
+        profile_path: Path,
+        context: EtaProfileContext | None,
+    ) -> None:
+        """Load and replay matching ETA observations from SQLite history."""
+        expected_context = self._normalize_context(context)
+        connection = sqlite3.connect(str(profile_path))
+        try:
+            connection.row_factory = sqlite3.Row
+            self._initialize_sqlite_schema(connection)
+            rows = connection.execute(
+                """
+                SELECT
+                    observed_at_utc,
+                    stage_type,
+                    stage_name,
+                    device,
+                    audio_duration_ms,
+                    total_units,
+                    elapsed_seconds,
+                    observed_value,
+                    context_json
+                FROM eta_observations
+                ORDER BY observed_at_utc ASC, id ASC
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+
+        for row in rows:
+            try:
+                row_context = self._normalize_context(
+                    json.loads(str(row["context_json"] or "{}"))
+                )
+            except Exception:
+                row_context = {}
+            stage_type = str(row["stage_type"] or "").strip().lower()
+            stage_name = str(row["stage_name"] or "").strip()
+            if stage_type == "audio" and stage_name in _VALID_AUDIO_STAGES:
+                device = self._normalize_device(str(row["device"] or "cpu"))
+                if not self._context_matches(
+                    stored_context=row_context,
+                    expected_context=expected_context,
+                    relevant_keys=_AUDIO_STAGE_CONTEXT_KEYS,
+                ):
+                    continue
+                try:
+                    observed_value = float(row["observed_value"])
+                except (TypeError, ValueError):
+                    continue
+                self._apply_audio_observation(
+                    stage=stage_name,
+                    device=device,
+                    observed_multiplier=observed_value,
+                )
+                continue
+            if stage_type == "unit" and stage_name in _VALID_UNIT_STAGES:
+                if not self._context_matches(
+                    stored_context=row_context,
+                    expected_context=expected_context,
+                    relevant_keys=_UNIT_STAGE_CONTEXT_KEYS[stage_name],
+                ):
+                    continue
+                try:
+                    observed_value = float(row["observed_value"])
+                except (TypeError, ValueError):
+                    continue
+                self._apply_unit_observation(
+                    stage=stage_name,
+                    observed_seconds_per_unit=observed_value,
+                )
+
+    def _save_sqlite_profile(
+        self,
+        *,
+        profile_path: Path,
+        context: EtaProfileContext | None,
+    ) -> None:
+        """Flush pending ETA observations into SQLite history."""
+        if not self.pending_observations:
+            return
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        normalized_context = self._normalize_context(context)
+        serialized_context = json.dumps(
+            normalized_context,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        connection = sqlite3.connect(str(profile_path))
+        try:
+            self._initialize_sqlite_schema(connection)
+            connection.executemany(
+                """
+                INSERT INTO eta_observations (
+                    observed_at_utc,
+                    stage_type,
+                    stage_name,
+                    device,
+                    audio_duration_ms,
+                    total_units,
+                    elapsed_seconds,
+                    observed_value,
+                    context_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        observation.observed_at_utc,
+                        observation.stage_type,
+                        observation.stage_name,
+                        observation.device,
+                        observation.audio_duration_ms,
+                        observation.total_units,
+                        observation.elapsed_seconds,
+                        observation.observed_value,
+                        serialized_context,
+                    )
+                    for observation in self.pending_observations
+                ],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.pending_observations.clear()
+
+    def _initialize_sqlite_schema(self, connection: sqlite3.Connection) -> None:
+        """Create the ETA history schema when the store is first used."""
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eta_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_at_utc TEXT NOT NULL,
+                stage_type TEXT NOT NULL,
+                stage_name TEXT NOT NULL,
+                device TEXT,
+                audio_duration_ms INTEGER,
+                total_units INTEGER,
+                elapsed_seconds REAL NOT NULL,
+                observed_value REAL NOT NULL,
+                context_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_eta_observations_lookup
+            ON eta_observations (stage_type, stage_name, device, observed_at_utc, id)
+            """
+        )
+
+    def _apply_audio_observation(
+        self,
+        *,
+        stage: AudioStageName,
+        device: EtaDeviceName,
+        observed_multiplier: float,
+    ) -> None:
+        """Replay one audio observation through the in-memory EMA."""
+        clamped_multiplier = min(
+            self.max_multiplier,
+            max(self.min_multiplier, observed_multiplier),
+        )
+        key = (stage, device)
+        previous = self.observed_throughput.get(key)
+        if previous is None:
+            self.observed_throughput[key] = ObservedStageThroughput(
+                multiplier=clamped_multiplier,
+                samples=1,
+            )
+            return
+        updated_multiplier = (
+            (1.0 - self.learning_rate) * previous.multiplier
+            + self.learning_rate * clamped_multiplier
+        )
+        self.observed_throughput[key] = ObservedStageThroughput(
+            multiplier=min(
+                self.max_multiplier,
+                max(self.min_multiplier, updated_multiplier),
+            ),
+            samples=previous.samples + 1,
+        )
+
+    def _apply_unit_observation(
+        self,
+        *,
+        stage: EtaUnitStageName,
+        observed_seconds_per_unit: float,
+    ) -> None:
+        """Replay one unit-stage observation through the in-memory EMA."""
+        clamped_value = min(
+            self.max_unit_seconds_per_unit,
+            max(self.min_unit_seconds_per_unit, observed_seconds_per_unit),
+        )
+        previous = self.observed_unit_throughput.get(stage)
+        if previous is None:
+            self.observed_unit_throughput[stage] = ObservedUnitThroughput(
+                seconds_per_unit=clamped_value,
+                samples=1,
+            )
+            return
+        updated_value = (
+            (1.0 - self.learning_rate) * previous.seconds_per_unit
+            + self.learning_rate * clamped_value
+        )
+        self.observed_unit_throughput[stage] = ObservedUnitThroughput(
+            seconds_per_unit=min(
+                self.max_unit_seconds_per_unit,
+                max(self.min_unit_seconds_per_unit, updated_value),
+            ),
+            samples=previous.samples + 1,
+        )
+
+    def _context_matches(
+        self,
+        *,
+        stored_context: EtaProfileContext,
+        expected_context: EtaProfileContext,
+        relevant_keys: frozenset[str],
+    ) -> bool:
+        """Return whether two contexts are compatible for one stage family."""
+        expected_subset = self._filter_context_keys(
+            context=expected_context,
+            relevant_keys=relevant_keys,
+        )
+        stored_subset = self._filter_context_keys(
+            context=stored_context,
+            relevant_keys=relevant_keys,
+        )
+        if not expected_subset or not stored_subset:
+            return True
+        for key, expected_value in expected_subset.items():
+            stored_value = stored_subset.get(key)
+            if stored_value is None:
+                continue
+            if stored_value != expected_value:
+                return False
+        return True
+
+    def _filter_context_keys(
+        self,
+        *,
+        context: EtaProfileContext,
+        relevant_keys: frozenset[str],
+    ) -> EtaProfileContext:
+        """Extract the non-empty subset of relevant context keys."""
+        filtered: EtaProfileContext = {}
+        for key in relevant_keys:
+            value = str(context.get(key, "")).strip()
+            if value:
+                filtered[key] = value
+        return filtered
+
+    def _is_legacy_json_profile(self, profile_path: Path) -> bool:
+        """Return whether the requested ETA store should use legacy JSON persistence."""
+        return profile_path.suffix.strip().lower() == ".json"
 
     def _audio_profile_for_stage(self, *, stage: AudioStageName) -> StageSpeedProfile:
         """Resolve configured base profile for one audio stage."""
@@ -772,3 +1126,13 @@ def format_eta_seconds(seconds: float | None) -> str:
     if minutes > 0:
         return f"{minutes}m {secs:02d}s"
     return f"{secs}s"
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC timestamp in ISO-8601 format without microseconds."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC timestamp in ISO-8601 format."""
+    return datetime.now(timezone.utc).isoformat()

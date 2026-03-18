@@ -1,5 +1,6 @@
 ﻿from pathlib import Path
 import json
+import sqlite3
 
 import pytest
 
@@ -133,7 +134,7 @@ def test_linear_eta_strategy_profile_round_trip(tmp_path: Path) -> None:
         elapsed_seconds=21.0,
     )
 
-    profile_path = tmp_path / "eta_profile.json"
+    profile_path = tmp_path / "eta_history.sqlite3"
     strategy.save_profile(profile_path)
 
     reloaded = LinearStageEtaStrategy(
@@ -154,6 +155,126 @@ def test_linear_eta_strategy_profile_round_trip(tmp_path: Path) -> None:
     )
     assert estimate == 15.0
     assert unit_estimate == 21.0
+
+
+def test_linear_eta_strategy_sqlite_round_trip_replays_history(tmp_path: Path) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+    context = {
+        "device": "cuda",
+        "separator": "DemucsSourceSeparator",
+        "separator_model": "htdemucs",
+        "transcriber": "GraniteSpeechTranscriber",
+        "transcriber_model": "ibm-granite/granite-4.0-1b-speech",
+        "diarizer": "NemoSpeakerDiarizer",
+        "diarizer_model": "diar_msdd_telephonic",
+    }
+
+    strategy.observe_stage_duration(
+        stage="separation",
+        audio_duration_ms=5_000,
+        elapsed_seconds=10.0,
+        device="cuda",
+    )
+    strategy.observe_unit_stage_duration(
+        stage="voice_clone",
+        total_units=2,
+        elapsed_seconds=6.0,
+    )
+    strategy.save_profile(profile_path, context=context)
+
+    reloaded = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    reloaded.load_profile(profile_path, context=context)
+    assert reloaded.estimate_total_seconds(
+        stage="separation",
+        audio_duration_ms=5_000,
+        device="cuda",
+    ) == 10.0
+    assert reloaded.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    ) == 6.0
+
+    reloaded.observe_stage_duration(
+        stage="separation",
+        audio_duration_ms=5_000,
+        elapsed_seconds=20.0,
+        device="cuda",
+    )
+    reloaded.observe_unit_stage_duration(
+        stage="voice_clone",
+        total_units=2,
+        elapsed_seconds=10.0,
+    )
+    reloaded.save_profile(profile_path, context=context)
+
+    replayed = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    replayed.load_profile(profile_path, context=context)
+
+    assert replayed.estimate_total_seconds(
+        stage="separation",
+        audio_duration_ms=5_000,
+        device="cuda",
+    ) == 15.0
+    assert replayed.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    ) == 8.0
+    assert replayed.observed_throughput[("separation", "cuda")].samples == 2
+    assert replayed.observed_unit_throughput["voice_clone"].samples == 2
+
+
+def test_linear_eta_strategy_sqlite_records_timestamped_observations(tmp_path: Path) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=12.5,
+        device="cpu",
+    )
+    strategy.save_profile(profile_path, context={"transcriber_model": "granite"})
+
+    connection = sqlite3.connect(str(profile_path))
+    try:
+        row = connection.execute(
+            """
+            SELECT stage_type, stage_name, device, elapsed_seconds, observed_value, observed_at_utc
+            FROM eta_observations
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert row is not None
+    assert row[0] == "audio"
+    assert row[1] == "transcription"
+    assert row[2] == "cpu"
+    assert row[3] == pytest.approx(12.5)
+    assert row[4] == pytest.approx(1.25)
+    assert isinstance(row[5], str)
+    assert "T" in row[5]
+    assert row[5].endswith("+00:00")
 
 
 def test_linear_eta_strategy_ignores_context_mismatch(tmp_path: Path) -> None:
@@ -189,6 +310,115 @@ def test_linear_eta_strategy_ignores_context_mismatch(tmp_path: Path) -> None:
         device="cuda",
     )
     assert estimate == 1.0
+
+
+def test_linear_eta_strategy_replays_multiple_sqlite_observations_with_ema(
+    tmp_path: Path,
+) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=20.0,
+        device="cuda",
+    )
+    strategy.save_profile(profile_path, context={"transcriber_model": "granite"})
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=10.0,
+        device="cuda",
+    )
+    strategy.save_profile(profile_path, context={"transcriber_model": "granite"})
+
+    reloaded = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    reloaded.load_profile(profile_path, context={"transcriber_model": "granite"})
+
+    estimate = reloaded.estimate_total_seconds(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        device="cuda",
+    )
+    assert estimate == 15.0
+    assert reloaded.observed_throughput[("transcription", "cuda")].samples == 2
+
+
+def test_linear_eta_strategy_scopes_unit_stage_history_independently_from_audio_stack(
+    tmp_path: Path,
+) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=20.0,
+        device="cuda",
+    )
+    strategy.save_profile(
+        profile_path,
+        context={
+            "transcriber_model": "granite",
+            "voice_clone_provider": "indextts",
+            "voice_clone_device": "cuda",
+            "voice_clone_execution_backend": "subprocess",
+        },
+    )
+    strategy.observe_unit_stage_duration(
+        stage="voice_clone",
+        total_units=2,
+        elapsed_seconds=60.0,
+    )
+    strategy.save_profile(
+        profile_path,
+        context={
+            "transcriber_model": "granite",
+            "voice_clone_provider": "indextts",
+            "voice_clone_device": "cuda",
+            "voice_clone_execution_backend": "subprocess",
+        },
+    )
+
+    reloaded = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+    reloaded.load_profile(
+        profile_path,
+        context={
+            "transcriber_model": "different-model",
+            "voice_clone_provider": "indextts",
+            "voice_clone_device": "cuda",
+            "voice_clone_execution_backend": "subprocess",
+        },
+    )
+
+    assert reloaded.estimate_total_seconds(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        device="cuda",
+    ) == 10.0
+    assert reloaded.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    ) == 60.0
 
 
 def test_linear_eta_strategy_validates_learning_bounds() -> None:

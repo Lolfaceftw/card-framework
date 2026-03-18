@@ -359,6 +359,81 @@ def _save_eta_profile_if_supported(
         event_bus.publish("system_message", failure_message)
 
 
+def _resolve_eta_profile_path(
+    *,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    default_filename: str,
+) -> Path:
+    """Resolve the shared ETA persistence store path for the current runtime."""
+    eta_cfg = _to_plain_dict(audio_cfg_dict.get("eta", {}))
+    configured_store_path = str(eta_cfg.get("store_path", "")).strip()
+    if configured_store_path:
+        return resolve_path(configured_store_path, base_dir=project_root)
+    return (project_root / "artifacts" / "audio_stage" / default_filename).resolve()
+
+
+def _build_eta_profile_context(
+    *,
+    audio_orchestrator: Any,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    runtime_device: str,
+) -> dict[str, str]:
+    """Build the shared ETA context used to scope persisted history rows."""
+    context = audio_orchestrator._build_eta_profile_context(device=runtime_device)
+
+    speaker_samples_cfg = _to_plain_dict(audio_cfg_dict.get("speaker_samples", {}))
+    context.update(
+        {
+            "speaker_samples_source_audio": str(
+                speaker_samples_cfg.get("source_audio", "vocals")
+            ).strip(),
+            "speaker_samples_target_duration_seconds": str(
+                speaker_samples_cfg.get("target_duration_seconds", 30)
+            ).strip(),
+            "speaker_samples_selection_order": str(
+                speaker_samples_cfg.get("selection_order", "chronological")
+            ).strip(),
+            "speaker_samples_low_data_policy": str(
+                speaker_samples_cfg.get("low_data_policy", "quality_first_shorter")
+            ).strip(),
+        }
+    )
+
+    voice_clone_cfg = _to_plain_dict(audio_cfg_dict.get("voice_clone", {}))
+    cfg_path_value = str(voice_clone_cfg.get("cfg_path", "")).strip()
+    model_dir_value = str(voice_clone_cfg.get("model_dir", "")).strip()
+    context.update(
+        {
+            "voice_clone_provider": str(
+                voice_clone_cfg.get("provider", "indextts")
+            ).strip(),
+            "voice_clone_device": resolve_device(
+                str(voice_clone_cfg.get("device", "auto"))
+            ),
+            "voice_clone_execution_backend": str(
+                voice_clone_cfg.get("execution_backend", "subprocess")
+            ).strip(),
+            "voice_clone_cfg_path": (
+                str(resolve_path(cfg_path_value, base_dir=project_root))
+                if cfg_path_value
+                else ""
+            ),
+            "voice_clone_model_dir": (
+                str(resolve_path(model_dir_value, base_dir=project_root))
+                if model_dir_value
+                else ""
+            ),
+        }
+    )
+    return {
+        str(key): str(value).strip()
+        for key, value in context.items()
+        if str(key).strip() and str(value).strip()
+    }
+
+
 def _build_speaker_sample_preparer(
     *,
     stage_start: str,
@@ -1229,8 +1304,18 @@ def main(cfg: DictConfig) -> None:
         build_voice_clone_orchestrator,
     ) = _load_audio_pipeline_builders(status_reporter=_emit_runtime_loading_status)
     audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg_dict)
-    eta_profile_path = work_dir / audio_orchestrator.eta_profile_filename
-    eta_profile_context = audio_orchestrator._build_eta_profile_context(device=runtime_device)
+    eta_profile_path = _resolve_eta_profile_path(
+        audio_cfg_dict=audio_cfg_dict,
+        project_root=project_root,
+        default_filename=audio_orchestrator.eta_profile_filename,
+    )
+    audio_orchestrator.eta_profile_path = eta_profile_path
+    eta_profile_context = _build_eta_profile_context(
+        audio_orchestrator=audio_orchestrator,
+        audio_cfg_dict=audio_cfg_dict,
+        project_root=project_root,
+        runtime_device=runtime_device,
+    )
     if not stage_plan.run_audio_stage:
         audio_orchestrator._load_eta_profile(
             profile_path=eta_profile_path,

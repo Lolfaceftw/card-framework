@@ -1283,6 +1283,7 @@ def build_run_overrides(
     if has_explicit_output_root():
         run_work_dir = (resolve_output_root() / "audio_stage").resolve()
         transcript_path = (resolve_output_root() / "transcript.json").resolve()
+        eta_store_path = (resolve_output_root() / "audio_stage" / "eta_history.sqlite3").resolve()
     else:
         workspace_root = resolve_workspace_root()
         run_work_dir = (
@@ -1291,9 +1292,13 @@ def build_run_overrides(
         transcript_path = (
             workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
         ).resolve()
+        eta_store_path = (
+            workspace_root / "artifacts" / "audio_stage" / "eta_history.sqlite3"
+        ).resolve()
     overrides = [
         f"pipeline.start_stage={start_stage}",
         f"audio.work_dir={_path_for_override(run_work_dir)}",
+        f"audio.eta.store_path={_path_for_override(eta_store_path)}",
         "audio.speaker_samples.enabled=true",
         "audio.speaker_samples.source_audio=vocals",
         "audio.speaker_samples.target_duration_seconds=30",

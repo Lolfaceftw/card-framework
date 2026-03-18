@@ -82,6 +82,7 @@ audio:
     attempts: 2
     base_delay_seconds: 1.0
   eta:
+    store_path: "artifacts/audio_stage/eta_history.sqlite3"
     update_interval_seconds: 10
     dynamic:
       progress_smoothing: 0.25
