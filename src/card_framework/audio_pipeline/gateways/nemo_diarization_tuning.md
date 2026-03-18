@@ -69,3 +69,34 @@ Rationale:
 - Raise the minimum speech and nonspeech durations again because the remaining
   diarization defects are now mostly tiny word-level blips rather than large
   speaker fragmentation.
+
+## 2026-03-18 - Podcast micro-turn smoothing pass 3
+
+Context:
+- The latest rerun `5ac38992-00ce-4a36-883e-165a3a2410df` reduced the worst
+  repeated-`yeah` loop, but it still contained smaller `yeah` bursts and the
+  diarization regressed into many one-word speaker flips.
+
+Updated values:
+- Granite `max_new_tokens: 128`
+- Granite `repetition_penalty: 1.1`
+- `vad_onset: 0.8`
+- `vad_offset: 0.6`
+- `vad_pad_onset: 0.1`
+- `vad_pad_offset: 0.0`
+- `vad_min_duration_on: 0.2`
+- `vad_min_duration_off: 0.6`
+
+Companion transcript-smoothing change:
+- `max_relabel_window_words: 18`
+- `max_flip_span_words: 3`
+- `min_dominant_ratio: 0.7`
+
+Rationale:
+- Keep the lower Granite token cap, but add a light repetition penalty so the
+  model is less likely to get stuck on fillers like `yeah` without shortening
+  every chunk further.
+- Roll NeMo back to the prior VAD settings because the stronger pass-2 NeMo
+  values increased fast speaker switching on this episode.
+- Let the transcript-side smoothing absorb short mid-sentence one-word flips
+  that are still visible even when NeMo only emits `0.25s` intrusions.

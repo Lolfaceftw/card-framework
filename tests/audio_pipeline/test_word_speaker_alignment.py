@@ -79,3 +79,30 @@ def test_realign_speakers_with_punctuation_preserves_edge_minority_turn() -> Non
         "SPEAKER_01",
     ]
 
+
+def test_realign_speakers_with_punctuation_relabels_mid_sentence_one_word_flip() -> None:
+    tokens = [
+        WordSpeakerToken(word="I", speaker="SPEAKER_01", start_time_ms=0, end_time_ms=100),
+        WordSpeakerToken(word="really", speaker="SPEAKER_01", start_time_ms=100, end_time_ms=200),
+        WordSpeakerToken(word="think", speaker="SPEAKER_01", start_time_ms=200, end_time_ms=300),
+        WordSpeakerToken(word="this", speaker="SPEAKER_01", start_time_ms=300, end_time_ms=400),
+        WordSpeakerToken(word="is", speaker="SPEAKER_01", start_time_ms=400, end_time_ms=500),
+        WordSpeakerToken(word="a", speaker="SPEAKER_01", start_time_ms=500, end_time_ms=600),
+        WordSpeakerToken(word="very", speaker="SPEAKER_01", start_time_ms=600, end_time_ms=700),
+        WordSpeakerToken(word="good", speaker="SPEAKER_01", start_time_ms=700, end_time_ms=800),
+        WordSpeakerToken(word="definition", speaker="SPEAKER_01", start_time_ms=800, end_time_ms=900),
+        WordSpeakerToken(word="of", speaker="SPEAKER_01", start_time_ms=900, end_time_ms=1000),
+        WordSpeakerToken(word="it", speaker="SPEAKER_01", start_time_ms=1000, end_time_ms=1100),
+        WordSpeakerToken(word="and", speaker="SPEAKER_01", start_time_ms=1100, end_time_ms=1200),
+        WordSpeakerToken(word="I", speaker="SPEAKER_05", start_time_ms=1200, end_time_ms=1300),
+        WordSpeakerToken(word="think", speaker="SPEAKER_01", start_time_ms=1300, end_time_ms=1400),
+        WordSpeakerToken(word="we", speaker="SPEAKER_01", start_time_ms=1400, end_time_ms=1500),
+        WordSpeakerToken(word="should", speaker="SPEAKER_01", start_time_ms=1500, end_time_ms=1600),
+        WordSpeakerToken(word="keep", speaker="SPEAKER_01", start_time_ms=1600, end_time_ms=1700),
+        WordSpeakerToken(word="going.", speaker="SPEAKER_01", start_time_ms=1700, end_time_ms=1800),
+    ]
+
+    realigned = realign_speakers_with_punctuation(tokens)
+
+    assert all(token.speaker == "SPEAKER_01" for token in realigned)
+

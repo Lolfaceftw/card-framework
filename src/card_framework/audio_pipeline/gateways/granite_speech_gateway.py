@@ -50,6 +50,7 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         chunk_length_seconds: int = 25,
         chunk_overlap_seconds: int = 2,
         max_new_tokens: int = 128,
+        repetition_penalty: float = 1.1,
         prompt: str = _DEFAULT_PROMPT,
         enable_forced_alignment: bool = True,
         require_forced_alignment: bool = True,
@@ -66,6 +67,8 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
             )
         if max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be > 0.")
+        if repetition_penalty <= 0:
+            raise ValueError("repetition_penalty must be > 0.")
         if not prompt.strip():
             raise ValueError("prompt must be non-empty.")
         self.model_name = model_name
@@ -73,6 +76,7 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         self.chunk_length_seconds = chunk_length_seconds
         self.chunk_overlap_seconds = chunk_overlap_seconds
         self.max_new_tokens = max_new_tokens
+        self.repetition_penalty = repetition_penalty
         self.prompt = prompt.strip()
         self.enable_forced_alignment = enable_forced_alignment
         self.require_forced_alignment = require_forced_alignment
@@ -309,6 +313,7 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
                 generated = runtime.model.generate(
                     **model_inputs,
                     max_new_tokens=self.max_new_tokens,
+                    repetition_penalty=self.repetition_penalty,
                     do_sample=False,
                     num_beams=1,
                 )

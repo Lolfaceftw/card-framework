@@ -71,12 +71,13 @@ def test_factory_builds_default_strategies() -> None:
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is False
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.1)
     assert orchestrator.diarizer.vad_onset == pytest.approx(0.8)
     assert orchestrator.diarizer.vad_offset == pytest.approx(0.6)
     assert orchestrator.diarizer.vad_pad_onset == pytest.approx(0.1)
-    assert orchestrator.diarizer.vad_pad_offset == pytest.approx(0.05)
-    assert orchestrator.diarizer.vad_min_duration_on == pytest.approx(0.3)
-    assert orchestrator.diarizer.vad_min_duration_off == pytest.approx(0.8)
+    assert orchestrator.diarizer.vad_pad_offset == pytest.approx(0.0)
+    assert orchestrator.diarizer.vad_min_duration_on == pytest.approx(0.2)
+    assert orchestrator.diarizer.vad_min_duration_off == pytest.approx(0.6)
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
 
 
@@ -181,6 +182,20 @@ def test_factory_builds_nemo_vad_postprocessing_overrides() -> None:
     assert diarizer.vad_pad_offset == pytest.approx(0.0)
     assert diarizer.vad_min_duration_on == pytest.approx(0.3)
     assert diarizer.vad_min_duration_off == pytest.approx(0.7)
+
+
+def test_factory_builds_granite_repetition_penalty_override() -> None:
+    orchestrator = build_audio_to_script_orchestrator(
+        {
+            "asr": {
+                "provider": "granite_speech",
+                "repetition_penalty": 1.2,
+            },
+        }
+    )
+
+    assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.2)
 
 
 def test_factory_builds_pyannote_community1_diarizer() -> None:
@@ -307,6 +322,7 @@ def test_factory_builds_granite_transcriber_defaults() -> None:
     assert orchestrator.transcriber.chunk_length_seconds == 25
     assert orchestrator.transcriber.chunk_overlap_seconds == 2
     assert orchestrator.transcriber.max_new_tokens == 128
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.1)
     assert orchestrator.transcriber.language == "en"
 
 

@@ -180,9 +180,9 @@ def realign_speakers_with_punctuation(
     word_tokens: list[WordSpeakerToken],
     *,
     max_words_in_sentence: int = 50,
-    max_relabel_window_words: int = 14,
-    max_flip_span_words: int = 2,
-    min_dominant_ratio: float = 0.75,
+    max_relabel_window_words: int = 18,
+    max_flip_span_words: int = 3,
+    min_dominant_ratio: float = 0.7,
 ) -> list[WordSpeakerToken]:
     """Realign short speaker flips that split single sentence spans."""
     if not word_tokens:

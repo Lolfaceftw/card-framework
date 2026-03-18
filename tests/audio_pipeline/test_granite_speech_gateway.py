@@ -8,6 +8,7 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from card_framework.audio_pipeline.gateways import granite_speech_gateway
 from card_framework.audio_pipeline.gateways.granite_speech_gateway import (
@@ -154,9 +155,11 @@ def test_granite_transcribe_chunk_uses_rendered_prompt_cleanup(monkeypatch) -> N
                 )
             ]
 
+    generate_calls: list[dict[str, object]] = []
+
     class _FakeModel:
         def generate(self, **kwargs):
-            del kwargs
+            generate_calls.append(kwargs)
             return [[1, 2, 3]]
 
     transcriber = GraniteSpeechTranscriber(enable_forced_alignment=False)
@@ -173,6 +176,8 @@ def test_granite_transcribe_chunk_uses_rendered_prompt_cleanup(monkeypatch) -> N
     )
 
     assert chunk_text == "can you imagine this is our four. of pwl capital."
+    assert generate_calls[0]["max_new_tokens"] == 128
+    assert generate_calls[0]["repetition_penalty"] == pytest.approx(1.1)
 
 
 def test_granite_runtime_reports_loading_messages(monkeypatch) -> None:
