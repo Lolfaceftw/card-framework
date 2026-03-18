@@ -18,7 +18,7 @@ from card_framework.audio_pipeline.contracts import (
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
-from card_framework.audio_pipeline.runtime import release_torch_device_memory
+from card_framework.audio_pipeline.runtime import release_torch_device_memory_with_reporting
 from card_framework.shared.events import event_bus
 from card_framework.shared.perf import report_loading_duration
 
@@ -207,7 +207,10 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         runtime = self._runtime_cache.pop(device, None)
         if runtime is not None:
             del runtime
-        release_torch_device_memory(device)
+        release_torch_device_memory_with_reporting(
+            device=device,
+            description=f"Granite Speech ASR model '{self.model_name}'",
+        )
 
     def _load_audio_waveform(self, audio_path: Path):
         """Load one audio file into a tensor waveform."""

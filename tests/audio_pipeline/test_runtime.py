@@ -17,6 +17,7 @@ from card_framework.audio_pipeline.runtime import (
     release_torch_device_memory,
     resolve_command_path,
 )
+from card_framework.shared.events import event_bus
 
 
 def test_resolve_command_path_uses_imageio_ffmpeg_fallback(
@@ -132,8 +133,9 @@ def test_probe_audio_duration_ms_parses_ffmpeg_duration_output(
 def test_release_torch_device_memory_clears_cuda_allocator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run garbage collection plus the CUDA allocator cleanup hooks."""
+    """Run garbage collection plus the CUDA allocator cleanup hooks with logs."""
     calls: list[str] = []
+    messages: list[str] = []
     fake_torch = SimpleNamespace(
         cuda=SimpleNamespace(
             is_available=lambda: True,
@@ -148,6 +150,36 @@ def test_release_torch_device_memory_clears_cuda_allocator(
         lambda: calls.append("gc.collect"),
     )
 
-    release_torch_device_memory("cuda")
+    event_bus.subscribe("system_message", messages.append)
+    try:
+        release_torch_device_memory("cuda")
+    finally:
+        event_bus.unsubscribe("system_message", messages.append)
 
     assert calls == ["gc.collect", "empty_cache", "ipc_collect"]
+    assert messages[0] == "Loading CUDA memory cleanup for CUDA runtime resources..."
+    assert messages[1].startswith(
+        "Loaded CUDA memory cleanup for CUDA runtime resources in "
+    )
+
+
+def test_release_torch_device_memory_is_silent_for_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not emit cleanup logs or CUDA calls when the device is not CUDA."""
+    calls: list[str] = []
+    messages: list[str] = []
+
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.runtime.gc.collect",
+        lambda: calls.append("gc.collect"),
+    )
+
+    event_bus.subscribe("system_message", messages.append)
+    try:
+        release_torch_device_memory("cpu")
+    finally:
+        event_bus.unsubscribe("system_message", messages.append)
+
+    assert calls == []
+    assert messages == []

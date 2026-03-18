@@ -15,7 +15,7 @@ from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgre
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.runtime import (
     ensure_command_available,
-    release_torch_device_memory,
+    release_torch_device_memory_with_reporting,
 )
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
 
@@ -260,7 +260,10 @@ class FasterWhisperTranscriber(SpeechTranscriber):
                 except Exception:
                     pass
             del model
-        release_torch_device_memory(device)
+        release_torch_device_memory_with_reporting(
+            device=device,
+            description=f"Faster-Whisper model '{self.model_name}'",
+        )
 
     def _find_numeral_symbol_tokens(self, tokenizer: object | None) -> list[int]:
         """Identify token ids containing numerals/symbols for suppression."""

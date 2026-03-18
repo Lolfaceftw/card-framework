@@ -13,7 +13,7 @@ from card_framework.audio_pipeline.gateways.diarization_common import (
     normalize_speaker_labels,
     prepare_diarization_audio,
 )
-from card_framework.audio_pipeline.runtime import release_torch_device_memory
+from card_framework.audio_pipeline.runtime import release_torch_device_memory_with_reporting
 
 
 class PyannoteSpeakerDiarizer(SpeakerDiarizer):
@@ -143,7 +143,10 @@ class PyannoteSpeakerDiarizer(SpeakerDiarizer):
         pipeline = self._pipeline_cache.pop(device, None)
         if pipeline is not None:
             del pipeline
-        release_torch_device_memory(device)
+        release_torch_device_memory_with_reporting(
+            device=device,
+            description=f"pyannote pipeline '{self.pipeline_name}'",
+        )
 
     def _resolve_auth_token(self) -> str | None:
         """Resolve optional Hugging Face token from config or environment."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 import gc
 import importlib
@@ -13,6 +14,8 @@ import shutil
 import subprocess
 
 from card_framework.audio_pipeline.errors import DependencyMissingError
+from card_framework.shared.events import event_bus
+from card_framework.shared.perf import report_loading_duration
 
 _COMMAND_OVERRIDE_ENV_VARS = {
     "ffmpeg": "CARD_FRAMEWORK_FFMPEG_EXECUTABLE",
@@ -20,6 +23,7 @@ _COMMAND_OVERRIDE_ENV_VARS = {
 _FFMPEG_DURATION_PATTERN = re.compile(
     r"Duration:\s*(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d+)?)"
 )
+type StatusReporter = Callable[[str], None]
 
 
 def utc_now_iso() -> str:
@@ -97,38 +101,72 @@ def resolve_device(preferred_device: str) -> str:
 
 def release_torch_device_memory(device: str) -> None:
     """Best-effort release of process-local CUDA allocator state."""
+    release_torch_device_memory_with_reporting(device=device)
+
+
+def release_torch_device_memory_with_reporting(
+    *,
+    device: str,
+    description: str = "CUDA runtime resources",
+    reporter: StatusReporter | None = None,
+) -> bool:
+    """Best-effort release of CUDA allocator state with operator-visible reporting."""
     if device.strip().lower() != "cuda":
-        return
+        return False
+    resolved_reporter = reporter or _report_runtime_system_message
+    normalized_description = description.strip() or "CUDA runtime resources"
     try:
         import torch
     except Exception:
-        return
+        resolved_reporter(
+            f"Skipped clearing {normalized_description} because torch is unavailable."
+        )
+        return False
 
     cuda = getattr(torch, "cuda", None)
     if cuda is None:
-        return
+        resolved_reporter(
+            f"Skipped clearing {normalized_description} because torch CUDA helpers are unavailable."
+        )
+        return False
     is_available = getattr(cuda, "is_available", None)
     if not callable(is_available) or not is_available():
-        return
-
-    try:
-        gc.collect()
-    except Exception:
-        pass
-
-    empty_cache = getattr(cuda, "empty_cache", None)
-    if callable(empty_cache):
         try:
-            empty_cache()
+            resolved_reporter(
+                f"Skipped clearing {normalized_description} because CUDA is unavailable."
+            )
+        except Exception:
+            pass
+        return False
+
+    with report_loading_duration(
+        f"CUDA memory cleanup for {normalized_description}",
+        reporter=resolved_reporter,
+    ):
+        try:
+            gc.collect()
         except Exception:
             pass
 
-    ipc_collect = getattr(cuda, "ipc_collect", None)
-    if callable(ipc_collect):
-        try:
-            ipc_collect()
-        except Exception:
-            pass
+        empty_cache = getattr(cuda, "empty_cache", None)
+        if callable(empty_cache):
+            try:
+                empty_cache()
+            except Exception:
+                pass
+
+        ipc_collect = getattr(cuda, "ipc_collect", None)
+        if callable(ipc_collect):
+            try:
+                ipc_collect()
+            except Exception:
+                pass
+    return True
+
+
+def _report_runtime_system_message(message: str) -> None:
+    """Publish one runtime helper status line to the shared system-message stream."""
+    event_bus.publish("system_message", message)
 
 
 def resolve_path(path_value: str, *, base_dir: Path) -> Path:

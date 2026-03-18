@@ -13,7 +13,7 @@ from card_framework.audio_pipeline.gateways.diarization_common import (
     normalize_speaker_labels,
     prepare_diarization_audio,
 )
-from card_framework.audio_pipeline.runtime import release_torch_device_memory
+from card_framework.audio_pipeline.runtime import release_torch_device_memory_with_reporting
 
 
 class SortformerSpeakerDiarizer(SpeakerDiarizer):
@@ -137,7 +137,10 @@ class SortformerSpeakerDiarizer(SpeakerDiarizer):
         model = self._model_cache.pop(device, None)
         if model is not None:
             del model
-        release_torch_device_memory(device)
+        release_torch_device_memory_with_reporting(
+            device=device,
+            description=f"Sortformer diarization model '{self.model_name}'",
+        )
 
     def _configure_streaming(self, model: Any) -> None:
         """Apply streaming parameters from config when the model supports them."""

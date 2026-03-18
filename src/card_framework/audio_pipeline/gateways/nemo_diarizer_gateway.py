@@ -19,7 +19,7 @@ from card_framework.audio_pipeline.gateways.diarization_common import (
 from card_framework.audio_pipeline.runtime import (
     ensure_module_available,
     probe_audio_duration_ms,
-    release_torch_device_memory,
+    release_torch_device_memory_with_reporting,
 )
 from card_framework.shared.events import event_bus
 from card_framework.shared.perf import report_loading_duration
@@ -291,7 +291,10 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
 
     def release_cached_resources(self, *, device: str) -> None:
         """Release any process-local CUDA allocator slack after diarization."""
-        release_torch_device_memory(device)
+        release_torch_device_memory_with_reporting(
+            device=device,
+            description=f"NeMo diarization model '{self.msdd_model}'",
+        )
 
     def _report_system_message(self, message: str) -> None:
         """Publish one operator-facing loading message through the event bus."""

@@ -198,6 +198,7 @@
       <rule>Granite Speech model and processor initialization use the shared loading-duration reporter, so stage-1 emits the same timed `Loading ...` and `Loaded ... in X.XX seconds.` messages around ASR model startup as other slow runtime boundaries.</rule>
       <rule>NeMo MSDD diarizer startup now uses the shared loading-duration reporter too, so stage-1 runs launched through `card_framework.cli.main` or `card_framework.cli.setup_and_run` emit timed `Loading ...` / `Loaded ... in X.XX seconds.` messages around NeMo diarization model startup instead of only the generic stage-status line.</rule>
       <rule>Stage-1 now best-effort releases cached ASR and diarization device resources as soon as each heavy stage is done, and again at audio-stage teardown, so CUDA runs do not keep both transcription and diarization model footprints resident longer than necessary.</rule>
+      <rule>Explicit CUDA memory cleanup now also uses the shared timed status pattern. When a stage or gateway releases GPU-backed model state on `device=cuda`, operators see timed `Loading ...` / `Loaded ... in X.XX seconds.` cleanup messages; CPU runs stay silent because no CUDA cleanup is attempted.</rule>
       <rule>Windows-only dedicated GPU heartbeat monitoring can run during voice cloning when enabled and when the resolved provider device is CUDA.</rule>
       <rule>src/card_framework/shared/events.py provides the shared event bus used by UI and logging subscribers.</rule>
     </etaAndObservability>

@@ -240,11 +240,15 @@ def test_granite_release_cached_resources_clears_device_cache(monkeypatch) -> No
 
     monkeypatch.setattr(
         granite_speech_gateway,
-        "release_torch_device_memory",
-        lambda device: released_devices.append(device),
+        "release_torch_device_memory_with_reporting",
+        lambda *, device, description: released_devices.append(
+            f"{device}:{description}"
+        ),
     )
 
     transcriber.release_cached_resources(device="cuda")
 
     assert transcriber._runtime_cache == {}
-    assert released_devices == ["cuda"]
+    assert released_devices == [
+        "cuda:Granite Speech ASR model 'ibm-granite/granite-4.0-1b-speech'"
+    ]

@@ -1,3 +1,7 @@
+### 2026-03-18T15:15:16+08:00 - CUDA Cleanup Logging Should Reuse The Shared Timed Loading Pattern
+- Problem: Explicit GPU-memory cleanup existed in a few paths, but it was inconsistent and mostly silent. That made it hard to tell from logs whether CUDA cleanup was actually running after stage transitions or runtime offload steps.
+- Solution: Route the shared CUDA cleanup helper and the remaining explicit cleanup call sites through the same timed status pattern used elsewhere, so `device=cuda` runs log `Loading ...` and `Loaded ... in X.XX seconds.` around cleanup while CPU runs skip both the cleanup work and the cleanup log noise.
+
 ### 2026-03-18T14:58:16+08:00 - Stage-1 Needed Explicit ASR And Diarizer Resource Release To Avoid Carrying VRAM Forward
 - Problem: Stage-1 kept heavyweight transcription and diarization model objects alive in-process after their outputs were already materialized. On CUDA runs that could leave Granite or diarization allocations resident into the next stage, raising peak VRAM and making Windows report spillover into shared GPU memory even after diarization finished.
 - Solution: Add best-effort `release_cached_resources(...)` hooks for the GPU-backed ASR and diarization adapters, release the transcriber before NeMo diarization begins, release the diarizer right after it completes, and clear the CUDA allocator slack after the references are dropped.

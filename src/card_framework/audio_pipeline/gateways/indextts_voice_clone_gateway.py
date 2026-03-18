@@ -17,6 +17,7 @@ from typing import Any
 
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
+from card_framework.audio_pipeline.runtime import release_torch_device_memory_with_reporting
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneProvider
 
 _INDEXTTS_PROTOCOL_PREFIX = "__INDEXTTS_JSON__"
@@ -439,19 +440,23 @@ def _normalize_emo_text(emo_text: str | None) -> str | None:
     return normalized or None
 
 
-def _release_inprocess_model(model: object) -> None:
+def _release_inprocess_model(
+    model: object,
+    *,
+    device: str,
+    description: str,
+) -> None:
     """Best-effort release of one cached in-process IndexTTS runtime."""
     del model
     gc.collect()
+    release_torch_device_memory_with_reporting(
+        device=device,
+        description=description,
+    )
     try:
         import torch
     except ImportError:
         return
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
     try:
         if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
             torch.mps.empty_cache()
@@ -467,7 +472,14 @@ def _release_cached_runtime_for_key(key: _IndexTTSRuntimeKey) -> None:
     if worker is not None:
         worker.close()
     if model is not None:
-        _release_inprocess_model(model)
+        _release_inprocess_model(
+            model,
+            device=key.device,
+            description=(
+                f"IndexTTS in-process runtime '{key.model_dir.name}' "
+                f"(backend={key.execution_backend})"
+            ),
+        )
     with _SHARED_RUNTIME_LOCK:
         _SHARED_INPROCESS_EMO_VECTOR_CACHE.pop(key, None)
 
@@ -475,15 +487,22 @@ def _release_cached_runtime_for_key(key: _IndexTTSRuntimeKey) -> None:
 def _release_all_cached_runtime_resources() -> None:
     """Release all cached IndexTTS runtimes held by this Python process."""
     with _SHARED_RUNTIME_LOCK:
-        models = list(_SHARED_INPROCESS_MODELS.values())
+        models = list(_SHARED_INPROCESS_MODELS.items())
         workers = list(_SHARED_SUBPROCESS_WORKERS.values())
         _SHARED_INPROCESS_MODELS.clear()
         _SHARED_SUBPROCESS_WORKERS.clear()
         _SHARED_INPROCESS_EMO_VECTOR_CACHE.clear()
     for worker in workers:
         worker.close()
-    for model in models:
-        _release_inprocess_model(model)
+    for key, model in models:
+        _release_inprocess_model(
+            model,
+            device=key.device,
+            description=(
+                f"IndexTTS in-process runtime '{key.model_dir.name}' "
+                f"(backend={key.execution_backend})"
+            ),
+        )
 
 
 atexit.register(_release_all_cached_runtime_resources)
