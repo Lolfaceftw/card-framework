@@ -8,6 +8,7 @@ import argparse
 import asyncio
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -72,6 +73,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
 )
 from card_framework.benchmark.summarizer_critic.sporc.dataset import (
     DatasetPreparationError,
+    ensure_compact_prepared_dataset_manifest,
     iter_prepared_dataset_samples,
     load_prepared_dataset_manifest,
     prepare_sporc_benchmark,
@@ -1477,6 +1479,7 @@ def _open_shared_sample_queue_connection(queue_root: Path) -> sqlite3.Connection
         CREATE TABLE IF NOT EXISTS sample_queue (
             sample_id TEXT PRIMARY KEY,
             sample_position INTEGER NOT NULL,
+            sample_payload_json TEXT,
             status TEXT NOT NULL,
             owner_label TEXT,
             owner_pid INTEGER,
@@ -1487,6 +1490,13 @@ def _open_shared_sample_queue_connection(queue_root: Path) -> sqlite3.Connection
         )
         """
     )
+    sample_queue_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(sample_queue)")
+    }
+    if "sample_payload_json" not in sample_queue_columns:
+        connection.execute(
+            "ALTER TABLE sample_queue ADD COLUMN sample_payload_json TEXT"
+        )
     return connection
 
 
@@ -1522,6 +1532,7 @@ def _initialize_shared_sample_queue(
                 INSERT INTO sample_queue(
                     sample_id,
                     sample_position,
+                    sample_payload_json,
                     status,
                     owner_label,
                     owner_pid,
@@ -1529,7 +1540,7 @@ def _initialize_shared_sample_queue(
                     counts_toward_target,
                     replacement_reason,
                     updated_at_utc
-                ) VALUES (?, ?, 'pending', NULL, NULL, NULL, 0, NULL, ?)
+                ) VALUES (?, ?, NULL, 'pending', NULL, NULL, NULL, 0, NULL, ?)
                 """,
                 [
                     (sample_id, index, now_iso)
@@ -1544,6 +1555,195 @@ def _initialize_shared_sample_queue(
     except Exception:
         connection.execute("ROLLBACK")
         raise
+
+
+def _shared_sample_sort_key(
+    *,
+    sample_id: str,
+    sample_seed: int | None,
+    manifest_position: int,
+) -> str:
+    """Build the deterministic queue ordering key for one candidate sample."""
+    if sample_seed is None:
+        return f"{manifest_position:08d}"
+    return hashlib.sha256(f"{sample_seed}:{sample_id}".encode("utf-8")).hexdigest()
+
+
+def _serialize_prepared_sample(sample: PreparedBenchmarkSample) -> str:
+    """Serialize one prepared sample for queue-backed worker lookup."""
+    return json.dumps(
+        asdict(sample),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _deserialize_prepared_sample(raw_payload: str) -> PreparedBenchmarkSample:
+    """Deserialize one queued prepared sample payload."""
+    payload = json.loads(raw_payload)
+    if not isinstance(payload, dict):
+        raise BenchmarkExecutionError(
+            "Shared sample queue payload must decode to a JSON object."
+        )
+    return PreparedBenchmarkSample(
+        sample_id=str(payload.get("sample_id") or ""),
+        dataset=str(payload.get("dataset") or ""),
+        episode_key=str(payload.get("episode_key") or ""),
+        transcript_path=str(payload.get("transcript_path") or ""),
+        reference_summary=str(payload.get("reference_summary") or ""),
+        target_seconds=int(payload.get("target_seconds") or 0),
+        metadata=(
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        ),
+    )
+
+
+def _initialize_shared_sample_queue_from_manifest(
+    connection: sqlite3.Connection,
+    *,
+    manifest_path: Path,
+    requested_target_sample_count: int,
+    sample_seed: int | None,
+) -> tuple[list[str], int]:
+    """Create or validate a shared queue directly from the prepared manifest."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'sample_order_json'"
+        ).fetchone()
+        target_row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'target_sample_count'"
+        ).fetchone()
+        if row is not None and target_row is not None:
+            sample_order = json.loads(str(row[0]))
+            if not isinstance(sample_order, list) or not all(
+                isinstance(sample_id, str) for sample_id in sample_order
+            ):
+                raise BenchmarkExecutionError(
+                    "Shared sample queue sample order metadata is invalid."
+                )
+            target_sample_count = int(target_row[0])
+            connection.execute("COMMIT")
+            return [str(sample_id) for sample_id in sample_order], target_sample_count
+
+        connection.execute("DELETE FROM queue_metadata")
+        connection.execute("DELETE FROM sample_queue")
+        connection.execute("DROP TABLE IF EXISTS temp.shared_sample_catalog_stage")
+        connection.execute(
+            """
+            CREATE TEMP TABLE shared_sample_catalog_stage (
+                sort_key TEXT NOT NULL,
+                sample_id TEXT PRIMARY KEY,
+                sample_payload_json TEXT NOT NULL
+            )
+            """
+        )
+        total_sample_count = 0
+        for total_sample_count, sample in enumerate(
+            iter_prepared_dataset_samples(manifest_path, max_samples=None),
+            start=1,
+        ):
+            connection.execute(
+                """
+                INSERT INTO shared_sample_catalog_stage(
+                    sort_key,
+                    sample_id,
+                    sample_payload_json
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    _shared_sample_sort_key(
+                        sample_id=sample.sample_id,
+                        sample_seed=sample_seed,
+                        manifest_position=total_sample_count,
+                    ),
+                    sample.sample_id,
+                    _serialize_prepared_sample(sample),
+                ),
+            )
+        if total_sample_count <= 0:
+            raise BenchmarkExecutionError(
+                "Shared sample queue initialization found no benchmark candidates."
+            )
+
+        target_sample_count = (
+            total_sample_count
+            if requested_target_sample_count <= 0
+            else min(requested_target_sample_count, total_sample_count)
+        )
+        sample_order: list[str] = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for sample_position, row in enumerate(
+            connection.execute(
+                """
+                SELECT sample_id, sample_payload_json
+                FROM shared_sample_catalog_stage
+                ORDER BY sort_key ASC, sample_id ASC
+                """
+            ),
+            start=1,
+        ):
+            sample_id = str(row[0])
+            sample_order.append(sample_id)
+            connection.execute(
+                """
+                INSERT INTO sample_queue(
+                    sample_id,
+                    sample_position,
+                    sample_payload_json,
+                    status,
+                    owner_label,
+                    owner_pid,
+                    final_status,
+                    counts_toward_target,
+                    replacement_reason,
+                    updated_at_utc
+                ) VALUES (?, ?, ?, 'pending', NULL, NULL, NULL, 0, NULL, ?)
+                """,
+                (
+                    sample_id,
+                    sample_position,
+                    str(row[1]),
+                    now_iso,
+                ),
+            )
+        connection.execute("DROP TABLE IF EXISTS temp.shared_sample_catalog_stage")
+        connection.execute(
+            "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+            ("sample_order_json", json.dumps(sample_order, ensure_ascii=True)),
+        )
+        connection.execute(
+            "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+            ("target_sample_count", str(target_sample_count)),
+        )
+        connection.execute("COMMIT")
+        return sample_order, target_sample_count
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
+def _load_shared_sample(
+    connection: sqlite3.Connection,
+    *,
+    sample_id: str,
+) -> PreparedBenchmarkSample:
+    """Load one claimed sample payload from the shared queue catalog."""
+    row = connection.execute(
+        """
+        SELECT sample_payload_json
+        FROM sample_queue
+        WHERE sample_id = ?
+        """,
+        (sample_id,),
+    ).fetchone()
+    if row is None or not str(row[0] or "").strip():
+        raise BenchmarkExecutionError(
+            f"Shared sample queue is missing payload for sample '{sample_id}'."
+        )
+    return _deserialize_prepared_sample(str(row[0]))
 
 
 def _claim_next_shared_sample_id(
@@ -3094,7 +3294,8 @@ async def _run_sample_with_retries(
 
 
 async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionReport:
-    dataset_manifest_path = Path(args.dataset_manifest).resolve()
+    requested_dataset_manifest_path = Path(args.dataset_manifest).resolve()
+    dataset_manifest_path = requested_dataset_manifest_path
     if args.prepare_if_missing and not dataset_manifest_path.exists():
         prepared = prepare_sporc_benchmark(
             prepared_root=dataset_manifest_path.parent,
@@ -3108,6 +3309,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             ),
         )
         dataset_manifest_path = prepared.manifest_path
+    dataset_manifest_path = ensure_compact_prepared_dataset_manifest(
+        dataset_manifest_path,
+    )
 
     dataset_manifest = load_prepared_dataset_manifest(
         dataset_manifest_path,
@@ -3165,45 +3369,51 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             "--shared-sample-queue-root cannot be combined with sample-shard selection."
         )
     sample_limit = int(args.max_samples)
-    prepared_samples = tuple(
-        iter_prepared_dataset_samples(
-            dataset_manifest.manifest_path,
-            max_samples=None,
+    shared_sample_queue_connection: sqlite3.Connection | None = None
+    candidate_samples: list[PreparedBenchmarkSample] = []
+    sample_lookup: dict[str, PreparedBenchmarkSample] = {}
+    if shared_sample_queue_root is not None:
+        shared_sample_queue_connection = _open_shared_sample_queue_connection(
+            shared_sample_queue_root
         )
-    )
-    ordered_candidates = _select_samples(
-        prepared_samples,
-        max_samples=0,
-        sample_seed=sample_seed,
-    )
-    target_candidates = (
-        list(ordered_candidates)
-        if sample_limit <= 0
-        else list(ordered_candidates[:sample_limit])
-    )
-    candidate_samples = (
-        list(ordered_candidates)
-        if use_shared_sample_queue
-        else _select_sample_shard(
+        sample_order, target_sample_count = _initialize_shared_sample_queue_from_manifest(
+            shared_sample_queue_connection,
+            manifest_path=dataset_manifest.manifest_path,
+            requested_target_sample_count=sample_limit,
+            sample_seed=sample_seed,
+        )
+    else:
+        prepared_samples = tuple(
+            iter_prepared_dataset_samples(
+                dataset_manifest.manifest_path,
+                max_samples=None,
+            )
+        )
+        ordered_candidates = _select_samples(
+            prepared_samples,
+            max_samples=0,
+            sample_seed=sample_seed,
+        )
+        target_candidates = (
+            list(ordered_candidates)
+            if sample_limit <= 0
+            else list(ordered_candidates[:sample_limit])
+        )
+        candidate_samples = _select_sample_shard(
             ordered_candidates,
             shard_index=sample_shard_index,
             shard_count=sample_shard_count,
         )
-    )
-    target_sample_count = (
-        len(target_candidates)
-        if use_shared_sample_queue
-        else len(
+        target_sample_count = len(
             _select_sample_shard(
                 target_candidates,
                 shard_index=sample_shard_index,
                 shard_count=sample_shard_count,
             )
         )
-    )
-    sample_lookup = {sample.sample_id: sample for sample in candidate_samples}
-    sample_order = [sample.sample_id for sample in candidate_samples]
-    shared_sample_queue_connection: sqlite3.Connection | None = None
+        sample_lookup = {sample.sample_id: sample for sample in candidate_samples}
+        sample_order = [sample.sample_id for sample in candidate_samples]
+    selected_sample_ids = frozenset(sample_order)
     if resumed_from_checkpoint:
         checkpoint_shard_index = int(
             checkpoint_payload.get("sample_shard_index", 1) or 1
@@ -3226,23 +3436,14 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         checkpoint_manifest = str(
             checkpoint_payload.get("dataset_manifest_path", "") or ""
         ).strip()
-        if (
-            checkpoint_manifest
-            and Path(checkpoint_manifest).resolve()
-            != dataset_manifest.manifest_path.resolve()
-        ):
+        allowed_manifest_paths = {
+            requested_dataset_manifest_path.resolve(),
+            dataset_manifest.manifest_path.resolve(),
+        }
+        if checkpoint_manifest and Path(checkpoint_manifest).resolve() not in allowed_manifest_paths:
             raise BenchmarkExecutionError(
                 "Resume checkpoint dataset manifest does not match the requested dataset manifest."
             )
-    if shared_sample_queue_root is not None:
-        shared_sample_queue_connection = _open_shared_sample_queue_connection(
-            shared_sample_queue_root
-        )
-        _initialize_shared_sample_queue(
-            shared_sample_queue_connection,
-            sample_order=sample_order,
-            target_sample_count=target_sample_count,
-        )
     sample_selection_label = (
         f"seeded_random({sample_seed})" if sample_seed is not None else "manifest_order"
     )
@@ -3260,14 +3461,13 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     unexpected_checkpoint_samples = [
         sample_id
         for sample_id in results_by_sample_id
-        if sample_id not in sample_lookup
+        if sample_id not in selected_sample_ids
     ]
     if unexpected_checkpoint_samples:
         raise BenchmarkExecutionError(
             "Resume checkpoint contains samples outside the active benchmark selection: "
             f"{unexpected_checkpoint_samples}"
         )
-    active_target_seconds_by_sample_id: dict[str, int] = {}
     preloaded_transcripts: dict[str, Transcript] = {}
     preflight_results: dict[str, SampleBenchmarkResult] = {}
     curated_long_form_manifest_path = (
@@ -3287,10 +3487,18 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 f"{curated_long_form_manifest_path}"
             ),
         )
-    for sample in candidate_samples:
-        active_target_seconds_by_sample_id[sample.sample_id] = (
-            _resolve_sample_target_seconds(sample, args)
+
+    def _load_candidate_sample(sample_id: str) -> PreparedBenchmarkSample | None:
+        sample = sample_lookup.get(sample_id)
+        if sample is not None:
+            return sample
+        if shared_sample_queue_connection is None:
+            return None
+        return _load_shared_sample(
+            shared_sample_queue_connection,
+            sample_id=sample_id,
         )
+
     if _count_target_results(results_by_sample_id) >= target_sample_count:
         final_report = _write_execution_report_snapshot(
             run_root=run_root,
@@ -3322,7 +3530,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 {
                     "checkpoint_version": _CHECKPOINT_VERSION,
                     "run_id": run_id,
-                    "dataset_manifest_path": str(dataset_manifest.manifest_path),
+                    "dataset_manifest_path": str(requested_dataset_manifest_path),
                     "dataset_variant": dataset_manifest.dataset_variant,
                     "duration_preset": duration_preset,
                     "override_target_seconds": override_target_seconds,
@@ -3421,7 +3629,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             {
                 "checkpoint_version": _CHECKPOINT_VERSION,
                 "run_id": run_id,
-                "dataset_manifest_path": str(dataset_manifest.manifest_path),
+                "dataset_manifest_path": str(requested_dataset_manifest_path),
                 "dataset_variant": dataset_manifest.dataset_variant,
                 "duration_preset": duration_preset,
                 "override_target_seconds": override_target_seconds,
@@ -3484,11 +3692,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 active_sample_payload.get("sample_id", "") or ""
             ).strip()
             if active_sample_id and active_sample_id not in results_by_sample_id:
-                resumed_sample = sample_lookup.get(active_sample_id)
-                active_target_seconds = active_target_seconds_by_sample_id.get(
-                    active_sample_id
-                )
-                if resumed_sample is not None and active_target_seconds is not None:
+                resumed_sample = _load_candidate_sample(active_sample_id)
+                if resumed_sample is not None:
+                    active_target_seconds = _resolve_sample_target_seconds(
+                        resumed_sample,
+                        args,
+                    )
                     resume_failure_reason = str(
                         getattr(args, "resume_failure_reason", "")
                         or _RESUME_FAILURE_DEFAULT_STATUS
@@ -3630,7 +3839,10 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 )
                 if claimed_sample_id is None:
                     break
-                sample = sample_lookup[claimed_sample_id]
+                sample = _load_shared_sample(
+                    shared_sample_queue_connection,
+                    sample_id=claimed_sample_id,
+                )
                 restored_result = results_by_sample_id.get(sample.sample_id)
                 if restored_result is not None:
                     _mark_shared_sample_completed(
@@ -3643,7 +3855,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     continue
             if sample.sample_id in results_by_sample_id:
                 continue
-            active_target_seconds = active_target_seconds_by_sample_id[sample.sample_id]
+            active_target_seconds = _resolve_sample_target_seconds(sample, args)
             retained_before_sample = _count_target_results(results_by_sample_id)
             sample_index = min(retained_before_sample + 1, max(target_sample_count, 1))
             remaining_samples, average_text, eta_text = _progress_snapshot(

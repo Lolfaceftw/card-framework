@@ -12,6 +12,7 @@ from card_framework.benchmark.summarizer_critic.sporc.dataset import (
     curate_longform_sporc_manifest,
     derive_sporc_target_seconds,
     derive_target_seconds,
+    ensure_compact_prepared_dataset_manifest,
     iter_prepared_dataset_samples,
     load_prepared_dataset_manifest,
 )
@@ -462,6 +463,106 @@ def test_load_prepared_dataset_manifest_supports_bounded_sidecar_loading(
         "sample_0",
         "sample_1",
     ]
+
+
+def test_ensure_compact_prepared_dataset_manifest_externalizes_inline_samples(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "prepared_full" / "benchmark_longform_15k_manifest.json"
+    _write_prepared_manifest(
+        manifest_path,
+        samples=[
+            {
+                "sample_id": "sample_0",
+                "dataset": "sporc_full",
+                "episode_key": "episode://0",
+                "transcript_path": str(tmp_path / "transcripts" / "0.json"),
+                "reference_summary": "reference",
+                "target_seconds": 45,
+                "metadata": {"episode_title": "Episode 0"},
+            },
+            {
+                "sample_id": "sample_1",
+                "dataset": "sporc_full",
+                "episode_key": "episode://1",
+                "transcript_path": str(tmp_path / "transcripts" / "1.json"),
+                "reference_summary": "reference",
+                "target_seconds": 45,
+                "metadata": {"episode_title": "Episode 1"},
+            },
+        ],
+    )
+
+    compact_manifest_path = ensure_compact_prepared_dataset_manifest(manifest_path)
+
+    assert compact_manifest_path != manifest_path.resolve()
+    assert compact_manifest_path.exists()
+    compact_payload = json.loads(compact_manifest_path.read_text(encoding="utf-8"))
+    assert "samples" not in compact_payload
+    assert compact_payload["sample_count"] == 2
+    assert compact_payload["compacted_from_manifest_path"] == str(manifest_path.resolve())
+
+    compact_manifest = load_prepared_dataset_manifest(compact_manifest_path)
+    assert [sample.sample_id for sample in compact_manifest.samples] == [
+        "sample_0",
+        "sample_1",
+    ]
+    assert compact_manifest.samples_path is not None
+    assert compact_manifest.samples_path.exists()
+
+
+def test_ensure_compact_prepared_dataset_manifest_reuses_existing_sidecar(
+    tmp_path: Path,
+) -> None:
+    prepared_root = tmp_path / "prepared_full"
+    prepared_root.mkdir(parents=True, exist_ok=True)
+    samples_path = prepared_root / "samples.jsonl.gz"
+    _write_jsonl_gz(
+        samples_path,
+        [
+            {
+                "sample_id": "sample_0",
+                "dataset": "sporc_full",
+                "episode_key": "episode://0",
+                "transcript_path": str(prepared_root / "0.json"),
+                "reference_summary": "reference",
+                "target_seconds": 45,
+                "metadata": {},
+            }
+        ],
+    )
+    manifest_path = prepared_root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_full",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "full",
+                "episode_data_path": str(prepared_root / "episodeLevelData.jsonl.gz"),
+                "turn_data_path": str(prepared_root / "speakerTurnData.jsonl.gz"),
+                "sample_count": 1,
+                "samples_path": str(samples_path),
+                "samples": [
+                    {
+                        "sample_id": "sample_0",
+                        "dataset": "sporc_full",
+                        "episode_key": "episode://0",
+                        "transcript_path": str(prepared_root / "0.json"),
+                        "reference_summary": "reference",
+                        "target_seconds": 45,
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    compact_manifest_path = ensure_compact_prepared_dataset_manifest(manifest_path)
+    compact_payload = json.loads(compact_manifest_path.read_text(encoding="utf-8"))
+
+    assert compact_payload["samples_path"] == str(samples_path.resolve())
+    assert "samples" not in compact_payload
 
 
 def test_curate_longform_sporc_manifest_filters_to_strict_multi_speaker_examples(

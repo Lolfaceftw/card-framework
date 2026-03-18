@@ -57,6 +57,7 @@ from card_framework.shared.paths import REPO_ROOT
 
 
 _DATASET_HELPERS: tuple[object, object] | None = None
+_DATASET_COMPACTION_HELPER: object | None = None
 _RUNNER_HELPERS: tuple[object, object, object] | None = None
 _TELEMETRY_HELPERS: tuple[object, object, object, object] | None = None
 _REPORTING_HELPERS: tuple[object, object] | None = None
@@ -269,6 +270,25 @@ def _load_dataset_helpers(
 
         _DATASET_HELPERS = (curate_longform_sporc_manifest, prepare_sporc_benchmark)
     return _DATASET_HELPERS
+
+
+def _load_dataset_compaction_helper(
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> object:
+    """Load the prepared-manifest compaction helper lazily for execute flows."""
+    global _DATASET_COMPACTION_HELPER
+    if _DATASET_COMPACTION_HELPER is None:
+        with report_loading_duration(
+            "SPoRC dataset helpers",
+            reporter=status_reporter,
+        ):
+            from card_framework.benchmark.summarizer_critic.sporc.dataset import (
+                ensure_compact_prepared_dataset_manifest,
+            )
+
+        _DATASET_COMPACTION_HELPER = ensure_compact_prepared_dataset_manifest
+    return _DATASET_COMPACTION_HELPER
 
 
 def _load_runner_helpers(
@@ -1903,6 +1923,22 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
         presets = [single_preset]
     else:
         presets = _parse_duration_preset_list(str(args.duration_presets))
+    raw_dataset_manifest = str(getattr(args, "dataset_manifest", "") or "").strip()
+    if raw_dataset_manifest:
+        resolved_dataset_manifest = Path(raw_dataset_manifest).resolve()
+        if resolved_dataset_manifest.exists():
+            ensure_compact_prepared_dataset_manifest = (
+                _load_dataset_compaction_helper(
+                    status_reporter=_emit_cli_status,
+                )
+            )
+            args = argparse.Namespace(**vars(args))
+            args.dataset_manifest = str(
+                ensure_compact_prepared_dataset_manifest(
+                    resolved_dataset_manifest,
+                    status_reporter=_emit_cli_status,
+                )
+            )
     examples = _resolve_duration_sweep_examples(args)
     effective_parallelism = _resolve_duration_sweep_parallelism(
         requested_parallelism=int(args.parallelism),

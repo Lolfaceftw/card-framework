@@ -26,6 +26,8 @@ from card_framework.benchmark.summarizer_critic.sporc.runner import (
     _execute_sample,
     _evaluate_sample_preflight,
     _initialize_shared_sample_queue,
+    _initialize_shared_sample_queue_from_manifest,
+    _load_shared_sample,
     _normalize_max_iterations,
     _mark_shared_sample_completed,
     _open_shared_sample_queue_connection,
@@ -89,6 +91,34 @@ def _write_transcript(
         ),
         encoding="utf-8",
     )
+
+
+def _write_prepared_manifest_with_sidecar(
+    manifest_path: Path,
+    *,
+    samples: list[PreparedBenchmarkSample],
+) -> Path:
+    samples_path = manifest_path.parent / "samples.jsonl.gz"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(samples_path, "wt", encoding="utf-8") as handle:
+        for sample in samples:
+            handle.write(json.dumps(asdict(sample)))
+            handle.write("\n")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_full",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "full",
+                "episode_data_path": str(manifest_path.parent / "episodeLevelData.jsonl.gz"),
+                "turn_data_path": str(manifest_path.parent / "speakerTurnData.jsonl.gz"),
+                "sample_count": len(samples),
+                "samples_path": str(samples_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
 
 
 def _write_empty_transcript(path: Path) -> None:
@@ -934,6 +964,46 @@ def test_shared_sample_queue_replacement_exclusion_frees_one_retained_slot(
             )
             == "sample-c"
         )
+    finally:
+        connection.close()
+
+
+def test_shared_sample_queue_manifest_catalog_loads_only_claimed_sample(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_prepared_manifest_with_sidecar(
+        tmp_path / "prepared_full" / "manifest.json",
+        samples=[
+            _sample("sample-a", transcript_path=str(tmp_path / "a.json")),
+            _sample("sample-b", transcript_path=str(tmp_path / "b.json")),
+            _sample("sample-c", transcript_path=str(tmp_path / "c.json")),
+        ],
+    )
+    connection = _open_shared_sample_queue_connection(tmp_path / "shared_queue")
+    try:
+        sample_order, target_sample_count = _initialize_shared_sample_queue_from_manifest(
+            connection,
+            manifest_path=manifest_path,
+            requested_target_sample_count=2,
+            sample_seed=None,
+        )
+
+        assert sample_order == ["sample-a", "sample-b", "sample-c"]
+        assert target_sample_count == 2
+
+        claimed_sample_id = _claim_next_shared_sample_id(
+            connection,
+            worker_label="worker-1",
+            worker_pid=101,
+        )
+
+        assert claimed_sample_id == "sample-a"
+        claimed_sample = _load_shared_sample(
+            connection,
+            sample_id=claimed_sample_id,
+        )
+        assert claimed_sample.sample_id == "sample-a"
+        assert claimed_sample.transcript_path == str(tmp_path / "a.json")
     finally:
         connection.close()
 

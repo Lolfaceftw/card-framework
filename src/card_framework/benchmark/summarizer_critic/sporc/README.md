@@ -169,6 +169,7 @@ Default roots:
 - full manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/manifest.json`
 - full samples sidecar: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/samples.jsonl.gz`
 - curated long-form manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json`
+- auto-generated compact execution manifest sibling: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.compact.json`
 - curated long-form audit: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_audit.json`
 - human sampling sessions: `artifacts/summarizer_critic_benchmark/sporc_human_sampling`
 - automatic LLM sampling runs: `artifacts/summarizer_critic_benchmark/sporc_llm_sampling`
@@ -527,9 +528,11 @@ Important behavior:
 - transcript-only runs still start from the prepared SPoRC transcript, but they now write a normalized working copy under `sporc_runs/<run_id>/working_transcripts/` before the summarizer-critic loop starts; that working copy only applies lossless cleanup and uncertainty tagging, not speaker reassignment.
 - use `--dataset-manifest` with the curated long-form manifest for `5m` and `15m` benchmark runs.
 - `--max-samples` is an exact retained-sample target. If one candidate is excluded for infra-only reasons, the runner keeps going until it retains the requested count or exhausts the manifest.
+- `execute` and `duration-sweep` now auto-compact large inline manifests into sibling `*.compact.json` plus `*.compact.samples.jsonl.gz` files before heavy worker startup, so repeated benchmark children do not all reparse the original inline `samples` array.
 - replacement-eligible outcomes are infra-only: `preflight_failed`, `startup_unavailable`, `connection_unavailable`, `stage_timeout`, and resume/watchdog orphan failures.
 - startup or connection-unavailable failures retry the same sample up to two additional times before that sample is excluded and replaced by the next deterministic candidate.
 - normal benchmark failures after the sample actually ran still count toward the retained target.
+- sweep workers coordinated through the shared SQLite queue now load the claimed sample payload from SQLite on demand instead of materializing the full prepared dataset in every child process.
 - direct `execute` runs launched from a real terminal now stream live markdown-rendered panels for the Summarizer, Critic, and Judge, and each panel appears as soon as that agent request starts so long-prefill calls no longer look idle; piped or supervised runs still fall back to plain streamed `[THINKING]` and `[CONTENT]` text.
 - `--duration-preset` and `--target-seconds-override` are mutually exclusive.
 
