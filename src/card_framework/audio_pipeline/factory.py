@@ -357,8 +357,8 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
                 asr_cfg.get("model", "ibm-granite/granite-4.0-1b-speech")
             ),
             language=(str(asr_cfg.get("language", "en")).strip() or "en"),
-            chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 30)),
-            chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 5)),
+            chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 25)),
+            chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 2)),
             max_new_tokens=int(asr_cfg.get("max_new_tokens", 200)),
             enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
             require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),

@@ -264,7 +264,7 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="conf/config.yaml">Canonical human-edited runtime config for source checkouts. It keeps the provider choice small through `selection` plus `profiles`, while real secrets come from `.env` rather than tracked YAML. Stage-1 now defaults `audio.separation` to windowed Demucs (`600s` windows, `5s` context) and `audio.asr.provider` to `granite_speech` with the IBM Granite Speech model and `30s` chunking.</file>
+      <file path="conf/config.yaml">Canonical human-edited runtime config for source checkouts. It keeps the provider choice small through `selection` plus `profiles`, while real secrets come from `.env` rather than tracked YAML. Stage-1 now defaults `audio.separation` to windowed Demucs (`600s` windows, `5s` context) and `audio.asr.provider` to `granite_speech` with the IBM Granite Speech model and `25s` chunking plus `2s` overlap.</file>
       <file path="src/card_framework/config/config.yaml">Bundled fallback runtime config shipped with the installed package. Keep it functionally aligned with `conf/config.yaml`, including the Demucs windowing defaults and Granite Speech ASR defaults.</file>
       <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa, including `deepseek_chat` for `deepseek-chat` and `deepseek_judge` for `deepseek-reasoner` when running reference-free judge sweeps.</file>
       <file path="src/card_framework/benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts. The benchmark vLLM API key is env-backed now instead of being stored literally in YAML.</file>
@@ -347,7 +347,7 @@
       <note>When CLI overrides do not specify `audio.voice_clone.enabled`, `audio.interjector.enabled`, or `audio.speaker_samples.enabled`, `card_framework.cli.setup_and_run` now respects the defaults declared in the active runtime config, which is `conf/config.yaml` in a source checkout and `src/card_framework/config/config.yaml` in packaged contexts.</note>
       <note>`card_framework.cli.setup_and_run` now skips IndexTTS repo sync, nested uv sync, and model provisioning only when neither final synthesis nor the legacy calibration-backed estimate path needs the voice-clone runtime.</note>
       <note>Use audio.speaker_samples.defer_until_voice_clone=true when time-to-first-summary matters more than precomputing speaker sample artifacts ahead of live drafting or stage-3 rendering.</note>
-      <note>The default stage-1 ASR path is now Granite Speech with `30s` chunks, `5s` overlap, and fail-fast model/runtime errors. `faster_whisper` remains available only when selected explicitly in config.</note>
+      <note>The default stage-1 ASR path is now Granite Speech with `25s` chunks, `2s` overlap, and fail-fast model/runtime errors. `faster_whisper` remains available only when selected explicitly in config.</note>
       <note>The default stage-1 separation path is now windowed Demucs with `audio.separation.window_length_seconds=600` and `audio.separation.window_context_seconds=5`, which trades some extra runtime for much lower peak RAM on long recordings.</note>
     </commandNotes>
   </section>

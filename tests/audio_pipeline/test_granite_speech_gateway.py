@@ -108,7 +108,7 @@ def test_granite_transcribe_chunks_audio_and_reports_progress(
         "segment 2/3",
         "segment 3/3",
     ]
-    assert [update.processed_audio_ms for update in updates] == [30_000, 55_000, 70_000]
+    assert [update.processed_audio_ms for update in updates] == [25_000, 48_000, 70_000]
     assert [segment.text for segment in result.segments] == [
         "hello there",
         "general kenobi",

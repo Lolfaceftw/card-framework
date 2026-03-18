@@ -274,8 +274,8 @@ def test_factory_builds_granite_transcriber_defaults() -> None:
 
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert orchestrator.transcriber.model_name == "ibm-granite/granite-4.0-1b-speech"
-    assert orchestrator.transcriber.chunk_length_seconds == 30
-    assert orchestrator.transcriber.chunk_overlap_seconds == 5
+    assert orchestrator.transcriber.chunk_length_seconds == 25
+    assert orchestrator.transcriber.chunk_overlap_seconds == 2
     assert orchestrator.transcriber.max_new_tokens == 200
     assert orchestrator.transcriber.language == "en"
 

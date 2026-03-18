@@ -92,8 +92,8 @@ audio:
   asr:
     provider: "granite_speech"
     model: "ibm-granite/granite-4.0-1b-speech"
-    chunk_length_seconds: 30
-    chunk_overlap_seconds: 5
+    chunk_length_seconds: 25
+    chunk_overlap_seconds: 2
     max_new_tokens: 200
     language: "en"
     forced_alignment:
