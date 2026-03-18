@@ -71,6 +71,12 @@ def test_factory_builds_default_strategies() -> None:
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is False
+    assert orchestrator.diarizer.vad_onset == pytest.approx(0.8)
+    assert orchestrator.diarizer.vad_offset == pytest.approx(0.6)
+    assert orchestrator.diarizer.vad_pad_onset == pytest.approx(0.1)
+    assert orchestrator.diarizer.vad_pad_offset == pytest.approx(0.0)
+    assert orchestrator.diarizer.vad_min_duration_on == pytest.approx(0.2)
+    assert orchestrator.diarizer.vad_min_duration_off == pytest.approx(0.6)
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
 
 
@@ -151,6 +157,30 @@ def test_factory_allows_explicit_single_speaker_fallback_opt_in() -> None:
 
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is True
+
+
+def test_factory_builds_nemo_vad_postprocessing_overrides() -> None:
+    diarizer = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo",
+                "vad_onset": 0.75,
+                "vad_offset": 0.55,
+                "vad_pad_onset": 0.05,
+                "vad_pad_offset": 0.0,
+                "vad_min_duration_on": 0.3,
+                "vad_min_duration_off": 0.7,
+            }
+        }
+    )
+
+    assert isinstance(diarizer, NemoSpeakerDiarizer)
+    assert diarizer.vad_onset == pytest.approx(0.75)
+    assert diarizer.vad_offset == pytest.approx(0.55)
+    assert diarizer.vad_pad_onset == pytest.approx(0.05)
+    assert diarizer.vad_pad_offset == pytest.approx(0.0)
+    assert diarizer.vad_min_duration_on == pytest.approx(0.3)
+    assert diarizer.vad_min_duration_off == pytest.approx(0.7)
 
 
 def test_factory_builds_pyannote_community1_diarizer() -> None:

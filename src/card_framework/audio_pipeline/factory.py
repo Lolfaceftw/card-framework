@@ -322,6 +322,23 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _optional_float(value: Any) -> float | None:
+    """Return float when configured, otherwise None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return float(value)
+
+
+def _configured_float(value: Any, *, default: float) -> float:
+    """Return configured float or a supplied default when omitted."""
+    parsed = _optional_float(value)
+    if parsed is None:
+        return default
+    return parsed
+
+
 def _build_separator(
     *,
     separation_cfg: Mapping[str, Any],
@@ -410,6 +427,24 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
             max_speakers=_optional_int(diarization_cfg.get("max_speakers")),
             allow_single_speaker_fallback=bool(
                 diarization_cfg.get("allow_single_speaker_fallback", False)
+            ),
+            vad_onset=_configured_float(diarization_cfg.get("vad_onset"), default=0.8),
+            vad_offset=_configured_float(diarization_cfg.get("vad_offset"), default=0.6),
+            vad_pad_onset=_configured_float(
+                diarization_cfg.get("vad_pad_onset"),
+                default=0.1,
+            ),
+            vad_pad_offset=_configured_float(
+                diarization_cfg.get("vad_pad_offset"),
+                default=0.0,
+            ),
+            vad_min_duration_on=_configured_float(
+                diarization_cfg.get("vad_min_duration_on"),
+                default=0.2,
+            ),
+            vad_min_duration_off=_configured_float(
+                diarization_cfg.get("vad_min_duration_off"),
+                default=0.6,
             ),
         )
     if provider in {"pyannote", "pyannote_community1"}:

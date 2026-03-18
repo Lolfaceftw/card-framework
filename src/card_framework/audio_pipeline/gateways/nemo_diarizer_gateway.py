@@ -42,6 +42,12 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         max_speakers: int | None = None,
         min_speakers: int | None = None,
         allow_single_speaker_fallback: bool = False,
+        vad_onset: float = 0.8,
+        vad_offset: float = 0.6,
+        vad_pad_onset: float = 0.1,
+        vad_pad_offset: float = 0.0,
+        vad_min_duration_on: float = 0.2,
+        vad_min_duration_off: float = 0.6,
     ) -> None:
         self.msdd_model = msdd_model
         self.vad_model = vad_model
@@ -49,6 +55,12 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         self.max_speakers = max_speakers
         self.min_speakers = min_speakers
         self.allow_single_speaker_fallback = allow_single_speaker_fallback
+        self.vad_onset = vad_onset
+        self.vad_offset = vad_offset
+        self.vad_pad_onset = vad_pad_onset
+        self.vad_pad_offset = vad_pad_offset
+        self.vad_min_duration_on = vad_min_duration_on
+        self.vad_min_duration_off = vad_min_duration_off
 
     def diarize(
         self,
@@ -247,9 +259,13 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
 
         cfg.diarizer.vad.model_path = self.vad_model
         cfg.diarizer.vad.external_vad_manifest = None
-        cfg.diarizer.vad.parameters.onset = 0.8
-        cfg.diarizer.vad.parameters.offset = 0.6
-        cfg.diarizer.vad.parameters.pad_offset = -0.05
+        vad_parameters = cfg.diarizer.vad.parameters
+        vad_parameters.onset = float(self.vad_onset)
+        vad_parameters.offset = float(self.vad_offset)
+        vad_parameters.pad_onset = float(self.vad_pad_onset)
+        vad_parameters.pad_offset = float(self.vad_pad_offset)
+        vad_parameters.min_duration_on = float(self.vad_min_duration_on)
+        vad_parameters.min_duration_off = float(self.vad_min_duration_off)
 
         cfg.diarizer.speaker_embeddings.model_path = self.speaker_embedding_model
         cfg.diarizer.msdd_model.model_path = self.msdd_model

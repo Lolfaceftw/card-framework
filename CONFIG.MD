@@ -44,6 +44,26 @@ so the host checkout does not receive Linux virtual environments.
 For the full container workflow and Windows + NeMo guidance, see
 [`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md).
 
+## Session Resume
+
+`card_framework.cli.setup_and_run` now creates a UUID-backed pipeline session
+for each wrapper-managed run and persists it in
+`artifacts/pipeline_sessions/sessions.sqlite3`.
+
+- The wrapper prints the `session_id` at the end of the run.
+- Resume with `--resume-session <uuid>`.
+- Resume is stage-level only: if transcription, summarization, voice cloning, or
+  interjection was interrupted, the pipeline reruns that whole stage instead of
+  trying to continue from the middle of a chunk or synth call.
+- The wrapper checkpoints the final summary for resume under
+  `artifacts/pipeline_sessions/<session_id>/summary.xml` while still mirroring
+  the latest summary to workspace-root `summary.xml`.
+
+The `session.*` config keys in `conf/config.yaml` and
+`src/card_framework/config/config.yaml` are primarily wrapper-managed. Most
+operators should not set them by hand unless they are integrating the runtime
+outside `setup_and_run`.
+
 ## What To Edit
 
 Most day-to-day changes happen in this block:
@@ -103,13 +123,41 @@ audio:
 ```
 
 - `granite_speech` is the default ASR backend for new runs.
-- The runtime chunks preprocessed audio into `30s` windows with `5s` overlap.
+- The runtime chunks preprocessed audio into `25s` windows with `2s` overlap.
 - Stage-1 now emits timed Granite model loading messages and inline
   transcription progress such as `segment 2/9` plus an ETA on the first run
   from the configured/default audio ETA profile, then refines later runs with
   learned stage history.
 - `faster_whisper` is still supported, but it is now an explicit opt-in
   provider instead of the default.
+
+The current NeMo diarization defaults are:
+
+```yaml
+audio:
+  diarization:
+    provider: "nemo"
+    nemo_model: "diar_msdd_telephonic"
+    vad_model: "vad_multilingual_marblenet"
+    speaker_embedding_model: "titanet_large"
+    min_speakers:
+    max_speakers:
+    allow_single_speaker_fallback: false
+    vad_onset: 0.8
+    vad_offset: 0.6
+    vad_pad_onset: 0.1
+    vad_pad_offset: 0.0
+    vad_min_duration_on: 0.2
+    vad_min_duration_off: 0.6
+```
+
+- Leave `min_speakers` and `max_speakers` blank when episodes can include a
+  variable number of guests.
+- The `vad_*` keys are NeMo-only tuning controls for boundary sensitivity and
+  micro-turn suppression.
+- The current first-pass podcast experiment removes the negative NeMo
+  `pad_offset`, deletes sub-`0.2s` speech bursts, and merges sub-`0.6s`
+  nonspeech gaps without constraining speaker count.
 
 ## Built-In LLM Profiles
 

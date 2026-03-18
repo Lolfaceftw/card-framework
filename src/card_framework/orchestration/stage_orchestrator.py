@@ -30,9 +30,16 @@ from card_framework.audio_pipeline.voice_clone_orchestrator import (
 )
 from card_framework.shared.events import event_bus
 from card_framework.runtime.loop_orchestrator import Orchestrator
+from card_framework.runtime.pipeline_sessions import (
+    PipelineSessionStore,
+    PipelineStageName,
+)
 from card_framework.runtime.pipeline_plan import PipelineStagePlan
 from card_framework.shared.summary_xml import count_summary_turns, parse_summary_xml
-from card_framework.shared.summary_output import write_summary_xml_to_workspace
+from card_framework.shared.summary_output import (
+    write_summary_xml,
+    write_summary_xml_to_workspace,
+)
 from card_framework.orchestration.transcript import Transcript, TranscriptLike, coerce_transcript
 
 
@@ -59,6 +66,9 @@ class StageOrchestrator:
     voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
     loop_memory_artifact_path: Path | None = None
     live_draft_audio_enabled: bool = False
+    session_store: PipelineSessionStore | None = None
+    session_id: str = ""
+    session_summary_output_path: Path | None = None
 
     async def run(
         self,
@@ -85,6 +95,7 @@ class StageOrchestrator:
 
     def _run_stage_three_only(self, *, transcript: Transcript) -> None:
         """Run stage-3 voice cloning using a pre-existing summary XML file."""
+        self._mark_stage_started("stage-3")
         if self.voice_clone_orchestrator is None:
             raise ValueError(
                 "audio.voice_clone.enabled must be true when "
@@ -107,7 +118,7 @@ class StageOrchestrator:
                 f"Final summary file is empty: {self.stage_plan.final_summary_path}"
             )
 
-        summary_path = write_summary_xml_to_workspace(final_summary, self.project_root)
+        summary_path = self._write_summary_outputs(final_summary)
         event_bus.publish(
             "status_message",
             f"Saved summary to {summary_path}",
@@ -129,6 +140,10 @@ class StageOrchestrator:
                 summary_xml=final_summary,
                 transcript=transcript,
             )
+        self._mark_stage_completed(
+            "stage-3",
+            detail={"manifest_path": str(voice_clone_result.manifest_path)},
+        )
         self._run_interjector_stage(
             summary_xml=final_summary,
             voice_clone_result=voice_clone_result,
@@ -136,6 +151,7 @@ class StageOrchestrator:
 
     def _run_stage_four_only(self) -> None:
         """Run stage-4 interjection mixing from existing stage-3 artifacts."""
+        self._mark_stage_started("stage-4")
         if self.interjector_orchestrator is None:
             raise ValueError(
                 "audio.interjector.enabled must be true when "
@@ -164,7 +180,7 @@ class StageOrchestrator:
                 f"Final summary file is empty: {self.stage_plan.final_summary_path}"
             )
 
-        summary_path = write_summary_xml_to_workspace(final_summary, self.project_root)
+        summary_path = self._write_summary_outputs(final_summary)
         event_bus.publish("status_message", f"Saved summary to {summary_path}")
         event_bus.publish(
             "status_message",
@@ -180,6 +196,7 @@ class StageOrchestrator:
 
     async def _run_full_loop(self, *, full_text: str, transcript: Transcript) -> None:
         """Run the full summarizer-critic loop until convergence or max iterations."""
+        self._mark_stage_started("stage-2")
         prepared_transcript = transcript
         speaker_samples_manifest_path: Path | None = None
         draft_audio_state_path: Path | None = None
@@ -232,41 +249,51 @@ class StageOrchestrator:
             "Orchestrator",
             f"Final Summary:\n```xml\n{result}\n```",
         )
-        summary_path = write_summary_xml_to_workspace(result, self.project_root)
+        summary_path = self._write_summary_outputs(result)
         event_bus.publish(
             "status_message",
             f"Saved final summary to {summary_path}",
         )
-        if (
-            self.live_draft_audio_enabled
-            and self.voice_clone_orchestrator is not None
-            and draft_audio_state_path is not None
-            and speaker_samples_manifest_path is not None
-        ):
-            event_bus.publish(
-                "system_message",
-                (
-                    "Finalizing live draft voice-clone manifest from rendered turn "
-                    f"audio in {draft_audio_state_path}"
-                ),
-            )
-            live_session = LiveDraftVoiceCloneSession.from_orchestrator(
-                orchestrator=self.voice_clone_orchestrator,
-                state_path=draft_audio_state_path,
-                speaker_samples_manifest_path=speaker_samples_manifest_path,
-            )
-            voice_clone_result = live_session.finalize()
-            event_bus.publish(
-                "status_message",
-                (
-                    f"Voice cloning complete: {len(voice_clone_result.artifacts)} artifacts "
-                    f"written to {voice_clone_result.output_dir}"
-                ),
-            )
-        else:
-            voice_clone_result = self._run_voice_clone_stage(
-                summary_xml=result,
-                transcript=prepared_transcript,
+        self._mark_stage_completed(
+            "stage-2",
+            detail={"summary_path": str(summary_path)},
+        )
+        voice_clone_result: VoiceCloneRunResult | None = None
+        if self.voice_clone_orchestrator is not None:
+            self._mark_stage_started("stage-3")
+            if (
+                self.live_draft_audio_enabled
+                and draft_audio_state_path is not None
+                and speaker_samples_manifest_path is not None
+            ):
+                event_bus.publish(
+                    "system_message",
+                    (
+                        "Finalizing live draft voice-clone manifest from rendered turn "
+                        f"audio in {draft_audio_state_path}"
+                    ),
+                )
+                live_session = LiveDraftVoiceCloneSession.from_orchestrator(
+                    orchestrator=self.voice_clone_orchestrator,
+                    state_path=draft_audio_state_path,
+                    speaker_samples_manifest_path=speaker_samples_manifest_path,
+                )
+                voice_clone_result = live_session.finalize()
+                event_bus.publish(
+                    "status_message",
+                    (
+                        f"Voice cloning complete: {len(voice_clone_result.artifacts)} artifacts "
+                        f"written to {voice_clone_result.output_dir}"
+                    ),
+                )
+            else:
+                voice_clone_result = self._run_voice_clone_stage(
+                    summary_xml=result,
+                    transcript=prepared_transcript,
+                )
+            self._mark_stage_completed(
+                "stage-3",
+                detail={"manifest_path": str(voice_clone_result.manifest_path)},
             )
         self._run_interjector_stage(
             summary_xml=result,
@@ -585,6 +612,7 @@ class StageOrchestrator:
         """Run Stage-4 interjection mixing when configured."""
         if self.interjector_orchestrator is None:
             return None
+        self._mark_stage_started("stage-4")
 
         manifest_path = voice_clone_manifest_path
         if manifest_path is None and voice_clone_result is not None:
@@ -606,6 +634,10 @@ class StageOrchestrator:
             summary_xml=summary_xml,
             voice_clone_manifest_path=manifest_path,
         )
+        self._mark_stage_completed(
+            "stage-4",
+            detail={"manifest_path": str(result.manifest_path)},
+        )
         event_bus.publish(
             "status_message",
             (
@@ -614,4 +646,35 @@ class StageOrchestrator:
             ),
         )
         return result
+
+    def _write_summary_outputs(self, summary_xml: str) -> Path:
+        """Persist summary XML to the workspace mirror and optional session checkpoint."""
+        summary_path = write_summary_xml_to_workspace(summary_xml, self.project_root)
+        if self.session_summary_output_path is not None:
+            write_summary_xml(summary_xml, self.session_summary_output_path)
+        return summary_path
+
+    def _mark_stage_started(self, stage_name: PipelineStageName) -> None:
+        """Record that one stage has started when session persistence is enabled."""
+        if self.session_store is None or not self.session_id:
+            return
+        self.session_store.mark_stage_started(
+            session_id=self.session_id,
+            stage_name=stage_name,
+        )
+
+    def _mark_stage_completed(
+        self,
+        stage_name: PipelineStageName,
+        *,
+        detail: dict[str, str] | None = None,
+    ) -> None:
+        """Record that one stage has completed when session persistence is enabled."""
+        if self.session_store is None or not self.session_id:
+            return
+        self.session_store.mark_stage_completed(
+            session_id=self.session_id,
+            stage_name=stage_name,
+            detail=detail,
+        )
 

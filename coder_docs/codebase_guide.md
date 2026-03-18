@@ -82,7 +82,8 @@
       <step>When live drafting is enabled and voice cloning is active, skip calibration entirely and let the summarizer and critic consume actual rendered turn durations from the persisted live-draft sidecar. When live drafting is disabled, ensure the project-level voice-clone calibration artifact exists before duration-aware summarization or critic evaluation. The calibration path can reuse an existing speaker-sample manifest or bootstrap one from transcript or audio context, but it must be regenerated when the active manifest or calibrated speaker coverage changes.</step>
       <step>When `orchestrator.loop_memory.artifact_path` is configured, the stage orchestrator scopes summarizer loop-memory artifacts by transcript hash and duration target so repeated failed critic remedies can be surfaced on later revise passes instead of being retried verbatim.</step>
       <step>Instantiate shared or per-stage LLM providers, including the optional stage_llm.interjector override, embedding provider, transcript index, local A2A apps, and the orchestrator stack.</step>
-      <step>Run the stage orchestrator, persist final summary XML to summary.xml, optionally finalize or render stage-3 voice cloning, and optionally run the stage-4 interjector.</step>
+      <step>Run the stage orchestrator, persist final summary XML to workspace-root `summary.xml`, also checkpoint the same XML under the active pipeline session when session persistence is enabled, optionally finalize or render stage-3 voice cloning, and optionally run the stage-4 interjector.</step>
+      <step>`card_framework.cli.setup_and_run` now creates UUID-backed pipeline sessions in `artifacts/pipeline_sessions/sessions.sqlite3`, records stage boundaries as the runtime enters and completes stage-1 through stage-4, and resumes interrupted runs from the next incomplete stage through `--resume-session &lt;uuid&gt;` instead of trying to continue from the middle of an in-flight chunk or synth call.</step>
     </runtimeFlow>
     <retrievalPolicy>
       <rule>When a real embedding provider is configured, transcript segments are indexed into embeddings.TranscriptIndex and retrieved through the retrieval agent.</rule>
@@ -141,7 +142,7 @@
       <typedBoundary>orchestration.transcript.Transcript and TranscriptSegment are the typed domain DTOs used by the stage orchestrator.</typedBoundary>
     </transcriptContract>
     <summaryContract>
-      <shape>The final summary is XML text persisted to workspace-root summary.xml through summary_output.write_summary_xml_to_workspace.</shape>
+      <shape>The final summary is XML text persisted to workspace-root `summary.xml` through `summary_output.write_summary_xml_to_workspace`, while resumable wrapper runs also checkpoint the same content under `artifacts/pipeline_sessions/&lt;session_id&gt;/summary.xml` for stage-level resume planning.</shape>
       <turnContract>Each speaker turn is stored as XML with an optional `emo_preset` attribute. Missing attributes remain backward-compatible and default to `neutral`.</turnContract>
       <consumer>Stage-3 voice cloning uses summary XML speaker turns to decide how many voice-clone artifacts to generate and which speaker samples to match; stage-4 interjection reuses the same summary XML plus the stage-3 manifest to place overlaps against synthesized audio timing.</consumer>
       <assumption>Critic logic and downstream processing expect speaker-tagged XML blocks rather than plain prose summaries.</assumption>
@@ -183,7 +184,7 @@
       <adapter>Demucs handles source separation when separation.provider=demucs.</adapter>
       <adapter>Granite Speech is the default transcription adapter, wired through `audio_pipeline.gateways.granite_speech_gateway.GraniteSpeechTranscriber` and loaded lazily through Transformers plus torchaudio.</adapter>
       <adapter>Faster-Whisper remains available as an explicit opt-in transcription backend through `audio.asr.provider=faster_whisper`.</adapter>
-      <adapter>NeMo MSDD remains the default diarization backend, with optional single-speaker fallback behavior controlled in config.</adapter>
+      <adapter>NeMo MSDD remains the default diarization backend, with optional single-speaker fallback behavior and NeMo-specific VAD onset, offset, padding, and minimum-duration controls exposed through config for diarization boundary tuning.</adapter>
       <adapter>Alternative diarization backends now include pyannote Community-1 plus NeMo Sortformer offline and streaming checkpoints, all wired through `audio_pipeline.factory.build_speaker_diarizer` and selected by `audio.diarization.provider`.</adapter>
       <adapter>FFmpeg-backed export is used for speaker sample generation.</adapter>
       <adapter>IndexTTS and passthrough voice-clone providers are composed through the voice-clone gateway layer, and the IndexTTS gateway exposes explicit runtime-release hooks for module offload paths plus repo-level generation tuning such as the default low-latency `num_beams=1` setting.</adapter>
@@ -264,8 +265,8 @@
 
   <section id="providers-config-and-commands" title="Providers, Config, And Commands">
     <configurationFiles>
-      <file path="conf/config.yaml">Canonical human-edited runtime config for source checkouts. It keeps the provider choice small through `selection` plus `profiles`, while real secrets come from `.env` rather than tracked YAML. Stage-1 now defaults `audio.separation` to windowed Demucs (`600s` windows, `5s` context) and `audio.asr.provider` to `granite_speech` with the IBM Granite Speech model and `25s` chunking plus `2s` overlap.</file>
-      <file path="src/card_framework/config/config.yaml">Bundled fallback runtime config shipped with the installed package. Keep it functionally aligned with `conf/config.yaml`, including the Demucs windowing defaults and Granite Speech ASR defaults.</file>
+      <file path="conf/config.yaml">Canonical human-edited runtime config for source checkouts. It keeps the provider choice small through `selection` plus `profiles`, while real secrets come from `.env` rather than tracked YAML. Stage-1 now defaults `audio.separation` to windowed Demucs (`600s` windows, `5s` context), `audio.asr.provider` to `granite_speech` with the IBM Granite Speech model and `25s` chunking plus `2s` overlap, and the default NeMo diarizer path to explicit VAD boundary-tuning keys such as `vad_pad_offset` and `vad_min_duration_on/off`.</file>
+      <file path="src/card_framework/config/config.yaml">Bundled fallback runtime config shipped with the installed package. Keep it functionally aligned with `conf/config.yaml`, including the Demucs windowing defaults, Granite Speech ASR defaults, and the exposed NeMo VAD tuning keys.</file>
       <file path="src/card_framework/benchmark/provider_profiles.yaml">Named provider profiles used by benchmark.run and benchmark.qa, including `deepseek_chat` for `deepseek-chat` and `deepseek_judge` for `deepseek-reasoner` when running reference-free judge sweeps.</file>
       <file path="src/card_framework/benchmark/qa_config.yaml">QA benchmark settings for vLLM connection details, input guard, corrector, evaluator runtime, and timeouts. The benchmark vLLM API key is env-backed now instead of being stored literally in YAML.</file>
       <file path="CONFIG.MD">Operator-facing guide for `.env`, provider profile names, stage override selection, and common runtime configuration examples.</file>
@@ -329,6 +330,7 @@
       <note>`audio.diarization.provider` now supports the default NeMo MSDD path, `pyannote_community1`, `nemo_sortformer_offline`, `nemo_sortformer_streaming`, and the existing `single_speaker` fallback backend.</note>
       <note>`card_framework.cli.calibrate` is the project-level one-time calibration helper. It prints the persisted preset/WPM mapping and can bootstrap speaker samples from a manifest, transcript, or raw audio path.</note>
       <note>`card_framework.cli.setup_and_run` is the preferred convenience wrapper when the task involves IndexTTS setup and full end-to-end stage execution.</note>
+      <note>`card_framework.cli.setup_and_run` now assigns each wrapper-managed run a UUID session, persists stage completion state in `artifacts/pipeline_sessions/sessions.sqlite3`, prints that `session_id` in its final summary, and resumes interrupted runs from the next incomplete stage with `--resume-session &lt;uuid&gt;`.</note>
       <note>When `card_framework.cli.setup_and_run` enables terminal logging, it now leaves `logging.summarizer_critic_print_to_terminal` unset so the live Summarizer and Critic reasoning/content stream follows the repo logging config unless the caller explicitly disables it.</note>
       <note>`src/card_framework/shared/logger_utils.py` now uses Rich's `RichHandler` for the terminal logger path when `print_to_terminal` is enabled, so console logs are level-colored while the rotating file log remains plain structured text.</note>
       <note>The `LoggingLLMProvider` terminal path now logs concise message/tool/response summaries at `INFO` and reserves full prompt, tool-schema, and response payload dumps for `DEBUG`, so streamed runs stay readable while deeper payload inspection remains opt-in.</note>

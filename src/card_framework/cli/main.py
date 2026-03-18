@@ -51,6 +51,7 @@ from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.platform_support import apply_runtime_platform_fallbacks
 from card_framework.orchestration import StageOrchestrator
 from card_framework.runtime.loop_orchestrator import Orchestrator
+from card_framework.runtime.pipeline_sessions import PipelineSessionStore
 from card_framework.runtime.pipeline_plan import build_pipeline_stage_plan
 from card_framework.providers.logging_provider import LoggingLLMProvider
 from card_framework.providers.response_callbacks import RichConsoleResponseCallback
@@ -1297,6 +1298,30 @@ def main(cfg: DictConfig) -> None:
         str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
         base_dir=project_root,
     )
+    session_cfg_dict = _to_plain_dict(cfg.get("session", {}))
+    session_enabled = bool(session_cfg_dict.get("enabled", False))
+    session_id = str(session_cfg_dict.get("session_id", "")).strip()
+    session_store: PipelineSessionStore | None = None
+    session_summary_output_path: Path | None = None
+    if session_enabled:
+        if not session_id:
+            raise ValueError("session.session_id must be set when session.enabled=true.")
+        session_store_path_value = str(session_cfg_dict.get("store_path", "")).strip()
+        if not session_store_path_value:
+            raise ValueError(
+                "session.store_path must be set when session.enabled=true."
+            )
+        session_store = PipelineSessionStore(
+            resolve_path(session_store_path_value, base_dir=project_root)
+        )
+        session_summary_output_value = str(
+            session_cfg_dict.get("summary_output_path", "")
+        ).strip()
+        if session_summary_output_value:
+            session_summary_output_path = resolve_path(
+                session_summary_output_value,
+                base_dir=project_root,
+            )
     (
         build_audio_to_script_orchestrator,
         build_interjector_orchestrator,
@@ -1342,6 +1367,11 @@ def main(cfg: DictConfig) -> None:
             input_audio_path = candidate_audio_path
 
     if stage_plan.run_audio_stage:
+        if session_store is not None and session_id:
+            session_store.mark_stage_started(
+                session_id=session_id,
+                stage_name="stage-1",
+            )
         audio_path_value = str(audio_cfg_dict.get("audio_path", "")).strip()
         if not audio_path_value:
             raise ValueError(
@@ -1380,6 +1410,12 @@ def main(cfg: DictConfig) -> None:
             },
         )
         transcript_path = str(audio_stage_output.transcript_path)
+        if session_store is not None and session_id:
+            session_store.mark_stage_completed(
+                session_id=session_id,
+                stage_name="stage-1",
+                detail={"transcript_path": transcript_path},
+            )
     else:
         event_bus.publish(
             "system_message",
@@ -1899,6 +1935,9 @@ def main(cfg: DictConfig) -> None:
         voice_clone_gpu_heartbeat=voice_clone_gpu_heartbeat,
         loop_memory_artifact_path=loop_memory_artifact_path,
         live_draft_audio_enabled=live_draft_audio_enabled,
+        session_store=session_store,
+        session_id=session_id,
+        session_summary_output_path=session_summary_output_path,
     )
     try:
         asyncio.run(
@@ -1907,6 +1946,37 @@ def main(cfg: DictConfig) -> None:
                 retrieval_enabled=transcript_index is not None,
             )
         )
+        if session_store is not None and session_id:
+            resume_plan = session_store.compute_resume_plan(session_id=session_id)
+            if resume_plan.is_completed:
+                session_store.mark_session_completed(session_id=session_id)
+            else:
+                failure_message = (
+                    "Pipeline exited without completing all required stages. "
+                    f"Resume from {resume_plan.resume_stage}."
+                )
+                session_store.mark_session_failed(
+                    session_id=session_id,
+                    current_stage=None,
+                    reason=failure_message,
+                )
+                raise RuntimeError(failure_message)
+    except KeyboardInterrupt:
+        if session_store is not None and session_id:
+            session_store.mark_session_paused(
+                session_id=session_id,
+                current_stage=None,
+                reason="Pipeline interrupted by user.",
+            )
+        raise SystemExit(130) from None
+    except Exception as exc:
+        if session_store is not None and session_id:
+            session_store.mark_session_failed(
+                session_id=session_id,
+                current_stage=None,
+                reason=str(exc),
+            )
+        raise
     finally:
         audio_orchestrator._save_eta_profile(
             profile_path=eta_profile_path,

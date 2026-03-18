@@ -12,8 +12,13 @@ import shutil
 import subprocess
 import sys
 from typing import Any, Literal, Mapping, Sequence, TypeAlias, cast
+from uuid import uuid4
 
 from card_framework.runtime.bootstrap import ensure_index_tts_runtime
+from card_framework.runtime.pipeline_sessions import (
+    PipelineResumePlan,
+    PipelineSessionStore,
+)
 from card_framework.shared.paths import (
     DEFAULT_CONFIG_PATH as SHARED_DEFAULT_CONFIG_PATH,
     REPO_ROOT,
@@ -135,6 +140,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resume-session",
+        help="Resume a previously saved pipeline session by UUID.",
+    )
+    parser.add_argument(
         "--override",
         action="append",
         default=[],
@@ -224,6 +233,52 @@ def has_explicit_output_root() -> bool:
 def resolve_setup_state_path() -> Path:
     """Return the per-workspace setup-state JSON path."""
     return (resolve_workspace_root() / "artifacts" / "bootstrap" / "setup_state.json").resolve()
+
+
+def resolve_pipeline_session_store_path() -> Path:
+    """Return the SQLite database path used for pipeline session persistence."""
+    return (
+        resolve_output_root() / "artifacts" / "pipeline_sessions" / "sessions.sqlite3"
+    ).resolve()
+
+
+def resolve_pipeline_session_root(session_id: str) -> Path:
+    """Return the artifact root used for one pipeline session UUID."""
+    return (resolve_output_root() / "artifacts" / "pipeline_sessions" / session_id).resolve()
+
+
+def resolve_pipeline_session_summary_path(session_id: str) -> Path:
+    """Return the session-scoped summary checkpoint path for one UUID."""
+    return (resolve_pipeline_session_root(session_id) / "summary.xml").resolve()
+
+
+def build_pipeline_session_artifacts(*, run_id: str) -> dict[str, str]:
+    """Build the deterministic artifact path catalog for one pipeline session."""
+    if has_explicit_output_root():
+        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
+        transcript_path = (resolve_output_root() / "transcript.json").resolve()
+        workspace_summary_path = (resolve_output_root() / "summary.xml").resolve()
+    else:
+        workspace_root = resolve_workspace_root()
+        run_work_dir = (
+            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
+        ).resolve()
+        transcript_path = (
+            workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
+        ).resolve()
+        workspace_summary_path = (workspace_root / "summary.xml").resolve()
+    return {
+        "work_dir": str(run_work_dir),
+        "transcript_path": str(transcript_path),
+        "workspace_summary_path": str(workspace_summary_path),
+        "session_summary_path": str(resolve_pipeline_session_summary_path(run_id)),
+        "voice_clone_manifest_path": str(
+            (run_work_dir / "voice_clone" / "manifest.json").resolve()
+        ),
+        "interjector_manifest_path": str(
+            (run_work_dir / "interjector" / "interjector_manifest.json").resolve()
+        ),
+    }
 
 
 def resolve_root_project_dir() -> Path | None:
@@ -812,6 +867,47 @@ def normalize_cli_overrides(raw_overrides: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def validate_resume_session_inputs(
+    *,
+    resume_session: str | None,
+    voiceclone_from_summary: str | None,
+    audio_path: str | None,
+    pass_through_overrides: Sequence[str],
+) -> None:
+    """Reject resume inputs that would conflict with the stored session state."""
+    if not str(resume_session or "").strip():
+        return
+    if voiceclone_from_summary is not None:
+        raise BootstrapError(
+            step="input",
+            message="--resume-session cannot be combined with --voiceclone-from-summary.",
+        )
+    if audio_path is not None:
+        raise BootstrapError(
+            step="input",
+            message="--resume-session cannot be combined with --audio-path.",
+        )
+    conflicting_keys = {
+        "pipeline.start_stage",
+        "transcript_path",
+        "pipeline.final_summary_path",
+        "pipeline.voice_clone_manifest_path",
+    }
+    conflicting = [
+        override
+        for override in pass_through_overrides
+        if any(override.startswith(f"{key}=") for key in conflicting_keys)
+    ]
+    if conflicting:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "--resume-session cannot be combined with stage/input overrides: "
+                + ", ".join(conflicting)
+            ),
+        )
+
+
 def build_shortcut_overrides(
     *,
     voiceclone_from_summary: str | None,
@@ -973,6 +1069,28 @@ def _has_override_key(overrides: Sequence[str], key: str) -> bool:
     """Return whether overrides include an assignment for one key."""
     prefix = f"{key}="
     return any(override.startswith(prefix) for override in overrides)
+
+
+def _replace_or_append_override(
+    *,
+    overrides: list[str],
+    key: str,
+    value: str,
+) -> None:
+    """Replace one override in place using last-wins semantics."""
+    prefix = f"{key}="
+    replacement = f"{key}={value}"
+    for index in range(len(overrides) - 1, -1, -1):
+        if overrides[index].startswith(prefix):
+            overrides[index] = replacement
+            return
+    overrides.append(replacement)
+
+
+def _remove_override_key(*, overrides: list[str], key: str) -> None:
+    """Remove every override assignment for one key."""
+    prefix = f"{key}="
+    overrides[:] = [override for override in overrides if not override.startswith(prefix)]
 
 
 def resolve_repo_config_boolean(
@@ -1280,23 +1398,26 @@ def build_run_overrides(
     Returns:
         Ordered list of Hydra override key-value strings.
     """
+    session_artifacts = build_pipeline_session_artifacts(run_id=run_id)
+    run_work_dir = Path(session_artifacts["work_dir"]).resolve()
+    transcript_path = Path(session_artifacts["transcript_path"]).resolve()
     if has_explicit_output_root():
-        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
-        transcript_path = (resolve_output_root() / "transcript.json").resolve()
-        eta_store_path = (resolve_output_root() / "audio_stage" / "eta_history.sqlite3").resolve()
-    else:
-        workspace_root = resolve_workspace_root()
-        run_work_dir = (
-            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
-        ).resolve()
-        transcript_path = (
-            workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
-        ).resolve()
         eta_store_path = (
-            workspace_root / "artifacts" / "audio_stage" / "eta_history.sqlite3"
+            resolve_output_root() / "audio_stage" / "eta_history.sqlite3"
+        ).resolve()
+    else:
+        eta_store_path = (
+            resolve_workspace_root() / "artifacts" / "audio_stage" / "eta_history.sqlite3"
         ).resolve()
     overrides = [
         f"pipeline.start_stage={start_stage}",
+        "session.enabled=true",
+        f"session.session_id={run_id}",
+        f"session.store_path={_path_for_override(resolve_pipeline_session_store_path())}",
+        (
+            "session.summary_output_path="
+            f"{_path_for_override(Path(session_artifacts['session_summary_path']))}"
+        ),
         f"audio.work_dir={_path_for_override(run_work_dir)}",
         f"audio.eta.store_path={_path_for_override(eta_store_path)}",
         "audio.speaker_samples.enabled=true",
@@ -1335,6 +1456,79 @@ def build_run_overrides(
         )
     if audio_path is not None:
         overrides.append(f"audio.audio_path={_path_for_override(audio_path)}")
+    return overrides
+
+
+def build_pipeline_session_options(
+    *,
+    requested_start_stage: PipelineStartStage,
+    voice_clone_enabled: bool,
+    interjector_enabled: bool,
+    workspace_root: Path,
+    output_root: Path,
+) -> dict[str, Any]:
+    """Build the stored session options payload used for resume planning."""
+    return {
+        "requested_start_stage": requested_start_stage,
+        "voice_clone_enabled": voice_clone_enabled,
+        "interjector_enabled": interjector_enabled,
+        "workspace_root": str(workspace_root.resolve()),
+        "output_root": str(output_root.resolve()),
+    }
+
+
+def build_resume_overrides(plan: PipelineResumePlan) -> list[str]:
+    """Build the effective override list needed to resume one stored session."""
+    if plan.resume_stage is None:
+        raise BootstrapError(
+            step="input",
+            message=f"Pipeline session is already complete: {plan.session_id}",
+        )
+    overrides = list(plan.prepared_overrides)
+    _replace_or_append_override(
+        overrides=overrides,
+        key="pipeline.start_stage",
+        value=plan.resume_stage,
+    )
+    _remove_override_key(overrides=overrides, key="pipeline.final_summary_path")
+    _remove_override_key(overrides=overrides, key="pipeline.voice_clone_manifest_path")
+    transcript_path = plan.artifacts.get("transcript_path", "")
+    session_summary_path = plan.artifacts.get("session_summary_path", "")
+    voice_clone_manifest_path = plan.artifacts.get("voice_clone_manifest_path", "")
+    if plan.resume_stage in {"stage-2", "stage-3"} and transcript_path:
+        _replace_or_append_override(
+            overrides=overrides,
+            key="transcript_path",
+            value=_path_for_override(Path(transcript_path)),
+        )
+    if plan.resume_stage in {"stage-3", "stage-4"}:
+        if not session_summary_path:
+            raise BootstrapError(
+                step="input",
+                message=(
+                    "Cannot resume this session because its summary checkpoint path "
+                    "is missing."
+                ),
+            )
+        _replace_or_append_override(
+            overrides=overrides,
+            key="pipeline.final_summary_path",
+            value=_path_for_override(Path(session_summary_path)),
+        )
+    if plan.resume_stage == "stage-4":
+        if not voice_clone_manifest_path:
+            raise BootstrapError(
+                step="input",
+                message=(
+                    "Cannot resume this session because its voice-clone manifest "
+                    "checkpoint path is missing."
+                ),
+            )
+        _replace_or_append_override(
+            overrides=overrides,
+            key="pipeline.voice_clone_manifest_path",
+            value=_path_for_override(Path(voice_clone_manifest_path)),
+        )
     return overrides
 
 
@@ -1608,12 +1802,21 @@ def run_pipeline(*, uv_executable: str, overrides: Sequence[str]) -> None:
             *overrides,
         ]
     )
-    run_cmd(
-        step="pipeline_run",
-        command=command,
-        cwd=resolve_output_root(),
-        stream_output=True,
+    completed = subprocess.run(
+        command,
+        cwd=str(resolve_output_root()),
+        check=False,
+        text=True,
     )
+    if completed.returncode == 130:
+        raise KeyboardInterrupt
+    if completed.returncode != 0:
+        raise BootstrapError(
+            step="pipeline_run",
+            message=f"Command failed with exit code {completed.returncode}.",
+            command=tuple(command),
+            stderr_tail="See streamed command output above for details.",
+        )
 
 
 def run_calibration(
@@ -1674,24 +1877,18 @@ def print_summary(
     if run_id is None:
         return
 
-    if has_explicit_output_root():
-        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
-        transcript_path = (resolve_output_root() / "transcript.json").resolve()
-    else:
-        workspace_root = resolve_workspace_root()
-        run_work_dir = (
-            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
-        ).resolve()
-        transcript_path = (
-            workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
-        ).resolve()
+    artifacts = build_pipeline_session_artifacts(run_id=run_id)
+    run_work_dir = Path(artifacts["work_dir"]).resolve()
+    transcript_path = Path(artifacts["transcript_path"]).resolve()
     speaker_manifest = run_work_dir / "speaker_samples" / "manifest.json"
-    voice_clone_manifest = run_work_dir / "voice_clone" / "manifest.json"
-    interjector_manifest = run_work_dir / "interjector" / "interjector_manifest.json"
+    voice_clone_manifest = Path(artifacts["voice_clone_manifest_path"]).resolve()
+    interjector_manifest = Path(artifacts["interjector_manifest_path"]).resolve()
+    session_summary_path = Path(artifacts["session_summary_path"]).resolve()
 
-    print(f"run_id: {run_id}")
+    print(f"session_id: {run_id}")
     print(f"work_dir: {run_work_dir}")
     print(f"transcript: {transcript_path}")
+    print(f"session_summary: {session_summary_path}")
     print(f"speaker_samples_manifest: {speaker_manifest}")
     print(f"voice_clone_manifest: {voice_clone_manifest}")
     print(f"interjector_manifest: {interjector_manifest}")
@@ -1725,9 +1922,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     CONFIG_FILE_PATH = config_file_path
     records: list[StepRecord] = []
     run_id: str | None = None
+    session_store: PipelineSessionStore | None = None
+    resume_plan: PipelineResumePlan | None = None
 
     try:
         pass_through_overrides = normalize_cli_overrides(args.override)
+        validate_resume_session_inputs(
+            resume_session=args.resume_session,
+            voiceclone_from_summary=args.voiceclone_from_summary,
+            audio_path=args.audio_path,
+            pass_through_overrides=pass_through_overrides,
+        )
+        session_store = PipelineSessionStore(resolve_pipeline_session_store_path())
         preflight_shortcut_overrides: list[str] = []
         if args.voiceclone_from_summary is not None:
             preflight_shortcut_overrides.extend(
@@ -1737,30 +1943,62 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "audio.voice_clone.enabled=true",
                 ]
             )
-        effective_start_stage = resolve_bootstrap_start_stage(
-            shortcut_overrides=preflight_shortcut_overrides,
-            pass_through_overrides=pass_through_overrides,
-            cli_audio_path=args.audio_path,
-        )
+        if args.resume_session:
+            resume_plan = session_store.compute_resume_plan(
+                session_id=str(args.resume_session).strip()
+            )
+            run_id = resume_plan.session_id
+            if resume_plan.is_completed:
+                records.append(
+                    StepRecord(
+                        name="pipeline_run",
+                        status="skipped",
+                        detail=(
+                            f"Session {run_id} is already complete; no resume needed."
+                        ),
+                    )
+                )
+                print_summary(records=records, run_id=run_id)
+                return 0
+            effective_start_stage = resume_plan.resume_stage
+            if effective_start_stage is None:
+                raise BootstrapError(
+                    step="input",
+                    message=(
+                        "Resume planning did not resolve a next stage for session "
+                        f"{run_id}."
+                    ),
+                )
+        else:
+            effective_start_stage = resolve_bootstrap_start_stage(
+                shortcut_overrides=preflight_shortcut_overrides,
+                pass_through_overrides=pass_through_overrides,
+                cli_audio_path=args.audio_path,
+            )
         combined_bootstrap_overrides = [
             *preflight_shortcut_overrides,
             *pass_through_overrides,
         ]
+        effective_boolean_overrides = (
+            list(resume_plan.prepared_overrides)
+            if resume_plan is not None
+            else combined_bootstrap_overrides
+        )
         voice_clone_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.voice_clone.enabled",
             repo_key_path=("audio", "voice_clone", "enabled"),
             fallback=True,
         )
         live_draft_audio_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.voice_clone.live_drafting.enabled",
             repo_key_path=("audio", "voice_clone", "live_drafting", "enabled"),
             fallback=True,
         )
         live_draft_audio_enabled = voice_clone_enabled and live_draft_audio_enabled
         interjector_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.interjector.enabled",
             repo_key_path=("audio", "interjector", "enabled"),
             fallback=False,
@@ -1773,7 +2011,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             voice_clone_enabled or interjector_enabled or calibration_runtime_enabled
         )
         speaker_samples_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.speaker_samples.enabled",
             repo_key_path=("audio", "speaker_samples", "enabled"),
             fallback=True,
@@ -1896,24 +2134,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         print("[5/7] Resolve runtime input")
-        run_id = utc_now_compact()
-        shortcut_overrides = build_shortcut_overrides(
-            voiceclone_from_summary=args.voiceclone_from_summary,
-            run_id=run_id,
-        )
-        base_overrides = build_run_overrides(
-            run_id=run_id,
-            start_stage=effective_start_stage,
-            enable_voice_clone=voice_clone_enabled,
-            enable_interjector=interjector_enabled,
-        )
-        overrides = [*base_overrides, *shortcut_overrides, *pass_through_overrides]
-        stage_selection_detail = build_start_stage_selection_detail(
-            start_stage=effective_start_stage,
-            voiceclone_from_summary=args.voiceclone_from_summary,
-            pass_through_overrides=pass_through_overrides,
-            cli_audio_path=args.audio_path,
-        )
+        if resume_plan is not None:
+            run_id = resume_plan.session_id
+            overrides = build_resume_overrides(resume_plan)
+            stage_selection_detail = (
+                f"Resuming session {run_id} from {effective_start_stage}."
+            )
+        else:
+            run_id = str(uuid4())
+            shortcut_overrides = build_shortcut_overrides(
+                voiceclone_from_summary=args.voiceclone_from_summary,
+                run_id=run_id,
+            )
+            base_overrides = build_run_overrides(
+                run_id=run_id,
+                start_stage=effective_start_stage,
+                enable_voice_clone=voice_clone_enabled,
+                enable_interjector=interjector_enabled,
+            )
+            overrides = [*base_overrides, *shortcut_overrides, *pass_through_overrides]
+            stage_selection_detail = build_start_stage_selection_detail(
+                start_stage=effective_start_stage,
+                voiceclone_from_summary=args.voiceclone_from_summary,
+                pass_through_overrides=pass_through_overrides,
+                cli_audio_path=args.audio_path,
+            )
         print(f"Selected {stage_selection_detail}")
         records.append(
             StepRecord(
@@ -1995,6 +2240,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     status="ok",
                     detail="audio_path=not_required_for_selected_stage",
                 )
+            )
+
+        if (
+            session_store is not None
+            and run_id is not None
+            and resume_plan is not None
+            and effective_start_stage is not None
+        ):
+            session_store.cleanup_for_stage_restart(
+                session_id=run_id,
+                stage_name=effective_start_stage,
+            )
+
+        if session_store is not None and run_id is not None and resume_plan is None:
+            session_store.create_or_replace_session(
+                session_id=run_id,
+                requested_start_stage=effective_start_stage,
+                prepared_overrides=list(overrides),
+                artifacts=build_pipeline_session_artifacts(run_id=run_id),
+                options=build_pipeline_session_options(
+                    requested_start_stage=effective_start_stage,
+                    voice_clone_enabled=voice_clone_enabled,
+                    interjector_enabled=interjector_enabled,
+                    workspace_root=workspace_root,
+                    output_root=output_root,
+                ),
             )
 
         print("[6/7] Duration setup")
@@ -2081,11 +2352,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_summary(records=records, run_id=run_id)
         return 0
     except BootstrapError as exc:
+        child_failure_record = (
+            session_store.get_session(run_id)
+            if session_store is not None and run_id is not None
+            else None
+        )
+        child_failure_already_persisted = (
+            exc.step == "pipeline_run"
+            and child_failure_record is not None
+            and child_failure_record.status in {"failed", "paused", "completed"}
+        )
+        if (
+            session_store is not None
+            and run_id is not None
+            and not child_failure_already_persisted
+        ):
+            session_store.mark_session_failed(
+                session_id=run_id,
+                current_stage=None,
+                reason=exc.message,
+            )
         records.append(StepRecord(name=exc.step, status="failed", detail=exc.message))
         print(exc.render())
         print_summary(records=records, run_id=run_id)
         return 1
     except KeyboardInterrupt:
+        if session_store is not None and run_id is not None:
+            session_store.mark_session_paused(
+                session_id=run_id,
+                current_stage=None,
+                reason="Pipeline interrupted by user.",
+            )
         print_summary(records=records, run_id=run_id, interrupted=True)
         return 130
 

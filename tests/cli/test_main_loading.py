@@ -9,6 +9,7 @@ from omegaconf import OmegaConf
 import pytest
 
 import card_framework.cli.main as runtime_main
+from card_framework.runtime.pipeline_sessions import PipelineSessionStore
 from card_framework.shared.events import event_bus
 
 
@@ -101,6 +102,12 @@ class _FakeStageOrchestrator:
 
     async def run(self, *, transcript, retrieval_enabled: bool) -> None:
         del transcript, retrieval_enabled
+
+
+class _InterruptingStageOrchestrator(_FakeStageOrchestrator):
+    async def run(self, *, transcript, retrieval_enabled: bool) -> None:
+        del transcript, retrieval_enabled
+        raise KeyboardInterrupt
 
 
 def test_main_emits_timed_loading_messages_for_startup_phases(
@@ -336,3 +343,297 @@ def test_wait_for_agent_servers_raises_runtime_error_when_readiness_times_out() 
             poll_interval_seconds=0.01,
             request_timeout_seconds=0.01,
         )
+
+
+def test_main_marks_incomplete_session_failed_and_raises_runtime_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Fail loudly when required session checkpoints are still missing."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(
+        (
+            '{"segments": [{"speaker": "SPEAKER_00", "start_time": 0, '
+            '"end_time": 1000, "text": "hello world"}], "metadata": {}}\n'
+        ),
+        encoding="utf-8",
+    )
+    session_store_path = tmp_path / "sessions.sqlite3"
+    session_summary_path = tmp_path / "session_summary.xml"
+    PipelineSessionStore(session_store_path).create_or_replace_session(
+        session_id="session-1",
+        requested_start_stage="stage-2",
+        prepared_overrides=["pipeline.start_stage=stage-2"],
+        artifacts={
+            "work_dir": str(tmp_path / "artifacts" / "audio_stage" / "runs" / "session-1"),
+            "transcript_path": str(transcript_path),
+            "workspace_summary_path": str(tmp_path / "summary.xml"),
+            "session_summary_path": str(session_summary_path),
+            "voice_clone_manifest_path": str(
+                tmp_path
+                / "artifacts"
+                / "audio_stage"
+                / "runs"
+                / "session-1"
+                / "voice_clone"
+                / "manifest.json"
+            ),
+            "interjector_manifest_path": str(
+                tmp_path
+                / "artifacts"
+                / "audio_stage"
+                / "runs"
+                / "session-1"
+                / "interjector"
+                / "interjector_manifest.json"
+            ),
+        },
+        options={
+            "voice_clone_enabled": False,
+            "interjector_enabled": False,
+        },
+    )
+
+    cfg = OmegaConf.create(
+        {
+            "logging": {"print_to_terminal": False, "enabled": False},
+            "audio": {
+                "device": "cpu",
+                "work_dir": "artifacts/audio_stage",
+                "audio_path": "",
+                "voice_clone": {
+                    "enabled": False,
+                    "live_drafting": {"enabled": False},
+                    "gpu_heartbeat": {},
+                    "emo_presets": {},
+                },
+                "interjector": {"enabled": False},
+                "speaker_samples": {"enabled": False},
+            },
+            "orchestrator": {"target_seconds": 60, "timeouts": {}, "max_iterations": 1},
+            "pipeline": {"start_stage": "stage-2"},
+            "session": {
+                "enabled": True,
+                "session_id": "session-1",
+                "store_path": str(session_store_path),
+                "summary_output_path": str(session_summary_path),
+            },
+            "transcript_path": "transcript.json",
+            "llm": {"_target_": "fake.llm"},
+            "stage_llm": {},
+            "embedding": {
+                "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+            },
+            "ports": {"retrieval": 9101, "summarizer": 9102, "critic": 9103},
+            "agents": {"summarizer": {}, "critic": {}},
+        }
+    )
+
+    monkeypatch.setattr("card_framework.cli.main.configure_logger", lambda _: None)
+    monkeypatch.setattr(
+        "card_framework.cli.main.hydra.utils.get_original_cwd",
+        lambda: str(tmp_path),
+    )
+    audio_orchestrator = _FakeAudioOrchestrator()
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_audio_pipeline_builders",
+        lambda **_: (
+            lambda _: audio_orchestrator,
+            lambda *args, **kwargs: None,
+            lambda _: None,
+            lambda *args, **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_post_transcript_speaker_sample_step",
+        lambda **kwargs: kwargs["transcript"],
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main.ensure_voice_clone_calibration",
+        lambda **_: SimpleNamespace(artifact_path=tmp_path / "voice_clone_calibration.json"),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_agent_runtime_helpers",
+        lambda **_: (
+            _FakeAgentClient,
+            _FakeExecutor,
+            _FakeHealthChecker,
+            _FakeExecutor,
+            _FakeExecutor,
+            _FakeTranscriptIndex,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._instantiate_llm_provider",
+        lambda llm_cfg, *, enable_logging: _FakeProvider(),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._resolve_stage_llm",
+        lambda cfg, *, shared_llm, enable_logging: (shared_llm, "shared"),
+    )
+    monkeypatch.setattr("card_framework.cli.main._build_a2a_app", lambda **_: object())
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_server_in_thread",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr("card_framework.cli.main.Orchestrator", _FakeOrchestrator)
+    monkeypatch.setattr("card_framework.cli.main.StageOrchestrator", _FakeStageOrchestrator)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Pipeline exited without completing all required stages.",
+    ):
+        runtime_main.main.__wrapped__(cfg)
+
+    record = PipelineSessionStore(session_store_path).get_session("session-1")
+    assert record is not None
+    assert record.status == "failed"
+    assert record.resume_stage == "stage-2"
+    assert "Pipeline exited without completing all required stages." in record.last_error
+
+
+def test_main_converts_keyboard_interrupt_into_exit_130(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Exit cleanly on Ctrl+C after persisting a paused session state."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(
+        (
+            '{"segments": [{"speaker": "SPEAKER_00", "start_time": 0, '
+            '"end_time": 1000, "text": "hello world"}], "metadata": {}}\n'
+        ),
+        encoding="utf-8",
+    )
+    session_store_path = tmp_path / "sessions.sqlite3"
+    session_summary_path = tmp_path / "session_summary.xml"
+    PipelineSessionStore(session_store_path).create_or_replace_session(
+        session_id="session-2",
+        requested_start_stage="stage-2",
+        prepared_overrides=["pipeline.start_stage=stage-2"],
+        artifacts={
+            "work_dir": str(tmp_path / "artifacts" / "audio_stage" / "runs" / "session-2"),
+            "transcript_path": str(transcript_path),
+            "workspace_summary_path": str(tmp_path / "summary.xml"),
+            "session_summary_path": str(session_summary_path),
+            "voice_clone_manifest_path": str(
+                tmp_path
+                / "artifacts"
+                / "audio_stage"
+                / "runs"
+                / "session-2"
+                / "voice_clone"
+                / "manifest.json"
+            ),
+            "interjector_manifest_path": str(
+                tmp_path
+                / "artifacts"
+                / "audio_stage"
+                / "runs"
+                / "session-2"
+                / "interjector"
+                / "interjector_manifest.json"
+            ),
+        },
+        options={
+            "voice_clone_enabled": False,
+            "interjector_enabled": False,
+        },
+    )
+
+    cfg = OmegaConf.create(
+        {
+            "logging": {"print_to_terminal": False, "enabled": False},
+            "audio": {
+                "device": "cpu",
+                "work_dir": "artifacts/audio_stage",
+                "audio_path": "",
+                "voice_clone": {
+                    "enabled": False,
+                    "live_drafting": {"enabled": False},
+                    "gpu_heartbeat": {},
+                    "emo_presets": {},
+                },
+                "interjector": {"enabled": False},
+                "speaker_samples": {"enabled": False},
+            },
+            "orchestrator": {"target_seconds": 60, "timeouts": {}, "max_iterations": 1},
+            "pipeline": {"start_stage": "stage-2"},
+            "session": {
+                "enabled": True,
+                "session_id": "session-2",
+                "store_path": str(session_store_path),
+                "summary_output_path": str(session_summary_path),
+            },
+            "transcript_path": "transcript.json",
+            "llm": {"_target_": "fake.llm"},
+            "stage_llm": {},
+            "embedding": {
+                "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+            },
+            "ports": {"retrieval": 9101, "summarizer": 9102, "critic": 9103},
+            "agents": {"summarizer": {}, "critic": {}},
+        }
+    )
+
+    monkeypatch.setattr("card_framework.cli.main.configure_logger", lambda _: None)
+    monkeypatch.setattr(
+        "card_framework.cli.main.hydra.utils.get_original_cwd",
+        lambda: str(tmp_path),
+    )
+    audio_orchestrator = _FakeAudioOrchestrator()
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_audio_pipeline_builders",
+        lambda **_: (
+            lambda _: audio_orchestrator,
+            lambda *args, **kwargs: None,
+            lambda _: None,
+            lambda *args, **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_post_transcript_speaker_sample_step",
+        lambda **kwargs: kwargs["transcript"],
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main.ensure_voice_clone_calibration",
+        lambda **_: SimpleNamespace(artifact_path=tmp_path / "voice_clone_calibration.json"),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_agent_runtime_helpers",
+        lambda **_: (
+            _FakeAgentClient,
+            _FakeExecutor,
+            _FakeHealthChecker,
+            _FakeExecutor,
+            _FakeExecutor,
+            _FakeTranscriptIndex,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._instantiate_llm_provider",
+        lambda llm_cfg, *, enable_logging: _FakeProvider(),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._resolve_stage_llm",
+        lambda cfg, *, shared_llm, enable_logging: (shared_llm, "shared"),
+    )
+    monkeypatch.setattr("card_framework.cli.main._build_a2a_app", lambda **_: object())
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_server_in_thread",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr("card_framework.cli.main.Orchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(
+        "card_framework.cli.main.StageOrchestrator",
+        _InterruptingStageOrchestrator,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        runtime_main.main.__wrapped__(cfg)
+
+    assert exc_info.value.code == 130
+    record = PipelineSessionStore(session_store_path).get_session("session-2")
+    assert record is not None
+    assert record.status == "paused"
+    assert record.resume_stage == "stage-2"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from card_framework.audio_pipeline.contracts import DiarizationTurn
 from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import (
     NemoSpeakerDiarizer,
@@ -58,3 +60,41 @@ def test_nemo_diarizer_reports_loading_messages(
     assert messages[1].startswith(
         "Loaded NeMo diarization model 'diar_msdd_telephonic' in "
     )
+
+
+def test_nemo_diarizer_builds_msdd_config_with_vad_postprocessing_overrides(
+    tmp_path: Path,
+) -> None:
+    omegaconf = pytest.importorskip("omegaconf")
+    manifest_path = tmp_path / "diarization_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "diarization"
+    diarizer = NemoSpeakerDiarizer(
+        min_speakers=2,
+        max_speakers=5,
+        vad_onset=0.75,
+        vad_offset=0.55,
+        vad_pad_onset=0.05,
+        vad_pad_offset=0.0,
+        vad_min_duration_on=0.3,
+        vad_min_duration_off=0.7,
+    )
+
+    cfg = diarizer._build_msdd_config(
+        manifest_path=manifest_path,
+        output_dir=output_dir,
+        omega_conf=omegaconf.OmegaConf,
+        device="cpu",
+    )
+
+    vad_parameters = cfg.diarizer.vad.parameters
+    assert vad_parameters.onset == pytest.approx(0.75)
+    assert vad_parameters.offset == pytest.approx(0.55)
+    assert vad_parameters.pad_onset == pytest.approx(0.05)
+    assert vad_parameters.pad_offset == pytest.approx(0.0)
+    assert vad_parameters.min_duration_on == pytest.approx(0.3)
+    assert vad_parameters.min_duration_off == pytest.approx(0.7)
+    clustering_parameters = cfg.diarizer.clustering.parameters
+    assert clustering_parameters.max_num_speakers == 5
+    if "min_num_speakers" in clustering_parameters:
+        assert clustering_parameters.min_num_speakers == 2

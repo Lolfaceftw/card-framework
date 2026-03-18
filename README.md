@@ -175,6 +175,13 @@ uv run python -m card_framework.cli.main
 uv run python -m card_framework.cli.calibrate
 ```
 
+Interrupted wrapper runs now print a UUID `session_id` and can be resumed from
+the next incomplete stage with:
+
+```bash
+uv run python -m card_framework.cli.setup_and_run --resume-session <session-id>
+```
+
 These runtime entrypoints now emit timed `Loading ...` and
 `Loaded ... in X.XX seconds.` status lines around slow startup and bootstrap
 phases such as packaged runtime setup, transcript loading, calibration,

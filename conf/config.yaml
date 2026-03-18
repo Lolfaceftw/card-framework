@@ -71,6 +71,12 @@ pipeline:
   final_summary_path: ""
   voice_clone_manifest_path: ""
 
+session:
+  enabled: false
+  session_id: ""
+  store_path: "artifacts/pipeline_sessions/sessions.sqlite3"
+  summary_output_path: ""
+
 audio:
   audio_path: ""
   output_transcript_path: "artifacts/transcripts/latest.transcript.json"
@@ -131,6 +137,12 @@ audio:
     min_speakers:
     max_speakers:
     allow_single_speaker_fallback: false
+    vad_onset: 0.8
+    vad_offset: 0.6
+    vad_pad_onset: 0.1
+    vad_pad_offset: 0.0
+    vad_min_duration_on: 0.2
+    vad_min_duration_off: 0.6
     pyannote:
       pipeline_name: "pyannote/speaker-diarization-community-1"
       auth_token: ${oc.env:HF_TOKEN,""}
