@@ -196,6 +196,7 @@
       <rule>Demucs separation now uses the shared loading-duration reporter too, so stage-1 emits timed `Loading ...` / `Loaded ... in X.XX seconds.` messages before and after long separation work in addition to the Granite model-load messages.</rule>
       <rule>Learned ETA throughput is persisted immediately after each completed audio, speaker-sample, and voice-clone stage so interrupted pipelines retain finished-stage history.</rule>
       <rule>Granite Speech model and processor initialization use the shared loading-duration reporter, so stage-1 emits the same timed `Loading ...` and `Loaded ... in X.XX seconds.` messages around ASR model startup as other slow runtime boundaries.</rule>
+      <rule>NeMo MSDD diarizer startup now uses the shared loading-duration reporter too, so stage-1 runs launched through `card_framework.cli.main` or `card_framework.cli.setup_and_run` emit timed `Loading ...` / `Loaded ... in X.XX seconds.` messages around NeMo diarization model startup instead of only the generic stage-status line.</rule>
       <rule>Windows-only dedicated GPU heartbeat monitoring can run during voice cloning when enabled and when the resolved provider device is CUDA.</rule>
       <rule>src/card_framework/shared/events.py provides the shared event bus used by UI and logging subscribers.</rule>
     </etaAndObservability>

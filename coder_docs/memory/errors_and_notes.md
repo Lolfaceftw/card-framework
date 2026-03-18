@@ -1,3 +1,7 @@
+### 2026-03-18T14:43:09+08:00 - NeMo Diarization Startup Needed The Shared Loading Reporter For Wrapper Runs
+- Problem: `card_framework.cli.setup_and_run` already surfaced timed `Loading ...` / `Loaded ... in X.XX seconds.` lines for its own bootstrap phases, but stage-1 NeMo diarization still only showed the generic `running NeMo diarization` stage log. That left a long silent-feeling gap during NeMo model startup in wrapper-driven runs.
+- Solution: Wrap NeMo MSDD diarizer startup with the shared loading-duration reporter inside the gateway itself, and add a gateway regression test so wrapper and direct runtime runs both emit the same timed operator-facing loading messages as Demucs and Granite Speech.
+
 ### 2026-03-18T11:05:00+08:00 - Post-Release Repo Metadata Must Advance Beyond The Latest Published PyPI Version
 - Problem: The repository continued to report `version = "1.1.0"` and still had release guidance claiming `1.0.4` was the current public version even though PyPI had already published `1.1.0` and the branch contained additional unreleased commits. That made it easy to prepare an ambiguous re-release from post-`1.1.0` code while still wearing the published `1.1.0` version number.
 - Solution: Bump the in-repo package version to the next unreleased line (`1.2.0`) once post-`1.1.0` work accumulates, and update the release docs in the same change so examples and current-public-version notes match the actual PyPI state.

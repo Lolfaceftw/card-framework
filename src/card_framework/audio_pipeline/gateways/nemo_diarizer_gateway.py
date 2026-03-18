@@ -20,6 +20,8 @@ from card_framework.audio_pipeline.runtime import (
     ensure_module_available,
     probe_audio_duration_ms,
 )
+from card_framework.shared.events import event_bus
+from card_framework.shared.perf import report_loading_duration
 
 
 class NemoSpeakerDiarizer(SpeakerDiarizer):
@@ -83,11 +85,15 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
 
         completed = False
         try:
-            turns = self._run_nemo_msdd(
-                audio_path=audio_path,
-                output_dir=output_dir,
-                device=device,
-            )
+            with report_loading_duration(
+                f"NeMo diarization model '{self.msdd_model}'",
+                reporter=self._report_system_message,
+            ):
+                turns = self._run_nemo_msdd(
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    device=device,
+                )
             if turns:
                 completed = True
                 return turns
@@ -281,4 +287,8 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         if duration_ms is None:
             return 24 * 60 * 60 * 1000
         return max(1, duration_ms)
+
+    def _report_system_message(self, message: str) -> None:
+        """Publish one operator-facing loading message through the event bus."""
+        event_bus.publish("system_message", message)
 
