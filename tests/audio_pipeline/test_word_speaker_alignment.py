@@ -1,8 +1,14 @@
-﻿from card_framework.audio_pipeline.contracts import DiarizationTurn, WordSpeakerToken, WordTimestamp
+from card_framework.audio_pipeline.contracts import (
+    DiarizationTurn,
+    TranscriptSegment,
+    WordSpeakerToken,
+    WordTimestamp,
+)
 from card_framework.audio_pipeline.word_speaker_alignment import (
     build_word_speaker_segments,
     map_words_to_speakers,
     realign_speakers_with_punctuation,
+    smooth_short_sandwich_segments,
 )
 
 
@@ -106,3 +112,33 @@ def test_realign_speakers_with_punctuation_relabels_mid_sentence_one_word_flip()
 
     assert all(token.speaker == "SPEAKER_01" for token in realigned)
 
+
+def test_smooth_short_sandwich_segments_relabels_zero_duration_single_word() -> None:
+    smoothed = smooth_short_sandwich_segments(
+        [
+            TranscriptSegment(
+                speaker="SPEAKER_01",
+                start_time=0,
+                end_time=1000,
+                text="very good definition of it and",
+            ),
+            TranscriptSegment(
+                speaker="SPEAKER_05",
+                start_time=1000,
+                end_time=1000,
+                text="i",
+            ),
+            TranscriptSegment(
+                speaker="SPEAKER_01",
+                start_time=1020,
+                end_time=2200,
+                text="think we should keep going",
+            ),
+        ]
+    )
+
+    assert [segment.speaker for segment in smoothed] == [
+        "SPEAKER_01",
+        "SPEAKER_01",
+        "SPEAKER_01",
+    ]

@@ -176,8 +176,8 @@ def test_granite_transcribe_chunk_uses_rendered_prompt_cleanup(monkeypatch) -> N
     )
 
     assert chunk_text == "can you imagine this is our four. of pwl capital."
-    assert generate_calls[0]["max_new_tokens"] == 128
-    assert generate_calls[0]["repetition_penalty"] == pytest.approx(1.1)
+    assert generate_calls[0]["max_new_tokens"] == 96
+    assert generate_calls[0]["repetition_penalty"] == pytest.approx(1.15)
 
 
 def test_granite_runtime_reports_loading_messages(monkeypatch) -> None:

@@ -73,6 +73,20 @@ Run the GPU profile for Windows or Linux NVIDIA hosts:
 docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
 ```
 
+Run only the stage-1 audio pipeline in the GPU container and stop after the
+transcript is written:
+
+```bash
+docker compose --profile gpu run --rm --entrypoint bash setup-and-run-gpu -lc "uv run python scripts/run_audio_stage_only.py --audio-path audio.wav --device cuda"
+```
+
+Rerun only diarization against a fixed separated `vocals.wav` artifact and
+write a quick speaker-preview transcript from an existing timed transcript:
+
+```bash
+docker compose --profile gpu run --rm --entrypoint bash setup-and-run-gpu -lc "uv run python scripts/run_diarization_experiment.py --audio-path artifacts/audio_stage/runs/<run-id>/separation/htdemucs/audio/vocals.wav --base-transcript-path artifacts/transcripts/<run-id>.transcript.json --device cuda"
+```
+
 Run stage-3 voice cloning directly from an existing summary:
 
 ```bash
@@ -111,6 +125,9 @@ NeMo support.
   `/workspace/card-framework`.
 - The GPU profile is intentionally separate so CPU hosts do not fail on `gpus:
   all`.
+- For transcript tuning, prefer fixing one stage-1 run ID first and then reuse
+  its `separation/.../vocals.wav` with `scripts/run_diarization_experiment.py`
+  when you want to isolate NeMo changes from run-to-run Demucs variation.
 
 ## Near-Term Plan
 

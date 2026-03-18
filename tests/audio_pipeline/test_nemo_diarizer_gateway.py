@@ -95,6 +95,73 @@ def test_nemo_diarizer_builds_msdd_config_with_vad_postprocessing_overrides(
     assert vad_parameters.min_duration_on == pytest.approx(0.3)
     assert vad_parameters.min_duration_off == pytest.approx(0.7)
     clustering_parameters = cfg.diarizer.clustering.parameters
+    assert clustering_parameters.oracle_num_speakers is False
     assert clustering_parameters.max_num_speakers == 5
+    assert clustering_parameters.max_rp_threshold == pytest.approx(0.4)
+    assert clustering_parameters.sparse_search_volume == 60
+    assert clustering_parameters.maj_vote_spk_count is True
     if "min_num_speakers" in clustering_parameters:
         assert clustering_parameters.min_num_speakers == 2
+
+
+def test_nemo_diarizer_exact_speaker_count_requires_equal_bounds() -> None:
+    diarizer = NemoSpeakerDiarizer(min_speakers=3, max_speakers=5)
+
+    assert diarizer._exact_speaker_count() is None
+
+
+def test_nemo_diarizer_manifest_uses_exact_speaker_count_when_bounds_match(
+    tmp_path: Path,
+) -> None:
+    diarizer = NemoSpeakerDiarizer(min_speakers=7, max_speakers=7)
+
+    manifest_payload = diarizer._build_manifest_payload(tmp_path / "audio.wav")
+
+    assert manifest_payload["num_speakers"] == 7
+
+
+def test_nemo_diarizer_builds_oracle_count_only_for_exact_speaker_count(
+    tmp_path: Path,
+) -> None:
+    omegaconf = pytest.importorskip("omegaconf")
+    manifest_path = tmp_path / "diarization_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "diarization"
+    diarizer = NemoSpeakerDiarizer(min_speakers=7, max_speakers=7)
+
+    cfg = diarizer._build_msdd_config(
+        manifest_path=manifest_path,
+        output_dir=output_dir,
+        omega_conf=omegaconf.OmegaConf,
+        device="cpu",
+    )
+
+    clustering_parameters = cfg.diarizer.clustering.parameters
+    assert clustering_parameters.oracle_num_speakers is True
+    assert clustering_parameters.max_num_speakers == 7
+
+
+def test_nemo_diarizer_builds_clustering_search_overrides(
+    tmp_path: Path,
+) -> None:
+    omegaconf = pytest.importorskip("omegaconf")
+    manifest_path = tmp_path / "diarization_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "diarization"
+    diarizer = NemoSpeakerDiarizer(
+        clustering_max_rp_threshold=0.4,
+        clustering_sparse_search_volume=60,
+        clustering_maj_vote_spk_count=True,
+    )
+
+    cfg = diarizer._build_msdd_config(
+        manifest_path=manifest_path,
+        output_dir=output_dir,
+        omega_conf=omegaconf.OmegaConf,
+        device="cpu",
+    )
+
+    clustering_parameters = cfg.diarizer.clustering.parameters
+    assert clustering_parameters.max_rp_threshold == pytest.approx(0.4)
+    assert clustering_parameters.sparse_search_volume == 60
+    assert clustering_parameters.maj_vote_spk_count is True

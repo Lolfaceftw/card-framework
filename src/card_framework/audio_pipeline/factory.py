@@ -376,10 +376,10 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
             language=(str(asr_cfg.get("language", "en")).strip() or "en"),
             chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 25)),
             chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 2)),
-            max_new_tokens=int(asr_cfg.get("max_new_tokens", 128)),
+            max_new_tokens=int(asr_cfg.get("max_new_tokens", 96)),
             repetition_penalty=_configured_float(
                 asr_cfg.get("repetition_penalty"),
-                default=1.1,
+                default=1.15,
             ),
             enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
             require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),
@@ -428,7 +428,7 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
                 diarization_cfg.get("speaker_embedding_model", "titanet_large")
             ),
             min_speakers=_optional_int(diarization_cfg.get("min_speakers")),
-            max_speakers=_optional_int(diarization_cfg.get("max_speakers")),
+            max_speakers=_optional_int(diarization_cfg.get("max_speakers", 10)),
             allow_single_speaker_fallback=bool(
                 diarization_cfg.get("allow_single_speaker_fallback", False)
             ),
@@ -449,6 +449,16 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
             vad_min_duration_off=_configured_float(
                 diarization_cfg.get("vad_min_duration_off"),
                 default=0.6,
+            ),
+            clustering_max_rp_threshold=_configured_float(
+                diarization_cfg.get("clustering_max_rp_threshold"),
+                default=0.4,
+            ),
+            clustering_sparse_search_volume=int(
+                diarization_cfg.get("clustering_sparse_search_volume", 60)
+            ),
+            clustering_maj_vote_spk_count=bool(
+                diarization_cfg.get("clustering_maj_vote_spk_count", True)
             ),
         )
     if provider in {"pyannote", "pyannote_community1"}:

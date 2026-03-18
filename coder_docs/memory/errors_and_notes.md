@@ -1,6 +1,18 @@
+### 2026-03-18T22:12:00+08:00 - NeMo Exact Speaker Count Needed A Real Oracle Path Instead Of Reusing min_speakers
+- Problem: The audio gateway exposed `min_speakers` and `max_speakers`, but NeMo's runtime only accepts an exact `num_speakers` oracle count. The old wiring passed `min_speakers` straight into that exact-count slot while still writing `num_speakers: null` into the NeMo manifest, so exact-count experiments crashed and unequal bounds risked taking the wrong path conceptually.
+- Solution: Treat only `min_speakers == max_speakers` as an exact speaker-count request, write that exact value into the NeMo manifest, keep unequal bounds on the clustering side only, and use exact-count overrides sparingly because they can over-fragment long podcast audio.
+
+### 2026-03-18T20:20:28.4313688+08:00 - Repeated GPU Stage-1 Runs Can Change Demucs Vocals Enough To Confound Diarization Tuning
+- Problem: During Docker GPU transcript tuning, repeated full stage-1 runs on the same `audio.wav` produced different `separation/.../vocals.wav` hashes. That means later RTTM or transcript differences can come from upstream separation variance, not just NeMo or Granite parameter changes.
+- Solution: When tuning diarization, pin one stage-1 run first, reuse its saved `vocals.wav` for NeMo experiments, and compare diarization changes on that fixed artifact before drawing conclusions about the diarizer settings.
+
 ### 2026-03-18T17:18:30.1981470+08:00 - Session Resume Must Fail Loudly On Missing Checkpoints And Skip Stage-3 When Voice Cloning Is Off
 - Problem: The first pass of pipeline-session resume could still leave two sharp edges. A stage-2-only run with `audio.voice_clone.enabled=false` still entered the stage-3 bookkeeping path and dereferenced a missing voice-clone result, and the child runtime could mark a session as failed in SQLite but still exit `0`, letting the wrapper report success even though required checkpoints were missing.
 - Solution: Make the stage orchestrator treat stage-3 as optional when voice cloning is disabled, have `card_framework.cli.main` raise a non-zero failure when the saved session still lacks required stage checkpoints after the run, translate `Ctrl+C` into a clean exit code `130`, and clean stale per-stage artifacts before `--resume-session` reruns the interrupted stage boundary.
+
+### 2026-03-18T19:35:07.1429713+08:00 - Some Tiny Transcript Speaker Flips Can Be Alignment Artifacts Even When Raw RTTM Is Stable
+- Problem: The latest podcast transcript still showed zero-duration or one-word speaker flips at specific lines, but the matching raw RTTM windows were single-speaker stretches. Continuing to push NeMo VAD thresholds would not fix those artifacts and risked degrading diarization elsewhere.
+- Solution: Verify the raw RTTM before treating a visible transcript flip as a diarization problem, keep NeMo settings stable when RTTM is already clean in that window, and smooth tiny sandwiched transcript segments after grouping when both neighboring segments agree on the speaker.
 
 ### 2026-03-18T18:49:49.3877351+08:00 - Stronger NeMo VAD Padding And Duration Thresholds Can Regress Podcast Diarization
 - Problem: After lowering Granite token generation reduced the worst repeated-token loop, a stronger NeMo pass using `vad_pad_offset=0.05`, `vad_min_duration_on=0.3`, and `vad_min_duration_off=0.8` made the same podcast episode produce more rapid speaker flips and many one-word transcript intrusions.

@@ -114,8 +114,8 @@ audio:
     model: "ibm-granite/granite-4.0-1b-speech"
     chunk_length_seconds: 25
     chunk_overlap_seconds: 2
-    max_new_tokens: 128
-    repetition_penalty: 1.1
+    max_new_tokens: 96
+    repetition_penalty: 1.15
     language: "en"
     forced_alignment:
       enabled: true
@@ -142,7 +142,7 @@ audio:
     vad_model: "vad_multilingual_marblenet"
     speaker_embedding_model: "titanet_large"
     min_speakers:
-    max_speakers:
+    max_speakers: 10
     allow_single_speaker_fallback: false
     vad_onset: 0.8
     vad_offset: 0.6
@@ -150,18 +150,33 @@ audio:
     vad_pad_offset: 0.0
     vad_min_duration_on: 0.2
     vad_min_duration_off: 0.6
+    clustering_max_rp_threshold: 0.4
+    clustering_sparse_search_volume: 60
+    clustering_maj_vote_spk_count: true
 ```
 
-- Leave `min_speakers` and `max_speakers` blank when episodes can include a
-  variable number of guests.
+- Leave `min_speakers` blank for variable-guest episodes and raise
+  `max_speakers` above the default `10` only when a show can genuinely exceed
+  that many voices.
+- Set `min_speakers` and `max_speakers` to the same value only when you want
+  NeMo to use an exact known speaker count for the whole file.
 - The `vad_*` keys are NeMo-only tuning controls for boundary sensitivity and
   micro-turn suppression.
-- The current third-pass podcast experiment keeps Granite
-  `max_new_tokens` at `128`, adds a mild Granite `repetition_penalty: 1.1`,
+- The `clustering_*` keys are NeMo-only tuning controls for speaker-count
+  search. Raise `clustering_max_rp_threshold` and
+  `clustering_sparse_search_volume` when NeMo consistently undercounts
+  speakers, and consider `clustering_maj_vote_spk_count: true` when you want a
+  more conservative speaker-count estimate across scales.
+- The current fifth-pass podcast experiment lowers Granite
+  `max_new_tokens` to `96`, raises Granite `repetition_penalty` to `1.15`,
   rolls NeMo back to the better-behaving `vad_pad_offset: 0.0`,
-  `vad_min_duration_on: 0.2`, and `vad_min_duration_off: 0.6` values, and
-  uses a slightly more permissive transcript-side speaker-flip smoother for
-  one-word mid-sentence intrusions.
+  `vad_min_duration_on: 0.2`, and `vad_min_duration_off: 0.6` values, then
+  broadens NeMo's clustering search with `max_speakers: 10`,
+  `clustering_max_rp_threshold: 0.4`,
+  `clustering_sparse_search_volume: 60`, and
+  `clustering_maj_vote_spk_count: true`, while keeping transcript-side
+  short-sandwich smoothing for tiny one-word speaker intrusions when both
+  neighboring segments agree.
 
 ## Built-In LLM Profiles
 

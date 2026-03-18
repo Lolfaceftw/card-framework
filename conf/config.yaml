@@ -122,8 +122,8 @@ audio:
     model: "ibm-granite/granite-4.0-1b-speech"
     chunk_length_seconds: 25
     chunk_overlap_seconds: 2
-    max_new_tokens: 128
-    repetition_penalty: 1.1
+    max_new_tokens: 96
+    repetition_penalty: 1.15
     language: "en"
     suppress_numerals: false
     forced_alignment:
@@ -136,7 +136,7 @@ audio:
     vad_model: "vad_multilingual_marblenet"
     speaker_embedding_model: "titanet_large"
     min_speakers:
-    max_speakers:
+    max_speakers: 10
     allow_single_speaker_fallback: false
     vad_onset: 0.8
     vad_offset: 0.6
@@ -144,6 +144,9 @@ audio:
     vad_pad_offset: 0.0
     vad_min_duration_on: 0.2
     vad_min_duration_off: 0.6
+    clustering_max_rp_threshold: 0.4
+    clustering_sparse_search_volume: 60
+    clustering_maj_vote_spk_count: true
     pyannote:
       pipeline_name: "pyannote/speaker-diarization-community-1"
       auth_token: ${oc.env:HF_TOKEN,""}

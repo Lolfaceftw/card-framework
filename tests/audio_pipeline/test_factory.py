@@ -71,13 +71,17 @@ def test_factory_builds_default_strategies() -> None:
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is False
-    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.1)
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.15)
+    assert orchestrator.diarizer.max_speakers == 10
     assert orchestrator.diarizer.vad_onset == pytest.approx(0.8)
     assert orchestrator.diarizer.vad_offset == pytest.approx(0.6)
     assert orchestrator.diarizer.vad_pad_onset == pytest.approx(0.1)
     assert orchestrator.diarizer.vad_pad_offset == pytest.approx(0.0)
     assert orchestrator.diarizer.vad_min_duration_on == pytest.approx(0.2)
     assert orchestrator.diarizer.vad_min_duration_off == pytest.approx(0.6)
+    assert orchestrator.diarizer.clustering_max_rp_threshold == pytest.approx(0.4)
+    assert orchestrator.diarizer.clustering_sparse_search_volume == 60
+    assert orchestrator.diarizer.clustering_maj_vote_spk_count is True
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
 
 
@@ -182,6 +186,24 @@ def test_factory_builds_nemo_vad_postprocessing_overrides() -> None:
     assert diarizer.vad_pad_offset == pytest.approx(0.0)
     assert diarizer.vad_min_duration_on == pytest.approx(0.3)
     assert diarizer.vad_min_duration_off == pytest.approx(0.7)
+
+
+def test_factory_builds_nemo_clustering_search_overrides() -> None:
+    diarizer = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo",
+                "clustering_max_rp_threshold": 0.4,
+                "clustering_sparse_search_volume": 60,
+                "clustering_maj_vote_spk_count": True,
+            }
+        }
+    )
+
+    assert isinstance(diarizer, NemoSpeakerDiarizer)
+    assert diarizer.clustering_max_rp_threshold == pytest.approx(0.4)
+    assert diarizer.clustering_sparse_search_volume == 60
+    assert diarizer.clustering_maj_vote_spk_count is True
 
 
 def test_factory_builds_granite_repetition_penalty_override() -> None:
@@ -321,8 +343,8 @@ def test_factory_builds_granite_transcriber_defaults() -> None:
     assert orchestrator.transcriber.model_name == "ibm-granite/granite-4.0-1b-speech"
     assert orchestrator.transcriber.chunk_length_seconds == 25
     assert orchestrator.transcriber.chunk_overlap_seconds == 2
-    assert orchestrator.transcriber.max_new_tokens == 128
-    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.1)
+    assert orchestrator.transcriber.max_new_tokens == 96
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.15)
     assert orchestrator.transcriber.language == "en"
 
 

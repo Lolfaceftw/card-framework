@@ -55,7 +55,8 @@ def build_word_speaker_segments(
     )
     realigned = realign_speakers_with_punctuation(punctuated)
     segmented = group_sentence_segments(realigned)
-    return merge_adjacent_segments(segmented, merge_gap_ms=merge_gap_ms)
+    smoothed = smooth_short_sandwich_segments(segmented)
+    return merge_adjacent_segments(smoothed, merge_gap_ms=merge_gap_ms)
 
 
 def map_words_to_speakers(
@@ -325,6 +326,39 @@ def merge_adjacent_segments(
             continue
         merged.append(current)
     return merged
+
+
+def smooth_short_sandwich_segments(
+    segments: list[TranscriptSegment],
+    *,
+    max_duration_ms: int = 500,
+    max_word_count: int = 3,
+) -> list[TranscriptSegment]:
+    """Relabel tiny sandwiched segments when both neighbors agree on speaker."""
+    if len(segments) < 3:
+        return segments
+
+    smoothed = list(segments)
+    for index in range(1, len(smoothed) - 1):
+        previous = smoothed[index - 1]
+        current = smoothed[index]
+        following = smoothed[index + 1]
+        if previous.speaker != following.speaker:
+            continue
+        if current.speaker == previous.speaker:
+            continue
+        duration_ms = current.end_time - current.start_time
+        if duration_ms > max_duration_ms:
+            continue
+        if len(current.text.split()) > max_word_count:
+            continue
+        smoothed[index] = TranscriptSegment(
+            speaker=previous.speaker,
+            start_time=current.start_time,
+            end_time=current.end_time,
+            text=current.text,
+        )
+    return smoothed
 
 
 def _word_anchor(start_ms: int, end_ms: int, *, anchor: str) -> int:
