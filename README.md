@@ -473,8 +473,18 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
   common configuration examples
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current
   architecture, runtime flow, commands, and maintenance expectations
+- [`AGENTS.md`](./AGENTS.md): compact agent entrypoint that routes developers to
+  the relevant `coder_docs` file by topic
 - [`coder_docs/research_agents.md`](./coder_docs/research_agents.md):
-  authoritative Codex delegation and delegated web-research workflow
+  authoritative optional delegation and delegated web-research workflow
+- [`coder_docs/python_engineering_standards.md`](./coder_docs/python_engineering_standards.md):
+  Python coding standards for this repository
+- [`coder_docs/security_standards.md`](./coder_docs/security_standards.md):
+  security expectations for code and workflow changes
+- [`coder_docs/logging_standards.md`](./coder_docs/logging_standards.md):
+  logging expectations for runtime and tooling changes
+- [`coder_docs/testing_standards.md`](./coder_docs/testing_standards.md):
+  testing expectations for behavior and contract changes
 - [`coder_docs/memory/errors_and_notes.md`](./coder_docs/memory/errors_and_notes.md):
   repository memory for recurring pitfalls and prior fixes
 - [`coder_docs/fault_localization_workflow.md`](./coder_docs/fault_localization_workflow.md):
@@ -483,10 +493,8 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
 If you are changing behavior, prompts, workflows, or commands, start with
 `coder_docs/codebase_guide.md`.
 
-If you are working through Codex, follow `AGENTS.md` plus
-`coder_docs/research_agents.md` so delegation stays aligned with the configured
-sub-agents in `../.codex/config.toml` and any delegated open-web work still
-follows the repo Scrapling workflow.
+Start with `AGENTS.md` if you want the shortest path to the right repo-local
+guide. It is intentionally the pointer layer into `coder_docs/`.
 
 ## License
 

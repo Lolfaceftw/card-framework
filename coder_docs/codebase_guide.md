@@ -5,10 +5,10 @@
     <repositoryIdentity>This workspace combines a Hydra-configured summarization runtime, an audio-to-transcript and voice-clone pipeline, multiple LLM and embedding provider adapters, and two benchmark systems: a matrix-style summarization benchmark and a source-grounded QA benchmark.</repositoryIdentity>
     <sessionStartChecklist>
       <step>Read this file first to understand subsystem boundaries, entrypoints, and data flow.</step>
-      <step>Use coder_docs/research_agents.md as the source of truth for Codex delegation and delegated web-research workflow.</step>
+      <step>Use coder_docs/research_agents.md as the source of truth for optional delegation and delegated web-research workflow.</step>
       <step>Review coder_docs/memory/errors_and_notes.md for previously captured pitfalls before repeating work in an area.</step>
       <step>Use coder_docs/academic_standards.md for formulas, thresholds, scoring logic, or methodology-sensitive implementations.</step>
-      <step>Use coder_docs/ruff.md for lint workflow, coder_docs/uv_package_manager.md for dependency and environment workflow, coder_docs/git_github_workflow.md for contributor Git and GitHub workflow, coder_docs/github_actions_release_spec.md for GitHub Actions release/build verification, and coder_docs/scrapling.md for external web retrieval workflow.</step>
+      <step>Use coder_docs/python_engineering_standards.md, coder_docs/security_standards.md, coder_docs/logging_standards.md, and coder_docs/testing_standards.md for the repository's Python, security, logging, and testing standards. Use coder_docs/ruff.md for lint workflow, coder_docs/uv_package_manager.md for dependency and environment workflow, coder_docs/git_github_workflow.md for contributor Git and GitHub workflow, coder_docs/github_actions_release_spec.md for GitHub Actions release/build verification, and coder_docs/scrapling.md for external web retrieval workflow.</step>
       <step>Use coder_docs/fault_localization_workflow.md as the source of truth when a task is primarily bug triage, failing-test analysis, or fault localization.</step>
       <step>Inspect the exact config and prompt files for the subsystem you are changing before editing behavior.</step>
       <step>When behavior, configuration, commands, or workflow changes materially, update this guide in the same change.</step>
@@ -23,7 +23,7 @@
       <principle>Treat configuration as authoritative; prefer overrides and config edits over hardcoded values.</principle>
       <principle>Preserve the separation between orchestration, provider adapters, prompts, and data-contract modules.</principle>
       <principle>Favor behavior-level understanding first: runtime pipeline, audio pipeline, and benchmark workflows are all first-class parts of this repo.</principle>
-      <principle>For Codex sessions, follow the configured sub-agent inventory in `../.codex/config.toml` rather than assuming only a research-only role is allowed. Keep the main thread responsible for coordination, integration, and the final response.</principle>
+      <principle>If the active developer runtime supports delegation, follow its configured delegated-role inventory rather than assuming only a research-only role is allowed. If delegation is unavailable, keep the equivalent work in the main thread. In all cases, keep the main thread responsible for coordination, integration, and the final response.</principle>
     </agentOperatingPrinciples>
   </overview>
 
@@ -39,8 +39,8 @@
     <directory path="src/card_framework/_vendor/index_tts">Vendored third-party IndexTTS runtime source required by the voice-clone pipeline.</directory>
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
     <directory path=".github/workflows">Repository automation. `ci.yml` runs the targeted cross-platform CPU compatibility matrix on `windows-2025`, `ubuntu-24.04`, and `macos-14`, while `publish-pypi.yml` builds tagged release distributions, smoke-checks the built wheel and source distribution, and publishes them to PyPI through GitHub OIDC trusted publishing.</directory>
-    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover Codex delegation workflow, methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
-    <file path="AGENTS.md">Repo-local coding-agent instructions, including the required Codex delegation guidance, Scrapling web-research policy, and the rule to keep coder_docs aligned with prompt changes.</file>
+    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover delegation workflow, Python standards, security, logging, testing, methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
+    <file path="AGENTS.md">Repo-local coding-agent entrypoint that should stay a compact pointer into the topic-specific files under coder_docs.</file>
     <entrypoints>
       <entrypoint path="src/card_framework/api.py">Public installed-package entrypoint exposing `card_framework.infer(audio_wav, output_dir, target_duration_seconds, *, device, vllm_url=None, vllm_api_key=None)` and the typed `InferenceResult` artifact bundle.</entrypoint>
       <entrypoint path="src/card_framework/cli/main.py">Primary Hydra runtime for the summarization, audio, and voice-clone pipeline.</entrypoint>
@@ -364,7 +364,7 @@
       <rule>When changing runtime flow, prompts, provider behavior, contracts, benchmark workflow, or operator-facing commands, update this guide in the same change.</rule>
       <rule>When a change affects tested behavior, add or update tests in the corresponding subsystem.</rule>
       <rule>When you fix a meaningful error, recurring pitfall, or debugging trap, prepend a short dated and timed Problem and Solution note to the top of coder_docs/memory/errors_and_notes.md.</rule>
-      <rule>When the Codex delegation workflow or delegated web-research expectations change materially, update coder_docs/research_agents.md, AGENTS.md, and this guide in the same change.</rule>
+      <rule>When the delegation workflow or delegated web-research expectations change materially, update coder_docs/research_agents.md, AGENTS.md, and this guide in the same change.</rule>
       <rule>When contributor Git or GitHub workflow expectations change materially, update coder_docs/git_github_workflow.md and this guide in the same change.</rule>
       <rule>When the repository's bug-triage or fault-localization workflow changes materially, update coder_docs/fault_localization_workflow.md and this guide in the same change.</rule>
       <rule>Before commit or pull request, review staged diffs for secrets, private endpoints such as vLLM URLs, credentials, tokens, and other private data. Do not let them enter repo history.</rule>

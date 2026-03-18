@@ -1,16 +1,23 @@
-# Codex Delegation And Research Workflow Guide
+# Delegation And Research Workflow Guide
 
-Use this document as the source of truth for Codex sub-agent usage and
+Use this document as the source of truth for optional delegated-agent usage and
 delegated web-research workflow in this repository.
 
-This workflow is derived from the local Codex configuration in
-`../.codex/config.toml`. Repo-local guidance should follow the configured
-sub-agent inventory instead of hardcoding a single delegated role.
+This file keeps its historical name for compatibility, but its guidance is now
+capability-based so it can work across different coding-agent runtimes.
+
+If your environment supports delegated agents or sub-agents, follow this file.
+If it does not, do the equivalent work in the main thread and keep the same
+scoping, source-quality, and integration rules.
+
+When a local runtime exposes an agent configuration file such as
+`../.codex/config.toml`, treat that local configuration as the source of truth
+for which delegated roles are actually available.
 
 ## Current Local Config Snapshot
 
-The current local Codex config enables `multi_agent = true` and defines these
-sub-agents:
+If you are using the checked-in Codex setup for this workspace, the current
+local config enables `multi_agent = true` and defines these sub-agents:
 
 - `explorer`: read-only codebase exploration.
 - `researcher`: external research and web retrieval with Scrapling.
@@ -18,7 +25,9 @@ sub-agents:
   tasks.
 - `monitor`: long-running task monitoring.
 
-Treat `../.codex/config.toml` as authoritative if this list changes.
+Other runtimes should map their equivalent roles onto the same behavioral
+categories where possible. Treat `../.codex/config.toml` as authoritative if
+you are using Codex here and this list changes.
 
 ## Policy
 
@@ -83,8 +92,8 @@ surface exposes that capability.
 
 - Do not hardcode repo-local guidance to a single agent name when
   `../.codex/config.toml` exposes a broader sub-agent inventory.
-- Do not invent agent names or capabilities that are not present in the local
-  Codex config.
+- Do not invent agent names or capabilities that are not present in the active
+  runtime configuration.
 - Do not use non-Scrapling web tooling for page retrieval when Scrapling can do
   the job.
 - Do not ask a delegated agent to rediscover a URL that is already known.
