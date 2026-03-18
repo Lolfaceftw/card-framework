@@ -65,6 +65,36 @@ def test_render_sample_results_table_contains_expected_columns() -> None:
 def test_write_execution_artifacts_persists_speaker_comparison_payloads(
     tmp_path: Path,
 ) -> None:
+    sample = _sample_result()
+    sample.sample_artifact_dir = str((tmp_path / "samples" / sample.sample_id).resolve())
+    sample.artifact_manifest_path = str(
+        (tmp_path / "samples" / sample.sample_id / "manifest.json").resolve()
+    )
+    sample.summarizer_trace_dir = str(
+        (tmp_path / "samples" / sample.sample_id / "llm" / "summarizer").resolve()
+    )
+    sample.critic_trace_dir = str(
+        (tmp_path / "samples" / sample.sample_id / "llm" / "critic").resolve()
+    )
+    sample.judge_trace_dir = str(
+        (tmp_path / "samples" / sample.sample_id / "llm" / "judge").resolve()
+    )
+    sample.final_summary_path = str(
+        (tmp_path / "samples" / sample.sample_id / "final" / "summary.xml").resolve()
+    )
+    sample.final_critic_feedback_path = str(
+        (
+            tmp_path / "samples" / sample.sample_id / "final" / "critic_feedback.txt"
+        ).resolve()
+    )
+    sample.loop_diagnostics_path = str(
+        (
+            tmp_path / "samples" / sample.sample_id / "final" / "loop_diagnostics.json"
+        ).resolve()
+    )
+    sample.sample_result_artifact_path = str(
+        (tmp_path / "samples" / sample.sample_id / "final" / "sample_result.json").resolve()
+    )
     report = BenchmarkExecutionReport(
         run_id="run_001",
         generated_at_utc="2026-03-13T00:00:00+00:00",
@@ -84,7 +114,7 @@ def test_write_execution_artifacts_persists_speaker_comparison_payloads(
         report_path="",
         notes_path="",
         results_path="",
-        samples=[_sample_result()],
+        samples=[sample],
         summary=BenchmarkSummary(
             sample_count=1,
             executed_count=1,
@@ -96,7 +126,10 @@ def test_write_execution_artifacts_persists_speaker_comparison_payloads(
             mean_speaker_grammar_similarity=0.9,
             mean_composite=0.8,
         ),
+        sample_artifacts_root=str((tmp_path / "samples").resolve()),
         sample_seed=23,
+        sample_shard_index=2,
+        sample_shard_count=3,
     )
 
     report_path, notes_path, results_path = write_execution_artifacts(
@@ -118,6 +151,12 @@ def test_write_execution_artifacts_persists_speaker_comparison_payloads(
     assert sample_payload["summary_per_speaker_messages"]["SPEAKER_00"] == [
         "hello there"
     ]
+    assert "- Sample shard: `2/3`" in notes_path.read_text(encoding="utf-8")
+    assert (
+        "- Sample artifacts root: "
+        f"`{(tmp_path / 'samples').resolve()}`"
+        in notes_path.read_text(encoding="utf-8")
+    )
     assert sample_payload["speaker_alias_map"]["Alex Host"] == "SPEAKER_00"
     assert (
         sample_payload["voice_clone_manifest_path"]
@@ -127,9 +166,22 @@ def test_write_execution_artifacts_persists_speaker_comparison_payloads(
     results_text = results_path.read_text(encoding="utf-8")
     notes_text = notes_path.read_text(encoding="utf-8")
     assert "- Sample seed: `23`" in notes_text
+    assert "samples/index.json" in notes_text
     assert "| metric | mean | 95% CI |" in results_text
     assert "n/a" in results_text
     assert "```text" not in results_text
+
+    sample_index_path = tmp_path / "samples" / "index.json"
+    sample_readme_path = tmp_path / "samples" / "README.md"
+    assert sample_index_path.exists()
+    assert sample_readme_path.exists()
+    sample_index_payload = json.loads(sample_index_path.read_text(encoding="utf-8"))
+    assert sample_index_payload["samples"][0]["sample_id"] == sample.sample_id
+    assert (
+        sample_index_payload["samples"][0]["llm_trace_dirs"]["judge"]
+        == sample.judge_trace_dir
+    )
+    assert "call_XXX.json" in sample_readme_path.read_text(encoding="utf-8")
 
 
 def test_render_duration_sweep_table_contains_expected_columns() -> None:
@@ -211,6 +263,7 @@ def test_write_duration_sweep_artifacts_persists_report(tmp_path: Path) -> None:
         report_path="",
         results_path="",
         sample_seed=31,
+        preset_concurrency=3,
     )
 
     report_path, results_path = write_duration_sweep_artifacts(
@@ -226,6 +279,7 @@ def test_write_duration_sweep_artifacts_persists_report(tmp_path: Path) -> None:
     results_text = results_path.read_text(encoding="utf-8")
     assert payload["sample_seed"] == 31
     assert "- Sample seed: `31`" in results_text
+    assert "- Preset concurrency: `3`" in results_text
     assert "| composite_95_ci |" in results_text
 
 

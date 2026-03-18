@@ -23,6 +23,7 @@ class _ProcessStub:
         self._wait_side_effects = list(wait_side_effects)
         self.wait_calls: list[float | None] = []
         self.kill_calls = 0
+        self.signals_sent: list[int] = []
 
     def poll(self) -> int | None:
         """Return the configured poll result."""
@@ -41,6 +42,10 @@ class _ProcessStub:
     def kill(self) -> None:
         """Record process-level kill requests."""
         self.kill_calls += 1
+
+    def send_signal(self, sig: int) -> None:
+        """Record process-group signal requests."""
+        self.signals_sent.append(sig)
 
 
 def test_detached_popen_kwargs_uses_windows_process_group(monkeypatch) -> None:
@@ -67,8 +72,8 @@ def test_detached_popen_kwargs_uses_start_new_session_on_posix(monkeypatch) -> N
     assert kwargs == {"start_new_session": True}
 
 
-def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
-    """Terminate a Windows child process tree with taskkill."""
+def test_terminate_process_tree_prefers_ctrl_break_on_windows(monkeypatch) -> None:
+    """Try a graceful process-group break signal before force-killing on Windows."""
     monkeypatch.setattr(process_utils.os, "name", "nt", raising=False)
     recorded_commands: list[list[str]] = []
     monkeypatch.setattr(
@@ -76,12 +81,49 @@ def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
         "run",
         lambda command, **kwargs: recorded_commands.append(command),
     )
+    monkeypatch.setattr(
+        process_utils.signal,
+        "CTRL_BREAK_EVENT",
+        1,
+        raising=False,
+    )
     process = _ProcessStub()
 
     process_utils.terminate_process_tree(process, timeout_seconds=5.0)
 
-    assert recorded_commands == [["taskkill", "/T", "/F", "/PID", "1234"]]
+    assert process.signals_sent == [1]
+    assert recorded_commands == []
     assert process.wait_calls == [5.0]
+    assert process.kill_calls == 0
+
+
+def test_terminate_process_tree_falls_back_to_taskkill_on_windows(monkeypatch) -> None:
+    """Force-kill the Windows child tree when the graceful break times out."""
+    monkeypatch.setattr(process_utils.os, "name", "nt", raising=False)
+    recorded_commands: list[list[str]] = []
+    monkeypatch.setattr(
+        process_utils.subprocess,
+        "run",
+        lambda command, **kwargs: recorded_commands.append(command),
+    )
+    monkeypatch.setattr(
+        process_utils.signal,
+        "CTRL_BREAK_EVENT",
+        1,
+        raising=False,
+    )
+    process = _ProcessStub(
+        wait_side_effects=(
+            subprocess.TimeoutExpired(cmd="child", timeout=5.0),
+            0,
+        )
+    )
+
+    process_utils.terminate_process_tree(process, timeout_seconds=5.0)
+
+    assert process.signals_sent == [1]
+    assert recorded_commands == [["taskkill", "/T", "/F", "/PID", "1234"]]
+    assert process.wait_calls == [5.0, 5.0]
     assert process.kill_calls == 0
 
 

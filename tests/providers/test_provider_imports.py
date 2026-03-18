@@ -52,3 +52,11 @@ def test_importing_deepseek_provider_does_not_load_transformer_stacks() -> None:
         "import card_framework.providers.deepseek_provider"
     )
     assert loaded_modules == set()
+
+
+def test_importing_anthropic_provider_does_not_load_transformer_stacks() -> None:
+    """Keep Anthropic-provider imports cheap for remote-provider startup."""
+    loaded_modules = _loaded_transformer_modules(
+        "import card_framework.providers.anthropic_provider"
+    )
+    assert loaded_modules == set()

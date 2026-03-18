@@ -209,8 +209,12 @@ uv run python -m card_framework.benchmark.summarizer_critic supervise --prepare-
 uv run python -m card_framework.benchmark.summarizer_critic.sporc prepare-dataset --dataset-variant sample
 uv run python -m card_framework.benchmark.summarizer_critic.sporc prepare-dataset --dataset-variant full
 uv run python -m card_framework.benchmark.summarizer_critic.sporc curate-longform
+uv run python -m card_framework.benchmark.summarizer_critic.sporc dedupe-manifest
+uv run python -m card_framework.benchmark.summarizer_critic.sporc export-transcripts --episodes 7-10
+uv run python -m card_framework.benchmark.summarizer_critic.sporc human-sample --duration-preset 5m --episodes 20
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample --duration-preset 5m --episodes 20
 uv run python -m card_framework.benchmark.summarizer_critic.sporc execute --prepare-if-missing --max-samples 100 --summarizer-provider vllm_default
-uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --examples 10 --transcript-only --summarizer-provider vllm_default
+uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep --mode batch-all --max-samples 10 --summarizer-provider vllm_default
 uv run python -m card_framework.benchmark.summarizer_critic.sporc supervise --prepare-if-missing --max-runs 3
 ```
 
@@ -232,13 +236,24 @@ file paths. The execute path still supports the repo's faithful combined
 stage-2/stage-3 voice-clone integration, but it now also supports
 `--transcript-only` for transcript-first summarizer-critic benchmarking that
 skips source-audio downloads, speaker-sample generation, and live-draft voice
-cloning. Sample preparation still defaults to
+cloning. Transcript-only runs now also normalize the copied working transcript:
+they drop punctuation-only micro-segments, merge adjacent same-speaker spans,
+preserve raw dataset speaker lists in segment extras for auditability, and mark
+ambiguous turns with speaker-candidate metadata instead of forcing those turns
+onto a neighboring speaker so the working transcript stays faithful to the
+dataset-derived attribution. Sample preparation still defaults to
 `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_sample`, while
 full-dataset preparation now defaults to
 `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full` and writes
 a compact `manifest.json` plus a streaming `samples.jsonl.gz` sidecar so the
 full prepare path and downstream readers do not materialize the entire SPoRC
-table in RAM at once. The SPoRC CLI also now prints timed stderr loading lines
+table in RAM at once. SPoRC `execute` and `duration-sweep` now treat
+`--max-samples` as a retained-sample target instead of a raw prefix length:
+infra-only exclusions such as preflight incompatibility, connection/startup
+unavailability, stage timeouts, or resumed stalled samples do not consume the
+target, so the runner will backfill with the next deterministic candidate and
+can inspect candidate `101` to retain `100` benchmarked samples. The SPoRC CLI
+also now prints timed stderr loading lines
 during long prepare phases so full prepares no longer appear blank after the
 Hugging Face download progress bars finish. The `curate-longform` subcommand
 now emits the same timed status lines while it loads the source manifest,
@@ -250,6 +265,44 @@ those stats. It filters a prepared full manifest down to strict long-form
 multi-speaker episodes using the released Hugging Face speaker-turn table as
 the diarized transcript source, requiring `15,000+` spoken words, multiple
 substantial speakers, strong turn counts, and low music/noise-token ratios.
+The new `dedupe-manifest` subcommand rewrites an inline SPoRC manifest in
+place, removing exact duplicate episodes with a metadata-first pipeline that
+only opens transcript JSON for small candidate-collision groups instead of
+hashing every transcript up front. It emits a sibling audit JSON describing the
+removed duplicates while preserving manifest order for the kept samples.
+The new `export-transcripts` subcommand reads a manifest plus an episode list or
+range and writes one combined raw transcript `.txt` file from the manifest's
+actual SPoRC `turn_data_path`, not from the prepared transcript JSON. It
+touches only the selected episode rows plus one streamed pass over the raw turn
+file, so export stays fast even when the full SPoRC manifest is large.
+The new `human-sample` subcommand turns that curated manifest into a Rich-based
+human annotation workflow: it takes the first `N` episodes in manifest order,
+computes a per-episode sampled-word budget from configurable `WPM` and factor
+defaults, splits each transcript into word-balanced windows, accepts transcript
+line numbers or `/override` text per window, writes live JSONL/CSV exports plus
+a SQLite session database under
+`artifacts/summarizer_critic_benchmark/sporc_human_sampling`, and resumes a
+paused session by UUID after `Ctrl+C`.
+The new `llm-sample` subcommand runs an Anthropic-backed automatic sampler over
+that same curated manifest prefix: it keeps the same per-episode word-budget
+formula, sends the whole transcript in one pass, streams summarized thinking
+plus the structured sample payload through the Rich callback path, and persists
+run-level JSONL, CSV, and per-episode request/stream/response traces under
+`artifacts/summarizer_critic_benchmark/sporc_llm_sampling`. It currently reads
+`ANTHROPIC_API_KEY` from `.env` and defaults to `claude-opus-4-6` with adaptive
+thinking enabled. If you pass `--samples <N>`, it skips the WPM-based budget
+and returns exactly `N` samples per transcript instead. Each saved sample now
+includes a direct `speaker_label`, and each episode also writes a plain-text
+`selected_segments.txt` export. The structured tool payload is the authoritative
+selection output. The prompt now explicitly favors readable reviewer-facing
+segments: it asks the model to preserve what the speaker said, including
+disfluencies, while lightly cleaning up only transcript formatting noise such
+as fragmentation, spacing, and punctuation so the result stays understandable
+to a human reviewer. It no longer rejects runs just because Anthropic chooses
+to skip or include extra prose around that tool call. If you pass
+`--disable-thinking`, it disables Anthropic thinking and sends `temperature=0.0`.
+If you pass `--select-episode "[7,10]"`, `llm-sample` runs only manifest
+episodes `7` through `10` inclusive instead of the default manifest prefix.
 The new `duration-sweep` subcommand exposes a non-interactive menu plus
 `--mode single` and `--mode batch-all` flows for preset duration benchmarking
 across `30s`, `1m`, `5m`, and `15m`, writes aggregate markdown and JSON sweep
@@ -368,19 +421,20 @@ Installed-package runtime notes:
 This repository now includes a GitHub Actions trusted-publishing workflow at
 `.github/workflows/publish-pypi.yml` that publishes tags matching `v*` to PyPI.
 
-The public PyPI project already exists. As of March 9, 2026:
+The public PyPI project already exists. As of March 18, 2026:
 
 - `1.0.1` is the first public release, but it published the wrong bare
   `ctc-forced-aligner` dependency name for downstream `pip` users.
 - `v1.0.2` was tagged but never published because PyPI rejected the direct Git
   dependency metadata.
-- `1.0.4` is the current public release.
-- The next install-path fix must ship under a new version such as `1.0.5`; do
+- `1.1.0` is the current public release.
+- The next release from the post-`1.1.0` commit line must ship under a new
+  version such as `1.2.0`; do
   not reuse a failed or already-published version number.
 
 Repository-side release steps:
 
-1. Create a dedicated release-preparation branch such as `release/v1.0.5` from
+1. Create a dedicated release-preparation branch such as `release/v1.2.0` from
    the target integration branch, then run the release preflight in
    [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_release_spec.md),
    including build, targeted tests, and artifact-scoped `uv publish --dry-run`.
@@ -388,8 +442,8 @@ Repository-side release steps:
    commit and push it, for example:
 
    ```bash
-   git tag -a v1.0.5 -m v1.0.5
-   git push origin v1.0.5
+   git tag -a v1.2.0 -m v1.2.0
+   git push origin v1.2.0
    ```
 
 3. Do not assume the release is complete just because the tag push succeeded.
@@ -420,8 +474,18 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
   common configuration examples
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current
   architecture, runtime flow, commands, and maintenance expectations
+- [`AGENTS.md`](./AGENTS.md): compact agent entrypoint that routes developers to
+  the relevant `coder_docs` file by topic
 - [`coder_docs/research_agents.md`](./coder_docs/research_agents.md):
-  authoritative Codex research-agent usage and delegated web-research workflow
+  authoritative optional delegation and delegated web-research workflow
+- [`coder_docs/python_engineering_standards.md`](./coder_docs/python_engineering_standards.md):
+  Python coding standards for this repository
+- [`coder_docs/security_standards.md`](./coder_docs/security_standards.md):
+  security expectations for code and workflow changes
+- [`coder_docs/logging_standards.md`](./coder_docs/logging_standards.md):
+  logging expectations for runtime and tooling changes
+- [`coder_docs/testing_standards.md`](./coder_docs/testing_standards.md):
+  testing expectations for behavior and contract changes
 - [`coder_docs/memory/errors_and_notes.md`](./coder_docs/memory/errors_and_notes.md):
   repository memory for recurring pitfalls and prior fixes
 - [`coder_docs/fault_localization_workflow.md`](./coder_docs/fault_localization_workflow.md):
@@ -430,10 +494,8 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
 If you are changing behavior, prompts, workflows, or commands, start with
 `coder_docs/codebase_guide.md`.
 
-If you are working through Codex, follow `AGENTS.md` plus
-`coder_docs/research_agents.md` so delegated open-web research goes through the
-configured `researcher` agent while local repository work stays in the main
-thread.
+Start with `AGENTS.md` if you want the shortest path to the right repo-local
+guide. It is intentionally the pointer layer into `coder_docs/`.
 
 ## License
 

@@ -46,12 +46,28 @@ class AgentClient:
     _POLL_INTERVAL_SECONDS = 2.0
     _MAX_HTTP_REQUEST_TIMEOUT_SECONDS = 30.0
 
-    def __init__(self, event_bus: EventBus | None = None) -> None:
+    def __init__(
+        self,
+        event_bus: EventBus | None = None,
+        *,
+        limits: httpx.Limits | None = None,
+        pool_timeout_seconds: float | None = None,
+        trust_env: bool = True,
+    ) -> None:
         """Initialize pooled transport and event bus dependency."""
-        self.limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        self.limits = limits or httpx.Limits(
+            max_keepalive_connections=20,
+            max_connections=100,
+        )
         self._clients: dict[asyncio.AbstractEventLoop | None, httpx.AsyncClient] = {}
         self._lock = threading.Lock()
         self._event_bus = event_bus if event_bus is not None else get_event_bus()
+        self._pool_timeout_seconds = (
+            max(0.1, float(pool_timeout_seconds))
+            if pool_timeout_seconds is not None
+            else None
+        )
+        self._trust_env = trust_env
 
     def _get_client(self) -> httpx.AsyncClient:
         try:
@@ -71,7 +87,10 @@ class AgentClient:
 
             client = self._clients.get(loop)
             if client is None or client.is_closed:
-                client = httpx.AsyncClient(limits=self.limits)
+                client = httpx.AsyncClient(
+                    limits=self.limits,
+                    trust_env=self._trust_env,
+                )
                 self._clients[loop] = client
             return client
 
@@ -88,11 +107,25 @@ class AgentClient:
             await client.aclose()
 
     @classmethod
-    def _resolve_http_timeout(cls, timeout: float | None) -> float | None:
-        """Resolve a per-request HTTP timeout for start and poll requests."""
+    def _resolve_http_timeout_seconds(cls, timeout: float | None) -> float:
+        """Resolve a per-request timeout budget in seconds."""
         if timeout is None:
             return cls._MAX_HTTP_REQUEST_TIMEOUT_SECONDS
         return max(0.1, min(float(timeout), cls._MAX_HTTP_REQUEST_TIMEOUT_SECONDS))
+
+    def _build_http_timeout(self, timeout: float | None) -> httpx.Timeout:
+        """Build an explicit timeout with a bounded connection-pool wait."""
+        resolved_seconds = self._resolve_http_timeout_seconds(timeout)
+        pool_timeout_seconds = (
+            min(self._pool_timeout_seconds, resolved_seconds)
+            if self._pool_timeout_seconds is not None
+            else resolved_seconds
+        )
+        return httpx.Timeout(
+            timeout=resolved_seconds,
+            connect=min(5.0, resolved_seconds),
+            pool=pool_timeout_seconds,
+        )
 
     @staticmethod
     def _build_message_send_payload(task_text: str) -> dict[str, Any]:
@@ -259,7 +292,7 @@ class AgentClient:
         *,
         url: str,
         payload: dict[str, Any],
-        timeout: float | None,
+        timeout: httpx.Timeout,
     ) -> dict[str, Any]:
         """POST one JSON-RPC payload and return the decoded response."""
         client = self._get_client()
@@ -272,7 +305,8 @@ class AgentClient:
         *,
         url: str,
         task_id: str,
-        timeout: float | None,
+        timeout: httpx.Timeout,
+        timeout_seconds: float,
         max_retries: int,
         call_id: str,
         port: int,
@@ -312,7 +346,7 @@ class AgentClient:
                     continue
                 raise RuntimeError(
                     "A2A task polling failed after "
-                    f"{consecutive_failures} attempt(s) with per-request timeout={timeout}s. "
+                    f"{consecutive_failures} attempt(s) with per-request timeout={timeout_seconds}s. "
                     f"Task may still be running. Last error: {self._format_exception_detail(exc)}"
                 ) from exc
 
@@ -375,13 +409,14 @@ class AgentClient:
 
         payload = self._build_message_send_payload(task_text)
         url = f"http://127.0.0.1:{port}"
-        http_timeout = self._resolve_http_timeout(timeout)
+        http_timeout_seconds = self._resolve_http_timeout_seconds(timeout)
+        http_timeout = self._build_http_timeout(timeout)
 
         self._event_bus.publish(
             "a2a_call_started",
             call_id=call_id,
             port=port,
-            timeout=http_timeout,
+            timeout=http_timeout_seconds,
             max_retries=max_retries,
             **metadata,
         )
@@ -407,6 +442,7 @@ class AgentClient:
                         url=url,
                         task_id=task_id,
                         timeout=http_timeout,
+                        timeout_seconds=http_timeout_seconds,
                         max_retries=max_retries,
                         call_id=call_id,
                         port=port,
@@ -452,9 +488,12 @@ class AgentClient:
                 break
 
         last_error = self._format_exception_detail(last_exception)
-        if isinstance(last_exception, (httpx.ReadTimeout, httpx.WriteTimeout)):
+        if isinstance(
+            last_exception,
+            (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout),
+        ):
             error_message = (
-                f"Failed after {max_retries} attempts. Per-request timeout hit after {http_timeout}s. "
+                f"Failed after {max_retries} attempts. Per-request timeout hit after {http_timeout_seconds}s. "
                 "The task may still be running on the agent; retrying the same HTTP request can "
                 f"duplicate work. Last error: {last_error}"
             )

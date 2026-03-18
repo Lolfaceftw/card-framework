@@ -21,8 +21,16 @@ separate from the older matrix benchmark. It:
 - writes machine-readable reports plus `notes.md` and `results.md` under `artifacts/summarizer_critic_benchmark`
 
 See `src/card_framework/benchmark/summarizer_critic/README.md` for the full
-PowerShell commands, provider-profile IDs, smoke-run recipe, and full supervised
-run instructions.
+package overview and benchmark-family split.
+
+Use these benchmark guides for the current command surfaces:
+
+- `src/card_framework/benchmark/summarizer_critic/README.md`: shared
+  summarizer-critic benchmark entrypoints, defaults, and artifact roots
+- `src/card_framework/benchmark/summarizer_critic/qmsum/README.md`: QMSum
+  prepare, execute, supervise, and concurrency workflow
+- `src/card_framework/benchmark/summarizer_critic/sporc/README.md`: SPoRC
+  preparation, sampling, execute, duration-sweep, and supervisor workflow
 
 ## Summarization Benchmark
 

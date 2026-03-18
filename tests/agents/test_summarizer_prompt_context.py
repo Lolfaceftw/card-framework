@@ -62,28 +62,21 @@ def test_full_transcript_prompt_excerpt_keeps_small_transcript_unchanged() -> No
         ]
     )
 
-    excerpt = SummarizerExecutor._build_full_transcript_prompt_excerpt(transcript)
+    excerpt = SummarizerExecutor._build_full_transcript_prompt_text(transcript)
 
     assert excerpt == transcript
 
 
-def test_full_transcript_prompt_excerpt_samples_large_transcript_with_coverage() -> (
-    None
-):
+def test_full_transcript_prompt_excerpt_keeps_large_transcript_unchanged() -> None:
     lines = [
         f"[SPEAKER_{index % 2:02d}]: line {index} " + ("context " * 80)
         for index in range(90)
     ]
     transcript = "\n".join(lines)
 
-    excerpt = SummarizerExecutor._build_full_transcript_prompt_excerpt(transcript)
+    excerpt = SummarizerExecutor._build_full_transcript_prompt_text(transcript)
 
-    assert len(excerpt) <= SummarizerExecutor._FULL_TRANSCRIPT_EXCERPT_MAX_CHARS
-    assert "Coverage-sampled transcript excerpt" in excerpt
-    assert "line 0" in excerpt
-    assert any(f"line {index}" in excerpt for index in range(40, 50))
-    assert "line 89" in excerpt
-    assert "[... omitted " in excerpt
+    assert excerpt == transcript
 
 
 def test_load_draft_into_registry_ignores_malformed_xml() -> None:

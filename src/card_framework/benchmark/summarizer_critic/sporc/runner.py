@@ -8,10 +8,13 @@ import argparse
 import asyncio
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -19,6 +22,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 import hydra
+import httpx
 from omegaconf import OmegaConf
 import requests
 
@@ -39,7 +43,6 @@ from card_framework.benchmark.matrix import (
 from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     BenchmarkExecutionError,
     ManagedServer,
-    _attach_stream_callback,
     _build_stub_calibration,
     _coerce_mapping,
     _configure_benchmark_logging,
@@ -70,6 +73,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
 )
 from card_framework.benchmark.summarizer_critic.sporc.dataset import (
     DatasetPreparationError,
+    ensure_compact_prepared_dataset_manifest,
     iter_prepared_dataset_samples,
     load_prepared_dataset_manifest,
     prepare_sporc_benchmark,
@@ -96,12 +100,22 @@ from card_framework.audio_pipeline.speaker_samples import (
     resolve_sample_source_audio_path,
 )
 from card_framework.cli.main import _build_a2a_app
-from card_framework.orchestration.transcript import Transcript
+from card_framework.orchestration.transcript import Transcript, TranscriptSegment
 from card_framework.providers.logging_provider import LoggingLLMProvider
+from card_framework.providers.response_callbacks import (
+    CompositeResponseCallback,
+    RichConsoleResponseCallback,
+)
 from card_framework.retrieval.embeddings import TranscriptIndex
 from card_framework.runtime.loop_orchestrator import Orchestrator
 from card_framework.shared.events import event_bus
-from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
+from card_framework.shared.llm_provider import (
+    EmbeddingProvider,
+    LLMProvider,
+    LLMResponseCallback,
+    normalize_messages,
+    normalize_tools,
+)
 from card_framework.shared.paths import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_PROVIDER_PROFILES_PATH,
@@ -122,14 +136,41 @@ _SOURCE_AUDIO_HEADERS = {
     "Accept": "audio/*,*/*;q=0.8",
     "Referer": "https://www.buzzsprout.com/",
 }
+_SHARED_SAMPLE_QUEUE_DB_NAME = "sample_queue.sqlite3"
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
 _PROGRESS_EVENT_KEY = "sporc_progress_event"
 _STAGE_TIMEOUT_FINAL_STATUS = "stage_timeout"
+_STARTUP_UNAVAILABLE_FINAL_STATUS = "startup_unavailable"
+_CONNECTION_UNAVAILABLE_FINAL_STATUS = "connection_unavailable"
 _RESUME_FAILURE_DEFAULT_STATUS = "resume_interrupted_sample"
 _SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
 _CHECKPOINT_VERSION = 1
+_TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS = 250
+_TRANSCRIPT_ONLY_ALNUM_PATTERN = re.compile(r"[A-Za-z0-9]")
+_TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
+_REPLACEMENT_ELIGIBLE_FINAL_STATUSES = frozenset(
+    {
+        "preflight_failed",
+        _STAGE_TIMEOUT_FINAL_STATUS,
+        _STARTUP_UNAVAILABLE_FINAL_STATUS,
+        _CONNECTION_UNAVAILABLE_FINAL_STATUS,
+        _RESUME_FAILURE_DEFAULT_STATUS,
+        _SWEEP_STALL_FINAL_STATUS,
+    }
+)
+_RETRYABLE_INFRA_FINAL_STATUSES = frozenset(
+    {
+        _STARTUP_UNAVAILABLE_FINAL_STATUS,
+        _CONNECTION_UNAVAILABLE_FINAL_STATUS,
+    }
+)
+_SAMPLE_INFRA_RETRY_LIMIT = 2
+_AGENT_CLIENT_MAX_KEEPALIVE_CONNECTIONS = 20
+_AGENT_CLIENT_MAX_CONNECTIONS = 100
+_AGENT_CLIENT_KEEPALIVE_EXPIRY_SECONDS = 30.0
+_AGENT_CLIENT_POOL_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(slots=True)
@@ -139,12 +180,502 @@ class _ManagedBenchmarkRuntime:
     orchestrator: Orchestrator
     judge: SPoRCJudge
     event_capture: EventCapture
+    artifact_recorder: "_SampleArtifactRecorder"
     retrieval_enabled: bool
     shared_agent_client: AgentClient
     servers: list[ManagedServer]
     retrieval_port: int
     summarizer_port: int
     critic_port: int
+
+
+@dataclass(slots=True)
+class _PendingTraceRecord:
+    """Track one in-flight streamed response before it is persisted."""
+
+    role: str
+    call_index: int
+    agent_name: str
+    started_at_utc: str
+    completed_at_utc: str | None = None
+    reasoning_content: str = ""
+    content: str = ""
+
+
+@dataclass(slots=True)
+class _SampleArtifactState:
+    """Track one active sample's artifact directories and recorded call files."""
+
+    sample_id: str
+    sample_root: Path
+    manifest_path: Path
+    final_dir: Path
+    llm_root: Path
+    llm_dirs: dict[str, Path]
+    target_seconds: int
+    dataset: str
+    episode_key: str
+    call_counts: dict[str, int]
+    recorded_call_paths: dict[str, list[Path]]
+    pending_calls: dict[str, _PendingTraceRecord]
+
+
+@dataclass(slots=True, frozen=True)
+class _SampleArtifactPaths:
+    """Expose persisted sample artifact locations back to report payloads."""
+
+    sample_artifact_dir: str
+    artifact_manifest_path: str
+    summarizer_trace_dir: str
+    critic_trace_dir: str
+    judge_trace_dir: str
+    final_summary_path: str | None
+    final_critic_feedback_path: str | None
+    loop_diagnostics_path: str | None
+    sample_result_artifact_path: str
+
+
+def _json_default(value: object) -> object:
+    """Serialize model-like objects safely for artifact JSON dumps."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    return str(value)
+
+
+def _serialize_provider_response(response_message: Any) -> dict[str, Any]:
+    """Return a stable JSON-friendly response payload for trace artifacts."""
+    if isinstance(response_message, dict):
+        return deepcopy(response_message)
+    serialized: dict[str, Any] = {
+        "role": getattr(response_message, "role", "assistant"),
+        "content": getattr(response_message, "content", ""),
+    }
+    reasoning_content = getattr(response_message, "reasoning_content", None)
+    if reasoning_content is None:
+        reasoning_content = getattr(response_message, "reasoning", None)
+    if reasoning_content is not None:
+        serialized["reasoning_content"] = reasoning_content
+    tool_calls = getattr(response_message, "tool_calls", None)
+    if tool_calls:
+        serialized["tool_calls"] = json.loads(
+            json.dumps(tool_calls, default=_json_default)
+        )
+    return serialized
+
+
+def _attach_response_callback(
+    llm: LLMProvider,
+    callback: LLMResponseCallback,
+) -> bool:
+    """Attach a streaming callback to a provider or wrapped inner provider."""
+    callback_setter = getattr(llm, "set_response_callback", None)
+    if callable(callback_setter):
+        callback_setter(callback)
+        return True
+
+    inner_provider = getattr(llm, "inner_provider", None)
+    if isinstance(inner_provider, LLMProvider):
+        return _attach_response_callback(inner_provider, callback)
+    return False
+
+
+class _SampleArtifactRecorder:
+    """Persist per-sample trace and final-output artifacts for one execute run."""
+
+    def __init__(self, *, run_root: Path) -> None:
+        self._run_root = run_root
+        self._samples_root = (run_root / "samples").resolve()
+        self._lock = threading.RLock()
+        self._active_sample: _SampleArtifactState | None = None
+        self._samples_root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def samples_root(self) -> Path:
+        """Return the root directory that contains per-sample artifacts."""
+        return self._samples_root
+
+    def activate_sample(
+        self,
+        *,
+        sample: PreparedBenchmarkSample,
+        target_seconds: int,
+    ) -> None:
+        """Create and register the per-sample artifact tree for a run sample."""
+        sample_root = (self._samples_root / sample.sample_id).resolve()
+        final_dir = (sample_root / "final").resolve()
+        llm_root = (sample_root / "llm").resolve()
+        llm_dirs = {
+            role: (llm_root / role).resolve()
+            for role in ("summarizer", "critic", "judge")
+        }
+        for directory in (sample_root, final_dir, llm_root, *llm_dirs.values()):
+            directory.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._active_sample = _SampleArtifactState(
+                sample_id=sample.sample_id,
+                sample_root=sample_root,
+                manifest_path=(sample_root / "manifest.json").resolve(),
+                final_dir=final_dir,
+                llm_root=llm_root,
+                llm_dirs=llm_dirs,
+                target_seconds=target_seconds,
+                dataset=sample.dataset,
+                episode_key=sample.episode_key,
+                call_counts=defaultdict(int),
+                recorded_call_paths=defaultdict(list),
+                pending_calls={},
+            )
+
+    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        """Write one JSON artifact with stable formatting."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                payload,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=_json_default,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def begin_stream(self, *, role: str, agent_name: str) -> None:
+        """Start buffering one streamed response for the active sample."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            state = self._active_sample
+            state.call_counts[role] += 1
+            state.pending_calls[role] = _PendingTraceRecord(
+                role=role,
+                call_index=state.call_counts[role],
+                agent_name=agent_name,
+                started_at_utc=utc_now_iso(),
+            )
+
+    def append_reasoning(self, *, role: str, token: str) -> None:
+        """Append one streamed reasoning token for the active sample."""
+        if not token:
+            return
+        with self._lock:
+            if self._active_sample is None:
+                return
+            pending = self._active_sample.pending_calls.get(role)
+            if pending is not None:
+                pending.reasoning_content += token
+
+    def append_content(self, *, role: str, token: str) -> None:
+        """Append one streamed content token for the active sample."""
+        if not token:
+            return
+        with self._lock:
+            if self._active_sample is None:
+                return
+            pending = self._active_sample.pending_calls.get(role)
+            if pending is not None:
+                pending.content += token
+
+    def complete_stream(self, *, role: str) -> None:
+        """Mark one streamed response complete for the active sample."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            pending = self._active_sample.pending_calls.get(role)
+            if pending is not None:
+                pending.completed_at_utc = utc_now_iso()
+
+    def record_call(self, *, role: str, payload: dict[str, Any]) -> None:
+        """Persist one finalized provider request/response trace."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            state = self._active_sample
+            pending = state.pending_calls.pop(role, None)
+            if pending is None:
+                state.call_counts[role] += 1
+                pending = _PendingTraceRecord(
+                    role=role,
+                    call_index=state.call_counts[role],
+                    agent_name=str(payload.get("agent_name") or role.title()),
+                    started_at_utc=utc_now_iso(),
+                    completed_at_utc=utc_now_iso(),
+                )
+            elif pending.completed_at_utc is None:
+                pending.completed_at_utc = utc_now_iso()
+
+            call_path = (
+                state.llm_dirs[role] / f"call_{pending.call_index:03d}.json"
+            ).resolve()
+            self._write_json(
+                call_path,
+                {
+                    "sample_id": state.sample_id,
+                    "dataset": state.dataset,
+                    "episode_key": state.episode_key,
+                    "target_seconds": state.target_seconds,
+                    "role": role,
+                    "call_index": pending.call_index,
+                    "agent_name": pending.agent_name,
+                    "stream_started_at_utc": pending.started_at_utc,
+                    "stream_completed_at_utc": pending.completed_at_utc,
+                    "streamed_reasoning_content": pending.reasoning_content,
+                    "streamed_content": pending.content,
+                    **payload,
+                },
+            )
+            state.recorded_call_paths[role].append(call_path)
+
+    def _active_paths(self) -> _SampleArtifactPaths | None:
+        """Return current sample artifact paths without mutating state."""
+        with self._lock:
+            if self._active_sample is None:
+                return None
+            state = self._active_sample
+            return _SampleArtifactPaths(
+                sample_artifact_dir=str(state.sample_root),
+                artifact_manifest_path=str(state.manifest_path),
+                summarizer_trace_dir=str(state.llm_dirs["summarizer"]),
+                critic_trace_dir=str(state.llm_dirs["critic"]),
+                judge_trace_dir=str(state.llm_dirs["judge"]),
+                final_summary_path=None,
+                final_critic_feedback_path=None,
+                loop_diagnostics_path=None,
+                sample_result_artifact_path=str(
+                    (state.final_dir / "sample_result.json").resolve()
+                ),
+            )
+
+    def finalize_sample(
+        self,
+        *,
+        result: SampleBenchmarkResult,
+        diagnostics: dict[str, Any] | None,
+        candidate_summary: str,
+    ) -> _SampleArtifactPaths | None:
+        """Write final sample artifacts and return their resolved locations."""
+        with self._lock:
+            if self._active_sample is None:
+                return None
+            state = self._active_sample
+            final_summary_path: Path | None = None
+            critic_feedback_path: Path | None = None
+            loop_diagnostics_path: Path | None = None
+            sample_result_path = (state.final_dir / "sample_result.json").resolve()
+
+            if candidate_summary.strip():
+                final_summary_path = (state.final_dir / "summary.xml").resolve()
+                final_summary_path.write_text(candidate_summary, encoding="utf-8")
+
+            if diagnostics is not None:
+                loop_diagnostics_path = (
+                    state.final_dir / "loop_diagnostics.json"
+                ).resolve()
+                self._write_json(loop_diagnostics_path, diagnostics)
+                critic_feedback = str(diagnostics.get("final_feedback", "") or "").strip()
+                if critic_feedback:
+                    critic_feedback_path = (
+                        state.final_dir / "critic_feedback.txt"
+                    ).resolve()
+                    critic_feedback_path.write_text(critic_feedback, encoding="utf-8")
+
+            artifact_paths = _SampleArtifactPaths(
+                sample_artifact_dir=str(state.sample_root),
+                artifact_manifest_path=str(state.manifest_path),
+                summarizer_trace_dir=str(state.llm_dirs["summarizer"]),
+                critic_trace_dir=str(state.llm_dirs["critic"]),
+                judge_trace_dir=str(state.llm_dirs["judge"]),
+                final_summary_path=(
+                    str(final_summary_path) if final_summary_path is not None else None
+                ),
+                final_critic_feedback_path=(
+                    str(critic_feedback_path)
+                    if critic_feedback_path is not None
+                    else None
+                ),
+                loop_diagnostics_path=(
+                    str(loop_diagnostics_path)
+                    if loop_diagnostics_path is not None
+                    else None
+                ),
+                sample_result_artifact_path=str(sample_result_path),
+            )
+            result_with_artifacts = replace(
+                result,
+                sample_artifact_dir=artifact_paths.sample_artifact_dir,
+                artifact_manifest_path=artifact_paths.artifact_manifest_path,
+                summarizer_trace_dir=artifact_paths.summarizer_trace_dir,
+                critic_trace_dir=artifact_paths.critic_trace_dir,
+                judge_trace_dir=artifact_paths.judge_trace_dir,
+                final_summary_path=artifact_paths.final_summary_path,
+                final_critic_feedback_path=artifact_paths.final_critic_feedback_path,
+                loop_diagnostics_path=artifact_paths.loop_diagnostics_path,
+                sample_result_artifact_path=artifact_paths.sample_result_artifact_path,
+            )
+            self._write_json(sample_result_path, asdict(result_with_artifacts))
+            self._write_json(
+                state.manifest_path,
+                {
+                    "sample_id": state.sample_id,
+                    "dataset": state.dataset,
+                    "episode_key": state.episode_key,
+                    "target_seconds": state.target_seconds,
+                    "sample_artifact_dir": str(state.sample_root),
+                    "final": {
+                        "summary_xml": (
+                            str(final_summary_path) if final_summary_path is not None else ""
+                        ),
+                        "critic_feedback": (
+                            str(critic_feedback_path)
+                            if critic_feedback_path is not None
+                            else ""
+                        ),
+                        "loop_diagnostics": (
+                            str(loop_diagnostics_path)
+                            if loop_diagnostics_path is not None
+                            else ""
+                        ),
+                        "sample_result": str(sample_result_path),
+                    },
+                    "llm_traces": {
+                        role: {
+                            "directory": str(state.llm_dirs[role]),
+                            "calls": [str(path) for path in state.recorded_call_paths[role]],
+                        }
+                        for role in ("summarizer", "critic", "judge")
+                    },
+                },
+            )
+            return artifact_paths
+
+    def clear_active_sample(self) -> None:
+        """Drop any active sample context after sample completion."""
+        with self._lock:
+            self._active_sample = None
+
+
+class _ArtifactCaptureResponseCallback(LLMResponseCallback):
+    """Buffer streamed reasoning/content so per-call artifacts keep raw text."""
+
+    def __init__(self, *, recorder: _SampleArtifactRecorder, role: str) -> None:
+        self._recorder = recorder
+        self._role = role
+
+    def on_start(self, agent_name: str) -> None:
+        self._recorder.begin_stream(role=self._role, agent_name=agent_name)
+
+    def on_thought_token(self, token: str) -> None:
+        self._recorder.append_reasoning(role=self._role, token=token)
+
+    def on_content_token(self, token: str) -> None:
+        self._recorder.append_content(role=self._role, token=token)
+
+    def on_complete(self) -> None:
+        self._recorder.complete_stream(role=self._role)
+
+
+class _ArtifactCaptureLLMProvider(LLMProvider):
+    """Wrap an LLM provider and persist structured request/response trace payloads."""
+
+    def __init__(
+        self,
+        *,
+        inner_provider: LLMProvider,
+        recorder: _SampleArtifactRecorder,
+        role: str,
+    ) -> None:
+        self.inner_provider = inner_provider
+        self._recorder = recorder
+        self._role = role
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        started = time.perf_counter()
+        try:
+            response = self.inner_provider.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            self._recorder.record_call(
+                role=self._role,
+                payload={
+                    "operation": "generate",
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                    "max_tokens": max_tokens,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise
+
+        self._recorder.record_call(
+            role=self._role,
+            payload={
+                "operation": "generate",
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "max_tokens": max_tokens,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "response_text": response,
+            },
+        )
+        return response
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]] | tuple[dict[str, Any], ...] | Any,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+    ) -> Any:
+        started = time.perf_counter()
+        normalized_messages = normalize_messages(messages)
+        normalized_tools = normalize_tools(tools)
+        try:
+            response = self.inner_provider.chat(
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            self._recorder.record_call(
+                role=self._role,
+                payload={
+                    "operation": "chat",
+                    "messages": normalized_messages,
+                    "tools": normalized_tools,
+                    "tool_choice": tool_choice,
+                    "max_tokens": max_tokens,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise
+
+        self._recorder.record_call(
+            role=self._role,
+            payload={
+                "operation": "chat",
+                "messages": normalized_messages,
+                "tools": normalized_tools,
+                "tool_choice": tool_choice,
+                "max_tokens": max_tokens,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "response": _serialize_provider_response(response),
+            },
+        )
+        return response
 
 
 class _BenchmarkProgressTracker:
@@ -397,7 +928,7 @@ def _deserialize_sample_result(raw_payload: dict[str, Any]) -> SampleBenchmarkRe
     raw_metrics = sample_payload.pop("metrics", None) or {}
     if not isinstance(raw_metrics, dict):
         raw_metrics = {}
-    return SampleBenchmarkResult(
+    result = SampleBenchmarkResult(
         metrics=SampleMetricBundle(
             factualness=float(raw_metrics.get("factualness", 0.0) or 0.0),
             naturalness=float(raw_metrics.get("naturalness", 0.0) or 0.0),
@@ -408,6 +939,9 @@ def _deserialize_sample_result(raw_payload: dict[str, Any]) -> SampleBenchmarkRe
         ),
         **sample_payload,
     )
+    if "counts_toward_target" in raw_payload:
+        return result
+    return _finalize_result_target_membership(result)
 
 
 def _load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
@@ -443,11 +977,83 @@ def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
     """Map one sample exception to a stable terminal status and message."""
     message = str(exc).strip() or exc.__class__.__name__
     lowered = message.lower()
+    if (
+        "health check failed" in lowered
+        or "server not responding" in lowered
+        or "state=failed" in lowered
+    ):
+        return _STARTUP_UNAVAILABLE_FINAL_STATUS, message
+    if (
+        "pooltimeout" in lowered
+        or "connecterror" in lowered
+        or "connecttimeout" in lowered
+        or "connection refused" in lowered
+        or "all connection attempts failed" in lowered
+        or "nodename nor servname provided" in lowered
+    ):
+        return _CONNECTION_UNAVAILABLE_FINAL_STATUS, message
     if "timeout=" in lowered or "readtimeout" in lowered or "writetimeout" in lowered:
         return _STAGE_TIMEOUT_FINAL_STATUS, message
     if "timed out" in lowered or "timeout" in lowered:
         return _STAGE_TIMEOUT_FINAL_STATUS, message
     return "execution_error", message
+
+
+def _build_failed_result(
+    *,
+    sample: PreparedBenchmarkSample,
+    target_seconds: int,
+    final_status: str,
+    error_message: str,
+    duration_seconds: float,
+    retrieval_events: int = 0,
+    tool_invocations: int = 0,
+) -> SampleBenchmarkResult:
+    """Build one failed result outside the normal success path."""
+    counts_toward_target = _counts_toward_target_for_status(final_status)
+    return SampleBenchmarkResult(
+        sample_id=sample.sample_id,
+        dataset=sample.dataset,
+        episode_key=sample.episode_key,
+        status="failed",
+        target_seconds=target_seconds,
+        candidate_seconds=0.0,
+        converged=False,
+        iterations_run=0,
+        final_status=final_status,
+        duration_seconds=duration_seconds,
+        retrieval_events=retrieval_events,
+        tool_invocations=tool_invocations,
+        metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
+        error_message=error_message,
+        counts_toward_target=counts_toward_target,
+        replacement_reason=(
+            final_status if not counts_toward_target else None
+        ),
+    )
+
+
+def _counts_toward_target_for_status(final_status: str) -> bool:
+    """Return whether one terminal status should consume a retained sample slot."""
+    return final_status not in _REPLACEMENT_ELIGIBLE_FINAL_STATUSES
+
+
+def _count_target_results(
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+) -> int:
+    """Count results that consume the retained benchmark target."""
+    return sum(
+        1
+        for result in results_by_sample_id.values()
+        if bool(result.counts_toward_target)
+    )
+
+
+def _count_attempted_candidates(
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+) -> int:
+    """Count all candidates that reached a terminal recorded result."""
+    return len(results_by_sample_id)
 
 
 def _build_resume_failure_result(
@@ -482,6 +1088,8 @@ def _build_resume_failure_result(
             "Marked failed while resuming from checkpoint after the previous child "
             f"stopped during stage={stage}{iteration_text}."
         ),
+        counts_toward_target=False,
+        replacement_reason=reason,
     )
 
 
@@ -495,6 +1103,55 @@ def _ordered_results(
         for sample_id in sample_order
         if sample_id in results_by_sample_id
     ]
+
+
+def _retained_results(
+    results: list[SampleBenchmarkResult],
+) -> list[SampleBenchmarkResult]:
+    """Return the sample results that count toward the retained cohort."""
+    return [result for result in results if result.counts_toward_target]
+
+
+def _replacement_excluded_results(
+    results: list[SampleBenchmarkResult],
+) -> list[SampleBenchmarkResult]:
+    """Return attempted candidates that were excluded and backfilled."""
+    return [result for result in results if not result.counts_toward_target]
+
+
+def _retained_result_count(
+    results_by_sample_id: dict[str, SampleBenchmarkResult],
+) -> int:
+    """Count results that consume one retained benchmark slot."""
+    return sum(
+        1 for result in results_by_sample_id.values() if result.counts_toward_target
+    )
+
+
+def _counts_toward_target(result: SampleBenchmarkResult) -> bool:
+    """Return whether one result belongs in the retained benchmark cohort."""
+    return _counts_toward_target_for_status(result.final_status)
+
+
+def _finalize_result_target_membership(
+    result: SampleBenchmarkResult,
+    *,
+    infra_retry_attempts: int = 0,
+) -> SampleBenchmarkResult:
+    """Apply retained-cohort membership and retry metadata to one result."""
+    counts_toward_target = _counts_toward_target(result)
+    replacement_reason = None if counts_toward_target else result.final_status
+    return replace(
+        result,
+        counts_toward_target=counts_toward_target,
+        replacement_reason=replacement_reason,
+        infra_retry_attempts=infra_retry_attempts,
+    )
+
+
+def _is_retryable_infra_result(result: SampleBenchmarkResult) -> bool:
+    """Return whether one failed result deserves same-sample infra retry."""
+    return result.final_status in _RETRYABLE_INFRA_FINAL_STATUSES
 
 
 def _prepare_provider_config(
@@ -686,21 +1343,36 @@ def _build_preflight_failed_result(
         error_message=reason,
         preflight_reason=reason,
         preflight_stats=dict(stats),
+        counts_toward_target=False,
+        replacement_reason="preflight_failed",
     )
 
 
-def _summarize_results(results: list[SampleBenchmarkResult]) -> BenchmarkSummary:
-    """Summarize results with skipped samples excluded from execution aggregates."""
-    executed_results = [result for result in results if result.status != "skipped"]
+def _summarize_results(
+    results: list[SampleBenchmarkResult],
+    *,
+    target_sample_count: int,
+) -> BenchmarkSummary:
+    """Summarize retained results while keeping attempted candidates auditable."""
+    retained_results = _retained_results(results)
+    executed_results = [
+        result for result in retained_results if result.status != "skipped"
+    ]
     successful_results = [
         result for result in executed_results if result.status == "completed"
     ]
     failed_results = [
         result for result in executed_results if result.status == "failed"
     ]
-    skipped_results = [result for result in results if result.status == "skipped"]
+    skipped_results = [
+        result for result in retained_results if result.status == "skipped"
+    ]
+    replacement_results = _replacement_excluded_results(results)
     return BenchmarkSummary(
-        sample_count=len(results),
+        target_sample_count=target_sample_count,
+        sample_count=len(retained_results),
+        attempted_candidate_count=len(results),
+        replacement_count=len(replacement_results),
         executed_count=len(executed_results),
         skipped_count=len(skipped_results),
         success_count=len(successful_results),
@@ -738,9 +1410,436 @@ def _report_status_from_summary(summary: BenchmarkSummary) -> str:
     """Resolve the top-level report status from summary counts."""
     if summary.executed_count == 0:
         return "failed"
+    if summary.sample_count < summary.target_sample_count:
+        return "partial"
     if summary.failure_count == 0 and summary.skipped_count == 0:
         return "completed"
     return "partial"
+
+
+def _resolve_sample_shard_args(args: argparse.Namespace) -> tuple[int, int]:
+    """Resolve and validate optional sample-shard selection arguments."""
+    shard_index = int(getattr(args, "sample_shard_index", 1) or 1)
+    shard_count = int(getattr(args, "sample_shard_count", 1) or 1)
+    if shard_count <= 0:
+        raise BenchmarkExecutionError("--sample-shard-count must be positive.")
+    if shard_index <= 0 or shard_index > shard_count:
+        raise BenchmarkExecutionError(
+            "--sample-shard-index must be between 1 and --sample-shard-count."
+        )
+    return shard_index, shard_count
+
+
+def _select_sample_shard(
+    samples: list[PreparedBenchmarkSample],
+    *,
+    shard_index: int,
+    shard_count: int,
+) -> list[PreparedBenchmarkSample]:
+    """Filter a selected sample list down to one deterministic shard."""
+    if shard_count == 1:
+        return list(samples)
+    zero_based_index = shard_index - 1
+    return [
+        sample
+        for sample_position, sample in enumerate(samples)
+        if sample_position % shard_count == zero_based_index
+    ]
+
+
+def _resolve_shared_sample_queue_root(args: argparse.Namespace) -> Path | None:
+    """Resolve an optional shared sample-queue root for pooled sweep workers."""
+    raw_value = str(getattr(args, "shared_sample_queue_root", "") or "").strip()
+    if not raw_value:
+        return None
+    return Path(raw_value).resolve()
+
+
+def _open_shared_sample_queue_connection(queue_root: Path) -> sqlite3.Connection:
+    """Open the preset-level SQLite queue used by pooled sweep workers."""
+    queue_root.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(
+        queue_root / _SHARED_SAMPLE_QUEUE_DB_NAME,
+        timeout=30.0,
+        isolation_level=None,
+    )
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS queue_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sample_queue (
+            sample_id TEXT PRIMARY KEY,
+            sample_position INTEGER NOT NULL,
+            sample_payload_json TEXT,
+            status TEXT NOT NULL,
+            owner_label TEXT,
+            owner_pid INTEGER,
+            final_status TEXT,
+            counts_toward_target INTEGER NOT NULL DEFAULT 0,
+            replacement_reason TEXT,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    sample_queue_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(sample_queue)")
+    }
+    if "sample_payload_json" not in sample_queue_columns:
+        connection.execute(
+            "ALTER TABLE sample_queue ADD COLUMN sample_payload_json TEXT"
+        )
+    return connection
+
+
+def _initialize_shared_sample_queue(
+    connection: sqlite3.Connection,
+    *,
+    sample_order: list[str],
+    target_sample_count: int,
+) -> None:
+    """Create or validate the shared preset queue against the selected sample order."""
+    serialized_order = json.dumps(sample_order, ensure_ascii=True)
+    serialized_target = str(target_sample_count)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'sample_order_json'"
+        ).fetchone()
+        target_row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'target_sample_count'"
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+                ("sample_order_json", serialized_order),
+            )
+            connection.execute(
+                "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+                ("target_sample_count", serialized_target),
+            )
+            connection.executemany(
+                """
+                INSERT INTO sample_queue(
+                    sample_id,
+                    sample_position,
+                    sample_payload_json,
+                    status,
+                    owner_label,
+                    owner_pid,
+                    final_status,
+                    counts_toward_target,
+                    replacement_reason,
+                    updated_at_utc
+                ) VALUES (?, ?, NULL, 'pending', NULL, NULL, NULL, 0, NULL, ?)
+                """,
+                [
+                    (sample_id, index, now_iso)
+                    for index, sample_id in enumerate(sample_order, start=1)
+                ],
+            )
+        elif str(row[0]) != serialized_order or target_row is None or str(target_row[0]) != serialized_target:
+            raise BenchmarkExecutionError(
+                "Shared sample queue does not match the selected benchmark sample order or retained target."
+            )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
+def _shared_sample_sort_key(
+    *,
+    sample_id: str,
+    sample_seed: int | None,
+    manifest_position: int,
+) -> str:
+    """Build the deterministic queue ordering key for one candidate sample."""
+    if sample_seed is None:
+        return f"{manifest_position:08d}"
+    return hashlib.sha256(f"{sample_seed}:{sample_id}".encode("utf-8")).hexdigest()
+
+
+def _serialize_prepared_sample(sample: PreparedBenchmarkSample) -> str:
+    """Serialize one prepared sample for queue-backed worker lookup."""
+    return json.dumps(
+        asdict(sample),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _deserialize_prepared_sample(raw_payload: str) -> PreparedBenchmarkSample:
+    """Deserialize one queued prepared sample payload."""
+    payload = json.loads(raw_payload)
+    if not isinstance(payload, dict):
+        raise BenchmarkExecutionError(
+            "Shared sample queue payload must decode to a JSON object."
+        )
+    return PreparedBenchmarkSample(
+        sample_id=str(payload.get("sample_id") or ""),
+        dataset=str(payload.get("dataset") or ""),
+        episode_key=str(payload.get("episode_key") or ""),
+        transcript_path=str(payload.get("transcript_path") or ""),
+        reference_summary=str(payload.get("reference_summary") or ""),
+        target_seconds=int(payload.get("target_seconds") or 0),
+        metadata=(
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        ),
+    )
+
+
+def _initialize_shared_sample_queue_from_manifest(
+    connection: sqlite3.Connection,
+    *,
+    manifest_path: Path,
+    requested_target_sample_count: int,
+    sample_seed: int | None,
+) -> tuple[list[str], int]:
+    """Create or validate a shared queue directly from the prepared manifest."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'sample_order_json'"
+        ).fetchone()
+        target_row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'target_sample_count'"
+        ).fetchone()
+        if row is not None and target_row is not None:
+            sample_order = json.loads(str(row[0]))
+            if not isinstance(sample_order, list) or not all(
+                isinstance(sample_id, str) for sample_id in sample_order
+            ):
+                raise BenchmarkExecutionError(
+                    "Shared sample queue sample order metadata is invalid."
+                )
+            target_sample_count = int(target_row[0])
+            connection.execute("COMMIT")
+            return [str(sample_id) for sample_id in sample_order], target_sample_count
+
+        connection.execute("DELETE FROM queue_metadata")
+        connection.execute("DELETE FROM sample_queue")
+        connection.execute("DROP TABLE IF EXISTS temp.shared_sample_catalog_stage")
+        connection.execute(
+            """
+            CREATE TEMP TABLE shared_sample_catalog_stage (
+                sort_key TEXT NOT NULL,
+                sample_id TEXT PRIMARY KEY,
+                sample_payload_json TEXT NOT NULL
+            )
+            """
+        )
+        total_sample_count = 0
+        for total_sample_count, sample in enumerate(
+            iter_prepared_dataset_samples(manifest_path, max_samples=None),
+            start=1,
+        ):
+            connection.execute(
+                """
+                INSERT INTO shared_sample_catalog_stage(
+                    sort_key,
+                    sample_id,
+                    sample_payload_json
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    _shared_sample_sort_key(
+                        sample_id=sample.sample_id,
+                        sample_seed=sample_seed,
+                        manifest_position=total_sample_count,
+                    ),
+                    sample.sample_id,
+                    _serialize_prepared_sample(sample),
+                ),
+            )
+        if total_sample_count <= 0:
+            raise BenchmarkExecutionError(
+                "Shared sample queue initialization found no benchmark candidates."
+            )
+
+        target_sample_count = (
+            total_sample_count
+            if requested_target_sample_count <= 0
+            else min(requested_target_sample_count, total_sample_count)
+        )
+        sample_order: list[str] = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for sample_position, row in enumerate(
+            connection.execute(
+                """
+                SELECT sample_id, sample_payload_json
+                FROM shared_sample_catalog_stage
+                ORDER BY sort_key ASC, sample_id ASC
+                """
+            ),
+            start=1,
+        ):
+            sample_id = str(row[0])
+            sample_order.append(sample_id)
+            connection.execute(
+                """
+                INSERT INTO sample_queue(
+                    sample_id,
+                    sample_position,
+                    sample_payload_json,
+                    status,
+                    owner_label,
+                    owner_pid,
+                    final_status,
+                    counts_toward_target,
+                    replacement_reason,
+                    updated_at_utc
+                ) VALUES (?, ?, ?, 'pending', NULL, NULL, NULL, 0, NULL, ?)
+                """,
+                (
+                    sample_id,
+                    sample_position,
+                    str(row[1]),
+                    now_iso,
+                ),
+            )
+        connection.execute("DROP TABLE IF EXISTS temp.shared_sample_catalog_stage")
+        connection.execute(
+            "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+            ("sample_order_json", json.dumps(sample_order, ensure_ascii=True)),
+        )
+        connection.execute(
+            "INSERT INTO queue_metadata(key, value) VALUES (?, ?)",
+            ("target_sample_count", str(target_sample_count)),
+        )
+        connection.execute("COMMIT")
+        return sample_order, target_sample_count
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
+def _load_shared_sample(
+    connection: sqlite3.Connection,
+    *,
+    sample_id: str,
+) -> PreparedBenchmarkSample:
+    """Load one claimed sample payload from the shared queue catalog."""
+    row = connection.execute(
+        """
+        SELECT sample_payload_json
+        FROM sample_queue
+        WHERE sample_id = ?
+        """,
+        (sample_id,),
+    ).fetchone()
+    if row is None or not str(row[0] or "").strip():
+        raise BenchmarkExecutionError(
+            f"Shared sample queue is missing payload for sample '{sample_id}'."
+        )
+    return _deserialize_prepared_sample(str(row[0]))
+
+
+def _claim_next_shared_sample_id(
+    connection: sqlite3.Connection,
+    *,
+    worker_label: str,
+    worker_pid: int,
+) -> str | None:
+    """Claim the next pending sample from a preset-level shared queue."""
+    claimed_sample_id: str | None = None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        counted_row = connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'completed' AND counts_toward_target = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'claimed' THEN 1 ELSE 0 END), 0)
+            FROM sample_queue
+            """
+        ).fetchone()
+        target_row = connection.execute(
+            "SELECT value FROM queue_metadata WHERE key = 'target_sample_count'"
+        ).fetchone()
+        counted_results = int(counted_row[0]) if counted_row is not None else 0
+        claimed_results = int(counted_row[1]) if counted_row is not None else 0
+        target_sample_count = int(target_row[0]) if target_row is not None else 0
+        if counted_results + claimed_results >= target_sample_count:
+            connection.execute("COMMIT")
+            return None
+        row = connection.execute(
+            """
+            SELECT sample_id
+            FROM sample_queue
+            WHERE status = 'pending'
+            ORDER BY sample_position ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is not None:
+            claimed_sample_id = str(row[0])
+            connection.execute(
+                """
+                UPDATE sample_queue
+                SET status = 'claimed',
+                    owner_label = ?,
+                    owner_pid = ?,
+                    updated_at_utc = ?
+                WHERE sample_id = ?
+                """,
+                (worker_label, worker_pid, now_iso, claimed_sample_id),
+            )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return claimed_sample_id
+
+
+def _mark_shared_sample_completed(
+    connection: sqlite3.Connection,
+    *,
+    sample_id: str,
+    final_status: str,
+    counts_toward_target: bool,
+    replacement_reason: str | None = None,
+) -> None:
+    """Mark one shared-queue sample terminal so other workers skip it."""
+    resolved_status = "completed" if counts_toward_target else "replaced"
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            UPDATE sample_queue
+            SET status = ?,
+                owner_label = NULL,
+                owner_pid = NULL,
+                final_status = ?,
+                counts_toward_target = ?,
+                replacement_reason = ?,
+                updated_at_utc = ?
+            WHERE sample_id = ?
+            """,
+            (
+                resolved_status,
+                final_status,
+                1 if counts_toward_target else 0,
+                replacement_reason,
+                datetime.now(timezone.utc).isoformat(),
+                sample_id,
+            ),
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
 
 
 def _build_execution_report(
@@ -757,17 +1856,23 @@ def _build_execution_report(
     duration_preset: str,
     override_target_seconds: int | None,
     sample_seed: int | None,
+    target_sample_count: int,
     checkpoint_path: Path | None,
     resumed_from_checkpoint: bool,
     resume_count: int,
+    sample_shard_index: int,
+    sample_shard_count: int,
 ) -> BenchmarkExecutionReport:
     """Build the SPoRC execution report before artifact paths are known."""
-    summary = _summarize_results(results)
+    summary = _summarize_results(results, target_sample_count=target_sample_count)
     git_commit, git_branch = git_info(REPO_ROOT)
+    status = _report_status_from_summary(summary)
+    if summary.sample_count == 0 and sample_shard_count > 1:
+        status = "completed"
     return BenchmarkExecutionReport(
         run_id=run_id,
         generated_at_utc=utc_now_iso(),
-        status=_report_status_from_summary(summary),
+        status=status,
         dataset_manifest_path=str(dataset_manifest.manifest_path),
         sporc_dataset_id=dataset_manifest.sporc_dataset_id,
         dataset_variant=dataset_manifest.dataset_variant,
@@ -783,6 +1888,7 @@ def _build_execution_report(
         results_path="",
         samples=results,
         summary=summary,
+        sample_artifacts_root=None,
         duration_tolerance_ratio=duration_tolerance_ratio,
         transcript_only=transcript_only,
         duration_preset=duration_preset,
@@ -791,6 +1897,8 @@ def _build_execution_report(
         checkpoint_path=(str(checkpoint_path) if checkpoint_path is not None else None),
         resumed_from_checkpoint=resumed_from_checkpoint,
         resume_count=resume_count,
+        sample_shard_index=sample_shard_index,
+        sample_shard_count=sample_shard_count,
     )
 
 
@@ -810,27 +1918,38 @@ def _write_execution_report_snapshot(
     duration_preset: str,
     override_target_seconds: int | None,
     sample_seed: int | None,
+    target_sample_count: int,
     checkpoint_path: Path | None,
     resumed_from_checkpoint: bool,
     resume_count: int,
+    sample_shard_index: int,
+    sample_shard_count: int,
 ) -> BenchmarkExecutionReport:
     """Write one partial or final execution report snapshot."""
-    provisional_report = _build_execution_report(
-        run_id=run_id,
-        dataset_manifest=dataset_manifest,
-        summarizer_provider=summarizer_provider,
-        critic_provider=critic_provider,
-        judge_provider=judge_provider,
-        embedding_mode=embedding_mode,
-        results=_ordered_results(sample_order, results_by_sample_id),
-        duration_tolerance_ratio=duration_tolerance_ratio,
-        transcript_only=transcript_only,
-        duration_preset=duration_preset,
-        override_target_seconds=override_target_seconds,
-        sample_seed=sample_seed,
-        checkpoint_path=checkpoint_path,
-        resumed_from_checkpoint=resumed_from_checkpoint,
-        resume_count=resume_count,
+    samples_root = (run_root / "samples").resolve()
+    sample_artifacts_root = str(samples_root) if samples_root.exists() else None
+    provisional_report = replace(
+        _build_execution_report(
+            run_id=run_id,
+            dataset_manifest=dataset_manifest,
+            summarizer_provider=summarizer_provider,
+            critic_provider=critic_provider,
+            judge_provider=judge_provider,
+            embedding_mode=embedding_mode,
+            results=_ordered_results(sample_order, results_by_sample_id),
+            duration_tolerance_ratio=duration_tolerance_ratio,
+            transcript_only=transcript_only,
+            duration_preset=duration_preset,
+            override_target_seconds=override_target_seconds,
+            sample_seed=sample_seed,
+            target_sample_count=target_sample_count,
+            checkpoint_path=checkpoint_path,
+            resumed_from_checkpoint=resumed_from_checkpoint,
+            resume_count=resume_count,
+            sample_shard_index=sample_shard_index,
+            sample_shard_count=sample_shard_count,
+        ),
+        sample_artifacts_root=sample_artifacts_root,
     )
     report_path, notes_path, results_path = write_execution_artifacts(
         run_root=run_root,
@@ -864,6 +1983,7 @@ def _build_runtime_port_args(
 async def _start_managed_runtime(
     *,
     args: argparse.Namespace,
+    run_root: Path,
     base_cfg: Any,
     summarizer_provider_config: dict[str, Any],
     critic_provider_config: dict[str, Any],
@@ -885,14 +2005,54 @@ async def _start_managed_runtime(
     llm_judge: LLMProvider = hydra.utils.instantiate(
         OmegaConf.create(judge_provider_config)
     )
+    artifact_recorder = _SampleArtifactRecorder(run_root=run_root)
+    summarizer_callback: LLMResponseCallback = _ArtifactCaptureResponseCallback(
+        recorder=artifact_recorder,
+        role="summarizer",
+    )
+    critic_callback: LLMResponseCallback = _ArtifactCaptureResponseCallback(
+        recorder=artifact_recorder,
+        role="critic",
+    )
+    judge_callback: LLMResponseCallback = _ArtifactCaptureResponseCallback(
+        recorder=artifact_recorder,
+        role="judge",
+    )
     if not bool(args.disable_stream_output):
-        _attach_stream_callback(llm_summarizer)
-        _attach_stream_callback(llm_critic)
-        _attach_stream_callback(llm_judge)
+        summarizer_callback = CompositeResponseCallback(
+            summarizer_callback,
+            RichConsoleResponseCallback(),
+        )
+        critic_callback = CompositeResponseCallback(
+            critic_callback,
+            RichConsoleResponseCallback(),
+        )
+        judge_callback = CompositeResponseCallback(
+            judge_callback,
+            RichConsoleResponseCallback(),
+        )
+    _attach_response_callback(llm_summarizer, summarizer_callback)
+    _attach_response_callback(llm_critic, critic_callback)
+    _attach_response_callback(llm_judge, judge_callback)
     if logging_enabled:
         llm_summarizer = LoggingLLMProvider(inner_provider=llm_summarizer)
         llm_critic = LoggingLLMProvider(inner_provider=llm_critic)
         llm_judge = LoggingLLMProvider(inner_provider=llm_judge)
+    llm_summarizer = _ArtifactCaptureLLMProvider(
+        inner_provider=llm_summarizer,
+        recorder=artifact_recorder,
+        role="summarizer",
+    )
+    llm_critic = _ArtifactCaptureLLMProvider(
+        inner_provider=llm_critic,
+        recorder=artifact_recorder,
+        role="critic",
+    )
+    llm_judge = _ArtifactCaptureLLMProvider(
+        inner_provider=llm_judge,
+        recorder=artifact_recorder,
+        role="judge",
+    )
 
     embedding: EmbeddingProvider = hydra.utils.instantiate(
         OmegaConf.create(embedding_profile.embedding_config)
@@ -907,7 +2067,16 @@ async def _start_managed_runtime(
         ["tool_invocation", "retrieval_stats", "orchestrator_iteration_completed"]
     )
     event_capture.start()
-    shared_agent_client = AgentClient(event_bus=event_bus)
+    shared_agent_client = AgentClient(
+        event_bus=event_bus,
+        limits=httpx.Limits(
+            max_keepalive_connections=_AGENT_CLIENT_MAX_KEEPALIVE_CONNECTIONS,
+            max_connections=_AGENT_CLIENT_MAX_CONNECTIONS,
+            keepalive_expiry=_AGENT_CLIENT_KEEPALIVE_EXPIRY_SECONDS,
+        ),
+        pool_timeout_seconds=_AGENT_CLIENT_POOL_TIMEOUT_SECONDS,
+        trust_env=False,
+    )
     servers: list[ManagedServer] = []
     reserved_ports: tuple[int, int, int] | None = None
     try:
@@ -1002,6 +2171,7 @@ async def _start_managed_runtime(
             orchestrator=orchestrator,
             judge=judge,
             event_capture=event_capture,
+            artifact_recorder=artifact_recorder,
             retrieval_enabled=retrieval_enabled,
             shared_agent_client=shared_agent_client,
             servers=servers,
@@ -1044,22 +2214,34 @@ def _format_transcript(transcript: dict[str, Any]) -> str:
 def _coerce_alias_map(
     transcript: dict[str, Any], sample: PreparedBenchmarkSample
 ) -> dict[str, str]:
+    def _normalize_alias_map(raw_alias_map: dict[str, Any]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        seen_casefold: set[str] = set()
+        for key, value in raw_alias_map.items():
+            cleaned_key = str(key).strip()
+            cleaned_value = str(value).strip()
+            if not cleaned_key or not cleaned_value:
+                continue
+            canonical_key = (
+                cleaned_key.upper()
+                if _TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN.match(cleaned_key)
+                else cleaned_key
+            )
+            casefold_key = canonical_key.casefold()
+            if casefold_key in seen_casefold:
+                continue
+            normalized[canonical_key] = cleaned_value
+            seen_casefold.add(casefold_key)
+        return normalized
+
     metadata = transcript.get("metadata", {})
     if isinstance(metadata, dict) and isinstance(
         metadata.get("speaker_alias_map"), dict
     ):
-        return {
-            str(key): str(value)
-            for key, value in metadata["speaker_alias_map"].items()
-            if str(key).strip() and str(value).strip()
-        }
+        return _normalize_alias_map(metadata["speaker_alias_map"])
     raw_alias_map = sample.metadata.get("speaker_alias_map", {})
     if isinstance(raw_alias_map, dict):
-        return {
-            str(key): str(value)
-            for key, value in raw_alias_map.items()
-            if str(key).strip() and str(value).strip()
-        }
+        return _normalize_alias_map(raw_alias_map)
     return {}
 
 
@@ -1079,7 +2261,304 @@ def _canonical_speaker_label(label: str, alias_map: dict[str, str]) -> str:
     cleaned = label.strip()
     if not cleaned:
         return "UNKNOWN"
-    return alias_map.get(cleaned, alias_map.get(cleaned.lower(), cleaned))
+    direct_match = alias_map.get(cleaned)
+    if direct_match:
+        return direct_match
+    cleaned_casefold = cleaned.casefold()
+    for alias_key, canonical_label in alias_map.items():
+        if alias_key.casefold() == cleaned_casefold:
+            return canonical_label
+    return cleaned
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    return [text]
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        deduped.append(cleaned)
+        seen.add(cleaned)
+    return deduped
+
+
+def _join_segment_text(left_text: str, right_text: str) -> str:
+    left = left_text.rstrip()
+    right = right_text.lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if right[:1] in ",.;:?!)]}" or left.endswith(("(", "/", "-", "'")):
+        return f"{left}{right}"
+    return f"{left} {right}"
+
+
+def _segment_duration_ms(segment: TranscriptSegment) -> int:
+    return max(0, int(segment.end_time) - int(segment.start_time))
+
+
+def _segment_word_count(segment: TranscriptSegment) -> int:
+    return count_words(segment.text)
+
+
+def _merge_segment_extras(
+    left_extras: dict[str, Any],
+    right_extras: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(left_extras)
+    for key, value in right_extras.items():
+        merged.setdefault(key, value)
+    left_raw_primary = str(
+        left_extras.get("raw_primary_speaker", merged.get("raw_primary_speaker", ""))
+    ).strip()
+    right_raw_primary = str(
+        right_extras.get("raw_primary_speaker", merged.get("raw_primary_speaker", ""))
+    ).strip()
+    raw_overlap_speakers = _dedupe_preserve_order(
+        _coerce_string_list(left_extras.get("raw_overlap_speakers"))
+        + _coerce_string_list(right_extras.get("raw_overlap_speakers"))
+    )
+    raw_speakers = _dedupe_preserve_order(
+        _coerce_string_list(left_extras.get("raw_speakers"))
+        + _coerce_string_list(right_extras.get("raw_speakers"))
+        + [left_raw_primary, right_raw_primary]
+        + raw_overlap_speakers
+    )
+    speaker_candidates = _dedupe_preserve_order(
+        _coerce_string_list(left_extras.get("speaker_candidates"))
+        + _coerce_string_list(right_extras.get("speaker_candidates"))
+        + raw_speakers
+    )
+    merged["raw_primary_speaker"] = left_raw_primary or right_raw_primary
+    merged["raw_overlap_speakers"] = raw_overlap_speakers
+    merged["raw_speakers"] = raw_speakers
+    merged["speaker_candidates"] = speaker_candidates
+    merged["speaker_uncertain"] = (
+        bool(left_extras.get("speaker_uncertain"))
+        or bool(right_extras.get("speaker_uncertain"))
+        or len(speaker_candidates) > 1
+    )
+    return merged
+
+
+def _merge_adjacent_same_speaker_segments(
+    segments: list[TranscriptSegment],
+    *,
+    merge_gap_ms: int,
+) -> list[TranscriptSegment]:
+    if not segments:
+        return []
+    merged: list[TranscriptSegment] = [segments[0]]
+    for segment in segments[1:]:
+        previous = merged[-1]
+        gap_ms = max(0, int(segment.start_time) - int(previous.end_time))
+        if previous.speaker == segment.speaker and gap_ms <= merge_gap_ms:
+            merged[-1] = TranscriptSegment(
+                speaker=previous.speaker,
+                text=_join_segment_text(previous.text, segment.text),
+                start_time=previous.start_time,
+                end_time=max(previous.end_time, segment.end_time),
+                extras=_merge_segment_extras(previous.extras, segment.extras),
+            )
+            continue
+        merged.append(segment)
+    return merged
+
+
+def _extract_named_speaker_labels(
+    *,
+    metadata: dict[str, Any],
+    sample: PreparedBenchmarkSample,
+    alias_map: dict[str, str],
+) -> list[str]:
+    metadata_labels = metadata.get("named_speaker_labels")
+    if isinstance(metadata_labels, list):
+        return _dedupe_preserve_order(
+            [
+                _canonical_speaker_label(str(label), alias_map)
+                for label in metadata_labels
+                if str(label).strip()
+            ]
+        )
+    sample_labels = sample.metadata.get("named_speaker_labels")
+    if isinstance(sample_labels, list):
+        return _dedupe_preserve_order(
+            [
+                _canonical_speaker_label(str(label), alias_map)
+                for label in sample_labels
+                if str(label).strip()
+            ]
+        )
+    return _dedupe_preserve_order(
+        [
+            canonical_label
+            for alias_key, canonical_label in alias_map.items()
+            if not _TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN.match(alias_key)
+        ]
+    )
+
+
+def _extract_main_speaker_labels(
+    *,
+    metadata: dict[str, Any],
+    sample: PreparedBenchmarkSample,
+    alias_map: dict[str, str],
+) -> list[str]:
+    for raw_value in (
+        metadata.get("main_speaker_labels"),
+        sample.metadata.get("main_speaker_labels"),
+    ):
+        if isinstance(raw_value, list):
+            return _dedupe_preserve_order(
+                [
+                    _canonical_speaker_label(str(label), alias_map)
+                    for label in raw_value
+                    if str(label).strip()
+                ]
+            )
+    speaker_notes = metadata.get("speaker_notes")
+    if not isinstance(speaker_notes, list):
+        speaker_notes = sample.metadata.get("speaker_notes", [])
+    if isinstance(speaker_notes, list):
+        for note in speaker_notes:
+            note_text = str(note)
+            if not note_text.startswith("mainEpSpeakers:"):
+                continue
+            raw_labels = [
+                part.strip()
+                for part in note_text.split(":", 1)[1].split(",")
+                if part.strip()
+            ]
+            return _dedupe_preserve_order(
+                [
+                    _canonical_speaker_label(label, alias_map)
+                    for label in raw_labels
+                ]
+            )
+    return []
+
+
+def _normalize_transcript_for_transcript_only_benchmark(
+    *,
+    transcript: Transcript,
+    sample: PreparedBenchmarkSample,
+) -> Transcript:
+    alias_map = _coerce_alias_map(transcript.to_payload(), sample)
+    prepared_segments: list[TranscriptSegment] = []
+    raw_speakers_seen: list[str] = []
+    for segment in sorted(
+        transcript.segments,
+        key=lambda item: (int(item.start_time), int(item.end_time)),
+    ):
+        cleaned_text = str(segment.text).strip()
+        if not cleaned_text or not _TRANSCRIPT_ONLY_ALNUM_PATTERN.search(cleaned_text):
+            continue
+        raw_primary_speaker = str(
+            segment.extras.get("raw_primary_speaker", segment.speaker)
+        ).strip() or str(segment.speaker).strip() or "UNKNOWN"
+        raw_overlap_speakers = _dedupe_preserve_order(
+            _coerce_string_list(
+                segment.extras.get(
+                    "raw_overlap_speakers",
+                    segment.extras.get("overlap_speakers"),
+                )
+            )
+        )
+        raw_speakers = _dedupe_preserve_order(
+            _coerce_string_list(segment.extras.get("raw_speakers"))
+            + [raw_primary_speaker]
+            + raw_overlap_speakers
+        )
+        canonical_speaker = _canonical_speaker_label(str(segment.speaker), alias_map)
+        speaker_candidates = _dedupe_preserve_order(
+            [
+                _canonical_speaker_label(candidate, alias_map)
+                for candidate in raw_speakers
+                if candidate
+            ]
+        )
+        speaker_uncertain = len(speaker_candidates) > 1
+        raw_speakers_seen.extend(raw_speakers)
+        extras = dict(segment.extras)
+        extras["raw_primary_speaker"] = raw_primary_speaker
+        extras["raw_overlap_speakers"] = raw_overlap_speakers
+        extras["raw_speakers"] = raw_speakers
+        extras["speaker_candidates"] = speaker_candidates
+        extras["speaker_uncertain"] = speaker_uncertain
+        prepared_segments.append(
+            TranscriptSegment(
+                speaker=canonical_speaker,
+                text=cleaned_text,
+                start_time=int(segment.start_time),
+                end_time=int(segment.end_time),
+                extras=extras,
+            )
+        )
+
+    normalized_segments = _merge_adjacent_same_speaker_segments(
+        prepared_segments,
+        merge_gap_ms=_TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS,
+    )
+    named_speaker_labels = _extract_named_speaker_labels(
+        metadata=transcript.metadata,
+        sample=sample,
+        alias_map=alias_map,
+    )
+    main_speaker_labels = _extract_main_speaker_labels(
+        metadata=transcript.metadata,
+        sample=sample,
+        alias_map=alias_map,
+    )
+    updated_metadata = dict(transcript.metadata)
+    updated_metadata["speaker_alias_map"] = alias_map
+    updated_metadata["named_speaker_labels"] = named_speaker_labels
+    updated_metadata["main_speaker_labels"] = main_speaker_labels
+    raw_normalization = updated_metadata.get("speaker_normalization", {})
+    normalization_metadata = (
+        dict(raw_normalization)
+        if isinstance(raw_normalization, dict)
+        else {}
+    )
+    normalization_metadata.pop("core_speaker_min_share", None)
+    normalization_metadata.pop("core_speaker_labels", None)
+    normalization_metadata.update(
+        {
+            "mode": "transcript_only_benchmark",
+            "speaker_assignment_mode": "raw_with_uncertainty",
+            "speaker_reassignment_enabled": False,
+            "merge_gap_ms": _TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS,
+            "raw_segment_count": len(transcript.segments),
+            "raw_distinct_speaker_count": len(_dedupe_preserve_order(raw_speakers_seen)),
+            "normalized_segment_count": len(normalized_segments),
+            "normalized_distinct_speaker_count": len(
+                {segment.speaker for segment in normalized_segments}
+            ),
+            "uncertain_segment_count": sum(
+                1
+                for segment in normalized_segments
+                if bool(segment.extras.get("speaker_uncertain"))
+            ),
+        }
+    )
+    updated_metadata["speaker_normalization"] = normalization_metadata
+    return Transcript(
+        segments=tuple(normalized_segments),
+        metadata=updated_metadata,
+        extras=dict(transcript.extras),
+    )
 
 
 def _speaker_message_lists_from_transcript(
@@ -1214,6 +2693,7 @@ def _copy_sample_transcript(
     sample: PreparedBenchmarkSample,
     run_root: Path,
     transcript: Transcript | None = None,
+    normalize_for_transcript_only: bool = False,
 ) -> tuple[Transcript, Path]:
     source_transcript = transcript
     if source_transcript is None:
@@ -1221,6 +2701,11 @@ def _copy_sample_transcript(
             Path(sample.transcript_path).read_text(encoding="utf-8")
         )
         source_transcript = Transcript.from_mapping(source_payload)
+    if normalize_for_transcript_only:
+        source_transcript = _normalize_transcript_for_transcript_only_benchmark(
+            transcript=source_transcript,
+            sample=sample,
+        )
     working_path = _working_transcript_path(run_root=run_root, sample=sample)
     _write_transcript_payload(working_path, source_transcript)
     return source_transcript, working_path
@@ -1428,10 +2913,12 @@ async def _execute_sample(
     judge: SPoRCJudge,
     calibration: Any,
     run_root: Path,
+    artifact_recorder: _SampleArtifactRecorder,
     audio_cfg: dict[str, Any],
     transcript_only: bool,
     voice_clone_orchestrator: Any | None,
     force_download_audio: bool,
+    infra_retry_attempts: int = 0,
 ) -> SampleBenchmarkResult:
     sample_started = time.perf_counter()
     retrieval_before = event_capture.count("retrieval_stats")
@@ -1442,11 +2929,15 @@ async def _execute_sample(
     archived_voice_clone_dir: Path | None = None
     archived_voice_clone_manifest: Path | None = None
     archived_voice_clone_merged_audio: Path | None = None
+    diagnostics: dict[str, Any] | None = None
+    candidate_summary = ""
+    artifact_recorder.activate_sample(sample=sample, target_seconds=target_seconds)
     try:
         transcript, working_transcript_path = _copy_sample_transcript(
             sample=sample,
             run_root=run_root,
             transcript=preloaded_transcript,
+            normalize_for_transcript_only=transcript_only,
         )
         if transcript_only:
             prepared_transcript = transcript
@@ -1571,7 +3062,7 @@ async def _execute_sample(
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
-        return SampleBenchmarkResult(
+        result = SampleBenchmarkResult(
             sample_id=sample.sample_id,
             dataset=sample.dataset,
             episode_key=sample.episode_key,
@@ -1628,20 +3119,16 @@ async def _execute_sample(
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
         tool_after = event_capture.count("tool_invocation")
-        return SampleBenchmarkResult(
-            sample_id=sample.sample_id,
-            dataset=sample.dataset,
-            episode_key=sample.episode_key,
-            status="failed",
-            target_seconds=target_seconds,
-            candidate_seconds=0.0,
-            converged=False,
-            iterations_run=0,
-            final_status=final_status,
-            duration_seconds=duration_seconds,
-            retrieval_events=max(0, retrieval_after - retrieval_before),
-            tool_invocations=max(0, tool_after - tool_before),
-            metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
+        result = replace(
+            _build_failed_result(
+                sample=sample,
+                target_seconds=target_seconds,
+                final_status=final_status,
+                error_message=error_message,
+                duration_seconds=duration_seconds,
+                retrieval_events=max(0, retrieval_after - retrieval_before),
+                tool_invocations=max(0, tool_after - tool_before),
+            ),
             source_audio_path=(str(source_audio_path) if source_audio_path else None),
             speaker_samples_manifest_path=(
                 str(speaker_samples_manifest_path)
@@ -1668,12 +3155,147 @@ async def _execute_sample(
                 if archived_voice_clone_merged_audio is not None
                 else None
             ),
-            error_message=error_message,
         )
+    result = _finalize_result_target_membership(
+        result,
+        infra_retry_attempts=infra_retry_attempts,
+    )
+    try:
+        artifact_paths = artifact_recorder.finalize_sample(
+            result=result,
+            diagnostics=diagnostics,
+            candidate_summary=candidate_summary,
+        )
+        if artifact_paths is not None:
+            result = replace(
+                result,
+                sample_artifact_dir=artifact_paths.sample_artifact_dir,
+                artifact_manifest_path=artifact_paths.artifact_manifest_path,
+                summarizer_trace_dir=artifact_paths.summarizer_trace_dir,
+                critic_trace_dir=artifact_paths.critic_trace_dir,
+                judge_trace_dir=artifact_paths.judge_trace_dir,
+                final_summary_path=artifact_paths.final_summary_path,
+                final_critic_feedback_path=artifact_paths.final_critic_feedback_path,
+                loop_diagnostics_path=artifact_paths.loop_diagnostics_path,
+                sample_result_artifact_path=artifact_paths.sample_result_artifact_path,
+            )
+        return result
+    finally:
+        artifact_recorder.clear_active_sample()
+
+
+async def _run_sample_with_retries(
+    *,
+    sample: PreparedBenchmarkSample,
+    target_seconds: int,
+    preloaded_transcript: Transcript | None,
+    runtime: _ManagedBenchmarkRuntime | None,
+    args: argparse.Namespace,
+    run_root: Path,
+    base_cfg: Any,
+    summarizer_provider_config: dict[str, Any],
+    critic_provider_config: dict[str, Any],
+    judge_provider_config: dict[str, Any],
+    embedding_profile: EmbeddingProfile,
+    transcript_only: bool,
+    calibration: Any,
+    voice_clone_orchestrator: Any | None,
+    logging_enabled: bool,
+    force_dynamic_ports: bool,
+    duration_tolerance_ratio: float,
+    max_iterations: int | None,
+    benchmark_audio_cfg: dict[str, Any],
+) -> tuple[SampleBenchmarkResult, _ManagedBenchmarkRuntime | None, bool]:
+    """Run one sample with bounded infra retries before replacement."""
+    infra_retry_attempts = 0
+    while True:
+        if runtime is None:
+            try:
+                runtime = await _start_managed_runtime(
+                    args=args,
+                    run_root=run_root,
+                    base_cfg=base_cfg,
+                    summarizer_provider_config=summarizer_provider_config,
+                    critic_provider_config=critic_provider_config,
+                    judge_provider_config=judge_provider_config,
+                    embedding_profile=embedding_profile,
+                    transcript_only=transcript_only,
+                    calibration=calibration,
+                    voice_clone_orchestrator=voice_clone_orchestrator,
+                    logging_enabled=logging_enabled,
+                    force_dynamic_ports=force_dynamic_ports,
+                )
+                force_dynamic_ports = False
+            except Exception as exc:
+                final_status, error_message = _classify_sample_failure(exc)
+                if final_status not in _RETRYABLE_INFRA_FINAL_STATUSES:
+                    raise
+                infra_retry_attempts += 1
+                if infra_retry_attempts <= _SAMPLE_INFRA_RETRY_LIMIT:
+                    event_bus.publish(
+                        "status_message",
+                        (
+                            f"Infra retry {infra_retry_attempts}/{_SAMPLE_INFRA_RETRY_LIMIT} "
+                            f"for {sample.sample_id} after startup failure: {error_message}"
+                        ),
+                    )
+                    force_dynamic_ports = True
+                    continue
+                result = replace(
+                    _build_failed_result(
+                        sample=sample,
+                        target_seconds=target_seconds,
+                        final_status=final_status,
+                        error_message=error_message,
+                        duration_seconds=0.0,
+                    ),
+                    infra_retry_attempts=infra_retry_attempts,
+                )
+                return result, runtime, force_dynamic_ports
+
+        result = await _execute_sample(
+            sample=sample,
+            target_seconds=target_seconds,
+            preloaded_transcript=preloaded_transcript,
+            orchestrator=runtime.orchestrator,
+            event_capture=runtime.event_capture,
+            retrieval_enabled=runtime.retrieval_enabled,
+            duration_tolerance_ratio=duration_tolerance_ratio,
+            max_iterations=max_iterations,
+            judge=runtime.judge,
+            calibration=calibration,
+            run_root=run_root,
+            artifact_recorder=runtime.artifact_recorder,
+            audio_cfg=benchmark_audio_cfg,
+            transcript_only=transcript_only,
+            voice_clone_orchestrator=voice_clone_orchestrator,
+            force_download_audio=bool(args.force_download_audio),
+        )
+        if (
+            result.final_status in _RETRYABLE_INFRA_FINAL_STATUSES
+            and infra_retry_attempts < _SAMPLE_INFRA_RETRY_LIMIT
+        ):
+            infra_retry_attempts += 1
+            event_bus.publish(
+                "status_message",
+                (
+                    f"Infra retry {infra_retry_attempts}/{_SAMPLE_INFRA_RETRY_LIMIT} "
+                    f"for {sample.sample_id} after {result.final_status}: "
+                    f"{result.error_message or result.final_status}"
+                ),
+            )
+            await _stop_managed_runtime(runtime)
+            runtime = None
+            force_dynamic_ports = True
+            continue
+        if infra_retry_attempts:
+            result = replace(result, infra_retry_attempts=infra_retry_attempts)
+        return result, runtime, force_dynamic_ports
 
 
 async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionReport:
-    dataset_manifest_path = Path(args.dataset_manifest).resolve()
+    requested_dataset_manifest_path = Path(args.dataset_manifest).resolve()
+    dataset_manifest_path = requested_dataset_manifest_path
     if args.prepare_if_missing and not dataset_manifest_path.exists():
         prepared = prepare_sporc_benchmark(
             prepared_root=dataset_manifest_path.parent,
@@ -1687,6 +3309,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             ),
         )
         dataset_manifest_path = prepared.manifest_path
+    dataset_manifest_path = ensure_compact_prepared_dataset_manifest(
+        dataset_manifest_path,
+    )
 
     dataset_manifest = load_prepared_dataset_manifest(
         dataset_manifest_path,
@@ -1734,26 +3359,75 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         if getattr(args, "sample_seed", None) is not None
         else None
     )
-    sample_limit = int(args.max_samples)
-    selection_fetch_limit = None if sample_seed is not None else sample_limit
-    prepared_samples = tuple(
-        iter_prepared_dataset_samples(
-            dataset_manifest.manifest_path,
-            max_samples=selection_fetch_limit,
+    sample_shard_index, sample_shard_count = _resolve_sample_shard_args(args)
+    shared_sample_queue_root = _resolve_shared_sample_queue_root(args)
+    use_shared_sample_queue = shared_sample_queue_root is not None
+    if use_shared_sample_queue and (
+        sample_shard_index != 1 or sample_shard_count != 1
+    ):
+        raise BenchmarkExecutionError(
+            "--shared-sample-queue-root cannot be combined with sample-shard selection."
         )
-    )
-    samples_to_run = _select_samples(
-        prepared_samples,
-        max_samples=sample_limit,
-        sample_seed=sample_seed,
-    )
-    total_samples = len(samples_to_run)
-    sample_lookup = {sample.sample_id: sample for sample in samples_to_run}
-    sample_order = [sample.sample_id for sample in samples_to_run]
-    sample_index_by_id = {
-        sample.sample_id: index for index, sample in enumerate(samples_to_run, start=1)
-    }
+    sample_limit = int(args.max_samples)
+    shared_sample_queue_connection: sqlite3.Connection | None = None
+    candidate_samples: list[PreparedBenchmarkSample] = []
+    sample_lookup: dict[str, PreparedBenchmarkSample] = {}
+    if shared_sample_queue_root is not None:
+        shared_sample_queue_connection = _open_shared_sample_queue_connection(
+            shared_sample_queue_root
+        )
+        sample_order, target_sample_count = _initialize_shared_sample_queue_from_manifest(
+            shared_sample_queue_connection,
+            manifest_path=dataset_manifest.manifest_path,
+            requested_target_sample_count=sample_limit,
+            sample_seed=sample_seed,
+        )
+    else:
+        prepared_samples = tuple(
+            iter_prepared_dataset_samples(
+                dataset_manifest.manifest_path,
+                max_samples=None,
+            )
+        )
+        ordered_candidates = _select_samples(
+            prepared_samples,
+            max_samples=0,
+            sample_seed=sample_seed,
+        )
+        target_candidates = (
+            list(ordered_candidates)
+            if sample_limit <= 0
+            else list(ordered_candidates[:sample_limit])
+        )
+        candidate_samples = _select_sample_shard(
+            ordered_candidates,
+            shard_index=sample_shard_index,
+            shard_count=sample_shard_count,
+        )
+        target_sample_count = len(
+            _select_sample_shard(
+                target_candidates,
+                shard_index=sample_shard_index,
+                shard_count=sample_shard_count,
+            )
+        )
+        sample_lookup = {sample.sample_id: sample for sample in candidate_samples}
+        sample_order = [sample.sample_id for sample in candidate_samples]
+    selected_sample_ids = frozenset(sample_order)
     if resumed_from_checkpoint:
+        checkpoint_shard_index = int(
+            checkpoint_payload.get("sample_shard_index", 1) or 1
+        )
+        checkpoint_shard_count = int(
+            checkpoint_payload.get("sample_shard_count", 1) or 1
+        )
+        if (
+            checkpoint_shard_index != sample_shard_index
+            or checkpoint_shard_count != sample_shard_count
+        ):
+            raise BenchmarkExecutionError(
+                "Resume checkpoint sample shard does not match the requested execute shard."
+            )
         checkpoint_order = checkpoint_payload.get("sample_order", [])
         if checkpoint_order and list(checkpoint_order) != sample_order:
             raise BenchmarkExecutionError(
@@ -1762,16 +3436,21 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         checkpoint_manifest = str(
             checkpoint_payload.get("dataset_manifest_path", "") or ""
         ).strip()
-        if (
-            checkpoint_manifest
-            and Path(checkpoint_manifest).resolve()
-            != dataset_manifest.manifest_path.resolve()
-        ):
+        allowed_manifest_paths = {
+            requested_dataset_manifest_path.resolve(),
+            dataset_manifest.manifest_path.resolve(),
+        }
+        if checkpoint_manifest and Path(checkpoint_manifest).resolve() not in allowed_manifest_paths:
             raise BenchmarkExecutionError(
                 "Resume checkpoint dataset manifest does not match the requested dataset manifest."
             )
     sample_selection_label = (
         f"seeded_random({sample_seed})" if sample_seed is not None else "manifest_order"
+    )
+    shard_label = (
+        f"{sample_shard_index}/{sample_shard_count}"
+        if sample_shard_count > 1
+        else "full"
     )
     results_by_sample_id: dict[str, SampleBenchmarkResult] = {}
     for raw_result in checkpoint_payload.get("completed_results", []):
@@ -1782,14 +3461,13 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     unexpected_checkpoint_samples = [
         sample_id
         for sample_id in results_by_sample_id
-        if sample_id not in sample_lookup
+        if sample_id not in selected_sample_ids
     ]
     if unexpected_checkpoint_samples:
         raise BenchmarkExecutionError(
             "Resume checkpoint contains samples outside the active benchmark selection: "
             f"{unexpected_checkpoint_samples}"
         )
-    active_target_seconds_by_sample_id: dict[str, int] = {}
     preloaded_transcripts: dict[str, Transcript] = {}
     preflight_results: dict[str, SampleBenchmarkResult] = {}
     curated_long_form_manifest_path = (
@@ -1809,51 +3487,19 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 f"{curated_long_form_manifest_path}"
             ),
         )
-    for sample in samples_to_run:
-        active_target_seconds = _resolve_sample_target_seconds(sample, args)
-        active_target_seconds_by_sample_id[sample.sample_id] = active_target_seconds
-        if sample.sample_id in results_by_sample_id:
-            continue
-        transcript, stats, reason = _evaluate_sample_preflight(
-            sample=sample,
-            target_seconds=active_target_seconds,
-            reference_wpm=float(args.reference_wpm),
+
+    def _load_candidate_sample(sample_id: str) -> PreparedBenchmarkSample | None:
+        sample = sample_lookup.get(sample_id)
+        if sample is not None:
+            return sample
+        if shared_sample_queue_connection is None:
+            return None
+        return _load_shared_sample(
+            shared_sample_queue_connection,
+            sample_id=sample_id,
         )
-        if reason is not None:
-            preflight_results[sample.sample_id] = _build_preflight_failed_result(
-                sample=sample,
-                target_seconds=active_target_seconds,
-                reason=reason,
-                stats=stats,
-            )
-            continue
-        preloaded_transcripts[sample.sample_id] = transcript
 
-    if preflight_results:
-        event_bus.publish(
-            "status_message",
-            (
-                f"Preflight skipped {len(preflight_results)}/{total_samples} "
-                "incompatible SPoRC sample(s) before provider startup."
-            ),
-        )
-        for sample in samples_to_run:
-            preflight_result = preflight_results.get(sample.sample_id)
-            if preflight_result is None:
-                continue
-            event_bus.publish(
-                "status_message",
-                (
-                    f"Preflight skip: {sample.sample_id} "
-                    f"target={active_target_seconds_by_sample_id[sample.sample_id]}s "
-                    f"reason={preflight_result.preflight_reason}"
-                ),
-            )
-
-    for sample_id, preflight_result in preflight_results.items():
-        results_by_sample_id.setdefault(sample_id, preflight_result)
-
-    if len(results_by_sample_id) >= total_samples:
+    if _count_target_results(results_by_sample_id) >= target_sample_count:
         final_report = _write_execution_report_snapshot(
             run_root=run_root,
             run_id=run_id,
@@ -1871,9 +3517,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             duration_preset=duration_preset,
             override_target_seconds=override_target_seconds,
             sample_seed=sample_seed,
+            target_sample_count=target_sample_count,
             checkpoint_path=checkpoint_path,
             resumed_from_checkpoint=resumed_from_checkpoint,
             resume_count=resume_count,
+            sample_shard_index=sample_shard_index,
+            sample_shard_count=sample_shard_count,
         )
         if checkpoint_path is not None:
             _write_checkpoint_payload(
@@ -1881,12 +3530,15 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 {
                     "checkpoint_version": _CHECKPOINT_VERSION,
                     "run_id": run_id,
-                    "dataset_manifest_path": str(dataset_manifest.manifest_path),
+                    "dataset_manifest_path": str(requested_dataset_manifest_path),
                     "dataset_variant": dataset_manifest.dataset_variant,
                     "duration_preset": duration_preset,
                     "override_target_seconds": override_target_seconds,
                     "transcript_only": transcript_only,
                     "sample_seed": sample_seed,
+                    "sample_shard_index": sample_shard_index,
+                    "sample_shard_count": sample_shard_count,
+                    "target_sample_count": target_sample_count,
                     "sample_order": sample_order,
                     "completed_results": [
                         asdict(result)
@@ -1901,6 +3553,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                 },
             )
+        if shared_sample_queue_connection is not None:
+            shared_sample_queue_connection.close()
         return final_report
 
     profiles = load_provider_profiles(Path(args.provider_profiles).resolve())
@@ -1975,12 +3629,15 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             {
                 "checkpoint_version": _CHECKPOINT_VERSION,
                 "run_id": run_id,
-                "dataset_manifest_path": str(dataset_manifest.manifest_path),
+                "dataset_manifest_path": str(requested_dataset_manifest_path),
                 "dataset_variant": dataset_manifest.dataset_variant,
                 "duration_preset": duration_preset,
                 "override_target_seconds": override_target_seconds,
                 "transcript_only": transcript_only,
                 "sample_seed": sample_seed,
+                "sample_shard_index": sample_shard_index,
+                "sample_shard_count": sample_shard_count,
+                "target_sample_count": target_sample_count,
                 "sample_order": sample_order,
                 "completed_results": [
                     asdict(result)
@@ -2012,9 +3669,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         duration_preset=duration_preset,
         override_target_seconds=override_target_seconds,
         sample_seed=sample_seed,
+        target_sample_count=target_sample_count,
         checkpoint_path=checkpoint_path,
         resumed_from_checkpoint=resumed_from_checkpoint,
         resume_count=resume_count,
+        sample_shard_index=sample_shard_index,
+        sample_shard_count=sample_shard_count,
     )
     progress_tracker = _BenchmarkProgressTracker(
         args=args,
@@ -2032,26 +3692,37 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 active_sample_payload.get("sample_id", "") or ""
             ).strip()
             if active_sample_id and active_sample_id not in results_by_sample_id:
-                resumed_sample = sample_lookup.get(active_sample_id)
-                active_target_seconds = active_target_seconds_by_sample_id.get(
-                    active_sample_id
-                )
-                if resumed_sample is not None and active_target_seconds is not None:
+                resumed_sample = _load_candidate_sample(active_sample_id)
+                if resumed_sample is not None:
+                    active_target_seconds = _resolve_sample_target_seconds(
+                        resumed_sample,
+                        args,
+                    )
                     resume_failure_reason = str(
                         getattr(args, "resume_failure_reason", "")
                         or _RESUME_FAILURE_DEFAULT_STATUS
                     ).strip()
                     if not resume_failure_reason:
                         resume_failure_reason = _RESUME_FAILURE_DEFAULT_STATUS
-                    resumed_failure = _build_resume_failure_result(
-                        sample=resumed_sample,
-                        target_seconds=active_target_seconds,
-                        reason=resume_failure_reason,
-                        active_sample=active_sample_payload,
+                    resumed_failure = _finalize_result_target_membership(
+                        _build_resume_failure_result(
+                            sample=resumed_sample,
+                            target_seconds=active_target_seconds,
+                            reason=resume_failure_reason,
+                            active_sample=active_sample_payload,
+                        )
                     )
                     results_by_sample_id[active_sample_id] = resumed_failure
                     if resume_failure_reason == _SWEEP_STALL_FINAL_STATUS:
                         recovered_stall_count += 1
+                    if shared_sample_queue_connection is not None:
+                        _mark_shared_sample_completed(
+                            shared_sample_queue_connection,
+                            sample_id=active_sample_id,
+                            final_status=resumed_failure.final_status,
+                            counts_toward_target=resumed_failure.counts_toward_target,
+                            replacement_reason=resumed_failure.replacement_reason,
+                        )
                     _persist_checkpoint()
                     final_report = _write_execution_report_snapshot(
                         run_root=run_root,
@@ -2068,19 +3739,26 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                         duration_preset=duration_preset,
                         override_target_seconds=override_target_seconds,
                         sample_seed=sample_seed,
+                        target_sample_count=target_sample_count,
                         checkpoint_path=checkpoint_path,
                         resumed_from_checkpoint=resumed_from_checkpoint,
                         resume_count=resume_count,
+                        sample_shard_index=sample_shard_index,
+                        sample_shard_count=sample_shard_count,
                     )
                     _emit_progress_event(
                         args,
                         event="sample_done",
                         duration_preset=str(duration_preset or "dataset_default"),
                         payload={
-                            "sample_index": sample_index_by_id[active_sample_id],
-                            "sample_count": total_samples,
+                            "sample_index": min(
+                                _count_target_results(results_by_sample_id) + 1,
+                                max(target_sample_count, 1),
+                            ),
+                            "sample_count": target_sample_count,
                             "sample_id": active_sample_id,
                             "final_status": resumed_failure.final_status,
+                            "counts_toward_target": resumed_failure.counts_toward_target,
                             "composite": round(resumed_failure.metrics.composite, 4),
                             "duration_seconds": round(
                                 resumed_failure.duration_seconds,
@@ -2093,12 +3771,13 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         "status_message",
         (
             f"Starting SPoRC summarizer-critic benchmark run {run_id} with "
-            f"{total_samples} sample(s); summarizer={summarizer_profile.provider_id}; "
+            f"{target_sample_count} retained sample(s); summarizer={summarizer_profile.provider_id}; "
             f"critic={critic_profile.provider_id}; judge={judge_profile.provider_id}; "
             f"judge_dimensions={', '.join(DIMENSION_NAMES)}; "
             f"transcript_only={transcript_only}; "
             f"target_override={override_target_seconds if override_target_seconds is not None else 'dataset_default'}; "
-            f"sample_selection={sample_selection_label}; resume_count={resume_count}."
+            f"sample_selection={sample_selection_label}; "
+            f"sample_shard={shard_label}; resume_count={resume_count}."
         ),
     )
     _emit_progress_event(
@@ -2107,17 +3786,19 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         duration_preset=str(duration_preset or "dataset_default"),
         payload={
             "run_id": run_id,
-            "sample_count": total_samples,
+            "sample_count": target_sample_count,
             "transcript_only": transcript_only,
             "sample_seed": sample_seed,
             "resume_count": resume_count,
+            "sample_shard_index": sample_shard_index,
+            "sample_shard_count": sample_shard_count,
             "checkpoint_path": str(checkpoint_path)
             if checkpoint_path is not None
             else "",
         },
     )
 
-    if len(results_by_sample_id) >= total_samples:
+    if _count_target_results(results_by_sample_id) >= target_sample_count:
         _emit_progress_event(
             args,
             event="run_complete",
@@ -2125,7 +3806,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             payload={
                 "run_id": run_id,
                 "status": final_report.status,
-                "sample_count": total_samples,
+                "sample_count": target_sample_count,
                 "report_path": final_report.report_path,
                 "results_path": final_report.results_path,
             },
@@ -2136,20 +3817,55 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
 
     benchmark_started = time.perf_counter()
     try:
-        for sample in samples_to_run:
+        shared_queue_worker_label = (
+            checkpoint_path.name
+            if checkpoint_path is not None
+            else f"pid-{os.getpid()}"
+        )
+        sample_iter = iter(candidate_samples)
+        while True:
+            if _count_target_results(results_by_sample_id) >= target_sample_count:
+                break
+            if shared_sample_queue_connection is None:
+                try:
+                    sample = next(sample_iter)
+                except StopIteration:
+                    break
+            else:
+                claimed_sample_id = _claim_next_shared_sample_id(
+                    shared_sample_queue_connection,
+                    worker_label=shared_queue_worker_label,
+                    worker_pid=os.getpid(),
+                )
+                if claimed_sample_id is None:
+                    break
+                sample = _load_shared_sample(
+                    shared_sample_queue_connection,
+                    sample_id=claimed_sample_id,
+                )
+                restored_result = results_by_sample_id.get(sample.sample_id)
+                if restored_result is not None:
+                    _mark_shared_sample_completed(
+                        shared_sample_queue_connection,
+                        sample_id=sample.sample_id,
+                        final_status=restored_result.final_status,
+                        counts_toward_target=restored_result.counts_toward_target,
+                        replacement_reason=restored_result.replacement_reason,
+                    )
+                    continue
             if sample.sample_id in results_by_sample_id:
                 continue
-            active_target_seconds = active_target_seconds_by_sample_id[sample.sample_id]
-            sample_index = sample_index_by_id[sample.sample_id]
-            completed_before_sample = len(results_by_sample_id)
+            active_target_seconds = _resolve_sample_target_seconds(sample, args)
+            retained_before_sample = _count_target_results(results_by_sample_id)
+            sample_index = min(retained_before_sample + 1, max(target_sample_count, 1))
             remaining_samples, average_text, eta_text = _progress_snapshot(
-                completed_samples=completed_before_sample,
-                total_samples=total_samples,
+                completed_samples=retained_before_sample,
+                total_samples=target_sample_count,
                 elapsed_seconds=time.perf_counter() - benchmark_started,
             )
             progress_tracker.activate_sample(
                 sample_index=sample_index,
-                sample_count=total_samples,
+                sample_count=target_sample_count,
                 sample_id=sample.sample_id,
                 target_seconds=active_target_seconds,
             )
@@ -2159,7 +3875,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 duration_preset=str(duration_preset or "dataset_default"),
                 payload={
                     "sample_index": sample_index,
-                    "sample_count": total_samples,
+                    "sample_count": target_sample_count,
                     "sample_id": sample.sample_id,
                     "target_seconds": active_target_seconds,
                     "max_iterations": (
@@ -2170,49 +3886,75 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             event_bus.publish(
                 "status_message",
                 (
-                    f"Sample {sample_index}/{len(samples_to_run)} start: "
+                    f"Sample slot {sample_index}/{target_sample_count} start: "
                     f"{sample.sample_id} target={active_target_seconds}s "
                     f"max_iterations={'unbounded' if max_iterations is None else str(max_iterations)} "
                     f"remaining={remaining_samples} rolling_avg={average_text} eta={eta_text}"
                 ),
             )
             preflight_result = preflight_results.get(sample.sample_id)
+            preloaded_transcript = preloaded_transcripts.get(sample.sample_id)
+            if preflight_result is None and preloaded_transcript is None:
+                (
+                    preloaded_transcript,
+                    preflight_stats,
+                    preflight_reason,
+                ) = _evaluate_sample_preflight(
+                    sample=sample,
+                    target_seconds=active_target_seconds,
+                    reference_wpm=float(args.reference_wpm),
+                )
+                if preflight_reason is not None:
+                    preflight_result = _build_preflight_failed_result(
+                        sample=sample,
+                        target_seconds=active_target_seconds,
+                        reason=preflight_reason,
+                        stats=preflight_stats,
+                    )
+                    preflight_results[sample.sample_id] = preflight_result
+                    event_bus.publish(
+                        "status_message",
+                        (
+                            f"Preflight skip: {sample.sample_id} "
+                            f"target={active_target_seconds}s "
+                            f"reason={preflight_result.preflight_reason}"
+                        ),
+                    )
+                else:
+                    preloaded_transcripts[sample.sample_id] = preloaded_transcript
             if preflight_result is not None:
                 result = preflight_result
             else:
-                if runtime is None:
-                    runtime = await _start_managed_runtime(
-                        args=args,
-                        base_cfg=base_cfg,
-                        summarizer_provider_config=summarizer_provider_config,
-                        critic_provider_config=critic_provider_config,
-                        judge_provider_config=judge_provider_config,
-                        embedding_profile=embedding_profile,
-                        transcript_only=transcript_only,
-                        calibration=calibration,
-                        voice_clone_orchestrator=voice_clone_orchestrator,
-                        logging_enabled=logging_enabled,
-                        force_dynamic_ports=force_dynamic_ports,
-                    )
-                    force_dynamic_ports = False
-                result = await _execute_sample(
+                result, runtime, force_dynamic_ports = await _run_sample_with_retries(
                     sample=sample,
                     target_seconds=active_target_seconds,
-                    preloaded_transcript=preloaded_transcripts.get(sample.sample_id),
-                    orchestrator=runtime.orchestrator,
-                    event_capture=runtime.event_capture,
-                    retrieval_enabled=runtime.retrieval_enabled,
+                    preloaded_transcript=preloaded_transcript,
+                    runtime=runtime,
+                    args=args,
+                    run_root=run_root,
+                    base_cfg=base_cfg,
+                    summarizer_provider_config=summarizer_provider_config,
+                    critic_provider_config=critic_provider_config,
+                    judge_provider_config=judge_provider_config,
+                    embedding_profile=embedding_profile,
+                    transcript_only=transcript_only,
+                    calibration=calibration,
+                    voice_clone_orchestrator=voice_clone_orchestrator,
+                    logging_enabled=logging_enabled,
+                    force_dynamic_ports=force_dynamic_ports,
                     duration_tolerance_ratio=duration_tolerance_ratio,
                     max_iterations=max_iterations,
-                    judge=runtime.judge,
-                    calibration=calibration,
-                    run_root=run_root,
-                    audio_cfg=benchmark_audio_cfg,
-                    transcript_only=transcript_only,
-                    voice_clone_orchestrator=voice_clone_orchestrator,
-                    force_download_audio=bool(args.force_download_audio),
+                    benchmark_audio_cfg=benchmark_audio_cfg,
                 )
             results_by_sample_id[sample.sample_id] = result
+            if shared_sample_queue_connection is not None:
+                _mark_shared_sample_completed(
+                    shared_sample_queue_connection,
+                    sample_id=sample.sample_id,
+                    final_status=result.final_status,
+                    counts_toward_target=result.counts_toward_target,
+                    replacement_reason=result.replacement_reason,
+                )
             progress_tracker.clear_active_sample()
             _persist_checkpoint()
             final_report = _write_execution_report_snapshot(
@@ -2230,14 +3972,17 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 duration_preset=duration_preset,
                 override_target_seconds=override_target_seconds,
                 sample_seed=sample_seed,
+                target_sample_count=target_sample_count,
                 checkpoint_path=checkpoint_path,
                 resumed_from_checkpoint=resumed_from_checkpoint,
                 resume_count=resume_count,
+                sample_shard_index=sample_shard_index,
+                sample_shard_count=sample_shard_count,
             )
-            completed_after_sample = len(results_by_sample_id)
+            retained_after_sample = _count_target_results(results_by_sample_id)
             remaining_samples, average_text, eta_text = _progress_snapshot(
-                completed_samples=completed_after_sample,
-                total_samples=total_samples,
+                completed_samples=retained_after_sample,
+                total_samples=target_sample_count,
                 elapsed_seconds=time.perf_counter() - benchmark_started,
             )
             _emit_progress_event(
@@ -2246,9 +3991,10 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 duration_preset=str(duration_preset or "dataset_default"),
                 payload={
                     "sample_index": sample_index,
-                    "sample_count": total_samples,
+                    "sample_count": target_sample_count,
                     "sample_id": sample.sample_id,
                     "final_status": result.final_status,
+                    "counts_toward_target": result.counts_toward_target,
                     "composite": round(result.metrics.composite, 4),
                     "duration_seconds": round(result.duration_seconds, 3),
                 },
@@ -2256,8 +4002,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             event_bus.publish(
                 "status_message",
                 (
-                    f"Sample {sample_index}/{len(samples_to_run)} done: "
+                    f"Sample slot {sample_index}/{target_sample_count} done: "
                     f"{sample.sample_id} status={result.final_status} "
+                    f"counted={result.counts_toward_target} "
                     f"remaining={remaining_samples} rolling_avg={average_text} eta={eta_text} "
                     f"composite={result.metrics.composite:.3f} elapsed={result.duration_seconds:.1f}s"
                 ),
@@ -2274,7 +4021,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             payload={
                 "run_id": run_id,
                 "status": final_report.status,
-                "sample_count": total_samples,
+                "sample_count": target_sample_count,
                 "report_path": final_report.report_path,
                 "results_path": final_report.results_path,
             },
@@ -2284,6 +4031,8 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         if progress_tracker is not None:
             progress_tracker.stop()
             progress_tracker.unsubscribe()
+        if shared_sample_queue_connection is not None:
+            shared_sample_queue_connection.close()
         await _stop_managed_runtime(runtime)
 
 
@@ -2343,7 +4092,10 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         "--max-samples",
         type=int,
         default=100,
-        help="Sample cap for execution. Use 0 to run all prepared SPoRC examples.",
+        help=(
+            "Retained sample target for execution. Replacement-eligible infra/preflight "
+            "outcomes do not consume this target. Use 0 to run all prepared SPoRC examples."
+        ),
     )
     parser.add_argument(
         "--sample-seed",
@@ -2430,4 +4182,30 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         "--resume-failure-reason",
         default=_RESUME_FAILURE_DEFAULT_STATUS,
         help="Final-status label used when resuming an orphaned active sample.",
+    )
+    parser.add_argument(
+        "--shared-sample-queue-root",
+        default="",
+        help=(
+            "Optional internal preset-level queue root used by duration-sweep "
+            "worker pooling."
+        ),
+    )
+    parser.add_argument(
+        "--sample-shard-index",
+        type=int,
+        default=1,
+        help=(
+            "Optional 1-based shard index used by duration-sweep fan-out. "
+            "Run the whole selected sample set by leaving this at 1."
+        ),
+    )
+    parser.add_argument(
+        "--sample-shard-count",
+        type=int,
+        default=1,
+        help=(
+            "Optional shard count used by duration-sweep fan-out. "
+            "Each shard executes a disjoint modulo partition of the selected samples."
+        ),
     )

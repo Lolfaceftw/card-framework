@@ -6,6 +6,7 @@ from importlib import import_module
 from typing import Any
 
 _PROVIDER_EXPORTS = {
+    "AnthropicProvider": "card_framework.providers.anthropic_provider",
     "DeepSeekProvider": "card_framework.providers.deepseek_provider",
     "GLMProvider": "card_framework.providers.glm_provider",
     "HuggingfaceProvider": "card_framework.providers.huggingface_provider",

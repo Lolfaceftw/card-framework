@@ -102,6 +102,7 @@ Use canonical variable names in `.env`:
 
 ```dotenv
 CARD_FRAMEWORK_VLLM_API_KEY=EMPTY
+ANTHROPIC_API_KEY=
 DEEPSEEK_API_KEY=
 GEMINI_API_KEY=
 ZAI_API_KEY=
@@ -111,6 +112,13 @@ HF_TOKEN=
 The runtime also accepts older aliases and mirrors them automatically. That
 means existing values such as `VLLM_API_KEY`, `GOOGLE_API_KEY`, `GLM_API_KEY`,
 `HF_ACCESS_TOKEN`, and `HF_API_TOKEN` still work.
+
+The new SPoRC automatic sampler also reads `ANTHROPIC_API_KEY` from `.env` or
+the process environment when you run:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample
+```
 
 ## Common Examples
 

@@ -49,6 +49,8 @@ _SPORC_MAX_TARGET_SECONDS = 45
 _LONGFORM_CURATION_PROFILE = "longform_15k_v1"
 _EPISODE_METADATA_CACHE_FILENAME = "sporc_episode_metadata_v1.sqlite3"
 _FULL_SAMPLES_FILENAME = "samples.jsonl.gz"
+_COMPACT_MANIFEST_SUFFIX = ".compact.json"
+_COMPACT_SAMPLES_SUFFIX = ".compact.samples.jsonl.gz"
 _EPISODE_CACHE_SCHEMA_VERSION = "sporc_episode_metadata_v1"
 _EPISODE_INDEX_PROGRESS_INTERVAL = 50_000
 _TURN_STREAM_PROGRESS_INTERVAL = 500_000
@@ -280,19 +282,74 @@ def _timestamp_milliseconds(payload: dict[str, Any], *field_names: str) -> int |
     return None
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _coerce_text(value)
+        if not cleaned or cleaned in seen:
+            continue
+        deduped.append(cleaned)
+        seen.add(cleaned)
+    return deduped
+
+
+def _speaker_labels(value: Any) -> list[str]:
+    labels = _coerce_list_of_strings(value)
+    if len(labels) != 1:
+        return _dedupe_preserve_order(labels)
+    only_value = labels[0]
+    if "," not in only_value:
+        return labels
+    return _dedupe_preserve_order(
+        [part.strip() for part in only_value.split(",") if part.strip()]
+    )
+
+
+def _looks_like_speaker_label(value: str) -> bool:
+    cleaned = _coerce_text(value)
+    return bool(cleaned) and cleaned.upper().startswith("SPEAKER_")
+
+
 def _speaker_alias_map(record: dict[str, Any], speakers: list[str]) -> dict[str, str]:
     alias_map: dict[str, str] = {}
     for speaker in speakers:
         alias_map[speaker] = speaker
-        alias_map[speaker.lower()] = speaker
     for field_name in ("hostSpeakerLabels", "guestSpeakerLabels"):
         for name, raw_labels in _coerce_mapping(record.get(field_name)).items():
-            labels = _coerce_list_of_strings(raw_labels)
+            labels = _speaker_labels(raw_labels)
             for label in labels:
                 if label:
                     alias_map[name] = label
-                    alias_map[name.lower()] = label
     return alias_map
+
+
+def _named_speaker_labels(record: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for field_name in ("hostSpeakerLabels", "guestSpeakerLabels"):
+        for raw_labels in _coerce_mapping(record.get(field_name)).values():
+            labels.extend(_speaker_labels(raw_labels))
+    return _dedupe_preserve_order(labels)
+
+
+def _main_speaker_labels(record: dict[str, Any]) -> list[str]:
+    return _speaker_labels(record.get("mainEpSpeakers"))
+
+
+def _named_speaker_labels_from_alias_map(alias_map: dict[str, str]) -> list[str]:
+    labels = [
+        value
+        for key, value in alias_map.items()
+        if not _looks_like_speaker_label(key)
+    ]
+    return _dedupe_preserve_order(labels)
+
+
+def _main_speaker_labels_from_notes(speaker_notes: list[str]) -> list[str]:
+    for note in speaker_notes:
+        if note.startswith("mainEpSpeakers:"):
+            return _speaker_labels(note.split(":", 1)[1])
+    return []
 
 
 def _speaker_notes(record: dict[str, Any]) -> list[str]:
@@ -303,7 +360,11 @@ def _speaker_notes(record: dict[str, Any]) -> list[str]:
         "neitherPredictedNames",
         "mainEpSpeakers",
     ):
-        values = _coerce_list_of_strings(record.get(field_name))
+        values = (
+            _speaker_labels(record.get(field_name))
+            if field_name == "mainEpSpeakers"
+            else _coerce_list_of_strings(record.get(field_name))
+        )
         if values:
             notes.append(f"{field_name}: {', '.join(values)}")
     for field_name in ("hostSpeakerLabels", "guestSpeakerLabels"):
@@ -554,7 +615,6 @@ def _augment_speaker_alias_map(
     alias_map = dict(base_alias_map)
     for speaker in unique_speakers:
         alias_map[speaker] = speaker
-        alias_map[speaker.lower()] = speaker
     return alias_map
 
 
@@ -635,6 +695,12 @@ def _build_prepared_sample(
         base_alias_map=base_speaker_alias_map,
         unique_speakers=unique_speakers,
     )
+    named_speaker_labels = _named_speaker_labels_from_alias_map(speaker_alias_map)
+    main_speaker_labels = _main_speaker_labels_from_notes(speaker_notes)
+    speaker_normalization = {
+        "raw_segment_count": len(segments),
+        "raw_distinct_speaker_count": len(unique_speakers),
+    }
     transcript_payload = {
         "segments": segments,
         "metadata": {
@@ -643,6 +709,9 @@ def _build_prepared_sample(
             "episode_title": episode_title,
             "speaker_alias_map": speaker_alias_map,
             "speaker_notes": speaker_notes,
+            "named_speaker_labels": named_speaker_labels,
+            "main_speaker_labels": main_speaker_labels,
+            "speaker_normalization": speaker_normalization,
             "source_audio_url": source_audio_url,
             "source_episode_data_path": str(episode_data_path),
             "source_turn_data_path": str(turn_data_path),
@@ -675,6 +744,9 @@ def _build_prepared_sample(
             "source_audio_url": source_audio_url,
             "speaker_alias_map": speaker_alias_map,
             "speaker_notes": speaker_notes,
+            "named_speaker_labels": named_speaker_labels,
+            "main_speaker_labels": main_speaker_labels,
+            "speaker_normalization": speaker_normalization,
             _LONGFORM_CURATION_CANDIDATE_METADATA_KEY: longform_curation_candidate,
         },
     )
@@ -1399,6 +1471,112 @@ def _load_prepared_manifest_payload(manifest_path: Path) -> dict[str, Any]:
             "Prepared dataset manifest must contain an object."
         )
     return payload
+
+
+def _compact_manifest_path(manifest_path: Path) -> Path:
+    """Return the sibling manifest path used for compact execution manifests."""
+    return manifest_path.with_name(
+        f"{manifest_path.stem}{_COMPACT_MANIFEST_SUFFIX}"
+    )
+
+
+def _compact_samples_path(manifest_path: Path) -> Path:
+    """Return the sibling sidecar path used for compact execution manifests."""
+    return manifest_path.with_name(
+        f"{manifest_path.stem}{_COMPACT_SAMPLES_SUFFIX}"
+    )
+
+
+def _write_gzip_jsonl_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write one JSONL gzip sidecar atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.tmp")
+    if temp_path.exists():
+        temp_path.unlink(missing_ok=True)
+    try:
+        with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(
+                    json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+                )
+                handle.write("\n")
+        temp_path.replace(path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _write_json_payload(path: Path, payload: dict[str, Any]) -> None:
+    """Write one JSON payload atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.tmp")
+    temp_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def ensure_compact_prepared_dataset_manifest(
+    manifest_path: Path,
+    *,
+    status_reporter: StatusReporter | None = None,
+) -> Path:
+    """Write and return a compact sibling manifest for execution-heavy workflows.
+
+    The compact manifest preserves the original metadata but removes any inline
+    ``samples`` array so worker processes can read a small manifest header and a
+    gzip JSONL sidecar instead of reparsing one large JSON file.
+    """
+    resolved_manifest_path = manifest_path.resolve()
+    with report_loading_duration(
+        "prepared SPoRC manifest compaction",
+        reporter=status_reporter,
+    ):
+        payload = _load_prepared_manifest_payload(resolved_manifest_path)
+        raw_samples = payload.get("samples")
+        samples_path = _resolve_manifest_samples_path(
+            payload,
+            manifest_path=resolved_manifest_path,
+        )
+        if not isinstance(raw_samples, list):
+            if samples_path is None or not samples_path.exists():
+                raise DatasetPreparationError(
+                    "Prepared dataset manifest must contain inline samples or a valid samples_path."
+                )
+            return resolved_manifest_path
+
+        compact_manifest_path = _compact_manifest_path(resolved_manifest_path)
+        compact_samples_path = (
+            samples_path
+            if samples_path is not None and samples_path.exists()
+            else _compact_samples_path(resolved_manifest_path)
+        )
+        if (
+            compact_manifest_path.exists()
+            and compact_samples_path.exists()
+            and compact_manifest_path.stat().st_mtime
+            >= resolved_manifest_path.stat().st_mtime
+        ):
+            return compact_manifest_path
+
+        if compact_samples_path == _compact_samples_path(resolved_manifest_path):
+            compact_rows = [
+                raw_sample for raw_sample in raw_samples if isinstance(raw_sample, dict)
+            ]
+            _write_gzip_jsonl_rows(compact_samples_path, compact_rows)
+
+        compact_payload = {
+            key: value for key, value in payload.items() if key != "samples"
+        }
+        compact_payload["samples_path"] = str(compact_samples_path)
+        compact_payload["sample_count"] = int(
+            compact_payload.get("sample_count") or len(raw_samples)
+        )
+        compact_payload["compacted_from_manifest_path"] = str(resolved_manifest_path)
+        compact_payload["compacted_at_utc"] = utc_now_iso()
+        _write_json_payload(compact_manifest_path, compact_payload)
+        return compact_manifest_path
 
 
 def _resolve_manifest_samples_path(
