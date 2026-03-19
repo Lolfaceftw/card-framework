@@ -2564,7 +2564,6 @@ def _build_execute_child_command(
         "--critic-provider": args.critic_provider,
         "--judge-provider": args.judge_provider,
         "--embedding-mode": args.embedding_mode,
-        "--judge-source-char-limit": args.judge_source_char_limit,
         "--duration-preset": (
             duration_preset if duration_preset is not None else args.duration_preset
         ),

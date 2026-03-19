@@ -47,3 +47,24 @@ def test_sporc_judge_parses_three_required_dimensions() -> None:
     assert "Speaker alias mapping" in llm.user_prompt
     assert "Guide questions" in llm.user_prompt
     assert "filler words" in llm.user_prompt
+
+
+def test_sporc_judge_includes_full_transcript_in_prompt_by_default() -> None:
+    llm = _FakeJudgeLLM(
+        '{"Factualness": 1.0, "Naturalness": 1.0, '
+        '"Speaker Grammar Similarity": 1.0, "confidence": 1.0, "rationale": "ok"}'
+    )
+    judge = SPoRCJudge(judge_llm=llm)
+    source_text = f"{'A' * 30000}TAIL_MARKER"
+
+    result = judge.evaluate(
+        source_text=source_text,
+        summary_xml='<SPEAKER_00 emo_preset="neutral">hello</SPEAKER_00>',
+        transcript_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        summary_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        speaker_alias_map={"Alex Host": "SPEAKER_00"},
+        speaker_notes=["hostSpeakerLabels: {'Alex Host': ['SPEAKER_00']}"],
+    )
+
+    assert result.status == "ok"
+    assert "TAIL_MARKER" in llm.user_prompt

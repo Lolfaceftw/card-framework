@@ -18,6 +18,8 @@ the dataset's primary-speaker assignment.
 ## What This Benchmark Measures
 
 Each run evaluates generated summaries with an LLM-as-a-judge rubric modeled after G-Eval.
+The judge now receives the full formatted transcript by default rather than a
+truncated source-text prefix.
 
 The judge scores three dimensions from `0.0` to `1.0`:
 

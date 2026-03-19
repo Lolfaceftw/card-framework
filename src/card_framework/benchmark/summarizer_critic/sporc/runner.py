@@ -2103,7 +2103,7 @@ async def _start_managed_runtime(
         )
     judge = SPoRCJudge(
         judge_llm=llm_judge,
-        config=SPoRCJudgeConfig(source_char_limit=int(args.judge_source_char_limit)),
+        config=SPoRCJudgeConfig(),
     )
     event_capture = EventCapture(
         ["tool_invocation", "retrieval_stats", "orchestrator_iteration_completed"]
@@ -4138,7 +4138,6 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--embedding-mode", choices=("disabled", "enabled"), default="disabled"
     )
-    parser.add_argument("--judge-source-char-limit", type=int, default=30000)
     parser.add_argument(
         "--duration-preset",
         choices=tuple(DURATION_PRESET_SECONDS.keys()),

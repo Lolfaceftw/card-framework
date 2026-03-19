@@ -750,9 +750,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             judge_runner=LLMJudgeRunner(
                 judge_llm=llm_judge,
                 rubric=rubric,
-                config=LLMJudgeRunnerConfig(
-                    source_char_limit=int(args.judge_source_char_limit)
-                ),
+                config=LLMJudgeRunnerConfig(),
             ),
             config=ReferenceFreePipelineConfig(
                 enable_order_swap=not bool(args.disable_order_swap),
@@ -959,7 +957,6 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         "--alignscore-model", default="sentence-transformers/all-MiniLM-L6-v2"
     )
     parser.add_argument("--alignscore-source-chunk-words", type=int, default=256)
-    parser.add_argument("--judge-source-char-limit", type=int, default=30000)
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument(
         "--sample-seed",

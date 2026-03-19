@@ -42,7 +42,6 @@ class JudgeLLMProtocol(Protocol):
 class SPoRCJudgeConfig:
     """Configuration for SPoRC judge scoring."""
 
-    source_char_limit: int = 30_000
     max_tokens: int = 900
 
 
@@ -107,7 +106,6 @@ class SPoRCJudge:
             "message lists to judge content faithfulness, flow, and speaker-specific "
             "style preservation."
         )
-        truncated_source = source_text[: self._config.source_char_limit]
         user_prompt = (
             "Evaluate the candidate summary with exactly these dimensions:\n"
             "- Factualness: every claim must be supported by the transcript, major "
@@ -153,7 +151,7 @@ class SPoRCJudge:
             '  "rationale": "short explanation"\n'
             "}\n\n"
             "Source transcript:\n"
-            f"{truncated_source}\n\n"
+            f"{source_text}\n\n"
             "Candidate summary XML:\n"
             f"{summary_xml}\n\n"
             "Transcript per-speaker message lists:\n"

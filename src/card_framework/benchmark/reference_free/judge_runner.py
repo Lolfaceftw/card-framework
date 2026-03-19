@@ -34,11 +34,9 @@ class LLMJudgeRunnerConfig:
     """Configuration for rubric-based LLM judge scoring.
 
     Args:
-        source_char_limit: Optional max characters of source transcript passed to judge.
         max_tokens: Optional max output tokens requested from judge model.
     """
 
-    source_char_limit: int | None = 30_000
     max_tokens: int | None = None
 
 
@@ -117,12 +115,6 @@ class LLMJudgeRunner:
             "and 'rationale'."
         )
 
-        truncated_source = (
-            source_text[: self._config.source_char_limit]
-            if self._config.source_char_limit is not None
-            else source_text
-        )
-
         user_prompt = (
             f"Rubric ID: {self._rubric.rubric_id} v{self._rubric.version}\n"
             f"Dimensions:\n{dimensions_block}\n\n"
@@ -136,7 +128,7 @@ class LLMJudgeRunner:
             '  "rationale": "short explanation"\n'
             "}\n\n"
             "Source transcript:\n"
-            f"{truncated_source}\n\n"
+            f"{source_text}\n\n"
             "Candidate summary:\n"
             f"{summary_text}"
         )
@@ -155,12 +147,6 @@ class LLMJudgeRunner:
             "Return JSON only with winner in {A,B,tie}, confidence, rationale."
         )
 
-        truncated_source = (
-            source_text[: self._config.source_char_limit]
-            if self._config.source_char_limit is not None
-            else source_text
-        )
-
         user_prompt = (
             f"Pairwise dimension: {self._rubric.pairwise_dimension}\n"
             "Output contract JSON:\n"
@@ -170,7 +156,7 @@ class LLMJudgeRunner:
             '  "rationale": "short explanation"\n'
             "}\n\n"
             "Source transcript:\n"
-            f"{truncated_source}\n\n"
+            f"{source_text}\n\n"
             "Summary A:\n"
             f"{summary_a}\n\n"
             "Summary B:\n"

@@ -171,7 +171,6 @@ def _build_supervised_child_command(args: argparse.Namespace) -> list[str]:
         "--judge-repeats": args.judge_repeats,
         "--alignscore-model": args.alignscore_model,
         "--alignscore-source-chunk-words": args.alignscore_source_chunk_words,
-        "--judge-source-char-limit": args.judge_source_char_limit,
         "--max-samples": args.max_samples,
         "--sample-seed": args.sample_seed,
         "--max-iterations": args.max_iterations,

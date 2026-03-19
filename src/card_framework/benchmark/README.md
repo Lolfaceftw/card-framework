@@ -50,6 +50,9 @@ Common options:
 - `--alignscore-model <model name>`
 - `--output-dir artifacts/benchmark`
 
+The reference-free judge now receives the full source transcript by default
+instead of a capped prefix.
+
 Outputs:
 - `artifacts/benchmark/<run_id>/benchmark_report.json`
 - `artifacts/benchmark/<run_id>/verification.json`

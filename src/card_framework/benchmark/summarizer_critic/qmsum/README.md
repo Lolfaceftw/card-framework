@@ -122,6 +122,9 @@ Useful execution flags:
 - `--retrieval-timeout-seconds <float>`
 - `--index-timeout-seconds <float>`
 
+The reference-free judge path now receives the full transcript by default
+instead of a capped `30,000`-character prefix.
+
 When `--embedding-mode enabled`, the benchmark now reuses a persistent
 transcript-embedding cache under
 `artifacts/summarizer_critic_benchmark/embedding_cache`. Cache hits are keyed

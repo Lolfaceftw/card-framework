@@ -25,7 +25,6 @@ def test_build_supervised_child_command_forwards_sample_seed() -> None:
         judge_repeats=1,
         alignscore_model="sentence-transformers/all-MiniLM-L6-v2",
         alignscore_source_chunk_words=256,
-        judge_source_char_limit=30000,
         max_samples=25,
         sample_seed=17,
         max_iterations=3,
