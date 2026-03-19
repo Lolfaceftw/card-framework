@@ -31,6 +31,12 @@ The judge scores three dimensions from `0.0` to `1.0`:
 - `Naturalness`: whether the summary flows naturally, chronologically, and reads like a coherent spoken segment.
 - `Speaker Grammar Similarity`: whether the summary preserves speaker-specific grammar, cadence, filler words, and personality where appropriate.
 
+The shared judge prompt now phrases each dimension as three parallel
+Likert-friendly guide items so the same rubric wording can be reused for human
+participant surveys and for the LLM judge. The prompt maps item responses from
+`1-5` onto `0.00-1.00` with `1->0.00`, `2->0.25`, `3->0.50`, `4->0.75`, and
+`5->1.00`, then averages the three item scores within each dimension.
+
 The benchmark also records:
 
 - target duration,

@@ -4,24 +4,46 @@ Evaluate the candidate summary with exactly these dimensions:
 - Speaker Grammar Similarity: the summary should preserve each speaker's noticeable grammar, cadence, filler words, fragments, and personality when appropriate under compression, while still keeping speaker-specific content with the right speaker.
 
 Guide questions:
-1. Factualness
-   - Is every factual statement grounded in the transcript?
-   - Did the summary omit any major topic, segment, or claim that should reasonably survive compression?
-   - How much important information was lost beyond what compression requires?
-2. Naturalness
-   - Does the flow feel natural, chronological, and conversation-like?
-   - Are there abrupt jumps, stitched-together sentences, or awkward phrases?
-3. Speaker Grammar Similarity
-   - Does each speaker still sound like themselves rather than a generic summarizer voice?
-   - Are filler words such as 'um', 'uh', and conversational fragments preserved when they are important to personality and tone?
-   - Is speaker-specific content still associated with the correct speaker?
+Use the same question wording for both human raters and the LLM judge.
+For each question, think in a 5-point Likert scale:
+- 1 = Strongly disagree
+- 2 = Disagree
+- 3 = Neither agree nor disagree / mixed
+- 4 = Agree
+- 5 = Strongly agree
 
-Scoring anchors:
-- 1.00: Excellent; essentially no meaningful issue.
-- 0.75: Strong; minor issues only.
-- 0.50: Mixed; noticeable weaknesses but still usable.
-- 0.25: Weak; major problems or substantial loss.
-- 0.00: Fails badly.
+Convert each Likert response to the normalized score used in the JSON output:
+- 1 -> 0.00
+- 2 -> 0.25
+- 3 -> 0.50
+- 4 -> 0.75
+- 5 -> 1.00
+
+For each dimension:
+- answer the three guide questions below using the Likert scale,
+- convert each item to the normalized score,
+- average the three normalized item scores,
+- return that average as the dimension score.
+
+1. Factualness
+   - F1. The summary does not contain claims that are unsupported or contradicted by the transcript.
+   - F2. The summary keeps the important topics and claims that should still remain after compression.
+   - F3. The amount of information removed feels appropriate for the target length rather than overly lossy.
+2. Naturalness
+   - N1. The summary is easy to follow from beginning to end.
+   - N2. The ordering of ideas feels natural and matches the conversation flow well enough.
+   - N3. The wording sounds coherent and not awkward, stitched together, or abruptly jumpy.
+3. Speaker Grammar Similarity
+   - S1. Each speaker still sounds recognizably like themselves rather than a generic summary voice.
+   - S2. Speaker-specific style cues, such as filler words, fragments, and informal phrasing, are preserved when they matter.
+   - S3. Content and style cues remain attached to the correct speaker.
+
+Dimension-level interpretation after averaging the three item scores:
+- 1.00: Excellent alignment on the three items for that dimension.
+- 0.75: Good alignment with only minor issues.
+- 0.50: Mixed or moderate issues.
+- 0.25: Poor alignment with major issues.
+- 0.00: Very poor alignment or clear failure.
 
 Output JSON only with this exact schema:
 {

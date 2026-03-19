@@ -51,7 +51,12 @@ def test_sporc_judge_parses_three_required_dimensions() -> None:
     assert "Transcript per-speaker message lists" in llm.user_prompt
     assert "Speaker alias mapping" in llm.user_prompt
     assert "Guide questions" in llm.user_prompt
-    assert "filler words" in llm.user_prompt
+    assert "5-point Likert scale" in llm.user_prompt
+    assert "F1." in llm.user_prompt
+    assert "N1." in llm.user_prompt
+    assert "S1." in llm.user_prompt
+    assert "1 -> 0.00" in llm.user_prompt
+    assert "average the three normalized item scores" in llm.user_prompt
 
 
 def test_sporc_judge_includes_full_transcript_in_prompt_by_default() -> None:
@@ -122,3 +127,24 @@ def test_sporc_judge_uses_shared_conversation_summary_templates() -> None:
     )
     assert llm.system_prompt == "conversation_summary_judge_system prompt"
     assert llm.user_prompt == "conversation_summary_judge_user prompt"
+
+
+def test_sporc_judge_system_prompt_mentions_human_compatible_likert_flow() -> None:
+    llm = _FakeJudgeLLM(
+        '{"Factualness": 0.9, "Naturalness": 0.8, '
+        '"Speaker Grammar Similarity": 0.7, "confidence": 0.6, "rationale": "ok"}'
+    )
+    judge = SPoRCJudge(judge_llm=llm)
+
+    result = judge.evaluate(
+        source_text="[SPEAKER_00]: hello",
+        summary_xml='<SPEAKER_00 emo_preset="neutral">hello</SPEAKER_00>',
+        transcript_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        summary_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        speaker_alias_map={"Alex Host": "SPEAKER_00"},
+        speaker_notes=["hostSpeakerLabels: {'Alex Host': ['SPEAKER_00']}"],
+    )
+
+    assert result.status == "ok"
+    assert "human survey participant" in llm.system_prompt
+    assert "average within the dimension" in llm.system_prompt
