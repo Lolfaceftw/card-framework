@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from omegaconf import OmegaConf
 
 from card_framework.shared.config_loading import (
     RuntimeConfigError,
@@ -119,3 +122,19 @@ def test_validate_runtime_credentials_reports_missing_selected_provider_secret()
                 },
             }
         )
+
+
+def test_packaged_qwen_embedding_profile_uses_tuned_defaults() -> None:
+    cfg = OmegaConf.load(
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "card_framework"
+        / "config"
+        / "config.yaml"
+    )
+
+    qwen_profile = cfg.profiles.embedding.qwen3_4b
+
+    assert qwen_profile.batch_size == 1
+    assert qwen_profile.max_seq_length == 384
+    assert qwen_profile.attention_implementation == "eager"

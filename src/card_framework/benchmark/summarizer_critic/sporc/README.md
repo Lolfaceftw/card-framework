@@ -692,7 +692,9 @@ Shared execution flags users usually need:
 `--embedding-mode enabled` uses the active embedding profile from config rather
 than a hard-coded benchmark-only model. In the repository defaults that profile
 is `qwen3_4b`, so enabling embeddings now points SPoRC sweeps at
-`Qwen/Qwen3-Embedding-4B` unless you change `selection.embedding`.
+`Qwen/Qwen3-Embedding-4B` unless you change `selection.embedding`. The default
+Qwen profile is tuned for the measured Windows RTX 3060 sweet spot:
+`batch_size=1`, `max_seq_length=384`, and `attention_implementation=eager`.
 
 ## Timeouts
 

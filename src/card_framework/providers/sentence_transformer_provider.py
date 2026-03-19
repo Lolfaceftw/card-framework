@@ -33,6 +33,8 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
         device: str = "cuda",
         torch_dtype: str = "auto",
         batch_size: int = 4,
+        max_seq_length: int | None = None,
+        attention_implementation: str | None = None,
     ) -> None:
         import torch
 
@@ -55,15 +57,30 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
             )
 
         resolved_dtype = self._DTYPE_MAP.get(torch_dtype, torch.float32)
-        event_bus.publish("system_message", 
-            f"Loading {model_name} on {device} (dtype={resolved_dtype}, batch_size={batch_size})..."
+        model_kwargs: dict[str, object] = {
+            "device_map": device,
+            "torch_dtype": resolved_dtype,
+        }
+        if attention_implementation:
+            model_kwargs["attn_implementation"] = attention_implementation
+
+        event_bus.publish(
+            "system_message",
+            (
+                f"Loading {model_name} on {device} "
+                f"(dtype={resolved_dtype}, batch_size={batch_size}, "
+                f"max_seq_length={max_seq_length or 'default'}, "
+                f"attn={attention_implementation or 'default'})..."
+            ),
         )
         t0 = time.time()
         self._model = SentenceTransformer(
             model_name,
-            model_kwargs={"device_map": device, "torch_dtype": resolved_dtype},
+            model_kwargs=model_kwargs,
             tokenizer_kwargs={"padding_side": "left"},
         )
+        if max_seq_length and int(max_seq_length) > 0:
+            self._model.max_seq_length = int(max_seq_length)
         event_bus.publish("system_message", f"Model loaded in {time.time() - t0:.1f}s")
 
     # â”€â”€ EmbeddingProvider interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

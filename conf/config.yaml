@@ -56,7 +56,9 @@ profiles:
       model_name: "Qwen/Qwen3-Embedding-4B"
       device: "cuda"
       torch_dtype: "float16"
-      batch_size: 4
+      batch_size: 1
+      max_seq_length: 384
+      attention_implementation: "eager"
     minilm_cpu:
       _target_: card_framework.providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider
       model_name: "sentence-transformers/all-MiniLM-L6-v2"
