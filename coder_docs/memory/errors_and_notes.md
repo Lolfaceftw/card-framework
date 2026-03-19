@@ -1,3 +1,7 @@
+### 2026-03-19T12:20:00+08:00 - Loop Memory Should Stay Unbounded By Default For Research Runs
+- Problem: The summarizer loop-memory helper still applied a hard `1024`-character cap to the prompt block that carries unresolved critic issues, repeated remedy history, and strategy-shift hints into the next iteration. On long iterative runs that silently dropped the tail of the memory block even though the transcript and judge paths had already been moved to full-input behavior.
+- Solution: Make loop-context prompts unbounded by default while keeping explicit caps available as an opt-in helper behavior for tests or future constrained deployments.
+
 ### 2026-03-19T12:05:00+08:00 - Reference-Free Judges Should Not Silently Cap Long Transcripts At 30k Characters
 - Problem: Even after the SPoRC-specific judge stopped truncating its transcript input, the shared reference-free `LLMJudgeRunner` still defaulted to `source_char_limit=30000`, and both the root benchmark CLI and QMSum CLI still threaded that cap into judge prompts. Long-form reference-free scoring could therefore silently drop later transcript content.
 - Solution: Remove the shared `source_char_limit` truncation path and delete the related CLI flags so reference-free judge prompts and QMSum reference-free scoring now receive the full transcript by default.

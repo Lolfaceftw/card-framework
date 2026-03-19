@@ -142,8 +142,8 @@ class SummarizerExecutor(BaseA2AExecutor):
 
     @staticmethod
     def _build_loop_context_prompt_block(raw_loop_context: Any) -> str:
-        """Build a bounded loop-context payload for prompt injection."""
-        return build_loop_context_prompt_block(raw_loop_context, char_cap=1024)
+        """Build the loop-context payload for prompt injection."""
+        return build_loop_context_prompt_block(raw_loop_context, char_cap=None)
 
     @staticmethod
     def _build_full_transcript_prompt_text(full_transcript: str) -> str:

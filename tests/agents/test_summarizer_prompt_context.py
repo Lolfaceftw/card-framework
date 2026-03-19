@@ -42,7 +42,18 @@ def test_summarizer_user_prompt_appends_loop_context_only_when_present() -> None
     assert "chronology mismatch" in prompt_with_context
 
 
-def test_loop_context_prompt_block_truncates_large_payload_safely() -> None:
+def test_loop_context_prompt_block_is_unbounded_by_default() -> None:
+    sentinel = "DO_NOT_LEAK_THIS_TAIL"
+    raw = ("A" * 12_000) + sentinel
+
+    unbounded = build_loop_context_prompt_block(raw)
+
+    assert unbounded == raw
+    assert sentinel in unbounded
+    assert "[truncated" not in unbounded
+
+
+def test_loop_context_prompt_block_can_still_truncate_when_explicitly_capped() -> None:
     sentinel = "DO_NOT_LEAK_THIS_TAIL"
     raw = ("A" * 12_000) + sentinel
 
