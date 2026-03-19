@@ -8,8 +8,12 @@ The actual embedding model is injected via the EmbeddingProvider strategy
 interface, making it trivial to swap backends.
 """
 
+import hashlib
+import json
+from pathlib import Path
 import re
 import threading
+import uuid
 
 import numpy as np
 
@@ -18,18 +22,205 @@ from card_framework.shared.events import event_bus
 from card_framework.shared.perf import report_loading_duration
 
 
+def _normalize_segments(segments: list[dict]) -> list[dict[str, str]]:
+    """Normalize retrieval segments into a stable cacheable payload."""
+    return [
+        {
+            "speaker": str(segment.get("speaker", "UNKNOWN")).strip() or "UNKNOWN",
+            "text": str(segment.get("text", "")),
+        }
+        for segment in segments
+    ]
+
+
+def _stable_segments_hash(segments: list[dict[str, str]]) -> str:
+    """Hash a normalized retrieval-segment payload deterministically."""
+    serialized = json.dumps(
+        segments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _embedding_provider_cache_identity(provider: EmbeddingProvider) -> str:
+    """Return a stable provider identity string for embedding cache keys."""
+    cache_identity = getattr(provider, "cache_identity", None)
+    if callable(cache_identity):
+        resolved = str(cache_identity()).strip()
+        if resolved:
+            return resolved
+    return f"{provider.__class__.__module__}.{provider.__class__.__qualname__}"
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically write one UTF-8 text file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _atomic_write_npy(path: Path, array: np.ndarray) -> None:
+    """Atomically persist one numpy array without partial writes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    with temp_path.open("wb") as handle:
+        np.save(handle, array, allow_pickle=False)
+    temp_path.replace(path)
+
+
 class TranscriptIndex:
     """Indexes transcript segments and retrieves relevant ones via MMR."""
 
-    def __init__(self, embedding_provider: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        embedding_provider: EmbeddingProvider,
+        *,
+        cache_dir: Path | None = None,
+    ) -> None:
         self.provider = embedding_provider
         self.segments: list[dict] = []
         self.embeddings: np.ndarray | None = None
+        self._cache_dir = cache_dir.resolve() if cache_dir is not None else None
+        self._provider_cache_identity = _embedding_provider_cache_identity(
+            embedding_provider
+        )
 
-    def index_segments(self, segments: list[dict]) -> int:
+    def _cache_paths(
+        self,
+        *,
+        sample_id: str | None,
+        transcript_hash: str,
+    ) -> tuple[Path, Path, dict[str, str]] | None:
+        if self._cache_dir is None:
+            return None
+        normalized_sample_id = str(sample_id or "").strip()
+        cache_key = hashlib.sha256(
+            (
+                f"{normalized_sample_id}\n"
+                f"{transcript_hash}\n"
+                f"{self._provider_cache_identity}"
+            ).encode("utf-8")
+        ).hexdigest()
+        provider_hash = hashlib.sha256(
+            self._provider_cache_identity.encode("utf-8")
+        ).hexdigest()[:16]
+        cache_root = (self._cache_dir / provider_hash / cache_key[:2] / cache_key).resolve()
+        metadata = {
+            "sample_id": normalized_sample_id,
+            "transcript_hash": transcript_hash,
+            "provider_identity": self._provider_cache_identity,
+            "cache_key": cache_key,
+        }
+        return (
+            cache_root / "metadata.json",
+            cache_root / "embeddings.npy",
+            metadata,
+        )
+
+    def _load_cached_embeddings(
+        self,
+        *,
+        metadata_path: Path,
+        embeddings_path: Path,
+        expected_metadata: dict[str, str],
+        segment_count: int,
+    ) -> np.ndarray | None:
+        if not metadata_path.exists() or not embeddings_path.exists():
+            return None
+        try:
+            cached_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(cached_metadata, dict):
+            return None
+        for key, expected_value in expected_metadata.items():
+            if str(cached_metadata.get(key, "")) != expected_value:
+                return None
+        try:
+            embeddings = np.load(embeddings_path, allow_pickle=False)
+        except (OSError, ValueError):
+            return None
+        if embeddings.ndim != 2 or int(embeddings.shape[0]) != int(segment_count):
+            return None
+        return embeddings
+
+    def _store_cached_embeddings(
+        self,
+        *,
+        metadata_path: Path,
+        embeddings_path: Path,
+        metadata: dict[str, str],
+        embeddings: np.ndarray,
+    ) -> None:
+        cache_metadata = {
+            **metadata,
+            "segment_count": int(embeddings.shape[0]) if embeddings.ndim >= 1 else 0,
+            "embedding_shape": list(embeddings.shape),
+            "dtype": str(embeddings.dtype),
+        }
+        try:
+            _atomic_write_npy(embeddings_path, embeddings)
+            _atomic_write_text(
+                metadata_path,
+                json.dumps(cache_metadata, indent=2, ensure_ascii=False),
+            )
+        except OSError:
+            return None
+
+    def _restore_from_cache(
+        self,
+        *,
+        sample_id: str | None,
+        segments: list[dict[str, str]],
+        texts: list[str],
+    ) -> bool:
+        transcript_hash = _stable_segments_hash(segments)
+        cache_paths = self._cache_paths(
+            sample_id=sample_id,
+            transcript_hash=transcript_hash,
+        )
+        if cache_paths is None:
+            return False
+        metadata_path, embeddings_path, metadata = cache_paths
+        cached_embeddings = self._load_cached_embeddings(
+            metadata_path=metadata_path,
+            embeddings_path=embeddings_path,
+            expected_metadata=metadata,
+            segment_count=len(texts),
+        )
+        if cached_embeddings is None:
+            return False
+        self.segments = list(segments)
+        self.embeddings = cached_embeddings
+        event_bus.publish(
+            "system_message",
+            (
+                f"Reused cached transcript embeddings for {len(texts)} segments "
+                f"(sample_id={metadata['sample_id'] or 'unknown'})."
+            ),
+        )
+        return True
+
+    def index_segments(
+        self,
+        segments: list[dict],
+        *,
+        sample_id: str | None = None,
+    ) -> int:
         """Embed and store all transcript segments. Returns count indexed."""
-        self.segments = segments
-        texts = [seg.get("text", "") for seg in segments]
+        normalized_segments = _normalize_segments(segments)
+        texts = [segment.get("text", "") for segment in normalized_segments]
+        if self._restore_from_cache(
+            sample_id=sample_id,
+            segments=normalized_segments,
+            texts=texts,
+        ):
+            return len(texts)
+
+        self.segments = list(normalized_segments)
 
         event_bus.publish("system_message", f"Embedding {len(texts)} segments...")
         with report_loading_duration(
@@ -38,6 +229,19 @@ class TranscriptIndex:
         ):
             self.embeddings = self.provider.encode(
                 texts, normalize=True, show_progress=True
+            )
+        transcript_hash = _stable_segments_hash(normalized_segments)
+        cache_paths = self._cache_paths(
+            sample_id=sample_id,
+            transcript_hash=transcript_hash,
+        )
+        if cache_paths is not None and self.embeddings is not None:
+            metadata_path, embeddings_path, metadata = cache_paths
+            self._store_cached_embeddings(
+                metadata_path=metadata_path,
+                embeddings_path=embeddings_path,
+                metadata=metadata,
+                embeddings=self.embeddings,
             )
         event_bus.publish("system_message", f"Embedded {len(texts)} segments")
         return len(texts)
@@ -130,9 +334,11 @@ class NamespacedTranscriptIndexRegistry:
         embedding_provider: EmbeddingProvider,
         *,
         serialize_requests: bool = False,
+        cache_dir: Path | None = None,
     ) -> None:
         self._embedding_provider = embedding_provider
         self._indices: dict[str, TranscriptIndex] = {}
+        self._cache_dir = cache_dir.resolve() if cache_dir is not None else None
         self._request_lock: threading.Lock | None = (
             threading.Lock() if serialize_requests else None
         )
@@ -147,18 +353,36 @@ class NamespacedTranscriptIndexRegistry:
         segments: list[dict],
         *,
         namespace: str | None = None,
+        sample_id: str | None = None,
     ) -> int:
         """Embed and store transcript segments for one namespace."""
         normalized_namespace = self._normalize_namespace(namespace)
         if self._request_lock is not None:
             with self._request_lock:
-                return self._index_segments_locked(segments, normalized_namespace)
-        return self._index_segments_locked(segments, normalized_namespace)
+                return self._index_segments_locked(
+                    segments,
+                    normalized_namespace,
+                    sample_id=sample_id,
+                )
+        return self._index_segments_locked(
+            segments,
+            normalized_namespace,
+            sample_id=sample_id,
+        )
 
-    def _index_segments_locked(self, segments: list[dict], namespace: str) -> int:
+    def _index_segments_locked(
+        self,
+        segments: list[dict],
+        namespace: str,
+        *,
+        sample_id: str | None = None,
+    ) -> int:
         self._indices.pop(namespace, None)
-        index = TranscriptIndex(self._embedding_provider)
-        count = index.index_segments(segments)
+        index = TranscriptIndex(
+            self._embedding_provider,
+            cache_dir=getattr(self, "_cache_dir", None),
+        )
+        count = index.index_segments(segments, sample_id=sample_id)
         self._indices[namespace] = index
         return count
 

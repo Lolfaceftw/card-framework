@@ -33,6 +33,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_PREPARED_ROOT,
     DEFAULT_RAM_THRESHOLD_PERCENT,
     DEFAULT_REFERENCE_WPM,
+    DEFAULT_RUNS_ROOT,
     DEFAULT_SUPERVISOR_ROOT,
     DEFAULT_SWEEP_ROOT,
     BenchmarkExecutionReport,
@@ -1037,6 +1038,7 @@ def _start_duration_sweep_shared_retrieval_service(
             registry = NamespacedTranscriptIndexRegistry(
                 embedding_provider,
                 serialize_requests=True,
+                cache_dir=(DEFAULT_RUNS_ROOT.parent / "embedding_cache").resolve(),
             )
             retrieval_app = _build_a2a_app(
                 name="InfoRetrieval",

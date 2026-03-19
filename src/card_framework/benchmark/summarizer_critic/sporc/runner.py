@@ -20,6 +20,7 @@ import threading
 import time
 from typing import Any, Callable
 from urllib.parse import urlparse
+import uuid
 
 import hydra
 import httpx
@@ -138,6 +139,7 @@ _SOURCE_AUDIO_HEADERS = {
     "Referer": "https://www.buzzsprout.com/",
 }
 _SHARED_SAMPLE_QUEUE_DB_NAME = "sample_queue.sqlite3"
+_EMBEDDING_CACHE_ROOT = (DEFAULT_RUNS_ROOT.parent / "embedding_cache").resolve()
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
@@ -148,6 +150,8 @@ _CONNECTION_UNAVAILABLE_FINAL_STATUS = "connection_unavailable"
 _RESUME_FAILURE_DEFAULT_STATUS = "resume_interrupted_sample"
 _SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
 _CHECKPOINT_VERSION = 1
+_CHECKPOINT_REPLACE_ATTEMPTS = 10
+_CHECKPOINT_REPLACE_BACKOFF_SECONDS = 0.1
 _TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS = 250
 _TRANSCRIPT_ONLY_ALNUM_PATTERN = re.compile(r"[A-Za-z0-9]")
 _TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
@@ -161,6 +165,7 @@ _REPLACEMENT_ELIGIBLE_FINAL_STATUSES = frozenset(
         _SWEEP_STALL_FINAL_STATUS,
     }
 )
+_CHECKPOINT_WRITE_LOCKS: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 _RETRYABLE_INFRA_FINAL_STATUSES = frozenset(
     {
         _STARTUP_UNAVAILABLE_FINAL_STATUS,
@@ -968,12 +973,34 @@ def _write_checkpoint_payload(
 ) -> None:
     """Atomically persist one execute checkpoint payload."""
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = checkpoint_path.with_suffix(f"{checkpoint_path.suffix}.tmp")
-    temp_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    temp_path.replace(checkpoint_path)
+    lock = _CHECKPOINT_WRITE_LOCKS[str(checkpoint_path.resolve())]
+    serialized_payload = json.dumps(payload, indent=2, ensure_ascii=False)
+    last_error: PermissionError | OSError | None = None
+
+    with lock:
+        for attempt_index in range(_CHECKPOINT_REPLACE_ATTEMPTS):
+            temp_path = checkpoint_path.with_name(
+                f"{checkpoint_path.name}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                temp_path.write_text(
+                    serialized_payload,
+                    encoding="utf-8",
+                )
+                temp_path.replace(checkpoint_path)
+                return
+            except (PermissionError, OSError) as exc:
+                last_error = exc
+                try:
+                    if temp_path.exists():
+                        temp_path.unlink()
+                except OSError:
+                    pass
+                if attempt_index + 1 >= _CHECKPOINT_REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(_CHECKPOINT_REPLACE_BACKOFF_SECONDS * (attempt_index + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
@@ -2070,7 +2097,10 @@ async def _start_managed_runtime(
         embedding = hydra.utils.instantiate(
             OmegaConf.create(embedding_profile.embedding_config)
         )
-        transcript_index = TranscriptIndex(embedding_provider=embedding)
+        transcript_index = TranscriptIndex(
+            embedding_provider=embedding,
+            cache_dir=_EMBEDDING_CACHE_ROOT,
+        )
     judge = SPoRCJudge(
         judge_llm=llm_judge,
         config=SPoRCJudgeConfig(source_char_limit=int(args.judge_source_char_limit)),
@@ -2989,7 +3019,10 @@ async def _execute_sample(
                 sample=sample,
             )
         if retrieval_enabled:
-            await orchestrator.index_transcript(transcript_payload)
+            await orchestrator.index_transcript(
+                transcript_payload,
+                sample_id=sample.sample_id,
+            )
         diagnostics = await orchestrator.run_loop_with_diagnostics(
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,

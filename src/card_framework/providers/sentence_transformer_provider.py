@@ -38,6 +38,14 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
     ) -> None:
         import torch
 
+        self._model_name = str(model_name)
+        self._torch_dtype_name = str(torch_dtype)
+        self._max_seq_length = (
+            int(max_seq_length) if max_seq_length is not None and int(max_seq_length) > 0 else None
+        )
+        self._attention_implementation = (
+            str(attention_implementation).strip() if attention_implementation else None
+        )
         self.batch_size = batch_size
         self._device = device
         self._encode_lock = threading.Lock()
@@ -125,4 +133,14 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
                 torch.cuda.empty_cache()
         except Exception:
             return None
+
+    def cache_identity(self) -> str:
+        """Return a stable cache fingerprint for persisted embeddings."""
+        return (
+            "SentenceTransformerEmbeddingProvider::"
+            f"model={self._model_name}::"
+            f"torch_dtype={self._torch_dtype_name}::"
+            f"max_seq_length={self._max_seq_length if self._max_seq_length is not None else 'default'}::"
+            f"attn={self._attention_implementation or 'default'}"
+        )
 

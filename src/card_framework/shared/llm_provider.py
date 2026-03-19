@@ -332,3 +332,7 @@ class EmbeddingProvider(ABC):
     def close(self) -> None:
         """Release provider-owned resources when the runtime is finished."""
         return None
+
+    def cache_identity(self) -> str:
+        """Return a stable cache fingerprint for persisted embedding payloads."""
+        return f"{self.__class__.__module__}.{self.__class__.__qualname__}"

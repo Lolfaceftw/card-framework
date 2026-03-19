@@ -112,6 +112,9 @@ class BenchmarkExecutionError(RuntimeError):
     """Raise when the summarizer-critic benchmark cannot proceed."""
 
 
+_EMBEDDING_CACHE_ROOT = (DEFAULT_RUNS_ROOT.parent / "embedding_cache").resolve()
+
+
 class ManagedServer:
     """Uvicorn server and backing thread handle for managed lifecycle."""
 
@@ -443,7 +446,10 @@ async def _execute_sample(
         source_text = _format_transcript(transcript)
         full_transcript_text = source_text if not retrieval_enabled else ""
         if retrieval_enabled:
-            await orchestrator.index_transcript(transcript)
+            await orchestrator.index_transcript(
+                transcript,
+                sample_id=sample.sample_id,
+            )
         diagnostics = await orchestrator.run_loop_with_diagnostics(
             target_seconds=sample.target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
@@ -634,7 +640,10 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         OmegaConf.create(embedding_profile.embedding_config)
     )
     retrieval_enabled = embedding_profile.embedding_id != "disabled"
-    transcript_index = TranscriptIndex(embedding_provider=embedding)
+    transcript_index = TranscriptIndex(
+        embedding_provider=embedding,
+        cache_dir=_EMBEDDING_CACHE_ROOT,
+    )
 
     event_capture = EventCapture(
         [

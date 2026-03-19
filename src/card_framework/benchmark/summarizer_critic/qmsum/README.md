@@ -122,6 +122,12 @@ Useful execution flags:
 - `--retrieval-timeout-seconds <float>`
 - `--index-timeout-seconds <float>`
 
+When `--embedding-mode enabled`, the benchmark now reuses a persistent
+transcript-embedding cache under
+`artifacts/summarizer_critic_benchmark/embedding_cache`. Cache hits are keyed
+by the sample ID, a stable transcript-content hash, and the active embedding
+provider identity, so reruns skip `encode(...)` when those inputs match.
+
 ## Concurrent Direct Runs
 
 When you launch multiple `execute` processes in parallel, give each process its
@@ -149,6 +155,7 @@ Each concurrent run must use a distinct trio of
 Main artifact roots:
 
 - prepared dataset: `artifacts/summarizer_critic_benchmark/datasets/qmsum_general_test`
+- shared embedding cache: `artifacts/summarizer_critic_benchmark/embedding_cache`
 - direct runs: `artifacts/summarizer_critic_benchmark/runs/<run_id>`
 - supervised sessions: `artifacts/summarizer_critic_benchmark/supervisor/<session_id>`
 

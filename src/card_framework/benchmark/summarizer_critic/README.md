@@ -36,6 +36,7 @@ Common subtrees:
 - `datasets/qmsum_general_test`: prepared QMSum manifest and transcript files
 - `runs`: direct QMSum benchmark runs
 - `supervisor`: QMSum supervised sessions
+- `embedding_cache`: persistent transcript-embedding cache reused across embedding-enabled benchmark runs when the sample ID, transcript content, and embedding provider identity match
 - `datasets/sporc/prepared_sample`: prepared SPoRC sample split
 - `datasets/sporc/prepared_full`: prepared SPoRC full split and curated manifests
 - `sporc_runs`: direct SPoRC execute runs

@@ -8,6 +8,7 @@ from dataclasses import asdict
 import gzip
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
@@ -40,6 +41,7 @@ from card_framework.benchmark.summarizer_critic.sporc.runner import (
     _select_samples,
     _select_sample_shard,
     _summarize_results,
+    _write_checkpoint_payload,
     build_execute_parser,
     execute_benchmark,
 )
@@ -246,10 +248,17 @@ class _StubOrchestrator:
     def __init__(self) -> None:
         self.index_calls = 0
         self.clear_calls = 0
+        self.indexed_sample_ids: list[str | None] = []
 
-    async def index_transcript(self, transcript_payload: dict[str, object]) -> None:
+    async def index_transcript(
+        self,
+        transcript_payload: dict[str, object],
+        *,
+        sample_id: str | None = None,
+    ) -> None:
         del transcript_payload
         self.index_calls += 1
+        self.indexed_sample_ids.append(sample_id)
 
     async def clear_transcript_index(self) -> None:
         self.clear_calls += 1
@@ -575,6 +584,7 @@ def test_execute_sample_clears_retrieval_namespace_after_success(tmp_path: Path)
 
     assert result.status == "completed"
     assert orchestrator.index_calls == 1
+    assert orchestrator.indexed_sample_ids == ["sample-a"]
     assert orchestrator.clear_calls == 1
 
 
@@ -609,6 +619,7 @@ def test_execute_sample_clears_retrieval_namespace_after_failure(tmp_path: Path)
 
     assert result.status == "failed"
     assert orchestrator.index_calls == 1
+    assert orchestrator.indexed_sample_ids == ["sample-a"]
     assert orchestrator.clear_calls == 1
 
 
@@ -1680,6 +1691,62 @@ def test_execute_benchmark_resumes_checkpoint_and_marks_orphaned_sample_failed(
     assert checkpoint_payload["resume_count"] == 1
     assert checkpoint_payload["active_sample"] is None
     assert len(checkpoint_payload["completed_results"]) == 3
+
+
+def test_write_checkpoint_payload_retries_transient_permission_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint.json"
+    payload = {"checkpoint_version": 1, "run_id": "retry-run"}
+    original_replace = Path.replace
+    replace_attempts = {"count": 0}
+
+    def _flaky_replace(self: Path, target: Path) -> Path:
+        if Path(target) == checkpoint_path and replace_attempts["count"] < 2:
+            replace_attempts["count"] += 1
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _flaky_replace)
+
+    _write_checkpoint_payload(checkpoint_path, payload)
+
+    persisted = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert persisted["run_id"] == "retry-run"
+    assert replace_attempts["count"] == 2
+
+
+def test_write_checkpoint_payload_serializes_concurrent_writers(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint.json"
+    failures: list[Exception] = []
+    start_event = threading.Event()
+
+    def _writer(run_id: str) -> None:
+        start_event.wait()
+        try:
+            _write_checkpoint_payload(
+                checkpoint_path,
+                {"checkpoint_version": 1, "run_id": run_id},
+            )
+        except Exception as exc:  # pragma: no cover - failure surfaced below
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=_writer, args=("run-a",)),
+        threading.Thread(target=_writer, args=("run-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    start_event.set()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    persisted = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert persisted["run_id"] in {"run-a", "run-b"}
 
 
 def test_execute_benchmark_continues_after_failed_sample_and_rebuilds_runtime(

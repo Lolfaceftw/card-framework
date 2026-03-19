@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 
@@ -28,6 +29,10 @@ class InfoRetrievalExecutor(BaseA2AExecutor):
     async def handle_task(
         self, task_data: dict, context: RequestContext, event_queue: EventQueue
     ) -> None:
+        result = await asyncio.to_thread(self._handle_task_sync, task_data)
+        await self.send_response(result, context, event_queue)
+
+    def _handle_task_sync(self, task_data: dict) -> str:
         from card_framework.agents.dtos import (
             ClearTaskRequest,
             ClearTaskResponse,
@@ -45,9 +50,13 @@ class InfoRetrievalExecutor(BaseA2AExecutor):
                 count = self.index.index_segments(
                     [s.model_dump() for s in req.segments],
                     namespace=req.namespace,
+                    sample_id=req.sample_id,
                 )
             else:
-                count = self.index.index_segments([s.model_dump() for s in req.segments])
+                count = self.index.index_segments(
+                    [s.model_dump() for s in req.segments],
+                    sample_id=req.sample_id,
+                )
             res = IndexTaskResponse(status="ok", count=count)
             result = res.model_dump_json()
             event_bus.publish("system_message", message=f"Indexed {count} segments")
@@ -65,8 +74,8 @@ class InfoRetrievalExecutor(BaseA2AExecutor):
                 selected = self.index.retrieve_mmr(
                     query=req.query,
                     top_k=req.top_k,
-                lambda_param=req.lambda_param,
-            )
+                    lambda_param=req.lambda_param,
+                )
 
             total_words = sum(
                 len(re.sub(r"<[^>]+>", "", seg.get("text", "")).split())
@@ -114,4 +123,4 @@ class InfoRetrievalExecutor(BaseA2AExecutor):
             )
             event_bus.publish("error_message", message=f"Unknown action: {action}")
 
-        await self.send_response(result, context, event_queue)
+        return result

@@ -107,7 +107,9 @@ Use `duration-sweep` when you want multiple duration targets in one invocation:
 - `--parallelism 0` runs every selected preset concurrently,
 - `--concurrency <int>` seeds that many worker children per active preset and donates those workers forward when earlier presets finish,
 - when `--embedding-mode enabled`, `duration-sweep` now starts one parent-owned retrieval service for the whole sweep, namespaces each worker, and serializes embedding/index/retrieve requests so the configured embedding model loads once per sweep instead of once per child,
+- embedding-enabled `execute` runs and `duration-sweep` children now reuse a persistent transcript-embedding cache under `artifacts/summarizer_critic_benchmark/embedding_cache`, keyed by sample ID, transcript content hash, and embedding-provider identity,
 - stalled preset children now heartbeat every `30s`, write per-preset checkpoints, and auto-restart from checkpoint when the active sample stops making progress,
+- checkpoint writes now use per-path serialization plus retry/backoff around the final atomic replace so transient Windows file locks do not abort a long sweep as easily,
 - `duration-sweep` is transcript-only by default unless you add `--enable-voice-clone`.
 
 Common flag mix-ups:
@@ -175,6 +177,7 @@ Default roots:
 - curated long-form audit: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_audit.json`
 - human sampling sessions: `artifacts/summarizer_critic_benchmark/sporc_human_sampling`
 - automatic LLM sampling runs: `artifacts/summarizer_critic_benchmark/sporc_llm_sampling`
+- shared embedding cache: `artifacts/summarizer_critic_benchmark/embedding_cache`
 - execute runs: `artifacts/summarizer_critic_benchmark/sporc_runs`
 - sweep runs: `artifacts/summarizer_critic_benchmark/sweeps`
 - supervised sessions: `artifacts/summarizer_critic_benchmark/sporc_supervisor`
@@ -696,9 +699,29 @@ is `qwen3_4b`, so enabling embeddings now points SPoRC sweeps at
 Qwen profile is tuned for the measured Windows RTX 3060 sweet spot:
 `batch_size=1`, `max_seq_length=384`, and `attention_implementation=eager`.
 
+## Sweep Analysis
+
+To analyze an in-flight or completed duration sweep, run:
+
+```powershell
+uv run python scripts/analyze_sporc_sweep.py `
+  --sweep-root artifacts/summarizer_critic_benchmark/sweeps/<sweep_id>
+```
+
+The helper emits five PNG graphs plus CSV, Markdown, and JSON summaries under
+`<sweep>/analysis/<timestamp>/` so you can inspect worker timelines, stage
+concurrency, observed worker-time shares, failure waste, and transcript
+complexity versus wall time from the same sweep artifact set. It also prints
+timed `Loading ...` / `Loaded ... in X.XX seconds.` phase updates while it
+parses logs, loads checkpoints, computes transcript complexity, renders graphs,
+and writes summaries, so long analyses do not leave the terminal blank.
+
 ## Timeouts
 
 Stage timeout flags are per-request network timeouts, not overall benchmark limits.
+Explicit values above the default `30s` request timeout are honored, and the
+shared retrieval service now keeps its health endpoint responsive while slow
+index or retrieve work is running in the background thread pool.
 
 Relevant flags:
 

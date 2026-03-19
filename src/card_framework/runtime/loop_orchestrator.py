@@ -130,7 +130,12 @@ class Orchestrator:
                 timeout = live_draft_floor
         return timeout
 
-    async def index_transcript(self, transcript: TranscriptLike) -> int:
+    async def index_transcript(
+        self,
+        transcript: TranscriptLike,
+        *,
+        sample_id: str | None = None,
+    ) -> int:
         """Index transcript segments in retrieval service and return indexed count."""
         transcript_dto = coerce_transcript(transcript)
         segments = transcript_dto.retrieval_segments()
@@ -138,6 +143,7 @@ class Orchestrator:
             action="index",
             segments=segments,
             namespace=self.retrieval_namespace,
+            sample_id=sample_id,
         )
         self.event_bus.publish(
             "system_message",
@@ -147,7 +153,11 @@ class Orchestrator:
             self.retrieval_port,
             index_task,
             timeout=self.timeouts["index"],
-            metadata={"component": "orchestrator", "stage": "index"},
+            metadata={
+                "component": "orchestrator",
+                "stage": "index",
+                "sample_id": sample_id,
+            },
         )
         try:
             index_result = json.loads(index_response_raw)

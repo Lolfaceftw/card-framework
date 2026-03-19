@@ -8,7 +8,10 @@ import time
 import numpy as np
 import pytest
 
-from card_framework.retrieval.embeddings import NamespacedTranscriptIndexRegistry
+from card_framework.retrieval.embeddings import (
+    NamespacedTranscriptIndexRegistry,
+    TranscriptIndex,
+)
 from card_framework.shared.llm_provider import EmbeddingProvider
 
 
@@ -20,6 +23,7 @@ class _FakeEmbeddingProvider(EmbeddingProvider):
         self._active_calls = 0
         self.max_active_calls = 0
         self.closed = False
+        self.encode_calls = 0
 
     def encode(
         self,
@@ -33,6 +37,7 @@ class _FakeEmbeddingProvider(EmbeddingProvider):
         with self._lock:
             self._active_calls += 1
             self.max_active_calls = max(self.max_active_calls, self._active_calls)
+            self.encode_calls += 1
         try:
             time.sleep(0.05)
             vectors = []
@@ -57,6 +62,9 @@ class _FakeEmbeddingProvider(EmbeddingProvider):
 
     def close(self) -> None:
         self.closed = True
+
+    def cache_identity(self) -> str:
+        return "fake-embedding-provider-v1"
 
 
 def test_namespaced_registry_isolates_worker_indices() -> None:
@@ -129,3 +137,49 @@ def test_namespaced_registry_close_releases_embedding_provider() -> None:
     registry.close()
 
     assert provider.closed is True
+
+
+def test_transcript_index_reuses_cached_embeddings_across_instances(
+    tmp_path,
+) -> None:
+    segments = [{"speaker": "SPEAKER_00", "text": "apple transcript"}]
+    first_provider = _FakeEmbeddingProvider()
+    first_index = TranscriptIndex(
+        embedding_provider=first_provider,
+        cache_dir=tmp_path / "embedding_cache",
+    )
+
+    assert first_index.index_segments(segments, sample_id="sample-a") == 1
+    assert first_provider.encode_calls == 1
+
+    second_provider = _FakeEmbeddingProvider()
+    second_index = TranscriptIndex(
+        embedding_provider=second_provider,
+        cache_dir=tmp_path / "embedding_cache",
+    )
+
+    assert second_index.index_segments(segments, sample_id="sample-a") == 1
+    assert second_provider.encode_calls == 0
+    retrieved = second_index.retrieve_mmr("apple", top_k=1)
+    assert retrieved[0]["text"] == "apple transcript"
+
+
+def test_transcript_index_cache_misses_when_transcript_hash_changes(
+    tmp_path,
+) -> None:
+    provider = _FakeEmbeddingProvider()
+    index = TranscriptIndex(
+        embedding_provider=provider,
+        cache_dir=tmp_path / "embedding_cache",
+    )
+
+    index.index_segments(
+        [{"speaker": "SPEAKER_00", "text": "apple transcript"}],
+        sample_id="sample-a",
+    )
+    index.index_segments(
+        [{"speaker": "SPEAKER_00", "text": "banana transcript"}],
+        sample_id="sample-a",
+    )
+
+    assert provider.encode_calls == 2

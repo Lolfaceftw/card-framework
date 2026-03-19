@@ -13,6 +13,7 @@ class IndexTaskRequest(BaseModel):
     action: str = Field(pattern="^index$")
     segments: List[SegmentDTO]
     namespace: str = "default"
+    sample_id: str | None = None
 
 
 class IndexTaskResponse(BaseModel):

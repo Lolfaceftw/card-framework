@@ -160,7 +160,8 @@ def test_index_and_clear_transcript_include_retrieval_namespace() -> None:
                         "end_time": 1200,
                     }
                 ]
-            }
+            },
+            sample_id="sample-17",
         )
     )
     asyncio.run(orchestrator.clear_transcript_index())
@@ -169,7 +170,12 @@ def test_index_and_clear_transcript_include_retrieval_namespace() -> None:
     assert sent_tasks[0][0] == 9012
     assert getattr(sent_tasks[0][1], "action", "") == "index"
     assert getattr(sent_tasks[0][1], "namespace", "") == "worker-3"
-    assert sent_tasks[0][2] == {"component": "orchestrator", "stage": "index"}
+    assert getattr(sent_tasks[0][1], "sample_id", None) == "sample-17"
+    assert sent_tasks[0][2] == {
+        "component": "orchestrator",
+        "stage": "index",
+        "sample_id": "sample-17",
+    }
     assert getattr(sent_tasks[1][1], "action", "") == "clear"
     assert getattr(sent_tasks[1][1], "namespace", "") == "worker-3"
     assert sent_tasks[1][2] == {"component": "orchestrator", "stage": "clear"}
