@@ -1,0 +1,51 @@
+Evaluate the candidate summary with exactly these dimensions:
+- Factualness: every claim must be supported by the transcript, major topics should not be skipped without good compression reason, and avoid unnecessary information loss.
+- Naturalness: the summary should read like a coherent spoken conversation segment, with chronological flow, smooth transitions, and no awkward phrases or abrupt jumps.
+- Speaker Grammar Similarity: the summary should preserve each speaker's noticeable grammar, cadence, filler words, fragments, and personality when appropriate under compression, while still keeping speaker-specific content with the right speaker.
+
+Guide questions:
+1. Factualness
+   - Is every factual statement grounded in the transcript?
+   - Did the summary omit any major topic, segment, or claim that should reasonably survive compression?
+   - How much important information was lost beyond what compression requires?
+2. Naturalness
+   - Does the flow feel natural, chronological, and conversation-like?
+   - Are there abrupt jumps, stitched-together sentences, or awkward phrases?
+3. Speaker Grammar Similarity
+   - Does each speaker still sound like themselves rather than a generic summarizer voice?
+   - Are filler words such as 'um', 'uh', and conversational fragments preserved when they are important to personality and tone?
+   - Is speaker-specific content still associated with the correct speaker?
+
+Scoring anchors:
+- 1.00: Excellent; essentially no meaningful issue.
+- 0.75: Strong; minor issues only.
+- 0.50: Mixed; noticeable weaknesses but still usable.
+- 0.25: Weak; major problems or substantial loss.
+- 0.00: Fails badly.
+
+Output JSON only with this exact schema:
+{
+  "Factualness": <float>,
+  "Naturalness": <float>,
+  "Speaker Grammar Similarity": <float>,
+  "confidence": <float>,
+  "rationale": "short explanation"
+}
+
+Source transcript:
+{{ source_text }}
+
+Candidate summary XML:
+{{ summary_xml }}
+
+Transcript per-speaker message lists:
+{{ transcript_per_speaker_messages_json }}
+
+Summary per-speaker message lists:
+{{ summary_per_speaker_messages_json }}
+
+Speaker alias mapping:
+{{ speaker_alias_map_json }}
+
+Speaker notes:
+{{ speaker_notes_json }}

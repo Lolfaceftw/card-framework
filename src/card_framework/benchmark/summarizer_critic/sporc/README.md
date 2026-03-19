@@ -19,7 +19,11 @@ the dataset's primary-speaker assignment.
 
 Each run evaluates generated summaries with an LLM-as-a-judge rubric modeled after G-Eval.
 The judge now receives the full formatted transcript by default rather than a
-truncated source-text prefix.
+truncated source-text prefix, and the reusable conversation-summary judge
+wording now lives in shared prompt templates under
+`src/card_framework/prompts/templates/conversation_summary_judge_system.jinja2`
+and `src/card_framework/prompts/templates/conversation_summary_judge_user.jinja2`
+instead of inline SPoRC-only strings.
 
 The judge scores three dimensions from `0.0` to `1.0`:
 

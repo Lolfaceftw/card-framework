@@ -123,6 +123,8 @@
       <prompt path="src/card_framework/prompts/templates/summarizer_system.jinja2">Primary summarizer system instructions.</prompt>
       <prompt path="src/card_framework/prompts/templates/summarizer_revise.jinja2">Revision-mode summarizer instructions.</prompt>
       <prompt path="src/card_framework/prompts/templates/critic_system.jinja2">Critic system instructions.</prompt>
+      <prompt path="src/card_framework/prompts/templates/conversation_summary_judge_system.jinja2">Shared multi-speaker benchmark judge system instructions.</prompt>
+      <prompt path="src/card_framework/prompts/templates/conversation_summary_judge_user.jinja2">Shared multi-speaker benchmark judge user payload and rubric instructions.</prompt>
       <prompt path="src/card_framework/prompts/templates/interjector_system.jinja2">Stage-4 planner instructions for overlap decisions and anchor spans.</prompt>
       <prompt path="src/card_framework/prompts/templates/interjector_user.jinja2">Stage-4 planner user payload describing eligible host turns and token indices.</prompt>
       <prompt path="src/card_framework/prompts/templates/qa_ground_truth_system.jinja2">QA ground-truth generation instructions.</prompt>
