@@ -210,6 +210,56 @@ def test_filter_sporc_manifest_audio_urls_preserves_compact_manifest_sidecar(
     assert [row["sample_id"] for row in rows] == ["keep_sidecar"]
 
 
+def test_filter_sporc_manifest_audio_urls_reports_validation_progress_and_eta(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manifest_path = _write_inline_manifest(
+        tmp_path / "benchmark_longform_15k_manifest.json",
+        samples=[
+            _sample(
+                "keep_progress",
+                episode_key="https://example.com/keep-progress.mp3",
+            ),
+            _sample(
+                "remove_progress",
+                episode_key="https://example.com/remove-progress.mp3",
+            ),
+        ],
+    )
+    status_messages: list[str] = []
+
+    def _fake_probe(url: str, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return AudioUrlProbeResult(
+            is_valid=url.endswith("keep-progress.mp3"),
+            url=url,
+            reason="reachable" if url.endswith("keep-progress.mp3") else "http_404",
+            method="GET",
+            status_code=206 if url.endswith("keep-progress.mp3") else 404,
+        )
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.filter_manifest_audio_urls._probe_source_audio_target",
+        _fake_probe,
+    )
+
+    filter_sporc_manifest_audio_urls(
+        manifest_path=manifest_path,
+        status_reporter=status_messages.append,
+    )
+
+    progress_messages = [
+        message
+        for message in status_messages
+        if "validated" in message and "rolling_avg=" in message and "eta=" in message
+    ]
+    assert progress_messages
+    assert any("validated 0 / 2 rows" in message for message in progress_messages)
+    assert any("validated 2 / 2 rows" in message for message in progress_messages)
+    assert any("[" in message and "]" in message for message in progress_messages)
+
+
 def test_filter_sporc_manifest_audio_urls_drops_stale_samples_path_when_inline_samples_win(
     tmp_path: Path,
     monkeypatch,

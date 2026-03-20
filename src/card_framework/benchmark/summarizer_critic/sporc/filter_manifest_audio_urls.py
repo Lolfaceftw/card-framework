@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import gzip
 import json
 from pathlib import Path
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -25,6 +26,9 @@ _SOURCE_AUDIO_GET_HEADERS = {
     "Range": "bytes=0-0",
 }
 _HEAD_FALLBACK_STATUS_CODES = {400, 401, 403, 405, 429, 500, 501, 502, 503, 504}
+_PROGRESS_BAR_WIDTH = 20
+_PROGRESS_REPORT_EVERY_ROWS = 25
+_PROGRESS_REPORT_INTERVAL_SECONDS = 5.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -87,11 +91,22 @@ def filter_sporc_manifest_audio_urls(
     try:
         kept_samples: list[dict[str, Any]] = []
         removed_rows: list[dict[str, Any]] = []
+        total_samples = len(raw_samples)
+        validation_started = time.perf_counter()
+        last_progress_report_at = validation_started
 
         with report_loading_duration(
             "SPoRC source-audio URL validation",
             reporter=status_reporter,
         ):
+            _emit_audio_url_validation_progress(
+                validated_count=0,
+                total_count=total_samples,
+                kept_count=0,
+                removed_count=0,
+                elapsed_seconds=0.0,
+                status_reporter=status_reporter,
+            )
             for sample in raw_samples:
                 if not isinstance(sample, dict):
                     removed_rows.append(
@@ -104,6 +119,23 @@ def filter_sporc_manifest_audio_urls(
                             "status_code": None,
                         }
                     )
+                    validated_count = len(kept_samples) + len(removed_rows)
+                    now = time.perf_counter()
+                    if _should_report_audio_url_validation_progress(
+                        validated_count=validated_count,
+                        total_count=total_samples,
+                        last_report_at=last_progress_report_at,
+                        now=now,
+                    ):
+                        _emit_audio_url_validation_progress(
+                            validated_count=validated_count,
+                            total_count=total_samples,
+                            kept_count=len(kept_samples),
+                            removed_count=len(removed_rows),
+                            elapsed_seconds=max(now - validation_started, 0.0),
+                            status_reporter=status_reporter,
+                        )
+                        last_progress_report_at = now
                     continue
                 source_audio_url = _resolve_sample_source_audio_url(sample)
                 probe = _probe_source_audio_target(
@@ -124,6 +156,23 @@ def filter_sporc_manifest_audio_urls(
                         "status_code": probe.status_code,
                     }
                 )
+                validated_count = len(kept_samples) + len(removed_rows)
+                now = time.perf_counter()
+                if _should_report_audio_url_validation_progress(
+                    validated_count=validated_count,
+                    total_count=total_samples,
+                    last_report_at=last_progress_report_at,
+                    now=now,
+                ):
+                    _emit_audio_url_validation_progress(
+                        validated_count=validated_count,
+                        total_count=total_samples,
+                        kept_count=len(kept_samples),
+                        removed_count=len(removed_rows),
+                        elapsed_seconds=max(now - validation_started, 0.0),
+                        status_reporter=status_reporter,
+                    )
+                    last_progress_report_at = now
     finally:
         if owned_session:
             active_session.close()
@@ -289,6 +338,118 @@ def _resolve_output_samples_path(
     return output_manifest_path.with_name(
         f"{output_manifest_path.stem}.samples.jsonl.gz"
     )
+
+
+def _format_eta(seconds: float | None) -> str:
+    """Format one compact ETA string."""
+    if seconds is None or seconds < 0:
+        return "n/a"
+    rounded_seconds = int(round(seconds))
+    hours, remainder = divmod(rounded_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def _validation_progress_snapshot(
+    *,
+    validated_count: int,
+    total_count: int,
+    elapsed_seconds: float,
+) -> tuple[str, str]:
+    """Return rolling-throughput and ETA strings for URL validation."""
+    if validated_count <= 0 or elapsed_seconds <= 0:
+        average_rows_per_minute = None
+    else:
+        average_rows_per_minute = validated_count / (elapsed_seconds / 60.0)
+    average_text = (
+        f"{average_rows_per_minute:.2f} rows/min"
+        if average_rows_per_minute is not None
+        else "n/a"
+    )
+    remaining_rows = max(total_count - validated_count, 0)
+    if remaining_rows <= 0:
+        eta_text = "0s"
+    elif average_rows_per_minute is None or average_rows_per_minute <= 0:
+        eta_text = "n/a"
+    else:
+        eta_text = _format_eta((remaining_rows / average_rows_per_minute) * 60.0)
+    return average_text, eta_text
+
+
+def _render_validation_progress_bar(
+    *,
+    validated_count: int,
+    total_count: int,
+) -> str:
+    """Render one compact text progress bar for operator updates."""
+    if total_count <= 0:
+        filled_width = _PROGRESS_BAR_WIDTH
+    else:
+        filled_width = int(
+            round((validated_count / float(total_count)) * _PROGRESS_BAR_WIDTH)
+        )
+    filled_width = min(max(filled_width, 0), _PROGRESS_BAR_WIDTH)
+    return (
+        "["
+        + ("#" * filled_width)
+        + ("-" * (_PROGRESS_BAR_WIDTH - filled_width))
+        + "]"
+    )
+
+
+def _emit_audio_url_validation_progress(
+    *,
+    validated_count: int,
+    total_count: int,
+    kept_count: int,
+    removed_count: int,
+    elapsed_seconds: float,
+    status_reporter: StatusReporter | None,
+) -> None:
+    """Emit one operator-facing progress update for URL validation."""
+    if status_reporter is None:
+        return
+    average_text, eta_text = _validation_progress_snapshot(
+        validated_count=validated_count,
+        total_count=total_count,
+        elapsed_seconds=elapsed_seconds,
+    )
+    progress_bar = _render_validation_progress_bar(
+        validated_count=validated_count,
+        total_count=total_count,
+    )
+    progress_ratio = (
+        (validated_count / float(total_count)) if total_count > 0 else 1.0
+    )
+    status_reporter(
+        "Loading SPoRC source-audio URL validation... validated "
+        f"{validated_count:,} / {total_count:,} rows {progress_bar} "
+        f"{progress_ratio * 100.0:5.1f}%; kept {kept_count:,}; removed "
+        f"{removed_count:,}; rolling_avg={average_text}; eta={eta_text}."
+    )
+
+
+def _should_report_audio_url_validation_progress(
+    *,
+    validated_count: int,
+    total_count: int,
+    last_report_at: float,
+    now: float,
+) -> bool:
+    """Return whether the URL filter should emit another progress update."""
+    if total_count <= 0:
+        return False
+    if validated_count >= total_count:
+        return True
+    if validated_count <= 0:
+        return False
+    if validated_count % _PROGRESS_REPORT_EVERY_ROWS == 0:
+        return True
+    return (now - last_report_at) >= _PROGRESS_REPORT_INTERVAL_SECONDS
 
 
 def _resolve_sample_source_audio_url(sample: dict[str, Any]) -> str:

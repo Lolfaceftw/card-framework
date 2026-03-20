@@ -1,3 +1,7 @@
+### 2026-03-21T01:24:12.7842289+08:00 - SPoRC Audio-URL Validation Should Emit Rolling Progress And ETA During Long Manifest Scans
+- Problem: The new `filter-audio-urls` command reported that source-audio URL validation had started, but then the terminal stayed blank until the entire manifest finished validating. On long SPoRC manifests that made the command look hung even though it was still probing URLs normally.
+- Solution: Emit periodic operator-facing progress updates during URL validation with checked-row counts, kept/removed counts, a compact text progress bar, rolling rows-per-minute throughput, and ETA, while keeping the existing timed `Loading ...` / `Loaded ... in X.XX seconds.` phase boundaries.
+
 ### 2026-03-21T00:29:15+08:00 - SPoRC Long-Form Curation Should Not Resolve Every Transcript Path In The Metadata-First Hot Loop
 - Problem: `curate-longform` was calling `Path.resolve()` for every sample before it even knew whether it needed to reopen that transcript. On Windows that turned the metadata-first fast path into thousands of filesystem-backed `realpath` calls, which dominated runtime even when all long-form curation stats were already embedded in the manifest.
 - Solution: Keep prepared transcript paths as stored in the manifest for the metadata-first path, and only pay transcript I/O when curation stats are actually missing. That restored near-constant per-sample work for precomputed-stat manifests and kept the transcript-fallback path focused on real parsing work instead of redundant path canonicalization.

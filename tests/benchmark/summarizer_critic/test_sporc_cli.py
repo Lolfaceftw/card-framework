@@ -1990,6 +1990,13 @@ def test_main_filter_audio_urls_reports_summary(
         assert kwargs["output_manifest_path"] == str(manifest_path)
         assert kwargs["audit_path"] == str(audit_path)
         assert kwargs["timeout_seconds"] == 7.5
+        reporter = kwargs["status_reporter"]
+        reporter(
+            "Loading SPoRC source-audio URL validation... validated 10 / 20 rows "
+            "[##########----------]  50.0%; kept 8; removed 2; "
+            "rolling_avg=120.00 rows/min; eta=5s."
+        )
+        reporter("Loaded SPoRC source-audio URL validation in 0.10 seconds.")
         return ManifestAudioUrlFilterResult(
             manifest_path=manifest_path,
             audit_path=audit_path,
@@ -2017,7 +2024,8 @@ def test_main_filter_audio_urls_reports_summary(
         ]
     )
 
-    payload = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
     assert exit_code == 0
     assert payload["status"] == "completed"
     assert payload["manifest_path"] == str(manifest_path)
@@ -2025,3 +2033,5 @@ def test_main_filter_audio_urls_reports_summary(
     assert payload["original_sample_count"] == 4
     assert payload["kept_sample_count"] == 3
     assert payload["removed_sample_count"] == 1
+    assert "validated 10 / 20 rows" in captured.err
+    assert "eta=5s." in captured.err

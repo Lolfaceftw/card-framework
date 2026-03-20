@@ -417,6 +417,7 @@ Important behavior:
 
 - `filter-audio-urls` prefers `metadata.source_audio_url` and falls back to `episode_key`.
 - it treats existing local files as valid and probes remote URLs with `HEAD`, then falls back to a tiny streamed `GET` when hosts reject `HEAD`.
+- it emits periodic validation progress with checked row counts, kept/removed counts, a compact progress bar, rolling rows-per-minute, and ETA so long runs do not leave the terminal blank.
 - it preserves the original sample order while removing failing rows.
 - it rewrites manifest JSON and compact sidecars atomically.
 
