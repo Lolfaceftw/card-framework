@@ -839,6 +839,218 @@ def test_curate_longform_sporc_manifest_reuses_precomputed_stats_and_reports_sta
     )
 
 
+def test_curate_longform_sporc_manifest_applies_max_speakers_from_precomputed_stats(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    allowed_transcript = tmp_path / "transcripts" / "allowed.transcript.json"
+    excluded_transcript = tmp_path / "transcripts" / "excluded.transcript.json"
+    source_manifest_path = tmp_path / "prepared_full" / "manifest.json"
+    _write_prepared_manifest(
+        source_manifest_path,
+        samples=[
+            {
+                "sample_id": "allowed",
+                "dataset": "sporc_full",
+                "episode_key": "episode://allowed",
+                "transcript_path": str(allowed_transcript),
+                "reference_summary": "Allowed long-form summary.",
+                "target_seconds": 45,
+                "metadata": {
+                    "longform_curation_candidate": {
+                        "profile": "longform_15k_v1",
+                        "raw_word_count": 16_500,
+                        "spoken_word_count": 16_500,
+                        "non_lexical_word_count": 0,
+                        "non_lexical_word_ratio": 0.0,
+                        "segment_count": 150,
+                        "unique_speaker_count": 2,
+                        "strong_speaker_count": 2,
+                        "dominant_speaker_word_share": 0.5,
+                        "timestamp_span_seconds": 9000.0,
+                        "speaker_stats": {
+                            "SPEAKER_00": {
+                                "raw_word_count": 8250,
+                                "spoken_word_count": 8250,
+                                "segment_count": 75,
+                            },
+                            "SPEAKER_01": {
+                                "raw_word_count": 8250,
+                                "spoken_word_count": 8250,
+                                "segment_count": 75,
+                            },
+                        },
+                    }
+                },
+            },
+            {
+                "sample_id": "excluded",
+                "dataset": "sporc_full",
+                "episode_key": "episode://excluded",
+                "transcript_path": str(excluded_transcript),
+                "reference_summary": "Excluded long-form summary.",
+                "target_seconds": 45,
+                "metadata": {
+                    "longform_curation_candidate": {
+                        "profile": "longform_15k_v1",
+                        "raw_word_count": 18_000,
+                        "spoken_word_count": 18_000,
+                        "non_lexical_word_count": 0,
+                        "non_lexical_word_ratio": 0.0,
+                        "segment_count": 180,
+                        "unique_speaker_count": 3,
+                        "strong_speaker_count": 3,
+                        "dominant_speaker_word_share": 0.34,
+                        "timestamp_span_seconds": 10_800.0,
+                        "speaker_stats": {
+                            "SPEAKER_00": {
+                                "raw_word_count": 6000,
+                                "spoken_word_count": 6000,
+                                "segment_count": 60,
+                            },
+                            "SPEAKER_01": {
+                                "raw_word_count": 6000,
+                                "spoken_word_count": 6000,
+                                "segment_count": 60,
+                            },
+                            "SPEAKER_02": {
+                                "raw_word_count": 6000,
+                                "spoken_word_count": 6000,
+                                "segment_count": 60,
+                            },
+                        },
+                    }
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.dataset._load_transcript_payload",
+        lambda transcript_path: (_ for _ in ()).throw(
+            AssertionError("precomputed curation stats should avoid transcript reloads")
+        ),
+    )
+
+    curated_manifest, audit_path = curate_longform_sporc_manifest(
+        source_manifest_path=source_manifest_path,
+        output_manifest_path=tmp_path / "prepared_full" / "benchmark_longform_15k_manifest.json",
+        audit_path=tmp_path / "prepared_full" / "benchmark_longform_15k_audit.json",
+        max_unique_speaker_count=2,
+    )
+
+    assert curated_manifest.sample_count == 1
+    assert curated_manifest.samples[0].sample_id == "allowed"
+    manifest_payload = json.loads(curated_manifest.manifest_path.read_text(encoding="utf-8"))
+    assert manifest_payload["curation_thresholds"]["max_unique_speaker_count"] == 2
+    assert manifest_payload["selected_max_unique_speaker_count"] == 2
+    audit_payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit_payload["curation_thresholds"]["max_unique_speaker_count"] == 2
+    assert audit_payload["selected_max_unique_speaker_count"] == 2
+    audit_rows = {
+        row["sample_id"]: row for row in audit_payload["samples"]
+    }
+    assert "unique_speaker_count>2" in audit_rows["excluded"]["excluded_reasons"]
+
+
+def test_curate_longform_sporc_manifest_reuses_existing_output_when_thresholds_match(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_manifest_path = tmp_path / "prepared_full" / "manifest.json"
+    output_manifest_path = (
+        tmp_path / "prepared_full" / "benchmark_longform_15k_manifest.json"
+    )
+    audit_path = tmp_path / "prepared_full" / "benchmark_longform_15k_audit.json"
+    _write_prepared_manifest(
+        source_manifest_path,
+        samples=[
+            {
+                "sample_id": "allowed",
+                "dataset": "sporc_full",
+                "episode_key": "episode://allowed",
+                "transcript_path": str(tmp_path / "transcripts" / "allowed.transcript.json"),
+                "reference_summary": "Allowed long-form summary.",
+                "target_seconds": 45,
+                "metadata": {
+                    "longform_curation_candidate": {
+                        "profile": "longform_15k_v1",
+                        "raw_word_count": 16_500,
+                        "spoken_word_count": 16_500,
+                        "non_lexical_word_count": 0,
+                        "non_lexical_word_ratio": 0.0,
+                        "segment_count": 150,
+                        "unique_speaker_count": 2,
+                        "strong_speaker_count": 2,
+                        "dominant_speaker_word_share": 0.5,
+                        "timestamp_span_seconds": 9000.0,
+                        "speaker_stats": {
+                            "SPEAKER_00": {
+                                "raw_word_count": 8250,
+                                "spoken_word_count": 8250,
+                                "segment_count": 75,
+                            },
+                            "SPEAKER_01": {
+                                "raw_word_count": 8250,
+                                "spoken_word_count": 8250,
+                                "segment_count": 75,
+                            },
+                        },
+                    }
+                },
+            }
+        ],
+    )
+
+    first_manifest, first_audit_path = curate_longform_sporc_manifest(
+        source_manifest_path=source_manifest_path,
+        output_manifest_path=output_manifest_path,
+        audit_path=audit_path,
+        max_unique_speaker_count=2,
+    )
+
+    original_iter_prepared_dataset_samples = iter_prepared_dataset_samples
+
+    def _guarded_iter_prepared_dataset_samples(  # type: ignore[no-untyped-def]
+        manifest_path,
+        *,
+        max_samples=None,
+    ):
+        resolved_manifest_path = Path(manifest_path).resolve()
+        if resolved_manifest_path == source_manifest_path.resolve():
+            raise AssertionError(
+                "curate_longform should reuse the existing filtered output "
+                "before rescanning the source manifest"
+            )
+        return original_iter_prepared_dataset_samples(
+            Path(manifest_path),
+            max_samples=max_samples,
+        )
+
+    status_messages: list[str] = []
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.dataset.iter_prepared_dataset_samples",
+        _guarded_iter_prepared_dataset_samples,
+    )
+
+    reused_manifest, reused_audit_path = curate_longform_sporc_manifest(
+        source_manifest_path=source_manifest_path,
+        output_manifest_path=output_manifest_path,
+        audit_path=audit_path,
+        max_unique_speaker_count=2,
+        status_reporter=status_messages.append,
+    )
+
+    assert first_manifest.sample_count == 1
+    assert first_audit_path == audit_path.resolve()
+    assert reused_manifest.sample_count == 1
+    assert reused_manifest.samples[0].sample_id == "allowed"
+    assert reused_audit_path == audit_path.resolve()
+    assert any(
+        "Reusing existing curated SPoRC long-form manifest" in message
+        for message in status_messages
+    )
+
+
 def test_curated_longform_manifest_loads_with_existing_schema(tmp_path: Path) -> None:
     transcript_path = tmp_path / "transcripts" / "passing.transcript.json"
     segments: list[dict[str, object]] = []

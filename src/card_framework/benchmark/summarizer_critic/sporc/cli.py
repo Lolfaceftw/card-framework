@@ -422,6 +422,16 @@ def _build_parser(
         "--audit-path",
         default=str(DEFAULT_LONGFORM_AUDIT_PATH),
     )
+    curate_longform.add_argument(
+        "--max-speakers",
+        type=int,
+        default=0,
+        help=(
+            "Optional inclusive upper bound for unique speaker count in the "
+            "filtered manifest. Uses precomputed manifest stats when available "
+            "and reuses an unchanged filtered output when possible."
+        ),
+    )
 
     dedupe_manifest = subparsers.add_parser(
         "dedupe-manifest",
@@ -2876,6 +2886,8 @@ def main(argv: list[str] | None = None) -> int:
         status_reporter=_emit_cli_status,
     )
     args = parser.parse_args(argv)
+    if getattr(args, "command", "") == "curate-longform" and int(args.max_speakers) < 0:
+        parser.error("--max-speakers must be zero or greater.")
     try:
         if args.command == "prepare-dataset":
             _, prepare_sporc_benchmark = _load_dataset_helpers(
@@ -2912,12 +2924,35 @@ def main(argv: list[str] | None = None) -> int:
             curate_longform_sporc_manifest, _ = _load_dataset_helpers(
                 status_reporter=_emit_cli_status,
             )
+            requested_max_unique_speaker_count = (
+                int(args.max_speakers) if int(args.max_speakers) > 0 else None
+            )
             manifest, audit_path = curate_longform_sporc_manifest(
                 source_manifest_path=Path(args.source_manifest).resolve(),
                 output_manifest_path=Path(args.output_manifest).resolve(),
                 audit_path=Path(args.audit_path).resolve(),
+                max_unique_speaker_count=requested_max_unique_speaker_count,
                 status_reporter=_emit_cli_status,
             )
+            selected_max_unique_speaker_count: int | None = None
+            for sample in manifest.samples:
+                raw_stats = sample.metadata.get("longform_curation")
+                if not isinstance(raw_stats, dict):
+                    raw_stats = sample.metadata.get("longform_curation_candidate")
+                if not isinstance(raw_stats, dict):
+                    continue
+                unique_speaker_count = raw_stats.get("unique_speaker_count")
+                if not isinstance(unique_speaker_count, (int, float)):
+                    continue
+                resolved_unique_speaker_count = int(unique_speaker_count)
+                if (
+                    selected_max_unique_speaker_count is None
+                    or resolved_unique_speaker_count
+                    > selected_max_unique_speaker_count
+                ):
+                    selected_max_unique_speaker_count = (
+                        resolved_unique_speaker_count
+                    )
             print(
                 json.dumps(
                     {
@@ -2927,6 +2962,8 @@ def main(argv: list[str] | None = None) -> int:
                         "audit_path": str(audit_path),
                         "sample_count": manifest.sample_count,
                         "dataset_variant": manifest.dataset_variant,
+                        "requested_max_unique_speaker_count": requested_max_unique_speaker_count,
+                        "selected_max_unique_speaker_count": selected_max_unique_speaker_count,
                     }
                 )
             )

@@ -310,7 +310,8 @@ Curate a strict long-form multi-speaker manifest from the prepared full data:
 
 ```bash
 uv run python -m card_framework.benchmark.summarizer_critic.sporc curate-longform \
-  --source-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/manifest.json"
+  --source-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/manifest.json" \
+  --max-speakers 3
 ```
 
 `curate-longform` uses the released SPoRC speaker-turn table as the diarized
@@ -328,7 +329,14 @@ manifest, evaluates stored curation stats, and writes the curated manifest plus
 audit JSON, so long curation passes no longer look idle. Fresh
 `prepare-dataset` outputs now persist reusable curation stats in sample
 metadata, so `curate-longform` only falls back to reopening transcript JSON for
-older manifests that were prepared before that optimization.
+older manifests that were prepared before that optimization. If you already
+have a prepared or previously filtered manifest, point `--source-manifest` at
+that manifest to stay on the metadata-first fast path rather than rescanning
+raw SPoRC source files. Filtered manifest and audit outputs now also record the
+selected manifest's `selected_max_unique_speaker_count` so later tooling can
+read the current cap directly from the filtered dataset. Rerunning
+`curate-longform` with the same source manifest, output paths, and speaker cap
+reuses the existing filtered output instead of rescanning the source manifest.
 
 Use local gated files instead of downloading:
 
@@ -347,6 +355,7 @@ Useful flags:
 - `curate-longform --source-manifest <path>`: prepared manifest to filter
 - `curate-longform --output-manifest <path>`: curated long-form manifest path
 - `curate-longform --audit-path <path>`: inclusion/exclusion audit JSON path
+- `curate-longform --max-speakers <N>`: keep only episodes with at most `N` unique speakers
 - `dedupe-manifest --manifest-path <path>`: inline manifest to rewrite in place
 - `dedupe-manifest --audit-path <path>`: optional dedupe audit JSON path
 - `export-transcripts --manifest-path <path>`: manifest to read transcript paths from

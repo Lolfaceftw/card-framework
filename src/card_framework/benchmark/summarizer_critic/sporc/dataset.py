@@ -1023,8 +1023,11 @@ def build_prepared_dataset_manifest(
     )
 
 
-def _longform_curation_thresholds() -> dict[str, int | float | str]:
-    return {
+def _longform_curation_thresholds(
+    *,
+    max_unique_speaker_count: int | None = None,
+) -> dict[str, int | float | str]:
+    thresholds: dict[str, int | float | str] = {
         "profile": _LONGFORM_CURATION_PROFILE,
         "min_spoken_word_count": LONGFORM_MIN_SPOKEN_WORDS,
         "min_segment_count": LONGFORM_MIN_SEGMENTS,
@@ -1034,6 +1037,9 @@ def _longform_curation_thresholds() -> dict[str, int | float | str]:
         "max_dominant_speaker_word_share": LONGFORM_MAX_DOMINANT_SPEAKER_SHARE,
         "max_non_lexical_word_ratio": LONGFORM_MAX_NON_LEXICAL_RATIO,
     }
+    if max_unique_speaker_count is not None:
+        thresholds["max_unique_speaker_count"] = int(max_unique_speaker_count)
+    return thresholds
 
 
 def _collect_longform_curation_stats_from_segments(
@@ -1156,14 +1162,22 @@ def _collect_longform_curation_stats(
 
 def _evaluate_longform_curation_stats(
     stats: dict[str, Any],
+    *,
+    max_unique_speaker_count: int | None = None,
 ) -> list[str]:
     failures: list[str] = []
     if int(stats.get("spoken_word_count", 0)) < LONGFORM_MIN_SPOKEN_WORDS:
         failures.append(f"spoken_word_count<{LONGFORM_MIN_SPOKEN_WORDS}")
     if int(stats.get("segment_count", 0)) < LONGFORM_MIN_SEGMENTS:
         failures.append(f"segment_count<{LONGFORM_MIN_SEGMENTS}")
-    if int(stats.get("unique_speaker_count", 0)) < LONGFORM_MIN_SPEAKERS:
+    unique_speaker_count = int(stats.get("unique_speaker_count", 0))
+    if unique_speaker_count < LONGFORM_MIN_SPEAKERS:
         failures.append(f"unique_speaker_count<{LONGFORM_MIN_SPEAKERS}")
+    if (
+        max_unique_speaker_count is not None
+        and unique_speaker_count > max_unique_speaker_count
+    ):
+        failures.append(f"unique_speaker_count>{max_unique_speaker_count}")
     if int(stats.get("strong_speaker_count", 0)) < LONGFORM_MIN_SPEAKERS:
         failures.append(
             f"strong_speaker_count<{LONGFORM_MIN_SPEAKERS}"
@@ -1230,15 +1244,26 @@ def _write_streamed_longform_audit_payload(
     evaluated_sample_count: int,
     selected_sample_count: int,
     audit_rows_path: Path,
+    max_unique_speaker_count: int | None = None,
+    selected_max_unique_speaker_count: int | None = None,
 ) -> None:
     header_fields = (
         ("created_at_utc", utc_now_iso()),
         ("source_manifest_path", str(source_manifest.manifest_path)),
         ("output_manifest_path", str(output_manifest_path)),
         ("curation_profile", _LONGFORM_CURATION_PROFILE),
-        ("curation_thresholds", _longform_curation_thresholds()),
+        (
+            "curation_thresholds",
+            _longform_curation_thresholds(
+                max_unique_speaker_count=max_unique_speaker_count,
+            ),
+        ),
         ("evaluated_sample_count", evaluated_sample_count),
         ("selected_sample_count", selected_sample_count),
+        (
+            "selected_max_unique_speaker_count",
+            selected_max_unique_speaker_count,
+        ),
     )
     with audit_path.open("w", encoding="utf-8") as handle:
         handle.write("{\n")
@@ -1262,14 +1287,65 @@ def _write_streamed_longform_audit_payload(
         handle.write("}\n")
 
 
+def _load_reusable_curated_longform_manifest(
+    *,
+    source_manifest_path: Path,
+    output_manifest_path: Path,
+    audit_path: Path,
+    max_unique_speaker_count: int | None = None,
+) -> PreparedDatasetManifest | None:
+    """Reuse an existing curated manifest when the source and thresholds match."""
+    if not output_manifest_path.exists() or not audit_path.exists():
+        return None
+    if not source_manifest_path.exists():
+        return None
+    if output_manifest_path.stat().st_mtime < source_manifest_path.stat().st_mtime:
+        return None
+
+    try:
+        payload = _load_prepared_manifest_payload(output_manifest_path)
+    except DatasetPreparationError:
+        return None
+
+    if _coerce_text(payload.get("source_manifest_path")) != str(source_manifest_path):
+        return None
+    if payload.get("curation_thresholds") != _longform_curation_thresholds(
+        max_unique_speaker_count=max_unique_speaker_count,
+    ):
+        return None
+    return load_prepared_dataset_manifest(output_manifest_path)
+
+
 def curate_longform_sporc_manifest(
     *,
     source_manifest_path: Path,
     output_manifest_path: Path = DEFAULT_LONGFORM_MANIFEST_PATH,
     audit_path: Path = DEFAULT_LONGFORM_AUDIT_PATH,
+    max_unique_speaker_count: int | None = None,
     status_reporter: StatusReporter | None = None,
 ) -> tuple[PreparedDatasetManifest, Path]:
     """Filter a prepared SPoRC manifest down to strict long-form dialogue episodes."""
+    source_manifest_path = source_manifest_path.resolve()
+    output_manifest_path = output_manifest_path.resolve()
+    audit_path = audit_path.resolve()
+    if (
+        max_unique_speaker_count is not None
+        and int(max_unique_speaker_count) <= 0
+    ):
+        raise ValueError("max_unique_speaker_count must be greater than zero.")
+    reusable_manifest = _load_reusable_curated_longform_manifest(
+        source_manifest_path=source_manifest_path,
+        output_manifest_path=output_manifest_path,
+        audit_path=audit_path,
+        max_unique_speaker_count=max_unique_speaker_count,
+    )
+    if reusable_manifest is not None:
+        if status_reporter is not None:
+            status_reporter(
+                "Reusing existing curated SPoRC long-form manifest because the "
+                "source manifest and curation thresholds are unchanged."
+            )
+        return reusable_manifest, audit_path
     with report_loading_duration(
         "prepared SPoRC source manifest",
         reporter=status_reporter,
@@ -1278,12 +1354,11 @@ def curate_longform_sporc_manifest(
             source_manifest_path,
             include_samples=False,
         )
-    output_manifest_path = output_manifest_path.resolve()
-    audit_path = audit_path.resolve()
     output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
     selected_samples: list[PreparedBenchmarkSample] = []
+    selected_max_unique_speaker_count: int | None = None
     total_samples = max(0, int(source_manifest.sample_count))
     evaluated_count = 0
     transcript_fallback_count = 0
@@ -1312,7 +1387,10 @@ def curate_longform_sporc_manifest(
                         transcript_fallback_count += 1
                         transcript_payload = _load_transcript_payload(transcript_path)
                         stats = _collect_longform_curation_stats(transcript_payload)
-                    excluded_reasons = _evaluate_longform_curation_stats(stats)
+                    excluded_reasons = _evaluate_longform_curation_stats(
+                        stats,
+                        max_unique_speaker_count=max_unique_speaker_count,
+                    )
                     audit_rows_handle.write(
                         json.dumps(
                             {
@@ -1351,6 +1429,17 @@ def curate_longform_sporc_manifest(
                             metadata=metadata,
                         )
                     )
+                    sample_unique_speaker_count = int(
+                        stats.get("unique_speaker_count", 0)
+                    )
+                    if (
+                        selected_max_unique_speaker_count is None
+                        or sample_unique_speaker_count
+                        > selected_max_unique_speaker_count
+                    ):
+                        selected_max_unique_speaker_count = (
+                            sample_unique_speaker_count
+                        )
                     if evaluated_count % _LONGFORM_CURATION_PROGRESS_INTERVAL == 0:
                         _emit_longform_curation_progress(
                             evaluated_count=evaluated_count,
@@ -1384,7 +1473,10 @@ def curate_longform_sporc_manifest(
             "turn_data_path": str(source_manifest.turn_data_path),
             "sample_count": len(selected_samples),
             "curation_profile": _LONGFORM_CURATION_PROFILE,
-            "curation_thresholds": _longform_curation_thresholds(),
+            "curation_thresholds": _longform_curation_thresholds(
+                max_unique_speaker_count=max_unique_speaker_count,
+            ),
+            "selected_max_unique_speaker_count": selected_max_unique_speaker_count,
             "samples": [asdict(sample) for sample in selected_samples],
         }
         with report_loading_duration(
@@ -1411,6 +1503,8 @@ def curate_longform_sporc_manifest(
                 evaluated_sample_count=evaluated_count,
                 selected_sample_count=len(selected_samples),
                 audit_rows_path=audit_rows_temp_path,
+                max_unique_speaker_count=max_unique_speaker_count,
+                selected_max_unique_speaker_count=selected_max_unique_speaker_count,
             )
         return (
             PreparedDatasetManifest(

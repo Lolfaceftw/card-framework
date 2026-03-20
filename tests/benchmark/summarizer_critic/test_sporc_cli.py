@@ -33,6 +33,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_PREPARED_FULL_ROOT,
     DEFAULT_PREPARED_ROOT,
     DurationSweepPresetSummary,
+    PreparedBenchmarkSample,
     PreparedDatasetManifest,
 )
 from card_framework.shared.paths import REPO_ROOT
@@ -253,6 +254,24 @@ def test_build_parser_accepts_export_transcripts_command() -> None:
     assert args.output_path == "combined.txt"
     assert args.backwards_compat is True
     assert args.raw is True
+
+
+def test_build_parser_accepts_curate_longform_max_speakers() -> None:
+    parser = _build_parser(target_command="curate-longform")
+
+    args = parser.parse_args(
+        [
+            "curate-longform",
+            "--source-manifest",
+            "manifest.json",
+            "--max-speakers",
+            "3",
+        ]
+    )
+
+    assert args.command == "curate-longform"
+    assert args.source_manifest == "manifest.json"
+    assert args.max_speakers == 3
 
 
 def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
@@ -1827,7 +1846,10 @@ def test_main_curate_longform_reports_progress_to_stderr(
 
     monkeypatch.setattr(
         "card_framework.benchmark.summarizer_critic.sporc.cli._load_dataset_helpers",
-        lambda **kwargs: (_fake_curate_longform_sporc_manifest, lambda **inner_kwargs: manifest),
+        lambda **kwargs: (
+            _fake_curate_longform_sporc_manifest,
+            lambda **inner_kwargs: manifest,
+        ),
     )
 
     exit_code = main(
@@ -1854,3 +1876,74 @@ def test_main_curate_longform_reports_progress_to_stderr(
     payload = json.loads(captured.out)
     assert payload["status"] == "completed"
     assert payload["sample_count"] == 2
+
+
+def test_main_curate_longform_passes_max_speakers(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    manifest = PreparedDatasetManifest(
+        manifest_path=(
+            tmp_path / "prepared_full" / "benchmark_longform_15k_manifest.json"
+        ).resolve(),
+        dataset_id="sporc_full_longform_15k",
+        sporc_dataset_id="blitt/SPoRC",
+        dataset_variant="full",
+        episode_data_path=(tmp_path / "episodeLevelData.jsonl.gz").resolve(),
+        turn_data_path=(tmp_path / "speakerTurnData.jsonl.gz").resolve(),
+        sample_count=1,
+        samples=(
+            PreparedBenchmarkSample(
+                sample_id="allowed",
+                dataset="sporc_full",
+                episode_key="episode://allowed",
+                transcript_path=str(tmp_path / "transcripts" / "allowed.transcript.json"),
+                reference_summary="Allowed long-form summary.",
+                target_seconds=45,
+                metadata={
+                    "longform_curation": {
+                        "unique_speaker_count": 2,
+                    }
+                },
+            ),
+        ),
+        samples_path=None,
+    )
+    audit_path = (
+        tmp_path / "prepared_full" / "benchmark_longform_15k_audit.json"
+    ).resolve()
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_curate_longform_sporc_manifest(**kwargs):  # type: ignore[no-untyped-def]
+        captured_kwargs.update(kwargs)
+        return manifest, audit_path
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_dataset_helpers",
+        lambda **kwargs: (
+            _fake_curate_longform_sporc_manifest,
+            lambda **inner_kwargs: manifest,
+        ),
+    )
+
+    exit_code = main(
+        [
+            "curate-longform",
+            "--source-manifest",
+            str(tmp_path / "prepared_full" / "manifest.json"),
+            "--output-manifest",
+            str(manifest.manifest_path),
+            "--audit-path",
+            str(audit_path),
+            "--max-speakers",
+            "3",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    assert captured_kwargs["max_unique_speaker_count"] == 3
+    assert payload["requested_max_unique_speaker_count"] == 3
+    assert payload["selected_max_unique_speaker_count"] == 2
