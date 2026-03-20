@@ -231,6 +231,30 @@ def test_build_parser_accepts_dedupe_manifest_command() -> None:
     assert args.audit_path == "audit.json"
 
 
+def test_build_parser_accepts_filter_audio_urls_command() -> None:
+    parser = _build_parser(target_command="filter-audio-urls")
+
+    args = parser.parse_args(
+        [
+            "filter-audio-urls",
+            "--manifest-path",
+            "manifest.json",
+            "--output-manifest",
+            "filtered.json",
+            "--audit-path",
+            "audit.json",
+            "--timeout-seconds",
+            "7.5",
+        ]
+    )
+
+    assert args.command == "filter-audio-urls"
+    assert args.manifest_path == "manifest.json"
+    assert args.output_manifest == "filtered.json"
+    assert args.audit_path == "audit.json"
+    assert args.timeout_seconds == 7.5
+
+
 def test_build_parser_accepts_export_transcripts_command() -> None:
     parser = _build_parser(target_command="export-transcripts")
 
@@ -1947,3 +1971,57 @@ def test_main_curate_longform_passes_max_speakers(
     assert captured_kwargs["max_unique_speaker_count"] == 3
     assert payload["requested_max_unique_speaker_count"] == 3
     assert payload["selected_max_unique_speaker_count"] == 2
+
+
+def test_main_filter_audio_urls_reports_summary(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    from card_framework.benchmark.summarizer_critic.sporc.filter_manifest_audio_urls import (
+        ManifestAudioUrlFilterResult,
+    )
+
+    manifest_path = (tmp_path / "prepared_full" / "filtered_manifest.json").resolve()
+    audit_path = (tmp_path / "prepared_full" / "filtered_manifest.audio_url_audit.json").resolve()
+
+    def _fake_run_filter_manifest_audio_urls_cli(*args, **kwargs):  # type: ignore[no-untyped-def]
+        assert args == (str(tmp_path / "prepared_full" / "manifest.json"),)
+        assert kwargs["output_manifest_path"] == str(manifest_path)
+        assert kwargs["audit_path"] == str(audit_path)
+        assert kwargs["timeout_seconds"] == 7.5
+        return ManifestAudioUrlFilterResult(
+            manifest_path=manifest_path,
+            audit_path=audit_path,
+            original_sample_count=4,
+            kept_sample_count=3,
+            removed_sample_count=1,
+        )
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.filter_manifest_audio_urls.run_filter_manifest_audio_urls_cli",
+        _fake_run_filter_manifest_audio_urls_cli,
+    )
+
+    exit_code = main(
+        [
+            "filter-audio-urls",
+            "--manifest-path",
+            str(tmp_path / "prepared_full" / "manifest.json"),
+            "--output-manifest",
+            str(manifest_path),
+            "--audit-path",
+            str(audit_path),
+            "--timeout-seconds",
+            "7.5",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    assert payload["manifest_path"] == str(manifest_path)
+    assert payload["audit_path"] == str(audit_path)
+    assert payload["original_sample_count"] == 4
+    assert payload["kept_sample_count"] == 3
+    assert payload["removed_sample_count"] == 1

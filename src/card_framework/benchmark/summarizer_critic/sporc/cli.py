@@ -447,6 +447,31 @@ def _build_parser(
         help="Optional audit JSON path. Defaults to a sibling *.dedupe_audit.json file.",
     )
 
+    filter_audio_urls = subparsers.add_parser(
+        "filter-audio-urls",
+        help="Filter a prepared SPoRC manifest down to reachable source-audio URLs",
+    )
+    filter_audio_urls.add_argument(
+        "--manifest-path",
+        default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
+    )
+    filter_audio_urls.add_argument(
+        "--output-manifest",
+        default="",
+        help="Optional output manifest path. Defaults to rewriting the input in place.",
+    )
+    filter_audio_urls.add_argument(
+        "--audit-path",
+        default="",
+        help="Optional audit JSON path. Defaults to a sibling *.audio_url_audit.json file.",
+    )
+    filter_audio_urls.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=10.0,
+        help="Per-request timeout in seconds for remote URL probes.",
+    )
+
     export_transcripts = subparsers.add_parser(
         "export-transcripts",
         help="Export one combined raw transcript text file for selected manifest episodes",
@@ -2989,6 +3014,31 @@ def main(argv: list[str] | None = None) -> int:
                         "removed_sample_count": result.removed_sample_count,
                         "candidate_group_count": result.candidate_group_count,
                         "transcript_signature_reads": result.transcript_signature_reads,
+                    }
+                )
+            )
+            return 0
+        if args.command == "filter-audio-urls":
+            from card_framework.benchmark.summarizer_critic.sporc.filter_manifest_audio_urls import (
+                run_filter_manifest_audio_urls_cli,
+            )
+
+            result = run_filter_manifest_audio_urls_cli(
+                str(args.manifest_path),
+                output_manifest_path=str(args.output_manifest),
+                audit_path=str(args.audit_path),
+                timeout_seconds=float(args.timeout_seconds),
+                status_reporter=_emit_cli_status,
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "manifest_path": str(result.manifest_path),
+                        "audit_path": str(result.audit_path),
+                        "original_sample_count": result.original_sample_count,
+                        "kept_sample_count": result.kept_sample_count,
+                        "removed_sample_count": result.removed_sample_count,
                     }
                 )
             )

@@ -94,6 +94,7 @@ Available subcommands:
 - `prepare-dataset`
 - `curate-longform`
 - `dedupe-manifest`
+- `filter-audio-urls`
 - `export-transcripts`
 - `human-sample`
 - `llm-sample`
@@ -358,6 +359,10 @@ Useful flags:
 - `curate-longform --max-speakers <N>`: keep only episodes with at most `N` unique speakers
 - `dedupe-manifest --manifest-path <path>`: inline manifest to rewrite in place
 - `dedupe-manifest --audit-path <path>`: optional dedupe audit JSON path
+- `filter-audio-urls --manifest-path <path>`: manifest to validate against source-audio reachability
+- `filter-audio-urls --output-manifest <path>`: optional filtered manifest output path; omit to rewrite in place
+- `filter-audio-urls --audit-path <path>`: optional validation audit JSON path
+- `filter-audio-urls --timeout-seconds <float>`: per-request timeout for remote HEAD/GET probes
 - `export-transcripts --manifest-path <path>`: manifest to read transcript paths from
 - `export-transcripts --episodes <spec>`: episode positions or ranges to export
 - `export-transcripts --output-path <path>`: optional combined transcript TXT path
@@ -387,7 +392,35 @@ Important behavior:
 - it is optimized for large manifests: it groups rows by cheap metadata fingerprints first and only opens transcript JSON for small collision groups that need confirmation.
 - it currently supports manifests with inline `samples` arrays, which matches the curated long-form manifest produced by `curate-longform`.
 
-## Step 1.46: Export Combined Raw Transcript Text
+## Step 1.46: Filter A Manifest To Reachable Audio URLs
+
+Keep only episodes whose `metadata.source_audio_url` or fallback `episode_key`
+is still reachable. Inline manifests stay inline, compact manifests keep their
+`samples_path` sidecar shape, and the command emits a sibling audit JSON by
+default.
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc filter-audio-urls \
+  --manifest-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json"
+```
+
+Or write the filtered result to a separate manifest explicitly:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc filter-audio-urls \
+  --manifest-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.compact.json" \
+  --output-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.filtered.compact.json" \
+  --audit-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.filtered.audio_url_audit.json"
+```
+
+Important behavior:
+
+- `filter-audio-urls` prefers `metadata.source_audio_url` and falls back to `episode_key`.
+- it treats existing local files as valid and probes remote URLs with `HEAD`, then falls back to a tiny streamed `GET` when hosts reject `HEAD`.
+- it preserves the original sample order while removing failing rows.
+- it rewrites manifest JSON and compact sidecars atomically.
+
+## Step 1.47: Export Combined Raw Transcript Text
 
 Write one combined `.txt` file for selected manifest episodes:
 
