@@ -1018,6 +1018,13 @@ def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
         or "connecterror" in lowered
         or "connecttimeout" in lowered
         or "connection refused" in lowered
+        or "actively refused" in lowered
+        or "forcibly closed by the remote host" in lowered
+        or "connection reset by peer" in lowered
+        or "connection aborted" in lowered
+        or "software caused connection abort" in lowered
+        or "winerror 10054" in lowered
+        or "winerror 10061" in lowered
         or "all connection attempts failed" in lowered
         or "nodename nor servname provided" in lowered
     ):

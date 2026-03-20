@@ -1175,6 +1175,37 @@ def test_classify_sample_failure_maps_timeout_messages_to_stage_timeout() -> Non
     assert "timed out" in error_message
 
 
+@pytest.mark.parametrize(
+    ("message", "expected_fragment"),
+    [
+        (
+            "[WinError 10061] No connection could be made because the target machine actively refused it",
+            "actively refused",
+        ),
+        (
+            "[WinError 10054] An existing connection was forcibly closed by the remote host",
+            "forcibly closed by the remote host",
+        ),
+        (
+            "httpx.ReadError: [Errno 104] Connection reset by peer",
+            "Connection reset by peer",
+        ),
+        (
+            "Connection aborted.",
+            "Connection aborted",
+        ),
+    ],
+)
+def test_classify_sample_failure_maps_connection_reset_and_refused_messages_to_connection_unavailable(
+    message: str,
+    expected_fragment: str,
+) -> None:
+    final_status, error_message = _classify_sample_failure(RuntimeError(message))
+
+    assert final_status == "connection_unavailable"
+    assert expected_fragment in error_message
+
+
 def test_compute_composite_score_uses_only_three_judge_dimensions() -> None:
     assert (
         _compute_composite_score(

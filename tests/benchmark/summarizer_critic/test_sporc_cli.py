@@ -20,6 +20,7 @@ from card_framework.benchmark.summarizer_critic.sporc.cli import (
     _child_environment,
     _build_parser,
     _detect_duration_sweep_child_stall,
+    _finalize_duration_sweep_child,
     _parse_duration_preset_list,
     _render_duration_sweep_menu,
     _resolve_duration_sweep_examples,
@@ -802,6 +803,7 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
 def test_aggregate_duration_sweep_preset_weights_multi_shard_summaries() -> None:
     aggregated = _aggregate_duration_sweep_preset(
         duration_preset="5m",
+        target_sample_count=6,
         child_summaries={
             1: DurationSweepPresetSummary(
                 duration_preset="5m",
@@ -873,6 +875,242 @@ def test_aggregate_duration_sweep_preset_weights_multi_shard_summaries() -> None
     assert aggregated.mean_composite_ci95_upper is None
     assert aggregated.restart_count == 3
     assert aggregated.recovered_stall_count == 1
+
+
+def test_aggregate_duration_sweep_preset_requires_full_target_fill_for_completed() -> None:
+    aggregated = _aggregate_duration_sweep_preset(
+        duration_preset="5m",
+        target_sample_count=10,
+        child_summaries={
+            1: DurationSweepPresetSummary(
+                duration_preset="5m",
+                target_seconds=300,
+                status="completed",
+                attempted_candidate_count=4,
+                replacement_count=0,
+                sample_count=4,
+                executed_count=4,
+                skipped_count=0,
+                success_count=4,
+                failure_count=0,
+                within_tolerance_count=4,
+                within_tolerance_rate=1.0,
+                mean_candidate_seconds=300.0,
+                mean_absolute_duration_delta_seconds=0.0,
+                mean_factualness=0.9,
+                mean_naturalness=0.8,
+                mean_speaker_grammar_similarity=0.7,
+                mean_composite=0.8,
+                report_path=None,
+                notes_path=None,
+                results_path=None,
+                mean_composite_ci95_lower=None,
+                mean_composite_ci95_upper=None,
+                error_message=None,
+                restart_count=0,
+                recovered_stall_count=0,
+            ),
+            2: DurationSweepPresetSummary(
+                duration_preset="5m",
+                target_seconds=300,
+                status="completed",
+                attempted_candidate_count=4,
+                replacement_count=0,
+                sample_count=4,
+                executed_count=4,
+                skipped_count=0,
+                success_count=4,
+                failure_count=0,
+                within_tolerance_count=4,
+                within_tolerance_rate=1.0,
+                mean_candidate_seconds=300.0,
+                mean_absolute_duration_delta_seconds=0.0,
+                mean_factualness=0.8,
+                mean_naturalness=0.7,
+                mean_speaker_grammar_similarity=0.6,
+                mean_composite=0.7,
+                report_path=None,
+                notes_path=None,
+                results_path=None,
+                mean_composite_ci95_lower=None,
+                mean_composite_ci95_upper=None,
+                error_message=None,
+                restart_count=0,
+                recovered_stall_count=0,
+            ),
+        },
+    )
+
+    assert aggregated.sample_count == 8
+    assert aggregated.status == "partial"
+
+
+def test_finalize_duration_sweep_child_ignores_stale_report_after_nonzero_exit(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "runs"
+    output_root.mkdir()
+    run_root = output_root / "stale-run"
+    run_root.mkdir()
+    report_path = run_root / "report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "run_id": "stale-run",
+                "status": "completed",
+                "duration_tolerance_ratio": 0.1,
+                "report_path": str(report_path),
+                "notes_path": "",
+                "results_path": "",
+                "resume_count": 0,
+                "summary": {
+                    "attempted_candidate_count": 1,
+                    "replacement_count": 0,
+                    "sample_count": 1,
+                    "executed_count": 1,
+                    "skipped_count": 0,
+                    "success_count": 1,
+                    "failure_count": 0,
+                    "mean_factualness": 0.9,
+                    "mean_naturalness": 0.9,
+                    "mean_speaker_grammar_similarity": 0.9,
+                    "mean_composite": 0.9,
+                },
+                "samples": [
+                    {
+                        "sample_id": "sample-1",
+                        "status": "completed",
+                        "counts_toward_target": True,
+                        "candidate_seconds": 300.0,
+                        "target_seconds": 300.0,
+                        "final_status": "completed",
+                        "metrics": {
+                            "factualness": 0.9,
+                            "naturalness": 0.9,
+                            "speaker_grammar_similarity": 0.9,
+                            "composite": 0.9,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_path = tmp_path / "5m.checkpoint.json"
+    checkpoint_path.write_text(json.dumps({"run_id": "stale-run"}), encoding="utf-8")
+    stale_mtime = time.time() - 60.0
+    os.utime(report_path, (stale_mtime, stale_mtime))
+    os.utime(checkpoint_path, (stale_mtime, stale_mtime))
+
+    log_path = tmp_path / "5m.log"
+    log_path.write_text(
+        json.dumps({"status": "completed", "report_path": str(report_path)}) + "\n",
+        encoding="utf-8",
+    )
+    log_handle = log_path.open("a", encoding="utf-8")
+    state = _DurationSweepChildState(
+        duration_preset="5m",
+        process=_MutableProcessStub(pid=5001, returncode=1),
+        log_path=log_path,
+        log_handle=log_handle,
+        reader_thread=None,
+        retrieval_port=5001,
+        summarizer_port=5002,
+        critic_port=5003,
+        max_samples=10,
+        checkpoint_path=checkpoint_path,
+        output_root=output_root,
+        launched_at_unix_seconds=time.time(),
+    )
+    try:
+        summary = _finalize_duration_sweep_child(
+            state=state,
+            fallback_sample_count=3,
+        )
+    finally:
+        if not log_handle.closed:
+            log_handle.close()
+
+    assert summary.status == "failed"
+    assert summary.report_path is None
+    assert summary.sample_count == 3
+    assert "without writing a report" in str(summary.error_message)
+
+
+def test_finalize_duration_sweep_child_downgrades_completed_report_on_nonzero_exit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    report_path = tmp_path / "fresh.report.json"
+    report_path.write_text("{}", encoding="utf-8")
+    log_path = tmp_path / "5m.log"
+    log_handle = log_path.open("w", encoding="utf-8")
+    state = _DurationSweepChildState(
+        duration_preset="5m",
+        process=_MutableProcessStub(pid=5002, returncode=1),
+        log_path=log_path,
+        log_handle=log_handle,
+        reader_thread=None,
+        retrieval_port=5001,
+        summarizer_port=5002,
+        critic_port=5003,
+        max_samples=10,
+        checkpoint_path=tmp_path / "5m.checkpoint.json",
+        output_root=tmp_path / "runs",
+        launched_at_unix_seconds=time.time() - 1.0,
+    )
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._discover_terminal_payload",
+        lambda path: {"report_path": str(report_path)},
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_execution_report",
+        lambda path: object(),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._summarize_duration_report",
+        lambda *args, **kwargs: DurationSweepPresetSummary(
+            duration_preset="5m",
+            target_seconds=300,
+            status="completed",
+            attempted_candidate_count=4,
+            replacement_count=0,
+            sample_count=4,
+            executed_count=4,
+            skipped_count=0,
+            success_count=4,
+            failure_count=0,
+            within_tolerance_count=4,
+            within_tolerance_rate=1.0,
+            mean_candidate_seconds=300.0,
+            mean_absolute_duration_delta_seconds=0.0,
+            mean_factualness=0.9,
+            mean_naturalness=0.8,
+            mean_speaker_grammar_similarity=0.7,
+            mean_composite=0.8,
+            report_path=str(report_path),
+            notes_path=None,
+            results_path=None,
+            mean_composite_ci95_lower=None,
+            mean_composite_ci95_upper=None,
+            error_message=None,
+            restart_count=0,
+            recovered_stall_count=0,
+        ),
+    )
+    try:
+        summary = _finalize_duration_sweep_child(
+            state=state,
+            fallback_sample_count=4,
+        )
+    finally:
+        if not log_handle.closed:
+            log_handle.close()
+
+    assert summary.status == "partial"
+    assert summary.report_path == str(report_path)
+    assert "exited with code 1" in str(summary.error_message)
 
 
 def test_run_duration_sweep_fans_out_each_preset_by_requested_concurrency(
@@ -1182,10 +1420,10 @@ def test_run_duration_sweep_restarts_stalled_child_and_records_recovery(
             sample_count=100,
             executed_count=8,
             skipped_count=0,
-            success_count=7,
-            failure_count=1,
-            within_tolerance_count=7,
-            within_tolerance_rate=0.875,
+            success_count=8,
+            failure_count=0,
+            within_tolerance_count=8,
+            within_tolerance_rate=1.0,
             mean_candidate_seconds=300.0,
             mean_absolute_duration_delta_seconds=0.0,
             mean_factualness=0.9,
@@ -1367,10 +1605,10 @@ def test_run_duration_sweep_continues_after_multiple_stalled_samples(
             sample_count=100,
             executed_count=9,
             skipped_count=0,
-            success_count=7,
-            failure_count=2,
-            within_tolerance_count=7,
-            within_tolerance_rate=0.7778,
+            success_count=9,
+            failure_count=0,
+            within_tolerance_count=9,
+            within_tolerance_rate=1.0,
             mean_candidate_seconds=300.0,
             mean_absolute_duration_delta_seconds=0.0,
             mean_factualness=0.9,

@@ -660,6 +660,7 @@ Important behavior:
 - `duration-sweep` also applies sweep-only request timeout defaults of `900s` for summarizer/critic and `300s` for retrieval/index so a wedged backend becomes a failed sample instead of a permanently hung preset.
 - `Ctrl+C` during `duration-sweep` now shuts down every active child before the parent exits, so local A2A ports, pipes, and log handles do not linger.
 - run notes/results now expose retained sample count, attempted candidate count, and replacement-excluded candidates separately so backfill behavior stays auditable.
+- a preset reports `completed` only after it fills the requested retained target; underfilled presets now stay `partial`, and a nonzero child exit no longer reuses a stale `completed` report snapshot.
 
 ## Running A Custom Manifest
 
@@ -818,4 +819,5 @@ Use `report.json` when you need:
 - missing manifest: run `prepare-dataset` first or add `--prepare-if-missing`.
 - wrong mode: remember `execute` defaults to voice-clone, while `duration-sweep` defaults to transcript-only.
 - empty or partial results: inspect the run's `notes.md`, `results.md`, and `report.json` under `artifacts/summarizer_critic_benchmark/sporc_runs`.
+- child exits with connection refused or reset errors: verify the effective `VLLM_URL` or `CARD_FRAMEWORK_VLLM_BASE_URL`; SPoRC benchmarks honor repo `.env` overrides, so a dead remote endpoint can replace the tracked local provider URL.
 - slow backend: reduce sample count first, then tune stage timeouts and/or distribute separate runs across multiple `VLLM_URL` endpoints.

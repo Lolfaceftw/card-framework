@@ -107,6 +107,7 @@ class _DurationSweepChildState:
     last_activity_age_seconds: float | None = None
     restart_count: int = 0
     recovered_stall_count: int = 0
+    launched_at_unix_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -1593,6 +1594,7 @@ def _launch_duration_sweep_child(
         )
     )
     log_handle.flush()
+    launched_at_unix_seconds = time.time()
     try:
         process = subprocess.Popen(
             child_command,
@@ -1629,6 +1631,7 @@ def _launch_duration_sweep_child(
         retrieval_namespace=retrieval_namespace,
         restart_count=restart_count,
         recovered_stall_count=recovered_stall_count,
+        launched_at_unix_seconds=launched_at_unix_seconds,
     )
     state.reader_thread = _start_duration_sweep_reader(
         state=state,
@@ -1644,6 +1647,12 @@ def _discover_report_path_from_checkpoint(
     if not state.checkpoint_path.exists():
         return None
     try:
+        checkpoint_mtime = state.checkpoint_path.stat().st_mtime
+    except OSError:
+        return None
+    if checkpoint_mtime + 1.0 < state.launched_at_unix_seconds:
+        return None
+    try:
         checkpoint_payload = json.loads(
             state.checkpoint_path.read_text(encoding="utf-8")
         )
@@ -1655,7 +1664,13 @@ def _discover_report_path_from_checkpoint(
     if not run_id:
         return None
     report_path = (state.output_root / run_id / "report.json").resolve()
-    return report_path if report_path.exists() else None
+    if not report_path.exists():
+        return None
+    try:
+        report_mtime = report_path.stat().st_mtime
+    except OSError:
+        return None
+    return report_path if report_mtime + 1.0 >= state.launched_at_unix_seconds else None
 
 
 def _stop_duration_sweep_child(
@@ -1819,13 +1834,12 @@ def _aggregate_duration_sweep_preset(
     *,
     duration_preset: str,
     child_summaries: dict[int, DurationSweepPresetSummary],
+    target_sample_count: int | None = None,
 ) -> DurationSweepPresetSummary:
     """Combine shard child summaries into one preset-level sweep summary."""
     ordered_children = [
         child_summaries[shard_index] for shard_index in sorted(child_summaries)
     ]
-    if len(ordered_children) == 1:
-        return ordered_children[0]
 
     sample_count = 0
     attempted_candidate_count = 0
@@ -1892,7 +1906,11 @@ def _aggregate_duration_sweep_preset(
         if not child_report_path:
             ci_available = False
             continue
-        child_report = _load_execution_report(Path(child_report_path))
+        resolved_child_report_path = Path(child_report_path)
+        if not resolved_child_report_path.exists():
+            ci_available = False
+            continue
+        child_report = _load_execution_report(resolved_child_report_path)
         composite_values.extend(
             sample.metrics.composite
             for sample in child_report.samples
@@ -1901,7 +1919,14 @@ def _aggregate_duration_sweep_preset(
 
     if executed_count == 0:
         status = "failed"
-    elif failure_count == 0 and skipped_count == 0:
+    elif (
+        failure_count == 0
+        and skipped_count == 0
+        and (
+            target_sample_count is None
+            or sample_count >= int(target_sample_count)
+        )
+    ):
         status = "completed"
     else:
         status = "partial"
@@ -1912,7 +1937,7 @@ def _aggregate_duration_sweep_preset(
         else None
     )
 
-    return DurationSweepPresetSummary(
+    summary = DurationSweepPresetSummary(
         duration_preset=duration_preset,
         target_seconds=int(DURATION_PRESET_SECONDS[duration_preset]),
         status=status,
@@ -1969,6 +1994,14 @@ def _aggregate_duration_sweep_preset(
         restart_count=restart_count,
         recovered_stall_count=recovered_stall_count,
     )
+    if len(ordered_children) == 1:
+        child_summary = ordered_children[0]
+        return replace(
+            child_summary,
+            status=summary.status,
+            error_message=summary.error_message,
+        )
+    return summary
 
 
 def _finalize_duration_sweep_child(
@@ -1996,8 +2029,13 @@ def _finalize_duration_sweep_child(
     if isinstance(report_path_value, str) and report_path_value.strip():
         candidate_report_path = Path(report_path_value).resolve()
         if candidate_report_path.exists():
-            report_path = candidate_report_path
-    if report_path is None:
+            try:
+                candidate_report_mtime = candidate_report_path.stat().st_mtime
+            except OSError:
+                candidate_report_mtime = 0.0
+            if candidate_report_mtime + 1.0 >= state.launched_at_unix_seconds:
+                report_path = candidate_report_path
+    if report_path is None and exit_code == 0:
         report_path = _discover_report_path_from_checkpoint(state)
     if report_path is not None:
         report_summary = _summarize_duration_report(
@@ -2006,6 +2044,19 @@ def _finalize_duration_sweep_child(
             restart_count=state.restart_count,
             recovered_stall_count=state.recovered_stall_count,
         )
+        if exit_code != 0 and report_summary.status == "completed":
+            fallback_status = "partial" if report_summary.executed_count > 0 else "failed"
+            return replace(
+                report_summary,
+                status=forced_status or fallback_status,
+                error_message=(
+                    forced_error_message
+                    or (
+                        f"Preset {state.duration_preset} exited with code {exit_code} "
+                        "after writing a report."
+                    )
+                ),
+            )
         if forced_status is None and forced_error_message is None:
             return report_summary
         return replace(
@@ -2286,6 +2337,7 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                         _aggregate_duration_sweep_preset(
                             duration_preset=duration_preset,
                             child_summaries=preset_state.completed_child_summaries,
+                            target_sample_count=examples,
                         )
                     )
                     donated_worker_ids = sorted(
