@@ -1381,7 +1381,7 @@ def curate_longform_sporc_manifest(
                     iter_prepared_dataset_samples(source_manifest.manifest_path),
                     start=1,
                 ):
-                    transcript_path = Path(sample.transcript_path).resolve()
+                    transcript_path = Path(sample.transcript_path)
                     stats = _precomputed_longform_curation_stats(sample)
                     if stats is None:
                         transcript_fallback_count += 1
