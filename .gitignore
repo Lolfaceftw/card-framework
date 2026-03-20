@@ -27,7 +27,7 @@ neo4j_data/
 summary.json
 summary.xml
 eval_report.json
-
+episode_assets/
 # Local benchmark output and backup copies
 summary_matrix/
 summary.xml.old.*

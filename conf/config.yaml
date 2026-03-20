@@ -3,7 +3,7 @@
 
 selection:
   llm: "vllm_local"
-  embedding: "qwen3_4b"
+  embedding: "disabled"
   stage_llm:
     summarizer: "default"
     critic: "default"
@@ -74,7 +74,7 @@ pipeline:
   voice_clone_manifest_path: ""
 
 session:
-  enabled: false
+  enabled: true
   session_id: ""
   store_path: "artifacts/pipeline_sessions/sessions.sqlite3"
   summary_output_path: ""
@@ -300,5 +300,5 @@ logging:
   enabled: true
   log_file: "agent_interactions.log"
   level: "INFO"
-  print_to_terminal: false
+  print_to_terminal: true
   summarizer_critic_print_to_terminal: ${logging.print_to_terminal}

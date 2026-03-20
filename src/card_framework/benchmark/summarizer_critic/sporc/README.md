@@ -494,6 +494,97 @@ Important behavior:
 - it retries one invalid out-of-budget or malformed structured submission per
   episode, then records the episode as failed and continues.
 
+## Step 1.7: Reuse Sampled Segments As Stage-2 Transcripts
+
+Build one sampled transcript per selected episode and optionally hand each one
+to the normal `setup_and_run` wrapper starting at stage-2:
+
+```bash
+uv run python scripts/run_sampled_transcript_pipeline.py \
+  --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --llm-sample-run-root "artifacts/summarizer_critic_benchmark/sporc_llm_sampling/<run_id>"
+```
+
+Or skip the interactive menu and prepare only one explicit manifest slice:
+
+```bash
+uv run python scripts/run_sampled_transcript_pipeline.py \
+  --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --selected-samples-path "artifacts/summarizer_critic_benchmark/sporc_llm_sampling/<run_id>/selected_samples.jsonl" \
+  --select-episodes "7-10" \
+  --prepare-only
+```
+
+Important behavior:
+
+- the helper shows `10` sampled episodes per page by default and truncates long titles in the menu.
+- selections use manifest positions, so the numbering stays aligned with the prepared manifest and the existing `llm-sample` range semantics.
+- it writes one sampled transcript JSON per selected episode under `artifacts/sampled_transcript_pipeline/<run-id>/episodes/.../inputs/`.
+- sampled transcript timings are synthetic sequential timings derived from sampled word counts, not original transcript timestamps.
+- it preserves useful metadata from the source transcript, including `source_audio_path` and `speaker_samples_manifest_path` when those already exist.
+- when the source transcript does not already carry `metadata.speaker_samples_manifest_path`, the helper still produces the stage-2 transcript, but the downstream runtime may need speaker-sample bootstrap work if voice cloning or the interjector stay enabled.
+- `--prepare-only` is the safest mode when you want to inspect the sampled transcripts first or when the downstream audio-stage prerequisites are not already present.
+
+## Step 1.8: Prepare Source Audio And Speaker Samples For Sampled Segments
+
+When the sampled-segment `.txt` files already exist under
+`src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/`, you can
+prepare one per-episode folder with:
+
+- a copied sampled-segment text file,
+- a local source-audio copy or download,
+- a prepared transcript whose metadata points at that local audio and the new
+  speaker-sample manifest,
+- speaker samples generated from the existing prepared SPoRC transcript timings.
+
+Run:
+
+```bash
+uv run python scripts/run_sampled_segment_speaker_prep.py \
+  --dataset-manifest /abs/path/to/benchmark_longform_15k_manifest.json
+```
+
+Notes:
+
+- the helper matches each sampled-segment file by its `Sample ID:` header first
+  and falls back to normalized episode-title matching only when needed,
+- output defaults to
+  `src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episodes/`,
+- it uses the same post-transcript speaker-sample generator path as the main
+  pipeline and SPoRC voice-clone benchmark flow, without re-running
+  transcription or diarization,
+- speaker clipping is forced onto `source` audio for this prep flow because the
+  downloaded episode MP3 is the artifact being localized into each episode
+  folder.
+
+## Step 1.75: Prepare Episode Audio And Speaker Samples For Local Sampled Segments
+
+If you already have plain-text sampled segment files under
+`src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/`, you
+can match them back to the prepared SPoRC manifest, download each episode's
+source MP3, and generate the speaker-sample manifest the main pipeline expects:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc.sampled_segments.prepare_episode_assets
+```
+
+Useful overrides:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc.sampled_segments.prepare_episode_assets \
+  --segments-dir "src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments" \
+  --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --output-root "src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets" \
+  --force
+```
+
+Important behavior:
+
+- the helper reads the `Episode:` header from each sampled-segment `.txt` file and uses `Sample ID:` when present for an exact manifest match.
+- duplicate sampled-segment files for the same SPoRC sample are grouped into one episode asset folder.
+- each prepared episode folder contains copied sampled-segment files, downloaded source audio, a local full transcript annotated with `source_audio_path` and `speaker_samples_manifest_path`, plus the generated speaker-sample manifest and WAV clips.
+- the helper uses the existing prepared full transcript for speaker-sample clipping, so the speaker labels stay aligned with the prepared SPoRC episode instead of trying to infer them from the sampled snippets alone.
+
 ## Step 2: Run One Benchmark
 
 Recommended transcript-only run:

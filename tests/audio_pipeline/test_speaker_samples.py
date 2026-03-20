@@ -16,7 +16,12 @@ def test_build_speaker_sample_plans_truncates_to_target_and_marks_shorter() -> N
     transcript_payload = {
         "segments": [
             {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 20_000, "text": "a"},
-            {"speaker": "SPEAKER_01", "start_time": 5_000, "end_time": 15_000, "text": "b"},
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 50_000,
+                "end_time": 60_000,
+                "text": "b",
+            },
             {
                 "speaker": "SPEAKER_00",
                 "start_time": 25_000,
@@ -40,7 +45,115 @@ def test_build_speaker_sample_plans_truncates_to_target_and_marks_shorter() -> N
     )
     assert plans[1].actual_duration_ms == 10_000
     assert plans[1].status == "shorter_than_requested"
-    assert plans[1].slices == (AudioSlice(start_time_ms=5_000, end_time_ms=15_000),)
+    assert plans[1].slices == (AudioSlice(start_time_ms=50_000, end_time_ms=60_000),)
+
+
+def test_build_speaker_sample_plans_subtracts_cross_speaker_overlap() -> None:
+    transcript_payload = {
+        "metadata": {"dataset": "sporc"},
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 10_000,
+                "text": "host line",
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 4_000,
+                "end_time": 6_000,
+                "text": "interruption",
+            },
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=6_000,
+        min_slice_duration_ms=1_000,
+        max_slices=3,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert [plan.speaker for plan in plans] == ["SPEAKER_00"]
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=4_000),
+        AudioSlice(start_time_ms=6_000, end_time_ms=8_000),
+    )
+    assert plans[0].actual_duration_ms == 6_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_keeps_legacy_behavior_without_overlap_markers() -> None:
+    transcript_payload = {
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 10_000,
+                "text": "host line",
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 4_000,
+                "end_time": 6_000,
+                "text": "interruption",
+            },
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=6_000,
+        min_slice_duration_ms=1_000,
+        max_slices=3,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert [plan.speaker for plan in plans] == ["SPEAKER_00", "SPEAKER_01"]
+    assert plans[0].slices == (AudioSlice(start_time_ms=0, end_time_ms=6_000),)
+    assert plans[0].actual_duration_ms == 6_000
+    assert plans[0].status == "ok"
+    assert plans[1].slices == (AudioSlice(start_time_ms=4_000, end_time_ms=6_000),)
+    assert plans[1].actual_duration_ms == 2_000
+    assert plans[1].status == "shorter_than_requested"
+
+
+def test_build_speaker_sample_plans_prefers_non_overlap_marked_segments() -> None:
+    transcript_payload = {
+        "metadata": {"dataset": "sporc"},
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 8_000,
+                "text": "crowded line",
+                "overlap_speakers": ["SPEAKER_01"],
+            },
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 10_000,
+                "end_time": 14_000,
+                "text": "clean line",
+            },
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=4_000,
+        min_slice_duration_ms=1_000,
+        max_slices=2,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (AudioSlice(start_time_ms=10_000, end_time_ms=14_000),)
+    assert plans[0].actual_duration_ms == 4_000
+    assert plans[0].status == "ok"
 
 
 def test_build_speaker_sample_plans_prefers_longest_slices_and_caps_count() -> None:
