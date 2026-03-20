@@ -6,7 +6,6 @@ import argparse
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from itertools import permutations
 import json
 from pathlib import Path
 import re
@@ -416,6 +415,7 @@ def _prepare_episode_assets(
         segment_files=plan.segment_files,
         destination_dir=episode_root / "sampled_segments",
     )
+    sampled_speakers = _selected_speaker_labels_from_paths(tuple(copied_segment_files))
 
     source_transcript = _load_transcript(Path(plan.sample.transcript_path))
     source_audio_url = _normalize_source_audio_url(plan.sample, source_transcript)
@@ -468,9 +468,20 @@ def _prepare_episode_assets(
         speaker_mapping = _resolve_bootstrap_speaker_mapping(
             transcript=source_transcript,
             bootstrap_transcript=bootstrap_transcript,
+            required_transcript_speakers=sampled_speakers,
         )
         generation_result = bootstrap_result.generation_result
         speaker_manifest_path = generation_result.manifest_path.resolve()
+        available_sample_speakers = set(speaker_mapping.values())
+        missing_reusable_speakers = [
+            speaker
+            for speaker in _ordered_transcript_speakers(source_transcript)
+            if speaker not in available_sample_speakers
+        ]
+        _ensure_sampled_speakers_have_clean_samples(
+            sampled_speakers=sampled_speakers,
+            available_sample_speakers=available_sample_speakers,
+        )
         if any(
             bootstrap_speaker != transcript_speaker
             for bootstrap_speaker, transcript_speaker in speaker_mapping.items()
@@ -482,6 +493,12 @@ def _prepare_episode_assets(
             console.print(
                 f"[{plan.sample.sample_id}] Remapped bootstrap speakers onto reusable "
                 f"transcript labels: {speaker_mapping}"
+            )
+        if missing_reusable_speakers:
+            console.print(
+                f"[{plan.sample.sample_id}] Clean solo-speech samples were only "
+                "available for sampled-transcript speakers. Missing reusable "
+                f"transcript speakers: {missing_reusable_speakers}"
             )
         console.print(
             f"[{plan.sample.sample_id}] Generated "
@@ -495,6 +512,7 @@ def _prepare_episode_assets(
                 "speaker_samples_dir": str(generation_result.output_dir.resolve()),
                 "speaker_sample_count": len(generation_result.artifacts),
                 "speaker_samples_generated_at_utc": generation_result.generated_at_utc,
+                "missing_reusable_speaker_sample_speakers": missing_reusable_speakers,
                 "speaker_sample_bootstrap_transcript_path": str(
                     bootstrap_result.transcript_path.resolve()
                 ),
@@ -502,6 +520,11 @@ def _prepare_episode_assets(
         )
     else:
         speaker_manifest_path = local_manifest_path.resolve()
+        available_sample_speakers = _speaker_labels_in_manifest(speaker_manifest_path)
+        _ensure_sampled_speakers_have_clean_samples(
+            sampled_speakers=sampled_speakers,
+            available_sample_speakers=available_sample_speakers,
+        )
         source_transcript = _update_transcript_metadata(
             transcript=source_transcript,
             metadata_updates={
@@ -612,6 +635,21 @@ def _selected_segments_from_paths(
     return tuple(unique)
 
 
+def _selected_speaker_labels_from_paths(
+    segment_files: tuple[Path, ...],
+) -> tuple[str, ...]:
+    """Return sampled speaker labels in first-seen order across copied segment files."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for _, segment in _selected_segments_from_paths(segment_files):
+        speaker = str(segment.speaker_label).strip()
+        if not speaker or speaker in seen:
+            continue
+        seen.add(speaker)
+        ordered.append(speaker)
+    return tuple(ordered)
+
+
 def _load_transcript(path: Path) -> Transcript:
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -694,6 +732,7 @@ def _resolve_bootstrap_speaker_mapping(
     *,
     transcript: Transcript,
     bootstrap_transcript: Transcript,
+    required_transcript_speakers: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Map bootstrap speaker labels back onto reusable transcript labels."""
     transcript_speakers = _ordered_transcript_speakers(transcript)
@@ -706,13 +745,22 @@ def _resolve_bootstrap_speaker_mapping(
         raise SampledSegmentPreparationError(
             "Bootstrap transcript does not contain any speaker labels."
         )
-    if len(transcript_speakers) != len(bootstrap_speakers):
+    if len(bootstrap_speakers) > len(transcript_speakers):
         raise SampledSegmentPreparationError(
-            "Bootstrap speaker coverage does not match the reusable transcript "
-            "after overlap-safe sample extraction. This usually means one or "
-            "more speakers never had clean solo speech long enough to survive "
-            "the overlap filter. "
+            "Bootstrap speaker coverage exceeded the reusable transcript "
+            "speaker count after overlap-safe sample extraction. "
             f"Reusable transcript speakers: {list(transcript_speakers)}. "
+            f"Bootstrap transcript speakers: {list(bootstrap_speakers)}."
+        )
+    normalized_required_speakers = _normalize_required_transcript_speakers(
+        required_transcript_speakers=required_transcript_speakers,
+        transcript_speakers=transcript_speakers,
+    )
+    if len(normalized_required_speakers) > len(bootstrap_speakers):
+        raise SampledSegmentPreparationError(
+            "Overlap-safe speaker sampling could not produce enough clean "
+            "solo-speech speakers to cover the sampled transcript. "
+            f"Required sampled speakers: {list(normalized_required_speakers)}. "
             f"Bootstrap transcript speakers: {list(bootstrap_speakers)}."
         )
     overlap_ms = _speaker_interval_overlap_ms(
@@ -720,66 +768,17 @@ def _resolve_bootstrap_speaker_mapping(
         bootstrap_transcript=bootstrap_transcript,
     )
     bootstrap_durations = _speaker_total_duration_ms(bootstrap_transcript)
-    if len(bootstrap_speakers) <= 6:
-        best_mapping: dict[str, str] | None = None
-        best_total_overlap = -1
-        for transcript_permutation in permutations(
-            transcript_speakers,
-            len(bootstrap_speakers),
-        ):
-            candidate_mapping = {
-                bootstrap_speaker: transcript_speaker
-                for bootstrap_speaker, transcript_speaker in zip(
-                    bootstrap_speakers,
-                    transcript_permutation,
-                    strict=True,
-                )
-            }
-            total_overlap = sum(
-                overlap_ms[bootstrap_speaker][candidate_mapping[bootstrap_speaker]]
-                for bootstrap_speaker in bootstrap_speakers
-            )
-            if total_overlap > best_total_overlap:
-                best_total_overlap = total_overlap
-                best_mapping = candidate_mapping
-        if best_mapping is None:
-            raise SampledSegmentPreparationError(
-                "Unable to determine bootstrap speaker mapping for sampled-segment "
-                "speaker-sample preparation."
-            )
-        mapping = best_mapping
-    else:
-        scored_pairs = sorted(
-            (
-                (
-                    overlap_ms[bootstrap_speaker][transcript_speaker],
-                    bootstrap_speaker,
-                    transcript_speaker,
-                )
-                for bootstrap_speaker in bootstrap_speakers
-                for transcript_speaker in transcript_speakers
-            ),
-            reverse=True,
+    mapping = _maximize_overlap_mapping(
+        bootstrap_speakers=bootstrap_speakers,
+        transcript_speakers=transcript_speakers,
+        overlap_ms=overlap_ms,
+        required_transcript_speakers=normalized_required_speakers,
+    )
+    if mapping is None:
+        raise SampledSegmentPreparationError(
+            "Unable to determine bootstrap speaker mapping for sampled-segment "
+            "speaker-sample preparation."
         )
-        mapping = {}
-        used_transcript_speakers: set[str] = set()
-        for score, bootstrap_speaker, transcript_speaker in scored_pairs:
-            if score <= 0:
-                continue
-            if (
-                bootstrap_speaker in mapping
-                or transcript_speaker in used_transcript_speakers
-            ):
-                continue
-            mapping[bootstrap_speaker] = transcript_speaker
-            used_transcript_speakers.add(transcript_speaker)
-            if len(mapping) == len(bootstrap_speakers):
-                break
-        if len(mapping) != len(bootstrap_speakers):
-            raise SampledSegmentPreparationError(
-                "Unable to determine bootstrap speaker mapping for sampled-segment "
-                "speaker-sample preparation."
-            )
     for bootstrap_speaker, transcript_speaker in mapping.items():
         duration_ms = bootstrap_durations.get(bootstrap_speaker, 0)
         overlap_ratio = (
@@ -794,6 +793,194 @@ def _resolve_bootstrap_speaker_mapping(
                 f"with overlap ratio={overlap_ratio:.3f}."
             )
     return mapping
+
+
+def _normalize_required_transcript_speakers(
+    *,
+    required_transcript_speakers: tuple[str, ...],
+    transcript_speakers: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Validate and deduplicate required reusable transcript speakers."""
+    transcript_speaker_set = set(transcript_speakers)
+    ordered_required: list[str] = []
+    seen: set[str] = set()
+    missing_required: list[str] = []
+    for raw_speaker in required_transcript_speakers:
+        speaker = str(raw_speaker).strip()
+        if not speaker or speaker in seen:
+            continue
+        if speaker not in transcript_speaker_set:
+            missing_required.append(speaker)
+            continue
+        seen.add(speaker)
+        ordered_required.append(speaker)
+    if missing_required:
+        raise SampledSegmentPreparationError(
+            "Sampled transcript references speaker labels that do not exist in "
+            "the reusable full transcript. "
+            f"Missing sampled speakers: {missing_required}. "
+            f"Reusable transcript speakers: {list(transcript_speakers)}."
+        )
+    return tuple(ordered_required)
+
+
+def _maximize_overlap_mapping(
+    *,
+    bootstrap_speakers: tuple[str, ...],
+    transcript_speakers: tuple[str, ...],
+    overlap_ms: dict[str, dict[str, int]],
+    required_transcript_speakers: tuple[str, ...],
+) -> dict[str, str] | None:
+    """Find the best injective bootstrap-to-transcript mapping with coverage constraints."""
+    transcript_count = len(transcript_speakers)
+    bootstrap_count = len(bootstrap_speakers)
+    required_speaker_set = set(required_transcript_speakers)
+    dummy_count = transcript_count - bootstrap_count
+    if dummy_count < 0:
+        return None
+
+    bootstrap_columns = list(bootstrap_speakers)
+    dummy_columns = [f"__DUMMY_{index:04d}__" for index in range(dummy_count)]
+    all_columns = bootstrap_columns + dummy_columns
+    allowed_weights: list[int] = [0]
+    for transcript_speaker in transcript_speakers:
+        for bootstrap_speaker in bootstrap_speakers:
+            allowed_weights.append(overlap_ms[bootstrap_speaker][transcript_speaker])
+    max_weight = max(allowed_weights)
+    impossible_cost = (transcript_count + 1) * (max_weight + 1)
+    cost_matrix: list[list[int]] = []
+    for transcript_speaker in transcript_speakers:
+        row: list[int] = []
+        for column_name in all_columns:
+            if column_name in overlap_ms:
+                weight = overlap_ms[column_name][transcript_speaker]
+                row.append(max_weight - weight)
+                continue
+            if transcript_speaker in required_speaker_set:
+                row.append(impossible_cost)
+            else:
+                row.append(max_weight)
+        cost_matrix.append(row)
+
+    assignment = _solve_square_min_cost_assignment(tuple(tuple(row) for row in cost_matrix))
+    if assignment is None:
+        return None
+
+    mapping: dict[str, str] = {}
+    for transcript_index, column_index in enumerate(assignment):
+        if column_index >= bootstrap_count:
+            continue
+        mapping[bootstrap_speakers[column_index]] = transcript_speakers[transcript_index]
+    if len(mapping) != bootstrap_count:
+        return None
+    if not required_speaker_set.issubset(set(mapping.values())):
+        return None
+    return mapping
+
+
+def _solve_square_min_cost_assignment(
+    cost_matrix: tuple[tuple[int, ...], ...],
+) -> list[int] | None:
+    """Solve one square minimum-cost assignment problem with Hungarian matching."""
+    size = len(cost_matrix)
+    if size == 0:
+        return []
+    if any(len(row) != size for row in cost_matrix):
+        raise ValueError("cost_matrix must be square")
+
+    infinity = 10**18
+    potentials_left = [0] * (size + 1)
+    potentials_right = [0] * (size + 1)
+    matched_left_by_right = [0] * (size + 1)
+    augmenting_way = [0] * (size + 1)
+
+    for left_index in range(1, size + 1):
+        matched_left_by_right[0] = left_index
+        current_right = 0
+        min_reduced_cost = [infinity] * (size + 1)
+        used_right = [False] * (size + 1)
+        while True:
+            used_right[current_right] = True
+            current_left = matched_left_by_right[current_right]
+            delta = infinity
+            next_right = 0
+            for right_index in range(1, size + 1):
+                if used_right[right_index]:
+                    continue
+                reduced_cost = (
+                    cost_matrix[current_left - 1][right_index - 1]
+                    - potentials_left[current_left]
+                    - potentials_right[right_index]
+                )
+                if reduced_cost < min_reduced_cost[right_index]:
+                    min_reduced_cost[right_index] = reduced_cost
+                    augmenting_way[right_index] = current_right
+                if min_reduced_cost[right_index] < delta:
+                    delta = min_reduced_cost[right_index]
+                    next_right = right_index
+            if delta >= infinity:
+                return None
+            for right_index in range(size + 1):
+                if used_right[right_index]:
+                    potentials_left[matched_left_by_right[right_index]] += delta
+                    potentials_right[right_index] -= delta
+                else:
+                    min_reduced_cost[right_index] -= delta
+            current_right = next_right
+            if matched_left_by_right[current_right] == 0:
+                break
+        while True:
+            previous_right = augmenting_way[current_right]
+            matched_left_by_right[current_right] = matched_left_by_right[previous_right]
+            current_right = previous_right
+            if current_right == 0:
+                break
+
+    assignment = [-1] * size
+    for right_index in range(1, size + 1):
+        left_index = matched_left_by_right[right_index]
+        if left_index <= 0:
+            continue
+        assignment[left_index - 1] = right_index - 1
+    if any(index < 0 for index in assignment):
+        return None
+    return assignment
+
+
+def _speaker_labels_in_manifest(manifest_path: Path) -> set[str]:
+    """Load speaker labels present in one speaker-sample manifest."""
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SampledSegmentPreparationError(
+            f"Failed to read speaker-sample manifest: {manifest_path}"
+        ) from exc
+    speakers: set[str] = set()
+    for raw_sample in payload.get("samples", []):
+        speaker = str(raw_sample.get("speaker", "")).strip()
+        if speaker:
+            speakers.add(speaker)
+    return speakers
+
+
+def _ensure_sampled_speakers_have_clean_samples(
+    *,
+    sampled_speakers: tuple[str, ...],
+    available_sample_speakers: set[str],
+) -> None:
+    """Fail only when the sampled transcript needs a speaker without a clean sample."""
+    missing_sampled_speakers = [
+        speaker
+        for speaker in sampled_speakers
+        if speaker not in available_sample_speakers
+    ]
+    if missing_sampled_speakers:
+        raise SampledSegmentPreparationError(
+            "Overlap-safe speaker sampling could not produce clean solo-speech "
+            "samples for one or more speakers used by the sampled transcript. "
+            f"Missing sampled speakers: {missing_sampled_speakers}. "
+            f"Available clean-sample speakers: {sorted(available_sample_speakers)}."
+        )
 
 
 def _rewrite_speaker_sample_manifest(
