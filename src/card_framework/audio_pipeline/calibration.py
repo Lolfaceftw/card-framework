@@ -679,8 +679,7 @@ def _bootstrap_speaker_samples_from_diarization_via_docker(
             f"under the repository root: {resolved_project_root}"
         ) from exc
 
-    device = resolve_device(str(audio_cfg.get("device", "auto")))
-    service_name = "setup-and-run-gpu" if device == "cuda" else "setup-and-run"
+    service_name = _resolve_docker_speaker_bootstrap_service_name(audio_cfg=audio_cfg)
     command: list[str] = ["docker", "compose"]
     if service_name == "setup-and-run-gpu":
         command.extend(["--profile", "gpu"])
@@ -814,11 +813,28 @@ def _load_speaker_sample_generation_result_from_manifest(
     )
 
 
+def _resolve_docker_speaker_bootstrap_service_name(
+    *,
+    audio_cfg: Mapping[str, Any],
+) -> str:
+    """Choose the Docker Compose service used for speaker-sample bootstrap."""
+    preferred_device = str(audio_cfg.get("device", "auto")).strip().lower()
+    if preferred_device == "cuda":
+        return "setup-and-run-gpu"
+    if preferred_device == "cpu":
+        return "setup-and-run"
+    runtime_platform = detect_runtime_platform()
+    if runtime_platform.system_key == "windows":
+        return "setup-and-run-gpu"
+    resolved_device = resolve_device(preferred_device)
+    return "setup-and-run-gpu" if resolved_device == "cuda" else "setup-and-run"
+
+
 def _ensure_diarization_runtime_available(audio_cfg: Mapping[str, Any]) -> None:
     """Fail fast when the configured diarizer runtime is unavailable."""
     diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
     provider = str(diarization_cfg.get("provider", "nemo")).strip().lower()
-    if provider == "nemo":
+    if provider in _NEMO_DERIVED_DIARIZATION_PROVIDERS:
         ensure_module_available("nemo")
         return
     if provider == "pyannote_community1":

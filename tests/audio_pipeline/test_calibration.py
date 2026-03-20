@@ -15,6 +15,7 @@ from card_framework.audio_pipeline.speaker_samples import (
     SpeakerSampleArtifact,
     SpeakerSampleGenerationResult,
 )
+from card_framework.shared.platform_support import RuntimePlatform
 
 
 @pytest.mark.parametrize(
@@ -229,9 +230,11 @@ def test_bootstrap_speaker_samples_from_diarization_fails_when_no_usable_turns(
         )
 
 
+@pytest.mark.parametrize("provider", ["nemo", "sortformer_offline"])
 def test_bootstrap_speaker_samples_from_diarization_fails_fast_when_nemo_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
 ) -> None:
     source_audio_path = (tmp_path / "source.wav").resolve()
     source_audio_path.write_bytes(b"RIFF")
@@ -258,7 +261,7 @@ def test_bootstrap_speaker_samples_from_diarization_fails_fast_when_nemo_missing
             project_root=tmp_path,
             audio_cfg={
                 "device": "cpu",
-                "diarization": {"provider": "nemo"},
+                "diarization": {"provider": provider},
                 "speaker_samples": {"source_audio": "source"},
             },
             audio_path=source_audio_path,
@@ -353,8 +356,16 @@ def test_bootstrap_speaker_samples_from_diarization_uses_docker_when_nemo_is_una
         lambda runtime_platform: False,
     )
     monkeypatch.setattr(
+        "card_framework.audio_pipeline.calibration.detect_runtime_platform",
+        lambda: RuntimePlatform(system="Windows", machine="x86_64"),
+    )
+    monkeypatch.setattr(
         "card_framework.audio_pipeline.calibration.ensure_command_available",
         lambda command_name: None,
+    )
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.calibration.resolve_device",
+        lambda preferred_device: "cpu",
     )
     monkeypatch.setattr(
         "card_framework.audio_pipeline.calibration.subprocess.run",
@@ -370,7 +381,7 @@ def test_bootstrap_speaker_samples_from_diarization_uses_docker_when_nemo_is_una
     result = bootstrap_speaker_samples_from_diarization(
         project_root=project_root,
         audio_cfg={
-            "device": "cuda",
+            "device": "auto",
             "diarization": {"provider": "nemo"},
             "speaker_samples": {"source_audio": "vocals"},
         },
@@ -392,7 +403,7 @@ def test_bootstrap_speaker_samples_from_diarization_uses_docker_when_nemo_is_una
     docker_cfg_path = (bootstrap_audio_work_dir / "docker_audio_cfg.json").resolve()
     assert docker_cfg_path.exists()
     docker_cfg_payload = json.loads(docker_cfg_path.read_text(encoding="utf-8"))
-    assert docker_cfg_payload["device"] == "cuda"
+    assert docker_cfg_payload["device"] == "auto"
 
     assert result.transcript_path == bootstrap_transcript_path
     assert result.generation_result.manifest_path == (
