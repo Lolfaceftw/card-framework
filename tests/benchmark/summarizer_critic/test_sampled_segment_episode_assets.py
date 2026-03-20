@@ -178,24 +178,64 @@ def test_main_prepares_episode_assets_and_summary(
             self.generated_at_utc = "2026-03-20T00:00:00+00:00"
             self.artifacts = ("speaker0", "speaker1")
 
-    class FakeGenerator:
-        def generate(
-            self,
-            *,
-            transcript_payload,
-            source_audio_path: Path,
-            output_dir: Path,
-            progress_callback=None,
-        ):
-            del transcript_payload, source_audio_path, progress_callback
-            output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "speaker_00.wav").write_bytes(b"RIFF")
-            (output_dir / "speaker_01.wav").write_bytes(b"RIFF")
-            (output_dir / "manifest.json").write_text(
-                json.dumps({"samples": [{"speaker": "SPEAKER_00"}]}) + "\n",
-                encoding="utf-8",
+    class FakeBootstrapResult:
+        def __init__(self, transcript_path: Path, output_dir: Path):
+            self.transcript_path = transcript_path
+            self.generation_result = FakeGenerationResult(output_dir)
+
+    def fake_bootstrap_speaker_samples_from_diarization(
+        *,
+        project_root: Path,
+        audio_cfg,
+        audio_path: Path,
+        bootstrap_transcript_path: Path,
+        bootstrap_audio_work_dir: Path,
+        speaker_samples_output_dir: Path,
+        status_reporter=None,
+    ):
+        del project_root, audio_cfg, bootstrap_audio_work_dir, status_reporter
+        bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        bootstrap_transcript_path.write_text(
+            json.dumps(
+                {
+                    "segments": [
+                        {
+                            "speaker": "BOOT_00",
+                            "start_time": 0,
+                            "end_time": 1200,
+                            "text": "hello world",
+                        },
+                        {
+                            "speaker": "BOOT_01",
+                            "start_time": 1200,
+                            "end_time": 2400,
+                            "text": "general kenobi",
+                        },
+                    ],
+                    "metadata": {
+                        "source_audio_path": str(audio_path),
+                    },
+                }
             )
-            return FakeGenerationResult(output_dir)
+            + "\n",
+            encoding="utf-8",
+        )
+        speaker_samples_output_dir.mkdir(parents=True, exist_ok=True)
+        (speaker_samples_output_dir / "speaker_00.wav").write_bytes(b"RIFF")
+        (speaker_samples_output_dir / "speaker_01.wav").write_bytes(b"RIFF")
+        (speaker_samples_output_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {"speaker": "BOOT_00"},
+                        {"speaker": "BOOT_01"},
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return FakeBootstrapResult(bootstrap_transcript_path, speaker_samples_output_dir)
 
     def fake_download_binary_to_path(
         *,
@@ -213,12 +253,12 @@ def test_main_prepares_episode_assets_and_summary(
         fake_load_audio_config,
     )
     monkeypatch.setattr(
-        "card_framework.benchmark.summarizer_critic.sporc.sampled_segments.prepare_episode_assets.build_speaker_sample_generator",
-        lambda audio_cfg: FakeGenerator(),
-    )
-    monkeypatch.setattr(
         "card_framework.benchmark.summarizer_critic.sporc.sampled_segments.prepare_episode_assets._download_binary_to_path",
         fake_download_binary_to_path,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.sampled_segments.prepare_episode_assets.bootstrap_speaker_samples_from_diarization",
+        fake_bootstrap_speaker_samples_from_diarization,
     )
 
     output_root = tmp_path / "episode_assets"
@@ -250,6 +290,19 @@ def test_main_prepares_episode_assets_and_summary(
         transcript_payload["metadata"]["speaker_samples_manifest_path"]
         == episode_payload["speaker_samples_manifest_path"]
     )
+    manifest_payload = json.loads(
+        Path(episode_payload["speaker_samples_manifest_path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [sample["speaker"] for sample in manifest_payload["samples"]] == [
+        "SPEAKER_00",
+        "SPEAKER_01",
+    ]
+    assert [sample["bootstrap_speaker"] for sample in manifest_payload["samples"]] == [
+        "BOOT_00",
+        "BOOT_01",
+    ]
     assert transcript_payload["segments"][0]["text"] == (
         "this sampled text does not exist in the transcript"
     )

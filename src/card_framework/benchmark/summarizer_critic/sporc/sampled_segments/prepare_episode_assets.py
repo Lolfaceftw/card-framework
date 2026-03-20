@@ -6,6 +6,7 @@ import argparse
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import permutations
 import json
 from pathlib import Path
 import re
@@ -18,7 +19,9 @@ import requests
 from rich.console import Console
 
 from card_framework.agents.utils import count_words
-from card_framework.audio_pipeline.factory import build_speaker_sample_generator
+from card_framework.audio_pipeline.calibration import (
+    bootstrap_speaker_samples_from_diarization,
+)
 from card_framework.audio_pipeline.io import write_transcript_atomic
 from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_LONGFORM_MANIFEST_PATH,
@@ -30,6 +33,7 @@ from card_framework.benchmark.summarizer_critic.sporc.dataset import (
 from card_framework.cli.calibrate import load_audio_config
 from card_framework.orchestration.transcript import Transcript, TranscriptSegment
 from card_framework.shared.paths import DEFAULT_CONFIG_PATH, REPO_ROOT
+from card_framework.shared.perf import report_loading_duration
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _DEFAULT_OUTPUT_ROOT = (_SCRIPT_DIR / "episode_assets").resolve()
@@ -38,6 +42,7 @@ _SOURCE_AUDIO_TIMEOUT = (10.0, 300.0)
 _DEFAULT_WORDS_PER_MINUTE = 170.0
 _DEFAULT_MIN_SEGMENT_MS = 1_000
 _DEFAULT_SEGMENT_GAP_MS = 250
+_BOOTSTRAP_MIN_SPEAKER_OVERLAP_RATIO = 0.45
 _EPISODE_HEADER_PATTERN = re.compile(r"^\s*Episode:\s*(?P<value>.+?)\s*$")
 _SAMPLE_ID_HEADER_PATTERN = re.compile(r"^\s*Sample ID:\s*(?P<value>.+?)\s*$")
 _SEGMENT_LINE_PATTERN = re.compile(
@@ -99,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Match sampled-segment episode files back to the prepared SPoRC "
             "manifest, download each episode's source audio, and generate "
-            "speaker samples using the prepared full transcript."
+            "speaker samples from fresh audio bootstrap artifacts."
         )
     )
     parser.add_argument(
@@ -189,6 +194,10 @@ def main(argv: list[str] | None = None) -> int:
     audio_cfg["speaker_samples"] = speaker_samples_cfg
 
     output_root.mkdir(parents=True, exist_ok=True)
+    console.print(
+        "Preparing "
+        f"{len(plans)} sampled-segment episode bundle(s) into {output_root}"
+    )
     results = [
         _prepare_episode_assets(
             plan=plan,
@@ -395,6 +404,10 @@ def _prepare_episode_assets(
     segment_gap_ms: int,
     console: Console,
 ) -> EpisodeAssetResult:
+    console.print(
+        f"[{plan.sample.sample_id}] Preparing episode assets for "
+        f"{plan.episode_title}"
+    )
     episode_root = (
         output_root / f"{_slugify(plan.sample.sample_id)}__{_slugify(plan.episode_title)}"
     ).resolve()
@@ -406,15 +419,19 @@ def _prepare_episode_assets(
 
     source_transcript = _load_transcript(Path(plan.sample.transcript_path))
     source_audio_url = _normalize_source_audio_url(plan.sample, source_transcript)
-    source_audio_path = _resolve_source_audio(
-        source_audio_url=source_audio_url,
-        destination=_source_audio_destination(
-            episode_root=episode_root,
-            sample=plan.sample,
+    with report_loading_duration(
+        f"source audio for {plan.sample.sample_id}",
+        reporter=console.print,
+    ):
+        source_audio_path = _resolve_source_audio(
             source_audio_url=source_audio_url,
-        ),
-        force=force,
-    )
+            destination=_source_audio_destination(
+                episode_root=episode_root,
+                sample=plan.sample,
+                source_audio_url=source_audio_url,
+            ),
+            force=force,
+        )
     source_transcript = _update_transcript_metadata(
         transcript=source_transcript,
         metadata_updates={
@@ -430,16 +447,47 @@ def _prepare_episode_assets(
     local_manifest_path = speaker_samples_dir / "manifest.json"
     if force or not local_manifest_path.exists():
         console.print(
-            f"Preparing speaker samples for {plan.sample.sample_id}: {plan.episode_title}"
+            f"[{plan.sample.sample_id}] Bootstrapping fresh speaker samples from "
+            f"{source_audio_path}"
         )
-        generator = build_speaker_sample_generator(audio_cfg)
-        generation_result = generator.generate(
-            transcript_payload=source_transcript.to_payload(),
-            source_audio_path=source_audio_path,
-            output_dir=speaker_samples_dir,
-            progress_callback=None,
+        bootstrap_root = (episode_root / "speaker_sample_bootstrap").resolve()
+        with report_loading_duration(
+            f"speaker-sample bootstrap for {plan.sample.sample_id}",
+            reporter=console.print,
+        ):
+            bootstrap_result = bootstrap_speaker_samples_from_diarization(
+                project_root=REPO_ROOT,
+                audio_cfg=audio_cfg,
+                audio_path=source_audio_path,
+                bootstrap_transcript_path=bootstrap_root / "bootstrap.transcript.json",
+                bootstrap_audio_work_dir=bootstrap_root / "audio_stage",
+                speaker_samples_output_dir=speaker_samples_dir,
+                status_reporter=console.print,
+            )
+        bootstrap_transcript = _load_transcript(bootstrap_result.transcript_path)
+        speaker_mapping = _resolve_bootstrap_speaker_mapping(
+            transcript=source_transcript,
+            bootstrap_transcript=bootstrap_transcript,
         )
+        generation_result = bootstrap_result.generation_result
         speaker_manifest_path = generation_result.manifest_path.resolve()
+        if any(
+            bootstrap_speaker != transcript_speaker
+            for bootstrap_speaker, transcript_speaker in speaker_mapping.items()
+        ):
+            _rewrite_speaker_sample_manifest(
+                manifest_path=speaker_manifest_path,
+                speaker_mapping=speaker_mapping,
+            )
+            console.print(
+                f"[{plan.sample.sample_id}] Remapped bootstrap speakers onto reusable "
+                f"transcript labels: {speaker_mapping}"
+            )
+        console.print(
+            f"[{plan.sample.sample_id}] Generated "
+            f"{len(generation_result.artifacts)} clean speaker sample(s): "
+            f"{speaker_manifest_path}"
+        )
         source_transcript = _update_transcript_metadata(
             transcript=source_transcript,
             metadata_updates={
@@ -447,6 +495,9 @@ def _prepare_episode_assets(
                 "speaker_samples_dir": str(generation_result.output_dir.resolve()),
                 "speaker_sample_count": len(generation_result.artifacts),
                 "speaker_samples_generated_at_utc": generation_result.generated_at_utc,
+                "speaker_sample_bootstrap_transcript_path": str(
+                    bootstrap_result.transcript_path.resolve()
+                ),
             },
         )
     else:
@@ -459,7 +510,8 @@ def _prepare_episode_assets(
             },
         )
         console.print(
-            f"Reusing speaker samples for {plan.sample.sample_id}: {speaker_manifest_path}"
+            f"[{plan.sample.sample_id}] Reusing cached speaker samples: "
+            f"{speaker_manifest_path}"
         )
 
     source_transcript_path = episode_root / "prepared_full.transcript.json"
@@ -496,6 +548,9 @@ def _prepare_episode_assets(
         )
         + "\n",
         encoding="utf-8",
+    )
+    console.print(
+        f"[{plan.sample.sample_id}] Finished episode bundle at {episode_root}"
     )
     return EpisodeAssetResult(
         sample_id=plan.sample.sample_id,
@@ -575,6 +630,216 @@ def _update_transcript_metadata(
     updated_metadata = dict(transcript.metadata)
     updated_metadata.update(metadata_updates)
     return transcript.with_metadata(updated_metadata)
+
+
+def _ordered_transcript_speakers(transcript: Transcript) -> tuple[str, ...]:
+    """Return transcript speaker labels in first-seen order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for segment in transcript.segments:
+        speaker = str(segment.speaker).strip()
+        if not speaker or speaker in seen:
+            continue
+        seen.add(speaker)
+        ordered.append(speaker)
+    return tuple(ordered)
+
+
+def _speaker_interval_overlap_ms(
+    *,
+    transcript: Transcript,
+    bootstrap_transcript: Transcript,
+) -> dict[str, dict[str, int]]:
+    """Measure overlap milliseconds between bootstrap and reusable speakers."""
+    transcript_speakers = _ordered_transcript_speakers(transcript)
+    overlap_by_bootstrap_speaker: dict[str, dict[str, int]] = {
+        bootstrap_speaker: {transcript_speaker: 0 for transcript_speaker in transcript_speakers}
+        for bootstrap_speaker in _ordered_transcript_speakers(bootstrap_transcript)
+    }
+    for bootstrap_segment in bootstrap_transcript.segments:
+        bootstrap_speaker = str(bootstrap_segment.speaker).strip()
+        if bootstrap_speaker not in overlap_by_bootstrap_speaker:
+            continue
+        for transcript_segment in transcript.segments:
+            transcript_speaker = str(transcript_segment.speaker).strip()
+            if transcript_speaker not in overlap_by_bootstrap_speaker[bootstrap_speaker]:
+                continue
+            overlap_ms = min(
+                bootstrap_segment.end_time,
+                transcript_segment.end_time,
+            ) - max(
+                bootstrap_segment.start_time,
+                transcript_segment.start_time,
+            )
+            if overlap_ms <= 0:
+                continue
+            overlap_by_bootstrap_speaker[bootstrap_speaker][transcript_speaker] += overlap_ms
+    return overlap_by_bootstrap_speaker
+
+
+def _speaker_total_duration_ms(transcript: Transcript) -> dict[str, int]:
+    """Return accumulated duration per speaker."""
+    durations: dict[str, int] = {}
+    for segment in transcript.segments:
+        speaker = str(segment.speaker).strip()
+        if not speaker:
+            continue
+        durations[speaker] = durations.get(speaker, 0) + max(
+            0, segment.end_time - segment.start_time
+        )
+    return durations
+
+
+def _resolve_bootstrap_speaker_mapping(
+    *,
+    transcript: Transcript,
+    bootstrap_transcript: Transcript,
+) -> dict[str, str]:
+    """Map bootstrap speaker labels back onto reusable transcript labels."""
+    transcript_speakers = _ordered_transcript_speakers(transcript)
+    bootstrap_speakers = _ordered_transcript_speakers(bootstrap_transcript)
+    if not transcript_speakers:
+        raise SampledSegmentPreparationError(
+            "Reusable transcript does not contain any speaker labels."
+        )
+    if not bootstrap_speakers:
+        raise SampledSegmentPreparationError(
+            "Bootstrap transcript does not contain any speaker labels."
+        )
+    if len(transcript_speakers) != len(bootstrap_speakers):
+        raise SampledSegmentPreparationError(
+            "Bootstrap speaker coverage does not match the reusable transcript "
+            "after overlap-safe sample extraction. This usually means one or "
+            "more speakers never had clean solo speech long enough to survive "
+            "the overlap filter. "
+            f"Reusable transcript speakers: {list(transcript_speakers)}. "
+            f"Bootstrap transcript speakers: {list(bootstrap_speakers)}."
+        )
+    overlap_ms = _speaker_interval_overlap_ms(
+        transcript=transcript,
+        bootstrap_transcript=bootstrap_transcript,
+    )
+    bootstrap_durations = _speaker_total_duration_ms(bootstrap_transcript)
+    if len(bootstrap_speakers) <= 6:
+        best_mapping: dict[str, str] | None = None
+        best_total_overlap = -1
+        for transcript_permutation in permutations(
+            transcript_speakers,
+            len(bootstrap_speakers),
+        ):
+            candidate_mapping = {
+                bootstrap_speaker: transcript_speaker
+                for bootstrap_speaker, transcript_speaker in zip(
+                    bootstrap_speakers,
+                    transcript_permutation,
+                    strict=True,
+                )
+            }
+            total_overlap = sum(
+                overlap_ms[bootstrap_speaker][candidate_mapping[bootstrap_speaker]]
+                for bootstrap_speaker in bootstrap_speakers
+            )
+            if total_overlap > best_total_overlap:
+                best_total_overlap = total_overlap
+                best_mapping = candidate_mapping
+        if best_mapping is None:
+            raise SampledSegmentPreparationError(
+                "Unable to determine bootstrap speaker mapping for sampled-segment "
+                "speaker-sample preparation."
+            )
+        mapping = best_mapping
+    else:
+        scored_pairs = sorted(
+            (
+                (
+                    overlap_ms[bootstrap_speaker][transcript_speaker],
+                    bootstrap_speaker,
+                    transcript_speaker,
+                )
+                for bootstrap_speaker in bootstrap_speakers
+                for transcript_speaker in transcript_speakers
+            ),
+            reverse=True,
+        )
+        mapping = {}
+        used_transcript_speakers: set[str] = set()
+        for score, bootstrap_speaker, transcript_speaker in scored_pairs:
+            if score <= 0:
+                continue
+            if (
+                bootstrap_speaker in mapping
+                or transcript_speaker in used_transcript_speakers
+            ):
+                continue
+            mapping[bootstrap_speaker] = transcript_speaker
+            used_transcript_speakers.add(transcript_speaker)
+            if len(mapping) == len(bootstrap_speakers):
+                break
+        if len(mapping) != len(bootstrap_speakers):
+            raise SampledSegmentPreparationError(
+                "Unable to determine bootstrap speaker mapping for sampled-segment "
+                "speaker-sample preparation."
+            )
+    for bootstrap_speaker, transcript_speaker in mapping.items():
+        duration_ms = bootstrap_durations.get(bootstrap_speaker, 0)
+        overlap_ratio = (
+            overlap_ms[bootstrap_speaker][transcript_speaker] / float(duration_ms)
+            if duration_ms > 0
+            else 0.0
+        )
+        if overlap_ratio < _BOOTSTRAP_MIN_SPEAKER_OVERLAP_RATIO:
+            raise SampledSegmentPreparationError(
+                "Bootstrap speaker mapping was too weak to trust. "
+                f"Speaker '{bootstrap_speaker}' best matched '{transcript_speaker}' "
+                f"with overlap ratio={overlap_ratio:.3f}."
+            )
+    return mapping
+
+
+def _rewrite_speaker_sample_manifest(
+    *,
+    manifest_path: Path,
+    speaker_mapping: dict[str, str],
+) -> None:
+    """Rewrite bootstrap speaker-sample manifest using reusable transcript labels."""
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SampledSegmentPreparationError(
+            f"Speaker-sample manifest could not be read for remapping: {manifest_path}"
+        ) from exc
+    samples = payload.get("samples", [])
+    if not isinstance(samples, list) or not samples:
+        raise SampledSegmentPreparationError(
+            f"Speaker-sample manifest does not contain sample entries: {manifest_path}"
+        )
+    seen_manifest_speakers: set[str] = set()
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        bootstrap_speaker = str(sample.get("speaker", "")).strip()
+        if not bootstrap_speaker:
+            continue
+        seen_manifest_speakers.add(bootstrap_speaker)
+        mapped_speaker = speaker_mapping.get(bootstrap_speaker)
+        if mapped_speaker is None:
+            raise SampledSegmentPreparationError(
+                "Speaker-sample manifest contains an unmapped bootstrap speaker: "
+                f"{bootstrap_speaker}"
+            )
+        sample["bootstrap_speaker"] = bootstrap_speaker
+        sample["speaker"] = mapped_speaker
+    missing_speakers = sorted(set(speaker_mapping) - seen_manifest_speakers)
+    if missing_speakers:
+        raise SampledSegmentPreparationError(
+            "Speaker-sample manifest is missing sample entries for bootstrap "
+            f"speaker(s): {missing_speakers}"
+        )
+    payload["bootstrap_speaker_mapping"] = dict(speaker_mapping)
+    manifest_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _normalize_source_audio_url(

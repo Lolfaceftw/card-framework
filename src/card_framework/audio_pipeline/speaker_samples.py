@@ -370,11 +370,14 @@ def build_speaker_sample_plans(
     """
     Build per-speaker concatenation plans from transcript segment timings.
 
-    For SPoRC and other transcripts that explicitly carry overlap uncertainty,
-    cross-speaker overlap is removed from candidate slices before planning and
-    segments already flagged as overlap-uncertain are only used as a fallback
-    when a speaker has no cleaner alternatives. Standard stage-one transcripts
-    keep the legacy behavior unless they include explicit overlap markers.
+    When raw diarization turns are available, they are preferred over transcript
+    segments so speaker samples come from direct speaker timing rather than text
+    alignment. In that mode, only solo speech is kept by subtracting all
+    cross-speaker overlap and allowing shorter-than-requested outputs. Without
+    diarization turns, SPoRC and other transcripts that explicitly carry overlap
+    uncertainty still get overlap-aware trimming, while standard stage-one
+    transcripts keep the legacy behavior unless they include explicit overlap
+    markers.
 
     Args:
         transcript_payload: Transcript payload with `segments`.
@@ -416,17 +419,22 @@ def build_speaker_sample_plans(
             "Transcript payload is invalid: 'segments' must be a list."
         )
 
-    raw_segments = [
-        segment for segment in segments if isinstance(segment, Mapping)
-    ]
-    overlap_isolation_enabled = _should_apply_overlap_isolation(
+    raw_segments = [segment for segment in segments if isinstance(segment, Mapping)]
+    raw_diarization_turns = _extract_diarization_turns(transcript_payload)
+    use_diarization_turns = bool(raw_diarization_turns)
+    overlap_isolation_enabled = use_diarization_turns or _should_apply_overlap_isolation(
         transcript_payload=transcript_payload,
         segments=raw_segments,
     )
     speaker_slices: dict[str, list[AudioSlice]] = {}
     overlap_fallback_slices: dict[str, list[AudioSlice]] = {}
     normalized_segments = sorted(
-        [_extract_segment_record(segment) for segment in raw_segments],
+        [
+            _extract_diarization_turn_record(turn)
+            for turn in raw_diarization_turns
+        ]
+        if use_diarization_turns
+        else [_extract_segment_record(segment) for segment in raw_segments],
         key=lambda item: item.start_time_ms,
     )
     speaker_order: list[str] = []
@@ -447,7 +455,11 @@ def build_speaker_sample_plans(
             continue
         target_pool = (
             overlap_fallback_slices
-            if overlap_isolation_enabled and segment.overlap_marked
+            if (
+                not use_diarization_turns
+                and overlap_isolation_enabled
+                and segment.overlap_marked
+            )
             else speaker_slices
         )
         target_pool.setdefault(segment.speaker, []).extend(clean_slices)
@@ -785,6 +797,45 @@ def _extract_segment_record(
         start_time_ms=start_time,
         end_time_ms=end_time,
         overlap_marked=overlap_marked,
+    )
+
+
+def _extract_diarization_turns(
+    transcript_payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Return persisted diarization turns when the transcript carries them."""
+    for raw_value in (
+        transcript_payload.get("diarization_turns"),
+        transcript_payload.get("metadata", {}).get("diarization_turns")
+        if isinstance(transcript_payload.get("metadata"), Mapping)
+        else None,
+    ):
+        if not isinstance(raw_value, Sequence) or isinstance(raw_value, (str, bytes)):
+            continue
+        turns = tuple(
+            item for item in raw_value if isinstance(item, Mapping)
+        )
+        if turns:
+            return turns
+    return ()
+
+
+def _extract_diarization_turn_record(
+    turn: Mapping[str, Any],
+) -> _NormalizedTranscriptSegment:
+    """Extract speaker and timings from one persisted diarization turn."""
+    speaker = str(turn.get("speaker", "")).strip()
+    if not speaker:
+        raise NonRetryableAudioStageError(
+            "Persisted diarization turn is missing a non-empty speaker label."
+        )
+    start_time = _coerce_milliseconds(turn.get("start_time"), field_name="start_time")
+    end_time = _coerce_milliseconds(turn.get("end_time"), field_name="end_time")
+    return _NormalizedTranscriptSegment(
+        speaker=speaker,
+        start_time_ms=start_time,
+        end_time_ms=end_time,
+        overlap_marked=False,
     )
 
 

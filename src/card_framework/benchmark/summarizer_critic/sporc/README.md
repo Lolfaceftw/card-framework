@@ -535,7 +535,9 @@ prepare one per-episode folder with:
 - a local source-audio copy or download,
 - a prepared transcript whose metadata points at that local audio and the new
   speaker-sample manifest,
-- speaker samples generated from the existing prepared SPoRC transcript timings.
+- speaker samples bootstrapped from the localized episode audio via fresh source
+  separation and NeMo diarization, then remapped onto the reusable transcript
+  speaker IDs.
 
 Run:
 
@@ -550,12 +552,17 @@ Notes:
   and falls back to normalized episode-title matching only when needed,
 - output defaults to
   `src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episodes/`,
-- it uses the same post-transcript speaker-sample generator path as the main
-  pipeline and SPoRC voice-clone benchmark flow, without re-running
-  transcription or diarization,
-- speaker clipping is forced onto `source` audio for this prep flow because the
-  downloaded episode MP3 is the artifact being localized into each episode
-  folder.
+- it now bootstraps fresh speaker samples from the localized episode audio so
+  the sample timings come from new diarization output instead of the prepared
+  SPoRC transcript timings, without rerunning ASR for this prep path,
+- the prep flow still preserves the reusable transcript speaker IDs by remapping
+  the bootstrap manifest labels back onto the prepared transcript labels before
+  later voice-clone stages consume them,
+- speaker clipping respects `audio.speaker_samples.source_audio`, so this prep
+  flow can still force clipping against the localized source MP3 when desired,
+- when the configured diarizer is NeMo-derived but the local host cannot import
+  or support NeMo, this bootstrap path now auto-delegates to the repo's Docker
+  Compose runtime instead of failing after local separation work.
 
 ## Step 1.75: Prepare Episode Audio And Speaker Samples For Local Sampled Segments
 
@@ -583,7 +590,9 @@ Important behavior:
 - the helper reads the `Episode:` header from each sampled-segment `.txt` file and uses `Sample ID:` when present for an exact manifest match.
 - duplicate sampled-segment files for the same SPoRC sample are grouped into one episode asset folder.
 - each prepared episode folder contains copied sampled-segment files, downloaded source audio, a local full transcript annotated with `source_audio_path` and `speaker_samples_manifest_path`, plus the generated speaker-sample manifest and WAV clips.
-- the helper uses the existing prepared full transcript for speaker-sample clipping, so the speaker labels stay aligned with the prepared SPoRC episode instead of trying to infer them from the sampled snippets alone.
+- the helper now bootstraps fresh speaker samples from the downloaded episode audio via source separation and NeMo diarization, then remaps the resulting speaker labels back onto the reusable SPoRC transcript speaker IDs.
+- overlap-heavy speaker regions are skipped for sampling by subtracting any simultaneous speaker activity before the final sample slices are selected, so samples can end up shorter than `30s` when that is the cleanest option.
+- if the configured diarizer is NeMo-derived but the local runtime cannot import NeMo, the helper auto-delegates only this diarization-first speaker-sample bootstrap to `docker compose` using the repo's `setup-and-run` or `setup-and-run-gpu` service. Keep Docker Desktop and the repo Compose stack available on Windows hosts.
 
 ## Step 2: Run One Benchmark
 

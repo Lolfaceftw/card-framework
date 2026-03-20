@@ -112,6 +112,18 @@ For Windows hosts, the supported path is:
 This is a Linux container fallback on a Windows host. It is not native Windows
 NeMo support.
 
+The sampled-segment speaker prep helpers now auto-use this same Compose runtime
+for their diarization-only speaker-sample bootstrap when:
+
+- `audio.diarization.provider` is NeMo-derived, and
+- the current host does not support NeMo or does not have the local NeMo
+  runtime installed.
+
+That means commands such as
+`python -m card_framework.benchmark.summarizer_critic.sporc.sampled_segments.prepare_episode_assets`
+can keep using your repo-local config while still handing NeMo work off to the
+Linux container automatically.
+
 ## CPU-Only Guidance
 
 - `setup-and-run` is the generic CPU-oriented service.
@@ -141,5 +153,6 @@ NeMo support.
 1. Keep Docker centered on `setup_and_run` until the operator path is stable.
 2. Add optional sidecar services later for local vLLM and related model
    backends when the runtime contract for those services is settled.
-3. Consider a host-side auto-fallback later so native Windows runs can hand off
-   to Compose automatically when the config selects NeMo.
+3. Keep expanding the same host-side Docker delegation pattern only where the
+   local runtime truly cannot satisfy a configured backend, without silently
+   moving unrelated stages into containers.

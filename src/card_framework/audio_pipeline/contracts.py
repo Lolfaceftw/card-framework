@@ -18,6 +18,14 @@ class TranscriptSegmentPayload(TypedDict):
     text: str
 
 
+class DiarizationTurnPayload(TypedDict):
+    """Serialized speaker-diarization turn stored in transcript metadata."""
+
+    speaker: str
+    start_time: int
+    end_time: int
+
+
 class TranscriptMetadataPayload(TypedDict, total=False):
     """Optional serialized metadata emitted by the audio stage."""
 
@@ -37,6 +45,7 @@ class TranscriptMetadataPayload(TypedDict, total=False):
     forced_alignment_enabled: bool
     forced_alignment_satisfied: bool
     transcription_language: str
+    diarization_turns: list[DiarizationTurnPayload]
 
 
 class TranscriptPayload(TypedDict, total=False):

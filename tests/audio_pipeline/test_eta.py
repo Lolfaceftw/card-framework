@@ -800,4 +800,11 @@ def test_audio_orchestrator_releases_stage_models_between_transcription_and_diar
 
     assert result.segment_count == 1
     assert release_order[:2] == ["transcriber:cuda", "diarizer:cuda"]
+    assert result.transcript_payload["metadata"]["diarization_turns"] == [
+        {
+            "speaker": "SPEAKER_00",
+            "start_time": 0,
+            "end_time": 1000,
+        }
+    ]
 

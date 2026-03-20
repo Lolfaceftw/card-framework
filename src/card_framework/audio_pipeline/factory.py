@@ -92,6 +92,24 @@ def build_audio_to_script_orchestrator(
     )
 
 
+def build_source_separator(audio_cfg: Mapping[str, Any]) -> SourceSeparator:
+    """
+    Build source separator from config mapping.
+
+    Args:
+        audio_cfg: ``audio`` config section.
+
+    Returns:
+        Wired ``SourceSeparator`` instance.
+    """
+    separation_cfg = _as_mapping(audio_cfg.get("separation", {}))
+    retry_cfg = _as_mapping(audio_cfg.get("retry", {}))
+    return _build_separator(
+        separation_cfg=separation_cfg,
+        retry_cfg=retry_cfg,
+    )
+
+
 def build_speaker_sample_generator(audio_cfg: Mapping[str, Any]) -> SpeakerSampleGenerator:
     """
     Build post-transcript speaker-sample generator from audio config mapping.

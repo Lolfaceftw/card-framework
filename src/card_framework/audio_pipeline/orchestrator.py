@@ -182,6 +182,14 @@ class AudioToScriptOrchestrator:
                 "forced_alignment_enabled": True,
                 "forced_alignment_satisfied": forced_alignment_satisfied,
                 "transcription_language": asr_result.language,
+                "diarization_turns": [
+                    {
+                        "speaker": turn.speaker,
+                        "start_time": turn.start_time_ms,
+                        "end_time": turn.end_time_ms,
+                    }
+                    for turn in diarization_turns
+                ],
             }
             if metadata_overrides:
                 metadata = cast(

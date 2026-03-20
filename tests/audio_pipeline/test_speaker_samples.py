@@ -85,6 +85,56 @@ def test_build_speaker_sample_plans_subtracts_cross_speaker_overlap() -> None:
     assert plans[0].status == "ok"
 
 
+def test_build_speaker_sample_plans_prefers_persisted_diarization_turns() -> None:
+    transcript_payload = {
+        "metadata": {
+            "diarization_turns": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 10_000,
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "start_time": 4_000,
+                    "end_time": 6_000,
+                },
+            ]
+        },
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 12_000,
+                "text": "host line with noisy alignment",
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 3_500,
+                "end_time": 6_500,
+                "text": "interruption with noisy alignment",
+            },
+        ],
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=6_000,
+        min_slice_duration_ms=1_000,
+        max_slices=3,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert [plan.speaker for plan in plans] == ["SPEAKER_00"]
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=4_000),
+        AudioSlice(start_time_ms=6_000, end_time_ms=8_000),
+    )
+    assert plans[0].actual_duration_ms == 6_000
+    assert plans[0].status == "ok"
+
+
 def test_build_speaker_sample_plans_keeps_legacy_behavior_without_overlap_markers() -> None:
     transcript_payload = {
         "segments": [
