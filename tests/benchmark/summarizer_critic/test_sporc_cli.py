@@ -132,7 +132,7 @@ def test_render_duration_sweep_menu_lists_presets() -> None:
 
 
 def test_parse_duration_preset_list_splits_and_validates() -> None:
-    assert _parse_duration_preset_list("30s,1m,5m") == ["30s", "1m", "5m"]
+    assert _parse_duration_preset_list("30s,1m,5m,10m") == ["30s", "1m", "5m", "10m"]
 
 
 def test_resolve_prepare_root_defaults_by_dataset_variant() -> None:
@@ -189,10 +189,16 @@ def test_build_parser_accepts_llm_sample_command() -> None:
             "llm-sample",
             "--dataset-manifest",
             "manifest.json",
+            "--provider",
+            "vllm",
             "--duration-preset",
-            "30s",
+            "10m",
             "--samples",
             "20",
+            "--text-only",
+            "--transcribe-enabled",
+            "--audio-device",
+            "cpu",
             "--episodes",
             "5",
             "--select-episode",
@@ -206,8 +212,12 @@ def test_build_parser_accepts_llm_sample_command() -> None:
 
     assert args.command == "llm-sample"
     assert args.dataset_manifest == "manifest.json"
-    assert args.duration_preset == "30s"
+    assert args.provider == "vllm"
+    assert args.duration_preset == "10m"
     assert args.samples == 20
+    assert args.text_only is True
+    assert args.transcribe_enabled is True
+    assert args.audio_device == "cpu"
     assert args.episodes == 5
     assert args.select_episode == "[7,10]"
     assert args.model == "claude-opus-4-6"
@@ -245,6 +255,14 @@ def test_build_parser_accepts_filter_audio_urls_command() -> None:
             "audit.json",
             "--timeout-seconds",
             "7.5",
+            "--max-workers",
+            "12",
+            "--max-workers-per-host",
+            "3",
+            "--max-retries",
+            "2",
+            "--retry-backoff-seconds",
+            "1.25",
         ]
     )
 
@@ -253,6 +271,10 @@ def test_build_parser_accepts_filter_audio_urls_command() -> None:
     assert args.output_manifest == "filtered.json"
     assert args.audit_path == "audit.json"
     assert args.timeout_seconds == 7.5
+    assert args.max_workers == 12
+    assert args.max_workers_per_host == 3
+    assert args.max_retries == 2
+    assert args.retry_backoff_seconds == 1.25
 
 
 def test_build_parser_accepts_export_transcripts_command() -> None:
@@ -1990,6 +2012,10 @@ def test_main_filter_audio_urls_reports_summary(
         assert kwargs["output_manifest_path"] == str(manifest_path)
         assert kwargs["audit_path"] == str(audit_path)
         assert kwargs["timeout_seconds"] == 7.5
+        assert kwargs["max_workers"] == 12
+        assert kwargs["max_workers_per_host"] == 3
+        assert kwargs["max_retries"] == 2
+        assert kwargs["retry_backoff_seconds"] == 1.25
         reporter = kwargs["status_reporter"]
         reporter(
             "Loading SPoRC source-audio URL validation... validated 10 / 20 rows "
@@ -2021,6 +2047,14 @@ def test_main_filter_audio_urls_reports_summary(
             str(audit_path),
             "--timeout-seconds",
             "7.5",
+            "--max-workers",
+            "12",
+            "--max-workers-per-host",
+            "3",
+            "--max-retries",
+            "2",
+            "--retry-backoff-seconds",
+            "1.25",
         ]
     )
 

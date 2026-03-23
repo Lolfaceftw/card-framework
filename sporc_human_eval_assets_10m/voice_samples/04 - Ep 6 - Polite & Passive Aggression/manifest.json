@@ -1,0 +1,83 @@
+{
+  "generated_at_utc": "2026-03-21T03:06:34+00:00",
+  "source_audio_path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_01648_https_dts_podtrac_com_redirect_mp3_api_spreaker_com_download_episode__Ep_6_Polite_Passive_Aggression/source_audio/sporc_01648_https_dts_podtrac_com_redirect_mp3_api_spreaker_com_download_episode_26589100_rr.mp3",
+  "target_duration_ms": 30000,
+  "clip_method": "concat_turns",
+  "short_speaker_policy": "export_shorter",
+  "sample_rate_hz": 44100,
+  "channels": 1,
+  "codec": "pcm_s24le",
+  "edge_fade_ms": 20,
+  "min_slice_duration_ms": 1200,
+  "max_slices": 6,
+  "selection_order": "chronological",
+  "low_data_policy": "quality_first_shorter",
+  "samples": [
+    {
+      "speaker": "SPEAKER_01",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_01648_https_dts_podtrac_com_redirect_mp3_api_spreaker_com_download_episode__Ep_6_Polite_Passive_Aggression/speaker_samples/SPEAKER_01.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 11165,
+      "status": "shorter_than_requested",
+      "selected_slice_count": 6,
+      "dropped_slice_count": 501,
+      "ranges_ms": [
+        {
+          "start_time_ms": 12940,
+          "end_time_ms": 14170
+        },
+        {
+          "start_time_ms": 17980,
+          "end_time_ms": 19290
+        },
+        {
+          "start_time_ms": 23500,
+          "end_time_ms": 26375
+        },
+        {
+          "start_time_ms": 31820,
+          "end_time_ms": 34445
+        },
+        {
+          "start_time_ms": 49260,
+          "end_time_ms": 51135
+        },
+        {
+          "start_time_ms": 52135,
+          "end_time_ms": 53385
+        }
+      ]
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_01648_https_dts_podtrac_com_redirect_mp3_api_spreaker_com_download_episode__Ep_6_Polite_Passive_Aggression/speaker_samples/SPEAKER_00.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 30000,
+      "status": "ok",
+      "selected_slice_count": 5,
+      "dropped_slice_count": 542,
+      "ranges_ms": [
+        {
+          "start_time_ms": 26375,
+          "end_time_ms": 29450
+        },
+        {
+          "start_time_ms": 34445,
+          "end_time_ms": 39370
+        },
+        {
+          "start_time_ms": 40300,
+          "end_time_ms": 47370
+        },
+        {
+          "start_time_ms": 53385,
+          "end_time_ms": 58650
+        },
+        {
+          "start_time_ms": 59260,
+          "end_time_ms": 68925
+        }
+      ]
+    }
+  ]
+}

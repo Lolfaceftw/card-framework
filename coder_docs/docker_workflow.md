@@ -4,8 +4,8 @@ Use this file as the source of truth for the repository's containerized runtime
 workflow.
 
 The Docker path is centered on `card_framework.cli.setup_and_run`. It is the
-recommended way to run the full pipeline on a Windows host when you need a
-Linux execution environment for NeMo-backed diarization.
+preferred repo-local way to run the full pipeline, and on CUDA-capable Docker
+hosts the preferred service is `setup-and-run-gpu` under the `gpu` profile.
 
 ## Why This Exists
 
@@ -37,6 +37,8 @@ Linux execution environment for NeMo-backed diarization.
   volumes so Linux virtual environments do not pollute the host checkout.
 - Hugging Face and uv caches are also stored in named volumes so repeated runs
   reuse downloaded assets.
+- Both runtime services inherit `mem_limit: 8g` and `memswap_limit: 10g`, so
+  the container stays capped at about `8 GB` of RAM with about `2 GB` of swap.
 - The Compose services force `linux/amd64` so the runtime matches the Linux
   x86_64 path that NeMo supports upstream. On Apple Silicon that means Docker
   runs under emulation, so expect slower startup.
@@ -67,7 +69,8 @@ Run the full pipeline from source audio:
 docker compose run --rm setup-and-run --audio-path audio.wav
 ```
 
-Run the GPU profile for Windows or Linux NVIDIA hosts:
+Run the GPU profile for CUDA-capable Docker hosts. Prefer this path whenever
+Docker can expose NVIDIA or CUDA devices:
 
 ```bash
 docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
@@ -94,10 +97,17 @@ write a quick speaker-preview transcript from an existing timed transcript:
 docker compose --profile gpu run --rm --entrypoint bash setup-and-run-gpu -lc "uv run python scripts/run_diarization_experiment.py --audio-path artifacts/audio_stage/runs/<run-id>/separation/htdemucs/audio/vocals.wav --base-transcript-path artifacts/transcripts/<run-id>.transcript.json --device cuda"
 ```
 
-Run stage-3 voice cloning directly from an existing summary:
+Run stage-3 voice cloning directly from an existing summary on CPU-only hosts:
 
 ```bash
 docker compose run --rm setup-and-run --voiceclone-from-summary summary.xml
+```
+
+Run stage-3 voice cloning directly from an existing summary on CUDA-capable
+Docker hosts:
+
+```bash
+docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --voiceclone-from-summary summary.xml
 ```
 
 ## Windows + NeMo Guidance
@@ -107,7 +117,8 @@ For Windows hosts, the supported path is:
 1. Install Docker Desktop with the WSL 2 backend enabled.
 2. Install an NVIDIA Windows driver that supports CUDA on WSL 2.
 3. Keep `audio.diarization.provider=nemo` in `conf/config.yaml`.
-4. Run the pipeline with `setup-and-run-gpu`.
+4. If Docker can expose CUDA, run the pipeline with `--profile gpu` and
+   `setup-and-run-gpu`; otherwise use `setup-and-run`.
 
 This is a Linux container fallback on a Windows host. It is not native Windows
 NeMo support.
@@ -137,6 +148,8 @@ Linux container automatically.
 
 - Run Compose commands from the repository root.
 - Copy `.env.example` to `.env` before the first containerized run.
+- Prefer `setup-and-run-gpu` over `setup-and-run` whenever the host exposes
+  CUDA to Docker.
 - `setup_and_run` still auto-selects stage-2 when it discovers a reusable
   transcript in the mounted workspace.
 - Relative paths such as `audio.wav`, `transcript.json`, and `summary.xml`
@@ -144,9 +157,29 @@ Linux container automatically.
   `/workspace/card-framework`.
 - The GPU profile is intentionally separate so CPU hosts do not fail on `gpus:
   all`.
+- The container-side resource cap is set in `compose.yml` to about `8 GB` RAM
+  plus `2 GB` swap (`mem_limit: 8g`, `memswap_limit: 10g`).
 - For transcript tuning, prefer fixing one stage-1 run ID first and then reuse
   its `separation/.../vocals.wav` with `scripts/run_diarization_experiment.py`
   when you want to isolate NeMo changes from run-to-run Demucs variation.
+
+## Run Verification
+
+When a task asks you to run a repo entrypoint or script, execute it instead of
+stopping at static inspection, and do not treat the live terminal stream as the
+only success signal.
+
+- Inspect the persisted run logs too. For the standard runtime path, check the
+  output-root `agent_interactions.log` when it exists, along with any
+  run-local artifacts or benchmark child logs written under `artifacts/`.
+- Probe container memory while the run is active with `docker stats
+  --no-stream <container-id>` after finding the active container through
+  `docker ps`.
+- On CUDA-capable hosts, probe GPU memory and utilization with `nvidia-smi`
+  while the run is active instead of inferring GPU health from terminal text
+  alone.
+- If a stage or profiling mode writes a structured telemetry artifact such as
+  `resource_profile.json`, review that artifact as part of run validation.
 
 ## Near-Term Plan
 

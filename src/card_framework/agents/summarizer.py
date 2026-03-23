@@ -24,6 +24,7 @@ from card_framework.agents.tool_handlers import (
     build_summarizer_tools,
 )
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
+from card_framework.audio_pipeline.emotion_vectors import serialize_emotion_vector
 from card_framework.audio_pipeline.live_draft_voice_clone import (
     LiveDraftVoiceCloneSession,
 )
@@ -269,6 +270,27 @@ class SummarizerExecutor(BaseA2AExecutor):
             for name, emo_text in self.emo_preset_catalog.items()
         )
 
+    @staticmethod
+    def _format_transcript_excerpt_segment(segment: dict[str, Any]) -> str:
+        """Render one retrieval segment into prompt-friendly transcript text."""
+        speaker = str(segment.get("speaker", "UNKNOWN")).strip() or "UNKNOWN"
+        text = str(segment.get("text", ""))
+        affect_hint = str(segment.get("affect_hint", "")).strip()
+        emotion_vector = serialize_emotion_vector(segment.get("emotion_vector"))
+        emotion_vector_text = (
+            ", ".join(f"{value:.3f}" for value in emotion_vector)
+            if emotion_vector is not None
+            else ""
+        )
+        if affect_hint:
+            prefix = f"[{speaker}] [affect: {affect_hint}]"
+            if emotion_vector_text:
+                prefix += f" [emotion_vector: {emotion_vector_text}]"
+            return f"{prefix}: {text}\n"
+        if emotion_vector_text:
+            return f"[{speaker}] [emotion_vector: {emotion_vector_text}]: {text}\n"
+        return f"[{speaker}]: {text}\n"
+
     async def handle_task(
         self,
         task_data: dict[str, Any],
@@ -462,9 +484,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             )
 
             for seg in segments:
-                speaker = seg.get("speaker", "UNKNOWN")
-                text = seg.get("text", "")
-                transcript_excerpt += f"[{speaker}]: {text}\n"
+                transcript_excerpt += self._format_transcript_excerpt_segment(seg)
         else:
             transcript_excerpt = self._build_full_transcript_prompt_text(
                 full_transcript
@@ -561,7 +581,12 @@ class SummarizerExecutor(BaseA2AExecutor):
         except ValueError:
             return
         for turn in turns:
-            registry.add(turn.speaker, turn.text, turn.emo_preset)
+            registry.add(
+                turn.speaker,
+                turn.text,
+                turn.emo_preset,
+                turn.emotion_vector.to_list() if turn.emotion_vector is not None else None,
+            )
 
     async def process_tool_calls(
         self, tool_calls: list[dict[str, Any]], messages: list, context_data: dict

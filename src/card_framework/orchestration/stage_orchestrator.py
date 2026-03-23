@@ -13,6 +13,9 @@ import time
 from card_framework.audio_pipeline.gpu_heartbeat import VoiceCloneGpuHeartbeatService
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
 from card_framework.audio_pipeline.interjector import InterjectorOrchestrator, InterjectorRunResult
+from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+    SummaryTurnEmotionLinker,
+)
 from card_framework.audio_pipeline.eta import (
     DynamicEtaTracker,
     EtaProfilePersistence,
@@ -35,7 +38,11 @@ from card_framework.runtime.pipeline_sessions import (
     PipelineStageName,
 )
 from card_framework.runtime.pipeline_plan import PipelineStagePlan
-from card_framework.shared.summary_xml import count_summary_turns, parse_summary_xml
+from card_framework.shared.summary_xml import (
+    count_summary_turns,
+    parse_summary_xml,
+    serialize_summary_turns,
+)
 from card_framework.shared.summary_output import (
     write_summary_xml,
     write_summary_xml_to_workspace,
@@ -66,6 +73,7 @@ class StageOrchestrator:
     voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
     loop_memory_artifact_path: Path | None = None
     live_draft_audio_enabled: bool = False
+    summary_turn_emotion_linker: SummaryTurnEmotionLinker | None = None
     session_store: PipelineSessionStore | None = None
     session_id: str = ""
     session_summary_output_path: Path | None = None
@@ -118,6 +126,10 @@ class StageOrchestrator:
                 f"Final summary file is empty: {self.stage_plan.final_summary_path}"
             )
 
+        final_summary = self._link_summary_turn_emotions(
+            summary_xml=final_summary,
+            transcript=transcript,
+        )
         summary_path = self._write_summary_outputs(final_summary)
         event_bus.publish(
             "status_message",
@@ -243,13 +255,17 @@ class StageOrchestrator:
         result = diagnostics["draft"] if diagnostics["converged"] else ""
         if not result:
             return
+        final_summary = self._link_summary_turn_emotions(
+            summary_xml=result,
+            transcript=prepared_transcript,
+        )
 
         event_bus.publish(
             "agent_message",
             "Orchestrator",
-            f"Final Summary:\n```xml\n{result}\n```",
+            f"Final Summary:\n```xml\n{final_summary}\n```",
         )
-        summary_path = self._write_summary_outputs(result)
+        summary_path = self._write_summary_outputs(final_summary)
         event_bus.publish(
             "status_message",
             f"Saved final summary to {summary_path}",
@@ -266,29 +282,38 @@ class StageOrchestrator:
                 and draft_audio_state_path is not None
                 and speaker_samples_manifest_path is not None
             ):
-                event_bus.publish(
-                    "system_message",
-                    (
-                        "Finalizing live draft voice-clone manifest from rendered turn "
-                        f"audio in {draft_audio_state_path}"
-                    ),
-                )
-                live_session = LiveDraftVoiceCloneSession.from_orchestrator(
-                    orchestrator=self.voice_clone_orchestrator,
-                    state_path=draft_audio_state_path,
-                    speaker_samples_manifest_path=speaker_samples_manifest_path,
-                )
-                voice_clone_result = live_session.finalize()
-                event_bus.publish(
-                    "status_message",
-                    (
-                        f"Voice cloning complete: {len(voice_clone_result.artifacts)} artifacts "
-                        f"written to {voice_clone_result.output_dir}"
-                    ),
-                )
+                if self._should_rerender_live_draft_final_summary(
+                    original_summary_xml=result,
+                    enriched_summary_xml=final_summary,
+                ):
+                    voice_clone_result = self._run_live_batch_voice_clone_stage(
+                        summary_xml=final_summary,
+                        transcript=prepared_transcript,
+                    )
+                else:
+                    event_bus.publish(
+                        "system_message",
+                        (
+                            "Finalizing live draft voice-clone manifest from rendered turn "
+                            f"audio in {draft_audio_state_path}"
+                        ),
+                    )
+                    live_session = LiveDraftVoiceCloneSession.from_orchestrator(
+                        orchestrator=self.voice_clone_orchestrator,
+                        state_path=draft_audio_state_path,
+                        speaker_samples_manifest_path=speaker_samples_manifest_path,
+                    )
+                    voice_clone_result = live_session.finalize()
+                    event_bus.publish(
+                        "status_message",
+                        (
+                            f"Voice cloning complete: {len(voice_clone_result.artifacts)} artifacts "
+                            f"written to {voice_clone_result.output_dir}"
+                        ),
+                    )
             else:
                 voice_clone_result = self._run_voice_clone_stage(
-                    summary_xml=result,
+                    summary_xml=final_summary,
                     transcript=prepared_transcript,
                 )
             self._mark_stage_completed(
@@ -296,9 +321,56 @@ class StageOrchestrator:
                 detail={"manifest_path": str(voice_clone_result.manifest_path)},
             )
         self._run_interjector_stage(
-            summary_xml=result,
+            summary_xml=final_summary,
             voice_clone_result=voice_clone_result,
         )
+
+    def _link_summary_turn_emotions(
+        self,
+        *,
+        summary_xml: str,
+        transcript: Transcript,
+    ) -> str:
+        """Attach source-grounded explicit vectors to the final summary turns."""
+        if self.summary_turn_emotion_linker is None:
+            return summary_xml
+        turns = parse_summary_xml(summary_xml)
+        if not turns:
+            return summary_xml
+        linking_result = self.summary_turn_emotion_linker.link_turns(
+            turns=turns,
+            transcript=transcript,
+        )
+        if linking_result.changed:
+            event_bus.publish(
+                "status_message",
+                (
+                    "Summary-turn emotion linking attached explicit vectors to "
+                    f"{linking_result.linked_turn_count}/{len(turns)} turn(s)."
+                ),
+            )
+        else:
+            event_bus.publish(
+                "system_message",
+                (
+                    "Summary-turn emotion linking found no strong source-grounded "
+                    "matches; preserving fallback emotion behavior."
+                ),
+            )
+        return serialize_summary_turns(list(linking_result.turns))
+
+    def _should_rerender_live_draft_final_summary(
+        self,
+        *,
+        original_summary_xml: str,
+        enriched_summary_xml: str,
+    ) -> bool:
+        """Return whether stage-3 should rerender the final accepted summary."""
+        if self.summary_turn_emotion_linker is None:
+            return False
+        if self.summary_turn_emotion_linker.config.force_live_draft_rerender:
+            return True
+        return original_summary_xml.strip() != enriched_summary_xml.strip()
 
     def _build_loop_memory_context(self, *, transcript: Transcript) -> dict[str, str]:
         """Build a stable persistence scope for summarizer loop memory artifacts."""
@@ -375,6 +447,14 @@ class StageOrchestrator:
                 "speaker_id": turn.speaker,
                 "content": turn.text,
                 "emo_preset": turn.emo_preset,
+                "emotion_vector": (
+                    turn.emotion_vector.to_list()
+                    if turn.emotion_vector is not None
+                    else None
+                ),
+                "emotion_vector_source": turn.emotion_vector_source,
+                "source_segment_indices": list(turn.source_segment_indices),
+                "source_segment_weights": list(turn.source_segment_weights),
             }
             for index, turn in enumerate(parse_summary_xml(summary_xml), start=1)
         ]

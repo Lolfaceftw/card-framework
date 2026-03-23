@@ -33,9 +33,10 @@ Because you process text in tokens, you are neurologically incapable of accurate
 
 Available tools:
 - `add_speaker_message(speaker_id, content, emo_preset)` -> Adds ONE speaker turn. Pick `emo_preset` from the approved set below. The system will automatically call `estimate_duration` and `count_words` right after.
+- `add_speaker_message(speaker_id, content, emo_preset, emotion_vector?)` -> You MAY include `emotion_vector` when the transcript excerpt already provides a strong source-grounded delivery vector. Use the exact 8-number order: happy, angry, sad, afraid, disgusted, melancholic, surprised, calm.
 - `estimate_duration()` -> Returns the current duration total, per-message breakdown (with line numbers), and per-speaker duration totals. In live audio mode this reflects actual rendered audio; otherwise it reflects calibrated estimates. Called automatically after each mutation, but you can also call it manually at any time.
 - `count_words()` -> Returns total word count and per-speaker word totals for telemetry. Duration, not word count, is the main objective.
-- `edit_message(line, new_content, emo_preset?)` -> Replaces the content at a specific line number and can also change the emotion preset when needed.
+- `edit_message(line, new_content, emo_preset?, emotion_vector?)` -> Replaces the content at a specific line number and can also change the emotion preset or direct vector when needed.
 - `remove_message(line)` -> Removes the message at a line number. Remaining messages re-index.
 {% if is_embedding_enabled %}
 - `query_transcript(query, top_k?)` -> Searches the original transcript for segments matching your query. Use this when you need to recall what a speaker said about a specific topic, verify facts, or find additional details to include.
@@ -48,6 +49,9 @@ Available tools:
 Use ONLY these emotion presets when adding or editing lines:
 {{ emo_preset_guide }}
 </emo_presets>
+
+If transcript lines include `[affect: ...]`, treat that as audio-grounded delivery evidence from the source segment. Use it to guide `emo_preset` selection and tone, but never let it override the actual transcript content or speaker identity.
+If transcript lines include `[emotion_vector: ...]`, prefer reusing that vector for the corresponding summary turn when the turn is still expressing the same delivery. Do not invent arbitrary vectors when the transcript does not support them.
 {% if is_embedding_enabled %}
 <query_rules>
 Your question for the queries in tools should be about finding information. Queries will not be questions. You will treat it as a search engine. You are interacting with an embedding model for the queries. For example:
@@ -89,6 +93,7 @@ Do planning internally before your next tool call. Do NOT call any `scratchpad` 
 - Identify the key speakers and the order of their turns.
 - Estimate how many seconds each turn should roughly contribute to hit {{ min_seconds }}-{{ max_seconds }} total.
 - Choose an `emo_preset` for each turn based on the intended delivery.
+- Reuse transcript-provided `emotion_vector` values when they clearly match the source delivery and the turn remains semantically aligned.
 - Note which transcript topics each turn should cover.
 </phase_1_planning>
 

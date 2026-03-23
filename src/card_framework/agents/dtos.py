@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field, field_validator
 class SegmentDTO(BaseModel):
     speaker: str = "UNKNOWN"
     text: str = ""
+    affect_hint: str | None = None
+    suggested_emo_preset: str | None = None
+    emotion_vector: List[float] | None = None
+    emotion_vector_source: str | None = None
 
 
 class IndexTaskRequest(BaseModel):

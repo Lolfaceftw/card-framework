@@ -31,6 +31,7 @@ episode_assets/
 # Local benchmark output and backup copies
 summary_matrix/
 summary.xml.old.*
+/compare_*/
 
 # Cache
 .pytest_cache/
@@ -41,4 +42,6 @@ checkpoints/hf_cache/
 checkpoints/index_tts/
 
 audio.wav
+*.wav
+*.mp3
 third_party/index_tts/

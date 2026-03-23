@@ -124,6 +124,31 @@ def test_validate_runtime_credentials_reports_missing_selected_provider_secret()
         )
 
 
+def test_validate_runtime_credentials_reports_missing_anthropic_secret() -> None:
+    """Anthropic profile selections should fail fast without an API key."""
+
+    with pytest.raises(RuntimeConfigError, match="ANTHROPIC_API_KEY"):
+        validate_runtime_credentials(
+            {
+                "selection": {"llm": "anthropic_claude_opus", "embedding": "disabled"},
+                "profiles": {
+                    "llm": {
+                        "anthropic_claude_opus": {
+                            "_target_": "card_framework.providers.anthropic_provider.AnthropicProvider",
+                            "api_key": "",
+                            "model": "claude-opus-4-6",
+                        }
+                    },
+                    "embedding": {
+                        "disabled": {
+                            "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+                        }
+                    },
+                },
+            }
+        )
+
+
 def test_packaged_qwen_embedding_profile_uses_tuned_defaults() -> None:
     cfg = OmegaConf.load(
         Path(__file__).resolve().parents[2]

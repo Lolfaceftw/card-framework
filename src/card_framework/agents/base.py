@@ -513,8 +513,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             await asyncio.sleep(0)
             await self.handle_task(task_data, context, event_queue)
         except Exception as e:
-            logger.error(f"[{self.name}] Error handling task: {e}")
-            raise
+            logger.exception("[%s] Error handling task: %s", self.name, e)
+            await self.send_failure(str(e), context, event_queue)
 
     @abstractmethod
     async def handle_task(
@@ -557,6 +557,39 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             return
 
         await event_queue.enqueue_event(response_message)
+
+    async def send_failure(
+        self,
+        error_text: str,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        """Publish one terminal failed-task update with a human-readable error."""
+        failure_message = new_agent_text_message(
+            error_text,
+            context_id=getattr(context, "context_id", None),
+            task_id=getattr(context, "task_id", None),
+        )
+        task_id = getattr(context, "task_id", None)
+        context_id = getattr(context, "context_id", None)
+
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and isinstance(context_id, str)
+            and context_id
+        ):
+            from a2a.server.tasks import TaskUpdater
+
+            task_updater = TaskUpdater(
+                event_queue=event_queue,
+                task_id=task_id,
+                context_id=context_id,
+            )
+            await task_updater.failed(message=failure_message)
+            return
+
+        await event_queue.enqueue_event(failure_message)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         pass

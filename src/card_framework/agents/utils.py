@@ -70,7 +70,8 @@ def validate_transcript_schema(payload: dict[str, Any]) -> dict[str, Any]:
         end_time = max(start_time, int(end_time))
         synthetic_cursor_ms = max(synthetic_cursor_ms, end_time)
 
-        normalized_segments.append(
+        normalized_segment = dict(segment)
+        normalized_segment.update(
             {
                 "speaker": speaker,
                 "start_time": start_time,
@@ -78,6 +79,7 @@ def validate_transcript_schema(payload: dict[str, Any]) -> dict[str, Any]:
                 "text": text,
             }
         )
+        normalized_segments.append(normalized_segment)
 
     normalized_payload = dict(payload)
     normalized_payload["segments"] = normalized_segments

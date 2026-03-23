@@ -17,7 +17,7 @@ diarizer:
   out_dir: ???
   oracle_vad: False
   collar: 0.25
-  ignore_overlap: True
+  ignore_overlap: False
 
   vad:
     model_path: vad_multilingual_marblenet

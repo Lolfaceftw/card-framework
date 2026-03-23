@@ -107,6 +107,82 @@ def test_resolve_audio_input_uses_workspace_root(
     assert resolved == audio_path.resolve()
 
 
+def test_resolve_session_transcript_artifact_override_preserves_stage_two_input(
+    tmp_path: Path,
+) -> None:
+    transcript_path = tmp_path / "episode.transcript.json"
+    transcript_path.write_text('{"segments": []}\n', encoding="utf-8")
+
+    resolved = setup_and_run.resolve_session_transcript_artifact_override(
+        start_stage="stage-2",
+        transcript_path=transcript_path,
+    )
+
+    assert resolved == transcript_path.resolve()
+
+
+def test_validate_batch_audio_inputs_rejects_non_stage_one_override() -> None:
+    """Batch audio sweeps should stay on isolated stage-1 runs only."""
+    try:
+        setup_and_run.validate_batch_audio_inputs(
+            audio_paths=("episode-a.mp3", "episode-b.mp3"),
+            voiceclone_from_summary=None,
+            resume_session=None,
+            pass_through_overrides=("pipeline.start_stage=stage-2",),
+        )
+    except setup_and_run.BootstrapError as exc:
+        assert exc.step == "input"
+        assert "stage-1" in exc.message
+    else:  # pragma: no cover - explicit failure path
+        raise AssertionError("Expected batch validation to reject stage-2 overrides.")
+
+
+def test_validate_duration_sweep_inputs_rejects_target_override() -> None:
+    """Duration sweeps should own the target-duration overrides themselves."""
+    try:
+        setup_and_run.validate_duration_sweep_inputs(
+            duration_sweep_enabled=True,
+            audio_paths=("episode-a.mp3",),
+            voiceclone_from_summary=None,
+            resume_session=None,
+            pass_through_overrides=("orchestrator.target_seconds=60",),
+        )
+    except setup_and_run.BootstrapError as exc:
+        assert exc.step == "input"
+        assert "orchestrator.target_seconds" in exc.message
+    else:  # pragma: no cover - explicit failure path
+        raise AssertionError(
+            "Expected duration sweep validation to reject target overrides."
+        )
+
+
+def test_should_launch_interactive_menu_for_no_arg_interactive_run(monkeypatch) -> None:
+    """Interactive no-arg launches should open the menu by default."""
+    args = setup_and_run.parse_args([])
+
+    monkeypatch.setattr(setup_and_run, "is_interactive_console", lambda: True)
+
+    assert setup_and_run.should_launch_interactive_menu(args) is True
+
+
+def test_apply_interactive_menu_selection_enables_duration_sweep_defaults() -> None:
+    """Batch duration sweep selections should project onto CLI args."""
+    args = setup_and_run.parse_args([])
+
+    updated = setup_and_run.apply_interactive_menu_selection(
+        args,
+        setup_and_run.InteractiveMenuSelection(
+            mode="stage1_batch_duration_sweep",
+            audio_paths=("episode-a.mp3", "episode-b.mp3"),
+            duration_presets=("30s", "1m", "5m"),
+        ),
+    )
+
+    assert updated.audio_path == ["episode-a.mp3", "episode-b.mp3"]
+    assert updated.duration_sweep is True
+    assert updated.duration_presets == "30s,1m,5m"
+
+
 def test_resolve_transcript_metadata_path_uses_workspace_root(
     monkeypatch,
     tmp_path: Path,
@@ -313,6 +389,560 @@ def test_main_setup_only_reports_timed_loading_status(
     assert "Loaded runtime dependency sync in" in captured.err
     assert "Loading IndexTTS model provisioning..." in captured.err
     assert "Loaded IndexTTS model provisioning in" in captured.err
+
+
+def test_main_auto_menu_applies_runtime_selection_overrides(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Default interactive launches should route through the setup menu."""
+    monkeypatch.chdir(tmp_path)
+    audio_path = tmp_path / "episode.mp3"
+    audio_path.write_bytes(b"ID3")
+
+    monkeypatch.setattr(setup_and_run, "is_interactive_console", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "run_interactive_menu",
+        lambda: setup_and_run.InteractiveMenuSelection(
+            mode="stage1_single",
+            audio_paths=(str(audio_path),),
+            output_root="menu_outputs",
+            overrides=(
+                "selection.llm=anthropic_claude_opus",
+                "selection.embedding=disabled",
+                "audio.voice_clone.enabled=false",
+            ),
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "uuid4", lambda: "menu-run-123")
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": not any(
+                item == "audio.voice_clone.enabled=false" for item in overrides
+            ),
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": False,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+
+    recorded: dict[str, object] = {}
+
+    def _fake_run_pipeline(*, uv_executable: str, overrides) -> None:
+        recorded["uv_executable"] = uv_executable
+        recorded["overrides"] = list(overrides)
+        recorded["output_root"] = setup_and_run.resolve_output_root()
+
+    monkeypatch.setattr(setup_and_run, "run_pipeline", _fake_run_pipeline)
+
+    exit_code = setup_and_run.main([])
+
+    assert exit_code == 0
+    assert recorded["uv_executable"] == "uv"
+    assert recorded["output_root"] == (tmp_path / "menu_outputs").resolve()
+    assert "selection.llm=anthropic_claude_opus" in recorded["overrides"]
+    assert "selection.embedding=disabled" in recorded["overrides"]
+    assert "audio.voice_clone.enabled=false" in recorded["overrides"]
+    assert any(
+        item == f"audio.audio_path={audio_path.resolve().as_posix()}"
+        for item in recorded["overrides"]
+    )
+
+
+def test_main_batch_audio_runs_use_isolated_output_roots(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Repeated --audio-path flags should create one isolated run per audio file."""
+    monkeypatch.chdir(tmp_path)
+    audio_one = tmp_path / "Episode One.mp3"
+    audio_two = tmp_path / "Episode Two.mp3"
+    audio_one.write_bytes(b"ID3")
+    audio_two.write_bytes(b"ID3")
+
+    monkeypatch.setattr(setup_and_run, "utc_now_compact", lambda: "20260321_140500")
+
+    run_ids = iter(["batch-run-1", "batch-run-2"])
+    monkeypatch.setattr(setup_and_run, "uuid4", lambda: next(run_ids))
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del overrides, repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": False,
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": False,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+
+    pipeline_calls: list[dict[str, object]] = []
+
+    def _fake_run_pipeline(*, uv_executable: str, overrides) -> None:
+        pipeline_calls.append(
+            {
+                "uv_executable": uv_executable,
+                "output_root": setup_and_run.resolve_output_root(),
+                "overrides": list(overrides),
+            }
+        )
+
+    monkeypatch.setattr(setup_and_run, "run_pipeline", _fake_run_pipeline)
+
+    exit_code = setup_and_run.main(
+        [
+            "--audio-path",
+            str(audio_one),
+            "--audio-path",
+            str(audio_two),
+        ]
+    )
+
+    batch_root = tmp_path / "artifacts" / "pipeline_batches" / "20260321_140500"
+    manifest_path = batch_root / "batch_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert [call["uv_executable"] for call in pipeline_calls] == ["uv", "uv"]
+    assert [Path(call["output_root"]) for call in pipeline_calls] == [
+        batch_root / "001_episode-one",
+        batch_root / "002_episode-two",
+    ]
+    assert any(
+        override == f"audio.audio_path={audio_one.resolve().as_posix()}"
+        for override in pipeline_calls[0]["overrides"]
+    )
+    assert any(
+        override == f"audio.audio_path={audio_two.resolve().as_posix()}"
+        for override in pipeline_calls[1]["overrides"]
+    )
+    assert manifest["batch_output_root"] == str(batch_root.resolve())
+    assert manifest["total_runs"] == 2
+    assert manifest["succeeded_runs"] == 2
+    assert manifest["failed_runs"] == 0
+    assert [run["session_id"] for run in manifest["runs"]] == [
+        "batch-run-1",
+        "batch-run-2",
+    ]
+    assert [run["status"] for run in manifest["runs"]] == ["ok", "ok"]
+    assert [Path(run["output_root"]) for run in manifest["runs"]] == [
+        batch_root / "001_episode-one",
+        batch_root / "002_episode-two",
+    ]
+
+
+def test_main_duration_sweep_reuses_first_episode_transcript_for_later_presets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Duration sweep should bootstrap stage-1 once, then reuse stage-2 per preset."""
+    monkeypatch.chdir(tmp_path)
+    audio_path = tmp_path / "Episode One.mp3"
+    audio_path.write_bytes(b"ID3")
+
+    monkeypatch.setattr(setup_and_run, "utc_now_compact", lambda: "20260321_150500")
+
+    run_ids = iter(["duration-30s", "duration-1m", "duration-5m"])
+    monkeypatch.setattr(setup_and_run, "uuid4", lambda: next(run_ids))
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del overrides, repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": False,
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": True,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+
+    calibration_calls: list[dict[str, object]] = []
+
+    def _fake_run_calibration(**kwargs) -> None:  # type: ignore[no-untyped-def]
+        calibration_calls.append(kwargs)
+
+    monkeypatch.setattr(setup_and_run, "run_calibration", _fake_run_calibration)
+
+    pipeline_calls: list[dict[str, object]] = []
+
+    def _fake_run_pipeline(*, uv_executable: str, overrides) -> None:
+        output_root = setup_and_run.resolve_output_root()
+        start_stage = next(
+            value.split("=", 1)[1]
+            for value in overrides
+            if value.startswith("pipeline.start_stage=")
+        )
+        target_seconds = int(
+            next(
+                value.split("=", 1)[1]
+                for value in overrides
+                if value.startswith("orchestrator.target_seconds=")
+            )
+        )
+        transcript_override = next(
+            (
+                value.split("=", 1)[1]
+                for value in overrides
+                if value.startswith("transcript_path=")
+            ),
+            None,
+        )
+        pipeline_calls.append(
+            {
+                "uv_executable": uv_executable,
+                "output_root": output_root,
+                "start_stage": start_stage,
+                "target_seconds": target_seconds,
+                "transcript_override": transcript_override,
+                "overrides": list(overrides),
+            }
+        )
+        (output_root / "summary.xml").write_text(
+            "<SPEAKER_00>Hello</SPEAKER_00>\n",
+            encoding="utf-8",
+        )
+        if start_stage == "stage-1":
+            speaker_manifest = (
+                output_root / "audio_stage" / "speaker_samples" / "manifest.json"
+            )
+            speaker_manifest.parent.mkdir(parents=True, exist_ok=True)
+            speaker_manifest.write_text('{"artifacts": []}\n', encoding="utf-8")
+            (output_root / "transcript.json").write_text(
+                json.dumps(
+                    {
+                        "segments": [],
+                        "metadata": {
+                            "source_audio_path": str(audio_path.resolve()),
+                            "speaker_samples_manifest_path": str(
+                                speaker_manifest.resolve()
+                            ),
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr(setup_and_run, "run_pipeline", _fake_run_pipeline)
+
+    exit_code = setup_and_run.main(
+        [
+            "--audio-path",
+            str(audio_path),
+            "--duration-sweep",
+        ]
+    )
+
+    sweep_root = (
+        tmp_path / "artifacts" / "pipeline_duration_sweeps" / "20260321_150500"
+    )
+    manifest_path = sweep_root / "duration_sweep_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert [call["start_stage"] for call in pipeline_calls] == [
+        "stage-1",
+        "stage-2",
+        "stage-2",
+    ]
+    assert [call["target_seconds"] for call in pipeline_calls] == [30, 60, 300]
+    assert [Path(call["output_root"]) for call in pipeline_calls] == [
+        sweep_root / "001_episode-one" / "30s",
+        sweep_root / "001_episode-one" / "1m",
+        sweep_root / "001_episode-one" / "5m",
+    ]
+    bootstrap_transcript = (
+        sweep_root / "001_episode-one" / "30s" / "transcript.json"
+    ).resolve()
+    assert pipeline_calls[1]["transcript_override"] == bootstrap_transcript.as_posix()
+    assert pipeline_calls[2]["transcript_override"] == bootstrap_transcript.as_posix()
+    assert len(calibration_calls) == 2
+    assert [call["transcript_path"] for call in calibration_calls] == [
+        bootstrap_transcript,
+        bootstrap_transcript,
+    ]
+    assert manifest["duration_presets"] == [
+        {"label": "30s", "target_seconds": 30},
+        {"label": "1m", "target_seconds": 60},
+        {"label": "5m", "target_seconds": 300},
+    ]
+    assert [run["status"] for run in manifest["runs"]] == ["ok", "ok", "ok"]
+    assert [run["start_stage"] for run in manifest["runs"]] == [
+        "stage-1",
+        "stage-2",
+        "stage-2",
+    ]
+
+
+def test_main_duration_sweep_skips_existing_preset_outputs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Existing preset artifacts should be reused instead of rerunning them."""
+    monkeypatch.chdir(tmp_path)
+    audio_path = tmp_path / "Episode One.mp3"
+    audio_path.write_bytes(b"ID3")
+    sweep_root = tmp_path / "duration-sweep-output"
+    episode_root = sweep_root / "001_episode-one"
+    preset_30_root = episode_root / "30s"
+    preset_1m_root = episode_root / "1m"
+    preset_30_root.mkdir(parents=True, exist_ok=True)
+    preset_1m_root.mkdir(parents=True, exist_ok=True)
+    (preset_30_root / "summary.xml").write_text(
+        "<SPEAKER_00>Thirty</SPEAKER_00>\n",
+        encoding="utf-8",
+    )
+    speaker_manifest = preset_30_root / "audio_stage" / "speaker_samples" / "manifest.json"
+    speaker_manifest.parent.mkdir(parents=True, exist_ok=True)
+    speaker_manifest.write_text('{"artifacts": []}\n', encoding="utf-8")
+    (preset_30_root / "transcript.json").write_text(
+        json.dumps(
+            {
+                "segments": [],
+                "metadata": {
+                    "source_audio_path": str(audio_path.resolve()),
+                    "speaker_samples_manifest_path": str(speaker_manifest.resolve()),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (preset_1m_root / "summary.xml").write_text(
+        "<SPEAKER_00>Minute</SPEAKER_00>\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "uuid4", lambda: "duration-5m-only")
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del overrides, repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": False,
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": True,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+    monkeypatch.setattr(setup_and_run, "run_calibration", lambda **_: None)
+
+    pipeline_calls: list[dict[str, object]] = []
+
+    def _fake_run_pipeline(*, uv_executable: str, overrides) -> None:
+        output_root = setup_and_run.resolve_output_root()
+        pipeline_calls.append(
+            {
+                "uv_executable": uv_executable,
+                "output_root": output_root,
+                "start_stage": next(
+                    value.split("=", 1)[1]
+                    for value in overrides
+                    if value.startswith("pipeline.start_stage=")
+                ),
+                "target_seconds": int(
+                    next(
+                        value.split("=", 1)[1]
+                        for value in overrides
+                        if value.startswith("orchestrator.target_seconds=")
+                    )
+                ),
+                "transcript_override": next(
+                    (
+                        value.split("=", 1)[1]
+                        for value in overrides
+                        if value.startswith("transcript_path=")
+                    ),
+                    None,
+                ),
+            }
+        )
+        (output_root / "summary.xml").write_text(
+            "<SPEAKER_00>Five Minutes</SPEAKER_00>\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(setup_and_run, "run_pipeline", _fake_run_pipeline)
+
+    exit_code = setup_and_run.main(
+        [
+            "--audio-path",
+            str(audio_path),
+            "--duration-sweep",
+            "--output-root",
+            str(sweep_root),
+        ]
+    )
+
+    manifest_path = sweep_root / "duration_sweep_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert len(pipeline_calls) == 1
+    assert pipeline_calls[0]["start_stage"] == "stage-2"
+    assert pipeline_calls[0]["target_seconds"] == 300
+    assert Path(pipeline_calls[0]["output_root"]) == episode_root / "5m"
+    assert pipeline_calls[0]["transcript_override"] == (
+        preset_30_root / "transcript.json"
+    ).resolve().as_posix()
+    assert [run["status"] for run in manifest["runs"]] == ["skipped", "skipped", "ok"]
+    assert [run["duration_preset"] for run in manifest["runs"]] == [
+        "30s",
+        "1m",
+        "5m",
+    ]
 
 
 def test_main_resume_cleanup_removes_stale_stage_outputs_before_rerun(

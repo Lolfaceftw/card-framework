@@ -29,6 +29,7 @@ References:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -37,10 +38,14 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Iterator, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, Field
 
+from card_framework.audio_pipeline.audio_normalization import (
+    AudioNormalizationPolicy,
+    normalize_audio_file,
+)
 from card_framework.audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
 from card_framework.audio_pipeline.runtime import ensure_command_available, probe_audio_duration_ms
@@ -73,6 +78,9 @@ class InterjectionPlanPayload(BaseModel):
     """Represent the structured planner payload returned by the LLM."""
 
     decisions: list[InterjectionDecision] = Field(default_factory=list)
+
+
+_INTERJECTION_DECISION_TOOL_NAME = "submit_interjection_decision"
 
 
 @dataclass(slots=True, frozen=True)
@@ -165,6 +173,7 @@ class LLMInterjectionPlanner:
     max_interjection_words: int = 5
     min_host_progress_ratio: float = 0.35
     max_host_progress_ratio: float = 0.90
+    prefer_tool_call_planning: bool = True
 
     def plan(self, summary_turns: Sequence[VoiceCloneTurn]) -> list[InterjectionDecision]:
         """Return one validated decision per eligible host turn."""
@@ -191,16 +200,28 @@ class LLMInterjectionPlanner:
             min_host_progress_percent=round(self.min_host_progress_ratio * 100),
             max_host_progress_percent=round(self.max_host_progress_ratio * 100),
         )
-        try:
-            raw_response = self.llm.generate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                max_tokens=self.max_tokens,
-            )
-        except Exception:
-            return _build_default_interjection_decisions(eligible_turns)
+        payload = None
+        if self.prefer_tool_call_planning:
+            try:
+                with _temporarily_disable_llm_thinking(self.llm):
+                    payload = self._plan_with_tool_call(
+                        eligible_turns=eligible_turns,
+                    )
+            except Exception:
+                payload = None
 
-        payload = _parse_plan_payload(raw_response)
+        if payload is None:
+            try:
+                with _temporarily_disable_llm_thinking(self.llm):
+                    raw_response = self.llm.generate(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        max_tokens=self.max_tokens,
+                    )
+            except Exception:
+                return _build_default_interjection_decisions(eligible_turns)
+            payload = _parse_plan_payload(raw_response)
+
         if payload is None:
             return _build_default_interjection_decisions(eligible_turns)
         return _validate_llm_decisions(
@@ -210,6 +231,66 @@ class LLMInterjectionPlanner:
             min_host_progress_ratio=self.min_host_progress_ratio,
             max_host_progress_ratio=self.max_host_progress_ratio,
         )
+
+    def _plan_with_tool_call(
+        self,
+        *,
+        eligible_turns: Sequence[_EligibleTurn],
+    ) -> InterjectionPlanPayload | None:
+        """Prefer one small structured tool call per eligible turn."""
+        raw_decisions: list[InterjectionDecision] = []
+
+        for item in eligible_turns:
+            response_message = self.llm.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Decide whether this single host turn should receive "
+                            "a short overlapping listener interjection. "
+                            f"Call `{_INTERJECTION_DECISION_TOOL_NAME}` exactly "
+                            "once and do not write prose. Use only the provided "
+                            "next speaker, keep anchors inside the preferred token "
+                            "window, do not add new facts, and keep the "
+                            f"interjection to at most {self.max_interjection_words} "
+                            "words."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Choose the decision for this single eligible turn "
+                            "and call the tool once.\n\nEligible turn:\n"
+                            + _render_eligible_turns_block(
+                                [item],
+                                min_host_progress_ratio=self.min_host_progress_ratio,
+                                max_host_progress_ratio=self.max_host_progress_ratio,
+                            )
+                        ),
+                    },
+                ],
+                tools=[_interjection_decision_tool_schema()],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": _INTERJECTION_DECISION_TOOL_NAME},
+                },
+                max_tokens=min(self.max_tokens, 400),
+            )
+            decision = _parse_interjection_decision_from_chat_response(
+                response_message=response_message,
+                expected_host_turn_index=item.host_turn_index,
+            )
+            if decision is None:
+                raw_decisions.append(
+                    InterjectionDecision(
+                        host_turn_index=item.host_turn_index,
+                        should_interject=False,
+                    )
+                )
+                continue
+            raw_decisions.append(decision)
+
+        return InterjectionPlanPayload(decisions=raw_decisions)
 
 
 @dataclass(slots=True)
@@ -231,6 +312,7 @@ class InterjectorOrchestrator:
     turn_end_guard_ms: int = 180
     mix_audio_codec: str = "pcm_s24le"
     mix_timeout_seconds: int = 300
+    merged_output_normalization: AudioNormalizationPolicy | None = None
     aligner: CtcForcedAlignerGateway | None = None
     alignment_batch_size: int = 8
 
@@ -290,6 +372,86 @@ class InterjectorOrchestrator:
         decisions = self.planner.plan(summary_turns)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        artifacts, overlays = self._render_interjection_artifacts(
+            decisions=decisions,
+            manifest_bundle=manifest_bundle,
+            sample_refs=sample_refs,
+            language=language,
+        )
+        if not artifacts:
+            fallback_decisions = _build_heuristic_interjection_decisions(
+                _build_eligible_turns(summary_turns),
+                max_interjection_words=self.max_interjection_words,
+                min_host_progress_ratio=self.min_host_progress_ratio,
+                max_host_progress_ratio=min(self.max_host_progress_ratio, 0.75),
+                max_interjections=self.max_interjections_per_host_turn,
+            )
+            artifacts, overlays = self._render_interjection_artifacts(
+                decisions=fallback_decisions,
+                manifest_bundle=manifest_bundle,
+                sample_refs=sample_refs,
+                language=language,
+            )
+
+        merged_output_audio_path = self.output_dir / self.merged_output_filename
+        _mix_audio_with_overlays(
+            base_audio_path=manifest_bundle.base_audio_path,
+            overlays=overlays,
+            output_path=merged_output_audio_path,
+            audio_codec=self.mix_audio_codec,
+            timeout_seconds=self.mix_timeout_seconds,
+        )
+        normalize_audio_file(
+            audio_path=merged_output_audio_path,
+            policy=self.merged_output_normalization,
+        )
+
+        generated_at_utc = _utc_now_iso()
+        manifest_path = self.output_dir / self.manifest_filename
+        _write_json_atomic(
+            {
+                "generated_at_utc": generated_at_utc,
+                "voice_clone_manifest_path": str(voice_clone_manifest_path),
+                "speaker_samples_manifest_path": str(
+                    manifest_bundle.speaker_samples_manifest_path
+                ),
+                "artifact_count": len(artifacts),
+                "merged_output_audio_path": str(merged_output_audio_path),
+                "artifacts": [
+                    {
+                        "host_turn_index": artifact.host_turn_index,
+                        "interjection_style": artifact.interjection_style,
+                        "speaker": artifact.speaker,
+                        "text": artifact.text,
+                        "anchor_text": artifact.anchor_text,
+                        "anchor_start_token_index": artifact.anchor_start_token_index,
+                        "anchor_end_token_index": artifact.anchor_end_token_index,
+                        "start_time_ms": artifact.start_time_ms,
+                        "duration_ms": artifact.duration_ms,
+                        "output_audio_path": str(artifact.output_audio_path),
+                    }
+                    for artifact in artifacts
+                ],
+            },
+            manifest_path,
+        )
+        return InterjectorRunResult(
+            output_dir=self.output_dir,
+            manifest_path=manifest_path,
+            generated_at_utc=generated_at_utc,
+            artifacts=tuple(artifacts),
+            merged_output_audio_path=merged_output_audio_path,
+        )
+
+    def _render_interjection_artifacts(
+        self,
+        *,
+        decisions: Sequence[InterjectionDecision],
+        manifest_bundle: _VoiceCloneManifestBundle,
+        sample_refs: dict[str, Any],
+        language: str,
+    ) -> tuple[list[InterjectorArtifact], list[_SynthesizedOverlay]]:
+        """Render audio artifacts for a set of interjection decisions."""
         artifacts: list[InterjectorArtifact] = []
         overlays: list[_SynthesizedOverlay] = []
         host_turn_counts: dict[int, int] = {}
@@ -375,52 +537,7 @@ class InterjectorOrchestrator:
                     start_time_ms=overlay_start_time_ms,
                 )
             )
-
-        merged_output_audio_path = self.output_dir / self.merged_output_filename
-        _mix_audio_with_overlays(
-            base_audio_path=manifest_bundle.base_audio_path,
-            overlays=overlays,
-            output_path=merged_output_audio_path,
-            audio_codec=self.mix_audio_codec,
-            timeout_seconds=self.mix_timeout_seconds,
-        )
-
-        generated_at_utc = _utc_now_iso()
-        manifest_path = self.output_dir / self.manifest_filename
-        _write_json_atomic(
-            {
-                "generated_at_utc": generated_at_utc,
-                "voice_clone_manifest_path": str(voice_clone_manifest_path),
-                "speaker_samples_manifest_path": str(
-                    manifest_bundle.speaker_samples_manifest_path
-                ),
-                "artifact_count": len(artifacts),
-                "merged_output_audio_path": str(merged_output_audio_path),
-                "artifacts": [
-                    {
-                        "host_turn_index": artifact.host_turn_index,
-                        "interjection_style": artifact.interjection_style,
-                        "speaker": artifact.speaker,
-                        "text": artifact.text,
-                        "anchor_text": artifact.anchor_text,
-                        "anchor_start_token_index": artifact.anchor_start_token_index,
-                        "anchor_end_token_index": artifact.anchor_end_token_index,
-                        "start_time_ms": artifact.start_time_ms,
-                        "duration_ms": artifact.duration_ms,
-                        "output_audio_path": str(artifact.output_audio_path),
-                    }
-                    for artifact in artifacts
-                ],
-            },
-            manifest_path,
-        )
-        return InterjectorRunResult(
-            output_dir=self.output_dir,
-            manifest_path=manifest_path,
-            generated_at_utc=generated_at_utc,
-            artifacts=tuple(artifacts),
-            merged_output_audio_path=merged_output_audio_path,
-        )
+        return artifacts, overlays
 
     def _compute_overlay_start_time_ms(
         self,
@@ -461,6 +578,29 @@ class InterjectorOrchestrator:
         if available_overlap_ms < self.min_available_overlap_ms:
             return None
         return overlay_start_time_ms
+
+
+@contextmanager
+def _temporarily_disable_llm_thinking(llm: LLMProvider) -> Iterator[None]:
+    """Temporarily disable visible thinking on wrapped providers when supported."""
+    toggled_providers: list[tuple[Any, bool]] = []
+    current_provider: Any = llm
+    seen_provider_ids: set[int] = set()
+
+    while current_provider is not None and id(current_provider) not in seen_provider_ids:
+        seen_provider_ids.add(id(current_provider))
+        if hasattr(current_provider, "enable_thinking"):
+            original_value = bool(getattr(current_provider, "enable_thinking"))
+            if original_value:
+                setattr(current_provider, "enable_thinking", False)
+                toggled_providers.append((current_provider, original_value))
+        current_provider = getattr(current_provider, "inner_provider", None)
+
+    try:
+        yield
+    finally:
+        for provider, original_value in reversed(toggled_providers):
+            setattr(provider, "enable_thinking", original_value)
 
 
 def _build_eligible_turns(summary_turns: Sequence[VoiceCloneTurn]) -> list[_EligibleTurn]:
@@ -538,6 +678,153 @@ def _build_default_interjection_decisions(
         )
         for item in eligible_turns
     ]
+
+
+def _build_heuristic_interjection_decisions(
+    eligible_turns: Sequence[_EligibleTurn],
+    *,
+    max_interjection_words: int,
+    min_host_progress_ratio: float,
+    max_host_progress_ratio: float,
+    max_interjections: int,
+) -> list[InterjectionDecision]:
+    """Return deterministic fallback decisions when the LLM yields no usable plan."""
+    decisions: list[InterjectionDecision] = []
+    emitted_interjections = 0
+
+    for item in eligible_turns:
+        if emitted_interjections >= max_interjections:
+            decisions.append(
+                InterjectionDecision(
+                    host_turn_index=item.host_turn_index,
+                    should_interject=False,
+                )
+            )
+            continue
+
+        host_tokens = _split_tokens(item.host_turn.text)
+        anchor_window = _compute_anchor_window_indices(
+            host_token_count=len(host_tokens),
+            min_host_progress_ratio=min_host_progress_ratio,
+            max_host_progress_ratio=max_host_progress_ratio,
+        )
+        interjection_text = _choose_heuristic_interjection_text(
+            item.next_turn.text,
+            max_interjection_words=max_interjection_words,
+        )
+        if anchor_window is None or not interjection_text:
+            decisions.append(
+                InterjectionDecision(
+                    host_turn_index=item.host_turn_index,
+                    should_interject=False,
+                )
+            )
+            continue
+
+        anchor_end_index = min(
+            max(anchor_window[0], math.floor(len(host_tokens) * 0.58) - 1),
+            anchor_window[1],
+        )
+        anchor_end_index = max(anchor_window[0], anchor_end_index)
+        anchor_text = host_tokens[anchor_end_index].strip()
+        decisions.append(
+            InterjectionDecision(
+                host_turn_index=item.host_turn_index,
+                should_interject=True,
+                interjection_style="backchannel",
+                interjection_speaker=item.next_turn.speaker,
+                interjection_text=interjection_text,
+                anchor_start_token_index=anchor_end_index,
+                anchor_end_token_index=anchor_end_index,
+                anchor_text=anchor_text,
+            )
+        )
+        emitted_interjections += 1
+
+    return decisions
+
+
+def _choose_heuristic_interjection_text(
+    next_turn_text: str,
+    *,
+    max_interjection_words: int,
+) -> str:
+    """Choose a short grounded backchannel from the next speaker turn."""
+    normalized_tokens = [
+        _normalize_token(token) for token in _split_tokens(next_turn_text)[:4]
+    ]
+    canonical_by_token = {
+        "yeah": "Yeah.",
+        "yep": "Yeah.",
+        "yes": "Yeah.",
+        "right": "Right.",
+        "totally": "Totally.",
+        "exactly": "Exactly.",
+        "absolutely": "Absolutely.",
+    }
+    for token in normalized_tokens:
+        if token in canonical_by_token:
+            candidate = canonical_by_token[token]
+            if len(_split_tokens(candidate)) <= max_interjection_words:
+                return candidate
+    return "Yeah." if max_interjection_words >= 1 else ""
+
+
+def _interjection_decision_tool_schema() -> dict[str, Any]:
+    """Return the structured tool contract for one eligible turn decision."""
+    return {
+        "type": "function",
+        "function": {
+            "name": _INTERJECTION_DECISION_TOOL_NAME,
+            "description": "Return the interjection decision for this single host turn.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "host_turn_index": {"type": "integer"},
+                    "should_interject": {"type": "boolean"},
+                    "interjection_style": {
+                        "type": "string",
+                        "enum": ["backchannel", "echo_agreement"],
+                    },
+                    "interjection_speaker": {"type": "string"},
+                    "interjection_text": {"type": "string"},
+                    "anchor_start_token_index": {"type": "integer"},
+                    "anchor_end_token_index": {"type": "integer"},
+                    "anchor_text": {"type": "string"},
+                },
+                "required": ["host_turn_index", "should_interject"],
+            },
+        },
+    }
+
+
+def _parse_interjection_decision_from_chat_response(
+    *,
+    response_message: Any,
+    expected_host_turn_index: int,
+) -> InterjectionDecision | None:
+    """Extract one structured interjection decision from an assistant tool call."""
+    raw_tool_calls = getattr(response_message, "tool_calls", None)
+    if not raw_tool_calls:
+        return None
+
+    for tool_call in raw_tool_calls:
+        function = getattr(tool_call, "function", None)
+        if function is None:
+            continue
+        if str(getattr(function, "name", "")).strip() != _INTERJECTION_DECISION_TOOL_NAME:
+            continue
+        raw_arguments = str(getattr(function, "arguments", "") or "")
+        if not raw_arguments.strip():
+            continue
+        try:
+            decision = InterjectionDecision.model_validate_json(raw_arguments)
+        except Exception:
+            return None
+        if decision.host_turn_index != expected_host_turn_index:
+            return None
+        return decision
+    return None
 
 
 def _parse_plan_payload(raw_response: str) -> InterjectionPlanPayload | None:

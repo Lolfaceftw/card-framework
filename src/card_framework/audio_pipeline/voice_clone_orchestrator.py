@@ -12,6 +12,11 @@ import shutil
 import subprocess
 from typing import Any
 
+from card_framework.audio_pipeline.audio_normalization import (
+    AudioNormalizationPolicy,
+    normalize_audio_file,
+)
+from card_framework.audio_pipeline.emotion_vectors import EmotionVector
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.runtime import ensure_command_available
@@ -60,6 +65,8 @@ class VoiceCloneOrchestrator:
     merge_audio_codec: str = "pcm_s24le"
     merge_timeout_seconds: int = 300
     emo_preset_catalog: dict[str, str] | None = None
+    emo_preset_vector_catalog: dict[str, EmotionVector] | None = None
+    merged_output_normalization: AudioNormalizationPolicy | None = None
 
     def __post_init__(self) -> None:
         """Validate orchestrator configuration."""
@@ -130,6 +137,11 @@ class VoiceCloneOrchestrator:
                 speaker=turn.speaker,
             )
             try:
+                resolved_emotion_vector = _resolve_emotion_vector(
+                    explicit_emotion_vector=turn.emotion_vector,
+                    emo_preset=turn.emo_preset,
+                    emo_preset_vector_catalog=self.emo_preset_vector_catalog,
+                )
                 emo_text = _resolve_emo_text(
                     emo_preset=turn.emo_preset,
                     emo_preset_catalog=self.emo_preset_catalog,
@@ -138,7 +150,8 @@ class VoiceCloneOrchestrator:
                     reference_audio_path=reference.path,
                     text=turn.text,
                     output_audio_path=output_audio_path,
-                    emo_text=emo_text,
+                    emo_text=emo_text if resolved_emotion_vector is None else None,
+                    emotion_vector=resolved_emotion_vector,
                     progress_callback=progress_callback,
                 )
             except Exception as exc:
@@ -155,6 +168,10 @@ class VoiceCloneOrchestrator:
                     speaker=turn.speaker,
                     text=turn.text,
                     emo_preset=turn.emo_preset,
+                    emotion_vector=resolved_emotion_vector,
+                    emotion_vector_source=turn.emotion_vector_source,
+                    source_segment_indices=turn.source_segment_indices,
+                    source_segment_weights=turn.source_segment_weights,
                     reference_audio_path=reference.path,
                     output_audio_path=rendered_path,
                 )
@@ -186,6 +203,10 @@ class VoiceCloneOrchestrator:
                     audio_codec=self.merge_audio_codec,
                     timeout_seconds=self.merge_timeout_seconds,
                 )
+                normalize_audio_file(
+                    audio_path=merged_output_audio_path,
+                    policy=self.merged_output_normalization,
+                )
             except Exception as exc:
                 if self.fail_on_error:
                     raise NonRetryableAudioStageError(
@@ -210,6 +231,14 @@ class VoiceCloneOrchestrator:
                     "speaker": artifact.speaker,
                     "text": artifact.text,
                     "emo_preset": artifact.emo_preset,
+                    "emotion_vector": (
+                        artifact.emotion_vector.to_list()
+                        if artifact.emotion_vector is not None
+                        else None
+                    ),
+                    "emotion_vector_source": artifact.emotion_vector_source,
+                    "source_segment_indices": list(artifact.source_segment_indices),
+                    "source_segment_weights": list(artifact.source_segment_weights),
                     "reference_audio_path": str(artifact.reference_audio_path),
                     "output_audio_path": str(artifact.output_audio_path),
                 }
@@ -243,6 +272,10 @@ def parse_summary_turns(summary_xml: str) -> list[VoiceCloneTurn]:
             speaker=turn.speaker,
             text=turn.text,
             emo_preset=turn.emo_preset,
+            emotion_vector=turn.emotion_vector,
+            emotion_vector_source=turn.emotion_vector_source,
+            source_segment_indices=turn.source_segment_indices,
+            source_segment_weights=turn.source_segment_weights,
         )
         for turn in raw_turns
     ]
@@ -340,6 +373,24 @@ def _resolve_emo_text(
     if emo_text is not None:
         return emo_text
     return emo_preset_catalog.get(DEFAULT_EMO_PRESET)
+
+
+def _resolve_emotion_vector(
+    *,
+    explicit_emotion_vector: EmotionVector | None,
+    emo_preset: str,
+    emo_preset_vector_catalog: dict[str, EmotionVector] | None,
+) -> EmotionVector | None:
+    """Prefer explicit vectors and otherwise fall back to preset-level vectors."""
+    if explicit_emotion_vector is not None:
+        return explicit_emotion_vector
+    if not emo_preset_vector_catalog:
+        return None
+    normalized_preset = emo_preset.strip() or DEFAULT_EMO_PRESET
+    preset_vector = emo_preset_vector_catalog.get(normalized_preset)
+    if preset_vector is not None:
+        return preset_vector
+    return emo_preset_vector_catalog.get(DEFAULT_EMO_PRESET)
 
 
 def merge_audio_artifacts_to_wav(

@@ -94,7 +94,7 @@ _STAGE_TWO_BOOTSTRAP_STOPWORDS = {
     "will",
     "with",
 }
-_AUDIO_PIPELINE_BUILDERS: tuple[object, object, object, object] | None = None
+_AUDIO_PIPELINE_BUILDERS: tuple[object, object, object, object, object, object] | None = None
 _A2A_SERVER_HELPERS: tuple[object, ...] | None = None
 _AGENT_RUNTIME_HELPERS: tuple[object, object, object, object, object, object] | None = None
 
@@ -113,7 +113,7 @@ def _emit_runtime_loading_status(message: str) -> None:
 def _load_audio_pipeline_builders(
     *,
     status_reporter: StatusReporter | None = None,
-) -> tuple[object, object, object, object]:
+) -> tuple[object, object, object, object, object, object]:
     """Load heavy audio-pipeline builder helpers only when runtime needs them."""
     global _AUDIO_PIPELINE_BUILDERS
     if _AUDIO_PIPELINE_BUILDERS is None:
@@ -124,14 +124,18 @@ def _load_audio_pipeline_builders(
             from card_framework.audio_pipeline import (
                 build_audio_to_script_orchestrator,
                 build_interjector_orchestrator,
+                build_summary_turn_emotion_linker,
                 build_speaker_sample_generator,
+                build_transcript_affect_analyzer,
                 build_voice_clone_orchestrator,
             )
 
         _AUDIO_PIPELINE_BUILDERS = (
             build_audio_to_script_orchestrator,
             build_interjector_orchestrator,
+            build_summary_turn_emotion_linker,
             build_speaker_sample_generator,
+            build_transcript_affect_analyzer,
             build_voice_clone_orchestrator,
         )
     return _AUDIO_PIPELINE_BUILDERS
@@ -470,6 +474,90 @@ def _build_speaker_sample_preparer(
     return _prepare
 
 
+def _run_post_transcript_affect_analysis_step(
+    *,
+    stage_start: str,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    transcript_path: str,
+    transcript: Transcript,
+) -> Transcript:
+    """Run audio-grounded affect analysis after transcript availability."""
+    if stage_start not in {"stage-1", "stage-2"}:
+        return transcript
+
+    affect_cfg = _to_plain_dict(audio_cfg_dict.get("affect_analysis", {}))
+    if not bool(affect_cfg.get("enabled", False)):
+        return transcript
+
+    reuse_existing_manifest = bool(affect_cfg.get("reuse_existing_manifest", True))
+    existing_manifest_path = _resolve_existing_affect_analysis_manifest_path(
+        transcript=transcript,
+        project_root=project_root,
+    )
+    if reuse_existing_manifest and existing_manifest_path is not None:
+        event_bus.publish(
+            "system_message",
+            (
+                "Reusing affect analysis manifest from transcript metadata: "
+                f"{existing_manifest_path}"
+            ),
+        )
+        return transcript
+
+    fail_on_error = bool(affect_cfg.get("fail_on_error", False))
+    (_, _, _, _, build_transcript_affect_analyzer, _) = _load_audio_pipeline_builders(
+        status_reporter=_emit_runtime_loading_status
+    )
+    try:
+        analyzer = build_transcript_affect_analyzer(
+            audio_cfg_dict,
+            project_root=project_root,
+        )
+        if analyzer is None:
+            return transcript
+        event_bus.publish(
+            "system_message",
+            "Running post-transcript affect analysis before summarization...",
+        )
+        with report_loading_duration(
+            "post-transcript affect analysis",
+            reporter=_emit_runtime_loading_status,
+        ):
+            result = analyzer.analyze_transcript(
+                transcript=transcript,
+                base_dir=project_root,
+            )
+    except Exception as exc:
+        event_bus.publish("error_message", f"Affect analysis failed: {exc}")
+        if fail_on_error:
+            raise
+        event_bus.publish(
+            "system_message",
+            (
+                "Affect analysis failure tolerated by config; "
+                "continuing without affect metadata."
+            ),
+        )
+        return transcript
+
+    resolved_transcript_path = resolve_path(transcript_path, base_dir=project_root)
+    write_transcript_atomic(
+        cast(TranscriptPayload, result.transcript.to_payload()),
+        resolved_transcript_path,
+    )
+    event_bus.publish(
+        "status_message",
+        f"Affect analysis manifest written to {result.manifest_path}",
+    )
+    if result.profile_path is not None:
+        event_bus.publish(
+            "status_message",
+            f"Affect analysis resource profile written to {result.profile_path}",
+        )
+    return result.transcript
+
+
 def _run_post_transcript_speaker_sample_step(
     *,
     stage_start: str,
@@ -548,7 +636,7 @@ def _run_post_transcript_speaker_sample_step(
         configured_audio_path=str(audio_cfg_dict.get("audio_path", "")),
         base_dir=project_root,
     )
-    (_, _, build_speaker_sample_generator, _) = _load_audio_pipeline_builders(
+    (_, _, _, build_speaker_sample_generator, _, _) = _load_audio_pipeline_builders(
         status_reporter=_emit_runtime_loading_status
     )
     sample_generator = build_speaker_sample_generator(audio_cfg_dict)
@@ -713,6 +801,23 @@ def _run_post_transcript_speaker_sample_step(
         f"Speaker sample manifest written to {sample_result.manifest_path}",
     )
     return updated_transcript
+
+
+def _resolve_existing_affect_analysis_manifest_path(
+    *,
+    transcript: Transcript,
+    project_root: Path,
+) -> Path | None:
+    """Resolve an existing transcript-linked affect-analysis manifest when present."""
+    manifest_value = str(
+        transcript.metadata.get("affect_analysis_manifest_path", "")
+    ).strip()
+    if not manifest_value:
+        return None
+    candidate = Path(manifest_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (project_root / candidate).resolve()
+    return candidate if candidate.is_file() else None
 
 
 def _resolve_existing_speaker_samples_manifest_path(
@@ -1325,6 +1430,8 @@ def main(cfg: DictConfig) -> None:
     (
         build_audio_to_script_orchestrator,
         build_interjector_orchestrator,
+        build_summary_turn_emotion_linker,
+        _,
         _,
         build_voice_clone_orchestrator,
     ) = _load_audio_pipeline_builders(status_reporter=_emit_runtime_loading_status)
@@ -1454,6 +1561,14 @@ def main(cfg: DictConfig) -> None:
         event_bus.publish(
             "system_message",
             f"Loaded {len(transcript.segments)} segments",
+        )
+    if stage_plan.start_stage != "stage-4":
+        transcript = _run_post_transcript_affect_analysis_step(
+            stage_start=stage_plan.start_stage,
+            audio_cfg_dict=audio_cfg_dict,
+            project_root=project_root,
+            transcript_path=transcript_path,
+            transcript=transcript,
         )
     speaker_sample_preparer: Callable[[Transcript], Transcript] | None = None
     if stage_plan.start_stage == "stage-4":
@@ -1935,6 +2050,7 @@ def main(cfg: DictConfig) -> None:
         voice_clone_gpu_heartbeat=voice_clone_gpu_heartbeat,
         loop_memory_artifact_path=loop_memory_artifact_path,
         live_draft_audio_enabled=live_draft_audio_enabled,
+        summary_turn_emotion_linker=build_summary_turn_emotion_linker(audio_cfg_dict),
         session_store=session_store,
         session_id=session_id,
         session_summary_output_path=session_summary_output_path,

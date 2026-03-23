@@ -32,7 +32,7 @@ def align_segments_with_speakers(
     previous_speaker = default_speaker
 
     for segment in asr_segments:
-        speaker = _pick_speaker_for_segment(
+        speaker, overlap_speakers = _pick_speaker_for_segment(
             segment=segment,
             turns=turns,
             fallback_speaker=previous_speaker,
@@ -45,6 +45,11 @@ def align_segments_with_speakers(
                 start_time=segment.start_time_ms,
                 end_time=segment.end_time_ms,
                 text=segment.text.strip(),
+                extras=(
+                    {"overlap_speakers": list(overlap_speakers)}
+                    if overlap_speakers
+                    else {}
+                ),
             )
         )
 
@@ -57,23 +62,33 @@ def _pick_speaker_for_segment(
     turns: list[DiarizationTurn],
     fallback_speaker: str,
     default_speaker: str,
-) -> str:
+) -> tuple[str, tuple[str, ...]]:
     """Pick a speaker by maximum overlap; fallback to nearest or previous."""
     if not turns:
-        return default_speaker
+        return default_speaker, ()
 
     best_speaker = ""
     best_overlap_ms = -1
+    overlapping_speakers: list[str] = []
     for turn in turns:
         overlap_ms = min(segment.end_time_ms, turn.end_time_ms) - max(
             segment.start_time_ms, turn.start_time_ms
         )
+        if overlap_ms > 0 and turn.speaker.strip():
+            overlapping_speakers.append(turn.speaker)
         if overlap_ms > best_overlap_ms:
             best_overlap_ms = overlap_ms
             best_speaker = turn.speaker
 
     if best_overlap_ms > 0:
-        return best_speaker
+        return (
+            best_speaker,
+            tuple(
+                speaker
+                for speaker in dict.fromkeys(overlapping_speakers)
+                if speaker.strip() and speaker != best_speaker
+            ),
+        )
 
     nearest_turn = min(
         turns,
@@ -83,10 +98,10 @@ def _pick_speaker_for_segment(
         ),
     )
     if nearest_turn.speaker.strip():
-        return nearest_turn.speaker
+        return nearest_turn.speaker, ()
     if fallback_speaker.strip():
-        return fallback_speaker
-    return default_speaker
+        return fallback_speaker, ()
+    return default_speaker, ()
 
 
 def _merge_adjacent_segments(
@@ -100,15 +115,28 @@ def _merge_adjacent_segments(
     for current in segments[1:]:
         previous = merged[-1]
         same_speaker = previous.speaker == current.speaker
+        same_overlap = _segment_overlap_key(previous) == _segment_overlap_key(current)
         gap_ms = current.start_time - previous.end_time
-        if same_speaker and gap_ms <= merge_gap_ms:
+        if same_speaker and same_overlap and gap_ms <= merge_gap_ms:
             merged[-1] = TranscriptSegment(
                 speaker=previous.speaker,
                 start_time=previous.start_time,
                 end_time=current.end_time,
                 text=f"{previous.text} {current.text}".strip(),
+                extras=dict(previous.extras),
             )
             continue
         merged.append(current)
     return merged
+
+
+def _segment_overlap_key(segment: TranscriptSegment) -> tuple[str, ...]:
+    raw_value = segment.extras.get("overlap_speakers")
+    if not isinstance(raw_value, list | tuple):
+        return ()
+    return tuple(
+        str(speaker).strip()
+        for speaker in raw_value
+        if str(speaker).strip()
+    )
 

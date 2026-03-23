@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import Any, Protocol, TypedDict, runtime_checkable
 
 from card_framework.audio_pipeline.eta import StageProgressCallback
 
 
-class TranscriptSegmentPayload(TypedDict):
+class TranscriptSegmentPayload(TypedDict, total=False):
     """Serialized segment payload consumed by downstream retrieval/LLM stages."""
 
     speaker: str
     start_time: int
     end_time: int
     text: str
+    overlap_speakers: list[str]
 
 
 class DiarizationTurnPayload(TypedDict):
@@ -110,6 +111,7 @@ class WordSpeakerToken:
     speaker: str
     start_time_ms: int
     end_time_ms: int
+    overlap_speakers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.start_time_ms < 0:
@@ -147,6 +149,7 @@ class TranscriptSegment:
     start_time: int
     end_time: int
     text: str
+    extras: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.start_time < 0:

@@ -54,7 +54,7 @@ from card_framework.shared.perf import (
     measure_elapsed_time,
     report_loading_duration,
 )
-from card_framework.shared.paths import REPO_ROOT
+from card_framework.shared.paths import DEFAULT_CONFIG_PATH, REPO_ROOT
 
 
 _DATASET_HELPERS: tuple[object, object] | None = None
@@ -471,6 +471,30 @@ def _build_parser(
         default=10.0,
         help="Per-request timeout in seconds for remote URL probes.",
     )
+    filter_audio_urls.add_argument(
+        "--max-workers",
+        type=int,
+        default=8,
+        help="Maximum concurrent URL probes. Defaults to 8.",
+    )
+    filter_audio_urls.add_argument(
+        "--max-workers-per-host",
+        type=int,
+        default=2,
+        help="Maximum concurrent URL probes against the same host. Defaults to 2.",
+    )
+    filter_audio_urls.add_argument(
+        "--max-retries",
+        type=int,
+        default=1,
+        help="Additional retries for transient remote probe failures. Defaults to 1.",
+    )
+    filter_audio_urls.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=0.5,
+        help="Base backoff in seconds between transient probe retries. Defaults to 0.5.",
+    )
 
     export_transcripts = subparsers.add_parser(
         "export-transcripts",
@@ -526,7 +550,7 @@ def _build_parser(
     human_sample.add_argument("--resume-session", default="")
     human_sample.add_argument(
         "--duration-preset",
-        choices=("30s", "1m", "5m"),
+        choices=("30s", "1m", "5m", "10m"),
         default="",
     )
     human_sample.add_argument("--episodes", type=int, default=0)
@@ -543,12 +567,18 @@ def _build_parser(
         default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
     )
     llm_sample.add_argument(
+        "--provider",
+        choices=("anthropic", "vllm"),
+        default="anthropic",
+        help="LLM provider to use for llm-sample.",
+    )
+    llm_sample.add_argument(
         "--sampling-root",
         default=str(DEFAULT_LLM_SAMPLING_ROOT),
     )
     llm_sample.add_argument(
         "--duration-preset",
-        choices=("30s", "1m", "5m"),
+        choices=("30s", "1m", "5m", "10m", "15m"),
         default="30s",
     )
     llm_sample.add_argument(
@@ -556,6 +586,40 @@ def _build_parser(
         type=int,
         default=0,
         help="Optional fixed number of samples to request per transcript. Overrides the WPM-based budget mode when greater than zero.",
+    )
+    llm_sample.add_argument(
+        "--text-only",
+        action="store_true",
+        help=(
+            "Select exact raw-transcript spans only and write combined text "
+            "artifacts instead of using reconstructed transcript snippets. "
+            "Requires --samples > 0 and ignores the duration preset for selection."
+        ),
+    )
+    llm_sample.add_argument(
+        "--transcribe-enabled",
+        action="store_true",
+        help=(
+            "Use the source episode audio as the sampler input by running the "
+            "stage-1 pipeline first: source separation, Granite ASR by default, "
+            "and the configured diarizer (NeMo by default)."
+        ),
+    )
+    llm_sample.add_argument(
+        "--audio-config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help=(
+            "Runtime config used for stage-1 source generation when "
+            "--transcribe-enabled is set."
+        ),
+    )
+    llm_sample.add_argument(
+        "--audio-device",
+        default="",
+        help=(
+            "Optional device override for the stage-1 source generation path "
+            "when --transcribe-enabled is set, for example cpu or cuda."
+        ),
     )
     llm_sample.add_argument("--episodes", type=int, default=20)
     llm_sample.add_argument(
@@ -3028,6 +3092,10 @@ def main(argv: list[str] | None = None) -> int:
                 output_manifest_path=str(args.output_manifest),
                 audit_path=str(args.audit_path),
                 timeout_seconds=float(args.timeout_seconds),
+                max_workers=int(args.max_workers),
+                max_workers_per_host=int(args.max_workers_per_host),
+                max_retries=int(args.max_retries),
+                retry_backoff_seconds=float(args.retry_backoff_seconds),
                 status_reporter=_emit_cli_status,
             )
             print(

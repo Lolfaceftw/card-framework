@@ -17,16 +17,37 @@ installs when the repo-root config is not available.
 The repository now ships a Docker workflow centered on
 `card_framework.cli.setup_and_run`.
 
+Prefer this Docker workflow for routine repo-local runs. If Docker can expose
+CUDA, prefer the `setup-and-run-gpu` service under the `gpu` profile.
+
 Build the image:
 
 ```bash
 docker compose build setup-and-run
 ```
 
-Run the wrapper from source audio:
+Run the wrapper from source audio on CPU-only or non-CUDA Docker hosts:
 
 ```bash
 docker compose run --rm setup-and-run --audio-path audio.wav
+```
+
+Run the interactive menu-first launcher:
+
+```bash
+docker compose run --rm setup-and-run
+```
+
+Run a sequential multi-audio sweep:
+
+```bash
+docker compose run --rm setup-and-run --audio-path episode-a.mp3 --audio-path episode-b.mp3
+```
+
+Run the per-episode duration sweep:
+
+```bash
+docker compose run --rm setup-and-run --audio-path episode-a.mp3 --audio-path episode-b.mp3 --duration-sweep
 ```
 
 Run the GPU profile for Windows or Linux NVIDIA hosts:
@@ -35,11 +56,27 @@ Run the GPU profile for Windows or Linux NVIDIA hosts:
 docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
 ```
 
+Both runtime services inherit the same Compose resource cap: about `8 GB` RAM
+plus about `2 GB` swap through `mem_limit: 8g` and `memswap_limit: 10g`.
+
 The Compose services bind-mount the repository checkout, so the container sees
 the same `conf/config.yaml`, `.env`, `audio.wav`, `transcript.json`, and
 `summary.xml` files you use locally. The root `.venv` and vendored
 `src/card_framework/_vendor/index_tts/.venv` are redirected to Docker volumes
 so the host checkout does not receive Linux virtual environments.
+Repeated `--audio-path` flags now run sequentially and isolate each audio
+input under its own output folder, with a top-level `batch_manifest.json`
+written at the batch root.
+Adding `--duration-sweep` changes that wrapper flow into a per-episode preset
+sweep for `30s`, `1m`, and `5m`. Each episode boots once, later presets reuse
+the cached transcript from stage-2, and completed preset folders are reused on
+reruns. The sweep ledger is written to `duration_sweep_manifest.json`.
+When the wrapper starts without explicit run inputs, it now opens an
+interactive menu by default so operators can choose the run mode, select LLM
+and embedding profiles, and provide audio, transcript, summary, or resume
+inputs. Pass `--no-menu` to skip that menu. The shared runtime profiles now
+also include `selection.llm=anthropic_claude_opus`, which uses
+`ANTHROPIC_API_KEY` for `claude-opus-4-6`.
 
 For the full container workflow and Windows + NeMo guidance, see
 [`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md).

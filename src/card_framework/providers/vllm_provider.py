@@ -341,6 +341,7 @@ class VLLMProvider(LLMProvider):
                                         "id": None,
                                         "type": "function",
                                         "function": {"name": "", "arguments": ""},
+                                        "preview_started": False,
                                     }
                                 )
 
@@ -353,6 +354,18 @@ class VLLMProvider(LLMProvider):
                                         tc_delta.function.name
                                     )
                                 if tc_delta.function.arguments:
+                                    if not bool(tool_call.get("preview_started")):
+                                        tool_name = (
+                                            str(tool_call["function"]["name"]).strip()
+                                            or "tool"
+                                        )
+                                        self._response_callback.on_content_token(
+                                            f"\nTOOL {tool_name}: "
+                                        )
+                                        tool_call["preview_started"] = True
+                                    self._response_callback.on_content_token(
+                                        tc_delta.function.arguments
+                                    )
                                     tool_call["function"]["arguments"] += (
                                         tc_delta.function.arguments
                                     )

@@ -1,0 +1,80 @@
+{
+  "package_root": "C:\\Users\\chris\\card-framework\\sporc_human_eval_assets_10m",
+  "transcript_root": "sporc_human_eval_assets_10m\\transcript_slices",
+  "voice_root": "sporc_human_eval_assets_10m\\voice_samples",
+  "episodes": [
+    {
+      "order": 1,
+      "title": "The Lion, the Lamb & the Meadow (Chap. 12-13)",
+      "sample_id": "sporc_00430_https_www_buzzsprout_com_202613_3990386_the_lion_the_lamb_the_meadow_chap_12_13_",
+      "transcript_slice": "sporc_human_eval_assets_10m\\transcript_slices\\01 - The Lion, the Lamb & the Meadow (Chap. 12-13) - transcript slices.txt",
+      "voice_samples_folder": "sporc_human_eval_assets_10m\\voice_samples\\01 - The Lion, the Lamb & the Meadow (Chap. 12-13)",
+      "voice_sample_files": [
+        "SPEAKER_01.wav",
+        "SPEAKER_00.wav"
+      ],
+      "bootstrap_mapping": null,
+      "audio_slice": "sporc_human_eval_assets_10m\\audio_slices\\01 - The Lion, the Lamb & the Meadow (Chap. 12-13) - 10m audio slice.mp3"
+    },
+    {
+      "order": 2,
+      "title": "Spirit Adrift's Nate Garrett on the Love That Saved His Life",
+      "sample_id": "sporc_00767_https_feeds_soundcloud_com_stream_845779975_hotbloodedpodcast_spirit_adrifts_nat",
+      "transcript_slice": "sporc_human_eval_assets_10m\\transcript_slices\\02 - Spirit Adrift's Nate Garrett on the Love That Saved His Life - transcript slices.txt",
+      "voice_samples_folder": "sporc_human_eval_assets_10m\\voice_samples\\02 - Spirit Adrift's Nate Garrett on the Love That Saved His Life",
+      "voice_sample_files": [
+        "SPEAKER_00.wav",
+        "SPEAKER_02.wav"
+      ],
+      "bootstrap_mapping": {
+        "SPEAKER_01": "SPEAKER_00",
+        "SPEAKER_00": "SPEAKER_02"
+      },
+      "audio_slice": "sporc_human_eval_assets_10m\\audio_slices\\02 - Spirit Adrift's Nate Garrett on the Love That Saved His Life - 10m audio slice.mp3"
+    },
+    {
+      "order": 3,
+      "title": "079 The United State of St Kitts and Nevis ft Nekirah Nicholls",
+      "sample_id": "sporc_01637_https_feeds_soundcloud_com_stream_837089506_stephen_smith_609604594_079_the_unit",
+      "transcript_slice": "sporc_human_eval_assets_10m\\transcript_slices\\03 - 079 The United State of St Kitts and Nevis ft Nekirah Nicholls - transcript slices.txt",
+      "voice_samples_folder": "sporc_human_eval_assets_10m\\voice_samples\\03 - 079 The United State of St Kitts and Nevis ft Nekirah Nicholls",
+      "voice_sample_files": [
+        "SPEAKER_00.wav",
+        "SPEAKER_02.wav"
+      ],
+      "bootstrap_mapping": {
+        "SPEAKER_00": "SPEAKER_02",
+        "SPEAKER_01": "SPEAKER_00"
+      },
+      "audio_slice": "sporc_human_eval_assets_10m\\audio_slices\\03 - 079 The United State of St Kitts and Nevis ft Nekirah Nicholls - 10m audio slice.mp3"
+    },
+    {
+      "order": 4,
+      "title": "Ep 6: Polite & Passive Aggression",
+      "sample_id": "sporc_01648_https_dts_podtrac_com_redirect_mp3_api_spreaker_com_download_episode_26589100_rr",
+      "transcript_slice": "sporc_human_eval_assets_10m\\transcript_slices\\04 - Ep 6 - Polite & Passive Aggression - transcript slices.txt",
+      "voice_samples_folder": "sporc_human_eval_assets_10m\\voice_samples\\04 - Ep 6 - Polite & Passive Aggression",
+      "voice_sample_files": [
+        "SPEAKER_01.wav",
+        "SPEAKER_00.wav"
+      ],
+      "bootstrap_mapping": null,
+      "audio_slice": "sporc_human_eval_assets_10m\\audio_slices\\04 - Ep 6 - Polite & Passive Aggression - 10m audio slice.mp3"
+    },
+    {
+      "order": 5,
+      "title": "Video Game Logic Episode 195: Take Two Takedown",
+      "sample_id": "sporc_02314_https_mcdn_podbean_com_mf_web_g2k25x_VGL_Podcast_Ep_195_Take_Two_Takedown_b7bne_",
+      "transcript_slice": "sporc_human_eval_assets_10m\\transcript_slices\\05 - Video Game Logic Episode 195 - Take Two Takedown - transcript slices.txt",
+      "voice_samples_folder": "sporc_human_eval_assets_10m\\voice_samples\\05 - Video Game Logic Episode 195 - Take Two Takedown",
+      "voice_sample_files": [
+        "SPEAKER_00.wav",
+        "SPEAKER_01.wav"
+      ],
+      "bootstrap_mapping": null,
+      "audio_slice": "sporc_human_eval_assets_10m\\audio_slices\\05 - Video Game Logic Episode 195 - Take Two Takedown - 10m audio slice.mp3"
+    }
+  ],
+  "missing_voice_samples": [],
+  "audio_root": "sporc_human_eval_assets_10m\\audio_slices"
+}

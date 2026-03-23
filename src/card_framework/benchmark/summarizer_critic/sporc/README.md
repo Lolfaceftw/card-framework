@@ -151,26 +151,60 @@ the curated long-form manifest:
 Use `llm-sample` when you want Anthropic to choose transcript-grounded sample
 segments automatically:
 
-- it defaults to the same curated long-form manifest prefix and per-episode
-  budget formula used by `human-sample`,
+- it now supports `--provider anthropic` and `--provider vllm`; the vLLM path
+  reuses the repo's OpenAI-compatible client and reads `VLLM_URL` from `.env`,
+- it defaults to the same curated long-form manifest prefix, uses the duration
+  preset as the primary local selection budget, and now accepts `30s`, `1m`,
+  `5m`, `10m`, and `15m` presets,
 - it sends the full transcript in one request per episode instead of windowing,
 - it streams summarized thinking plus the structured sample payload to the
   terminal through the shared Rich callback path,
 - it persists per-episode `request.json`, `stream.jsonl`, and `response.json`
   traces plus run-level JSONL/CSV exports under `sporc_llm_sampling`,
-- every saved sample now includes a direct `speaker_label`, and each episode
-  also writes a `selected_segments.txt` export for quick inspection,
+- every saved sample now includes bounded source anchors (`source_start_index`,
+  `source_end_index`, timestamps, and `speaker_mode`), and each episode also
+  writes a `selected_segments.txt` export for quick inspection,
 - it currently reads `ANTHROPIC_API_KEY` from `.env` and defaults to
   `claude-opus-4-6` with adaptive thinking enabled,
 - the structured tool payload is the authoritative output, but the sampler does
-  not enforce exact verbatim transcript matching on every returned segment,
-  explicitly favors readable reviewer-facing excerpts that preserve what the
-  speaker said, including disfluencies, while lightly cleaning up only
-  transcript formatting noise such as fragmentation, spacing, and punctuation,
-  and does not reject a run just because Anthropic decides to include or skip
-  prose around that tool call,
+  not require exact verbatim transcript matching; instead it enforces bounded
+  grounded reconstruction inside one cited transcript span per sample, preserves
+  disfluencies and flow where possible, allows only local repair of transcript
+  noise such as fragmentation, spacing, punctuation damage, and diarization
+  seams, rejects false single-speaker flattening of cited multi-speaker
+  spans, and now gives Anthropic two tools: `measure_selection_duration` for
+  exact local duration accounting over already-chosen spans plus automatic
+  `budget` feedback (`remaining_seconds_to_target`, `in_budget`, and
+  `recommended_action`) and `submit_samples` for the final answer. The duration
+  preset here is now the primary locally measured sampled-source budget, and
+  the returned source metadata is still treated as best-effort and not
+  transcript-cross-checked locally,
+- if the last allowed tool round returns a locally valid measured selection
+  that is already in-budget, the sampler now auto-promotes that last measured
+  span set instead of failing purely because `submit_samples` did not arrive in
+  time,
 - if you pass `--samples <N>`, it ignores the WPM-based target-word formula and
   returns exactly `N` samples from each full transcript instead,
+- if you pass `--text-only --samples <N>`, it ignores the duration preset for
+  selection, reads the raw SPoRC speaker-turn data instead of the prepared
+  transcript view, asks the model to return exact raw-turn spans only, locally
+  merges adjacent same-speaker fragments inside a selected span into one
+  coherent speaker line, and writes a per-episode `combined_segments.txt`
+  artifact with the combined text-only output,
+- if you pass `--transcribe-enabled`, `llm-sample` first localizes the source
+  episode audio and runs the repo's stage-1 pipeline on it. That means source
+  separation, Granite ASR by default, and the configured diarizer, then the
+  resulting stage-1 transcript becomes the LLM's source instead of the dataset
+  transcript. In this mode overlap-aware transcript JSON is preserved with
+  single-speaker `segments` plus optional `overlap_speakers` metadata, and the
+  sampler prompt now shows that overlap metadata to the model. This mode also
+  fails fast if the local runtime downgrades diarization to `single_speaker`,
+  because that would lose the overlap-preservation behavior,
+- if `--dataset-manifest` points at an `episode_assets/prepared_episodes_manifest.json`
+  summary produced by `prepare_episode_assets.py`, `llm-sample` now prefers the
+  referenced full `source_transcript_path` / `prepared_full.transcript.json`
+  input, only falls back to `transcript_path` or `sampled_transcript_path` when
+  needed, and still skips stage-1 unless you also add `--transcribe-enabled`,
 - if you pass `--select-episode "[7,10]"`, it runs only manifest episodes `7`
   through `10` inclusive and overrides the default manifest-prefix selection,
 - if you pass `--disable-thinking`, it disables Anthropic thinking and runs
@@ -215,6 +249,9 @@ Each `llm-sample` run writes:
 - `<run_id>/episodes/<sample_id>/stream.jsonl`
 - `<run_id>/episodes/<sample_id>/response.json`
 - `<run_id>/episodes/<sample_id>/selected_segments.txt`
+- `<run_id>/episodes/<sample_id>/combined_segments.txt` in `--text-only` mode
+- `<run_id>/episodes/<sample_id>/stage1_source/transcript.json` plus localized
+  source audio and audio-stage artifacts when `--transcribe-enabled` is used
 
 Each `execute` run writes:
 
@@ -363,6 +400,10 @@ Useful flags:
 - `filter-audio-urls --output-manifest <path>`: optional filtered manifest output path; omit to rewrite in place
 - `filter-audio-urls --audit-path <path>`: optional validation audit JSON path
 - `filter-audio-urls --timeout-seconds <float>`: per-request timeout for remote HEAD/GET probes
+- `filter-audio-urls --max-workers <int>`: maximum concurrent URL probes
+- `filter-audio-urls --max-workers-per-host <int>`: host-level concurrency cap
+- `filter-audio-urls --max-retries <int>`: transient retry count for remote probes
+- `filter-audio-urls --retry-backoff-seconds <float>`: base exponential retry backoff
 - `export-transcripts --manifest-path <path>`: manifest to read transcript paths from
 - `export-transcripts --episodes <spec>`: episode positions or ranges to export
 - `export-transcripts --output-path <path>`: optional combined transcript TXT path
@@ -401,7 +442,9 @@ default.
 
 ```bash
 uv run python -m card_framework.benchmark.summarizer_critic.sporc filter-audio-urls \
-  --manifest-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json"
+  --manifest-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
+  --max-workers 8 \
+  --max-workers-per-host 2
 ```
 
 Or write the filtered result to a separate manifest explicitly:
@@ -417,7 +460,10 @@ Important behavior:
 
 - `filter-audio-urls` prefers `metadata.source_audio_url` and falls back to `episode_key`.
 - it treats existing local files as valid and probes remote URLs with `HEAD`, then falls back to a tiny streamed `GET` when hosts reject `HEAD`.
-- it emits periodic validation progress with checked row counts, kept/removed counts, a compact progress bar, rolling rows-per-minute, and ETA so long runs do not leave the terminal blank.
+- it validates remote URLs with bounded concurrency and per-host caps instead of one fully serial probe stream.
+- it retries transient probe failures with backoff and caches duplicate URL results within the same run.
+- it emits periodic validation progress with checked row counts, kept/removed counts, a compact progress bar, rolling rows-per-minute, and ETA, and those updates now continue across long stretches of valid rows.
+- for compact manifests it now streams sidecar input and output rows instead of materializing the full sidecar in memory before filtering.
 - it preserves the original sample order while removing failing rows.
 - it rewrites manifest JSON and compact sidecars atomically.
 
@@ -520,6 +566,16 @@ uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample \
   --samples 20
 ```
 
+Use the raw text-only mode with a local vLLM server before spending Anthropic tokens:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample \
+  --provider vllm \
+  --text-only \
+  --samples 20 \
+  --select-episode "[7,10]"
+```
+
 Rerun only a specific inclusive manifest span:
 
 ```bash
@@ -530,12 +586,15 @@ uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample \
 Important behavior:
 
 - `llm-sample` is non-interactive and does not support resume yet.
-- it fails fast when `ANTHROPIC_API_KEY` is missing.
+- it fails fast when `ANTHROPIC_API_KEY` is missing for `--provider anthropic`
+  or when `VLLM_URL` is missing for `--provider vllm`.
 - `--samples <N>` overrides the WPM-based target-word mode.
+- `--text-only` requires `--samples <N>`.
 - `--select-episode "[start,end]"` uses 1-based inclusive manifest positions and overrides `--episodes`.
 - `--disable-thinking` disables Anthropic thinking and uses `temperature=0.0`.
-- it retries one invalid out-of-budget or malformed structured submission per
-  episode, then records the episode as failed and continues.
+- returned source indices, timestamps, and speaker metadata are treated as best-effort model output.
+- it is one-shot per episode: one invalid or malformed structured submission is
+  recorded as failed immediately instead of triggering a correction retry.
 
 ## Step 1.7: Reuse Sampled Segments As Stage-2 Transcripts
 
@@ -636,6 +695,41 @@ Important behavior:
 - the helper now bootstraps fresh speaker samples from the downloaded episode audio via source separation and NeMo diarization, then remaps the resulting speaker labels back onto the reusable SPoRC transcript speaker IDs.
 - overlap-heavy speaker regions are skipped for sampling by subtracting any simultaneous speaker activity before the final sample slices are selected, so samples can end up shorter than `30s` when that is the cleanest option.
 - if the configured diarizer is NeMo-derived but the local runtime cannot import NeMo, the helper auto-delegates only this diarization-first speaker-sample bootstrap to `docker compose` using the repo's `setup-and-run` or `setup-and-run-gpu` service. Keep Docker Desktop and the repo Compose stack available on Windows hosts.
+
+## Step 1.76: Build Final Human-Eval Audio From Episode Assets
+
+When `sampled_segments/episode_assets/prepared_episodes_manifest.json` already
+exists, you can run one end-to-end workflow that:
+
+- reads each episode's full `prepared_full.transcript.json`,
+- asks the LLM to choose relevant contiguous source spans under a `5m`, `10m`,
+  or `15m` duration target,
+- tracks estimated Anthropic spend from reported token usage because Anthropic
+  does not expose remaining prepaid credits through the standard API, and
+- cuts one final concatenated source-audio file per episode from the localized
+  `source_audio_path`.
+
+Recommended command for five local episode-assets bundles:
+
+```bash
+uv run python scripts/run_episode_audio_slicing.py \
+  --dataset-manifest "src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/prepared_episodes_manifest.json" \
+  --provider anthropic \
+  --model claude-sonnet-4-6 \
+  --duration-preset 10m \
+  --episodes 5 \
+  --audio-format mp3 \
+  --disable-thinking \
+  --max-estimated-cost-usd 20
+```
+
+Important behavior:
+
+- unlike the older episode-assets compatibility path, the audio-slicing helper now prefers `source_transcript_path` over `sampled_transcript_path`, so the LLM always sees the full episode transcript instead of a pre-sliced transcript.
+- no transcript truncation is applied in this workflow; the LLM receives the full prepared transcript for each selected episode.
+- each run writes live `run_summary.json`, `selected_samples.jsonl`, `selected_samples.csv`, and an `experiments.md` log under `artifacts/summarizer_critic_benchmark/sporc_episode_audio_slices/<run_id>/`.
+- each episode folder under that run root keeps the raw sampler request and response artifacts plus the final rendered audio file and a `selected_audio_manifest.json` sidecar.
+- the estimated Anthropic spend is best-effort and comes from the response `usage` fields plus the current model-pricing snapshot; Anthropic's Admin reporting APIs are separate and do not provide a real-time remaining-balance endpoint for a normal API key.
 
 ## Step 2: Run One Benchmark
 
@@ -781,7 +875,7 @@ Sweep-specific flags:
 - `--examples <int>` to override `--max-samples` only for the sweep using the same retained-sample semantics
 - `--parallelism <int>` where `0` means run all selected presets concurrently
 - `--concurrency <int>` to seed multiple worker children per active preset
-- `--duration-presets 30s,1m,5m,15m`
+- `--duration-presets 30s,1m,5m,10m,15m`
 - `--sweep-root <path>`
 - `--enable-voice-clone`
 - `--child-stall-seconds <float>` to restart a child when its active sample reports no new activity for too long
@@ -839,14 +933,14 @@ Shared execution flags users usually need:
 - `--output-root <path>`
 - `execute`: `--max-samples <int>` where `0` means all prepared examples and positive values mean retained samples
 - `execute`: `--sample-seed <int>` for deterministic seeded-random sample selection
-- `execute`: `--duration-preset <30s|1m|5m|15m>`
+- `execute`: `--duration-preset <30s|1m|5m|10m|15m>`
 - `execute`: `--target-seconds-override <int>`
 - `duration-sweep`: `--max-samples <int>` where `0` means all prepared examples per preset and positive values mean retained samples per preset
 - `duration-sweep`: `--sample-seed <int>` for deterministic seeded-random per-preset sample selection
 - `duration-sweep`: `--examples <int>` as a sweep-only override
 - `duration-sweep`: `--parallelism <int>`
 - `duration-sweep`: `--concurrency <int>`
-- `duration-sweep`: `--duration-presets 30s,1m,5m,15m`
+- `duration-sweep`: `--duration-presets 30s,1m,5m,10m,15m`
 
 `--embedding-mode enabled` uses the active embedding profile from config rather
 than a hard-coded benchmark-only model. In the repository defaults that profile

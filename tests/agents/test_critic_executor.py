@@ -85,6 +85,7 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.utils"] = utils_module
 
 from card_framework.agents.base import BaseA2AExecutor
+import card_framework.agents.critic as critic_module
 from card_framework.agents.critic import CriticExecutor
 from card_framework.agents.utils import count_words
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
@@ -584,6 +585,89 @@ def test_run_deterministic_checks_prefers_live_draft_audio_state(
     assert payload["duration_source"] == "actual_audio"
     assert payload["actual_estimated_seconds"] == 2.4
     assert payload["status"] == "pass"
+
+
+def test_run_deterministic_checks_falls_back_to_live_draft_turn_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Use rendered turn WAVs when the live-draft sidecar is unavailable."""
+    turn_dir = tmp_path / "voice_clone" / "live_draft_turns"
+    turn_dir.mkdir(parents=True)
+    first_turn = turn_dir / "turn-001.wav"
+    second_turn = turn_dir / "turn-002.wav"
+    first_turn.write_bytes(b"wav1")
+    second_turn.write_bytes(b"wav2")
+    state_path = tmp_path / "voice_clone" / "live_draft.state.json"
+    draft = (
+        "<SPEAKER_00>Short finalized draft.</SPEAKER_00>\n"
+        "<SPEAKER_01>Second short reply.</SPEAKER_01>"
+    )
+
+    durations = {
+        first_turn.resolve(): 2_400,
+        second_turn.resolve(): 3_600,
+    }
+
+    def _fake_probe_audio_duration_ms(audio_path: Path) -> int | None:
+        return durations.get(audio_path.resolve())
+
+    monkeypatch.setattr(
+        critic_module,
+        "probe_audio_duration_ms",
+        _fake_probe_audio_duration_ms,
+    )
+
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
+
+    payload = executor._run_deterministic_checks(
+        draft=draft,
+        target_seconds=5,
+        duration_tolerance_ratio=0.25,
+        draft_audio_state_path=state_path,
+    )
+
+    assert payload["duration_source"] == "actual_audio_dir"
+    assert payload["actual_estimated_seconds"] == 6.0
+    assert payload["status"] == "pass"
+
+
+def test_run_deterministic_checks_accepts_terminal_quoted_sentence() -> None:
+    """Treat closing quotes after terminal punctuation as a valid sentence end."""
+    draft = '<SPEAKER_00>Edward says it is "tolerable."</SPEAKER_00>'
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
+    messages: list[dict[str, Any]] = []
+
+    asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_quoted",
+                    "name": "run_deterministic_checks",
+                    "arguments": {"draft_text": draft},
+                }
+            ],
+            messages=messages,
+            context_data={
+                "draft": draft,
+                "target_seconds": 2,
+                "duration_tolerance_ratio": 0.8,
+            },
+        )
+    )
+    tool_msg = next(m for m in messages if m.get("name") == "run_deterministic_checks")
+    payload = json.loads(tool_msg["content"])
+
+    assert payload["status"] == "pass"
+    assert payload["failures"] == []
 
 
 def test_run_agent_loop_stops_on_repeated_no_tool_span() -> None:

@@ -1,0 +1,167 @@
+"""Regression tests for live-draft voice-clone state persistence."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from card_framework.audio_pipeline.live_draft_voice_clone import (
+    LiveDraftVoiceCloneSession,
+)
+
+
+class _FakeVoiceCloneProvider:
+    """Write placeholder audio files for live-draft session tests."""
+
+    def synthesize(
+        self,
+        *,
+        reference_audio_path: Path,
+        text: str,
+        output_audio_path: Path,
+        emo_text: str | None = None,
+        emotion_vector=None,
+        progress_callback=None,
+    ) -> Path:
+        del reference_audio_path, emo_text, emotion_vector, progress_callback
+        output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        output_audio_path.write_bytes(text.encode("utf-8"))
+        return output_audio_path
+
+
+def test_render_turn_persists_state_sidecar_before_snapshot_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Persist live-draft turn metadata immediately after one render."""
+    sample_dir = tmp_path / "speaker_samples"
+    sample_dir.mkdir()
+    sample_path = sample_dir / "speaker.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = sample_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "path": str(sample_path),
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_probe_audio_duration_ms(_path: Path) -> int:
+        return 2400
+
+    import card_framework.audio_pipeline.live_draft_voice_clone as live_draft_module
+
+    monkeypatch.setattr(
+        live_draft_module,
+        "probe_audio_duration_ms",
+        _fake_probe_audio_duration_ms,
+    )
+
+    state_path = tmp_path / "voice_clone" / "live_draft_test.state.json"
+    session = LiveDraftVoiceCloneSession(
+        provider=_FakeVoiceCloneProvider(),
+        state_path=state_path,
+        output_dir=state_path.parent,
+        speaker_samples_manifest_path=manifest_path,
+    )
+
+    record = session.render_turn(
+        turn_id="turn-001",
+        speaker="SPEAKER_00",
+        text="Hello there.",
+        emo_preset="neutral",
+    )
+
+    assert state_path.exists()
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["current_snapshot"] == []
+    assert payload["turn_audio"]["turn-001"]["output_audio_path"] == str(
+        record.output_audio_path
+    )
+    assert payload["turn_audio"]["turn-001"]["duration_ms"] == 2400
+
+
+def test_restore_snapshot_matches_summary_xml_with_link_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sample_dir = tmp_path / "speaker_samples"
+    sample_dir.mkdir()
+    sample_path = sample_dir / "speaker.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = sample_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "path": str(sample_path),
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_probe_audio_duration_ms(_path: Path) -> int:
+        return 2400
+
+    import card_framework.audio_pipeline.live_draft_voice_clone as live_draft_module
+
+    monkeypatch.setattr(
+        live_draft_module,
+        "probe_audio_duration_ms",
+        _fake_probe_audio_duration_ms,
+    )
+
+    state_path = tmp_path / "voice_clone" / "live_draft_test.state.json"
+    session = LiveDraftVoiceCloneSession(
+        provider=_FakeVoiceCloneProvider(),
+        state_path=state_path,
+        output_dir=state_path.parent,
+        speaker_samples_manifest_path=manifest_path,
+    )
+
+    session.render_turn(
+        turn_id="turn-001",
+        speaker="SPEAKER_00",
+        text="Hello there.",
+        emo_preset="neutral",
+        emotion_vector_source="summary_turn_linking",
+        source_segment_indices=(2, 5),
+        source_segment_weights=(0.7, 0.3),
+    )
+    snapshot = [
+        {
+            "line": 1,
+            "turn_id": "turn-001",
+            "speaker_id": "SPEAKER_00",
+            "content": "Hello there.",
+            "emo_preset": "neutral",
+            "emotion_vector_source": "summary_turn_linking",
+            "source_segment_indices": [2, 5],
+            "source_segment_weights": [0.7, 0.3],
+        }
+    ]
+    session.sync_snapshot(snapshot)
+
+    restored = session.restore_snapshot_for_draft(
+        '<SPEAKER_00 emo_preset="neutral" emotion_vector_source="summary_turn_linking" '
+        'source_segment_indices="2,5" source_segment_weights="0.700000,0.300000">'
+        "Hello there."
+        "</SPEAKER_00>"
+    )
+
+    assert restored is not None
+    assert restored[0]["source_segment_indices"] == [2, 5]
+    assert restored[0]["source_segment_weights"] == [0.7, 0.3]

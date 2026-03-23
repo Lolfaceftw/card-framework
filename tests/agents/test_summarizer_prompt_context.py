@@ -99,3 +99,18 @@ def test_load_draft_into_registry_ignores_malformed_xml() -> None:
     )
 
     assert len(registry) == 0
+
+
+def test_summarizer_excerpt_segment_includes_affect_hint_when_present() -> None:
+    rendered = SummarizerExecutor._format_transcript_excerpt_segment(
+        {
+            "speaker": "SPEAKER_00",
+            "text": "hello world",
+            "affect_hint": "preset=urgent; top=angry:0.75",
+        }
+    )
+
+    assert (
+        rendered
+        == "[SPEAKER_00] [affect: preset=urgent; top=angry:0.75]: hello world\n"
+    )

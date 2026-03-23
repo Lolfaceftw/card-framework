@@ -1,79 +1,32 @@
-Episode: Brett Hendrix - Texan, Multi-instrumentalist, New Guy
-Sample ID: sporc_00399_https_anchor_fm_s_16d4dbfc_podcast_play_15098967_https_3A_2F_2Fd3ctxlq1ktw2nl_cl
+Episode: Video Game Logic Episode 195: Take Two Takedown
+Sample ID: sporc_02314_https_mcdn_podbean_com_mf_web_g2k25x_VGL_Podcast_Ep_195_Take_Two_Takedown_b7bne_
 
-1. [SPEAKER_00] Welcome into another episode of Tonight We're Drinking. This week's episode features my interview with Brett Hendricks, the newest member of Chancy Williams and the Younger Brothers Band. As always, it's such a good time getting to interview all the band members, crew, and all that stuff.
-Rationale: Sets up the episode premise and introduces Brett as the newest band member.
+1. [SPEAKER_00] Hello and welcome to episode of Video Game Logic. Today's episode was recorded on June the 9th, 2020. I'm your host, gaming psychologist and with me as always. Nothing fancy this week. My name is Richard. On today's show we will of course be discussing the games that we have played. Take Two kills the KSP2 dev, pulling contracts and attempts to poach talent. Destiny 2 is removing its year one content from the game. We're going to be talking about a couple of gaming companies that are actually taking action amid recent world events. We'll be talking about our Steam discovery cues.
+Rationale: Episode introduction establishing the host, co-host, and full topic agenda for the episode.
 
-2. [SPEAKER_00] We also had our new album come out, the album is called Third Street, it came out May 22nd, and we were pretty excited to say the least that it was at number five on the iTunes charts, and it was something that we never expected to see, and it was such a cool thing to wake up, check the charts the day that something like that comes out, and you see your name up there with all the other big wigs in the business.
-Rationale: Major band news about the new album Third Street and its chart success.
+2. [SPEAKER_01] So let me talk about origin first. Let me bitch about this. All right. All right. EA, if you're out there and I know you're out there, you are always listening. First of all, fuck you. But EA needs to upgrade their servers that send out authorization codes to something that actually isn't dial up. So since I reformat, or not really reformat, but repaired my computer, I had to reinstall a lot of shit. And I never bothered to set origin back up. Well, this was coming over. So thought, yeah, Sims four. Wait, I have Sims four. That'll be a good game, just to play with her for a bit.
+Rationale: Rage's rant about EA's Origin platform and the context for playing Sims 4 with his niece, capturing his distinctive voice and humor.
 
-3. [SPEAKER_00] We met Brett first when he was playing with Casey Donahue, and we got to know him a little bit, we played with him a few times, and then Brett moved on from them, and we were in Sturgis last summer at the same time, and we just, Brett was playing a solo show at a campground, and we said, 'Hey, if you don't mind, why don't you come sit in with us, play a few shows a couple nights and see what happens.' Brett came out, we invited him out, and he came and showed up and started playing with us, and then just kind of slid right in there.
-Rationale: Origin story of how Brett connected with the band through Casey Donahue and Sturgis.
+3. [SPEAKER_00] So the only game I'm going to talk about this week is MechWarrior Living Legend. MechWarrior Living Legend is free. It was a game that was in development for several years before it was scrapped, and development was priority was shifted over to MechWarrior Online. So it is an online multiplayer game, but it uses, what's the term for it? It's more than just the mechs. You have the mechs, you have tanks, you have VTOLs, you have aerospace fighters, you have artillery that is all player controlled, and you also have like a battle, like a power armor suit that you spawn in that can be upgraded as well. But it was after the development was canceled, somehow the community that was really behind the game agreed to continue development of the game itself, and basically just sign a contract that said we won't accept any payment for this, we're doing this as fans, and as like a mod.
+Rationale: Gaming Psychologist introduces MechWarrior Living Legend, a key game discussion capturing the community-driven development story.
 
-4. [SPEAKER_03] Steve Stone, who is obviously a good friend of all of ours, had invited me before I left Casey to play his campground that he had taken part ownership in at the time. And I'm not sure if he has since got out of that or not, but anyway.
-Rationale: Brett explains the connection through Steve Stone that led to his Sturgis presence.
+4. [SPEAKER_00] Since it's a genuine free game with a shitload of content in it and a nice player base, I've just kind of overlooked. So that's a good game. It's a very good game. I'm trying to find a way to support the devs. Like, they even say like in their FAQ, like, where can we donate to this? And they're like, we can't accept money as part of our contract to keep developing this. But I figure there's got to be some way to support them somewhere, and I just haven't found it yet. Maybe I haven't looked hard enough, but once I find it, I'm gonna give him some money. Because I played it for 13 or 14 hours over the weekend, and well, tail into last week and over the weekend. And I had a really good time with it.
+Rationale: Strong endorsement of MechWarrior Living Legend and the desire to support community devs who can't accept payment.
 
-5. [SPEAKER_03] But I'm driving through Nebraska by myself, Omaha, you know, trying to make it up there, and a Wyoming number pops up on my phone, and I, like, I mean, we all get spam calls all the time. Sure enough, it was Chancy. He was like, 'Hey, man. You know, what are you doing?' And I'm like, 'Well, I'm driving through Omaha, like, I'm on my way up here.' And he was like, 'Yeah, I wanted to see if you wanted to come and play.' And I was like, 'Well, I don't have XYZ for gear. Like, I have my acoustic stuff. I don't have my electric guitar. I don't have an amp.'
-Rationale: Key moment when Chancy called Brett to invite him to play, and Brett's gear concerns.
+5. [SPEAKER_01] So keeping up with my theme of fours, I guess this week, I played streets of rage four. Now, it has a very old school feel to it. And it made me realize that boy, my reflexes are a lot worse. And it's a lot more frustrating these days, just because it is very old school. You don't have a lot of invincibility time. So there were sometimes that I just got juggled for about half my health bar, just due to bad luck.
+Rationale: Rage introduces Streets of Rage 4, capturing his personal experience and the old-school difficulty feel.
 
-6. [SPEAKER_03] I love situations like that for me, because I had two days to learn music. I literally sat in a trailer at that campground, and I figured out, because I didn't really get told by Chancy what we were doing. It wasn't, 'Hey, you're doing the whole set,' or, 'Hey, you're doing a couple of songs.' It was, 'Hey, here's this.'
-Rationale: Brett describes the challenge of learning the band's music in just two days.
+6. [SPEAKER_00] So the sort of the cliff notes version is that back in December of, well, okay. So the dev, the studio that was developing it and then take two, which was contracting the studio to develop ksp2, we're having some contract negotiations. Take two apparently didn't like what was going on. Basically pulled the contract, which was the only contract that this company had pulled the contract. And behind the scenes messaged on LinkedIn, all of the people who worked for the company developing ksp2 and said, hey, come work for us. And then they created a new development studio called intercept studio, which on the nose there. And now that studio is developing, or it is the one that has been developing ksp2 since sometime early this year.
+Rationale: Core narrative of the Take Two/KSP2 controversy - the main news story of the episode explaining how Take Two pulled the contract and poached talent.
 
-7. [SPEAKER_03] Brooke's prominent part, why it's a permanent part, they have these things set up, and it's very hard being the new guy, stepping in and going, 'All right, where do you fit? Where do you lie? Where do you put in your pieces to make this better?' And that was the hard thing to figure out, like, I'm listening to these parts. And obviously, like, hearing the fiddle part, like, 'Okay, she got it. I ain't got to worry about it. We're good.' But, like, hearing a guitar part, it's like, 'All right, Wyatt, what are we going to split? What am I going to do? What am I going to fake?'
-Rationale: Brett explains the challenge of finding his musical role within the established band.
+7. [SPEAKER_00] So take two basically killed this company. Because that it was their only contract that they had, like they were all hands on deck making ksp2 and then pulled the contract out from underneath them poached away a lot of their talent somewhere around a third of their talent initially. I've got several YouTube videos that explain it. And you know, fuck them. Part of my response initially was like, well, I'm never playing another one of their games ever again. At least not buying it. I'll, you know, ride the pirate train as far as it goes. But then I got to thinking like about how many companies that they own and what that would actually look like.
+Rationale: Emotional reaction to Take Two's actions and the practical dilemma of boycotting such a large publisher.
 
-8. [SPEAKER_03] It's such a rush. Like, I don't do drugs. I don't. Never have, never will. And I say that. I drink, and I have a good time with y'all. I'm royal because of y'all that's become my drink for the past year, but looking at the situation, like, there's a level of a high, and I think every musician can agree with this, that you get, especially when you walk into a situation of the unknown.
-Rationale: Brett describes the adrenaline rush of performing in unfamiliar musical situations.
+8. [SPEAKER_00] What destiny two is doing or what bungee is doing is basically, they're throwing their hands up and saying Destiny two is too bloated. We can't handle it all. We're going to use a system where we're going to rotate content in and out. Based on its popularity. Instead of building a Destiny 3 and leaving Destiny 2 behind each year, we're going to cycle older, less actively played content out of the live game into what we're calling the Destiny Content Vault.
+Rationale: Explains the Destiny 2 content vault controversy, a major news topic of the episode.
 
-9. [SPEAKER_00] The cool thing about it was, and I'll let you know this, that we had a lot of people say that week that you played with us, and it was, what, four nights? I had so many different people that were from that area, and have heard us so many different times that told us that you added so much to the music, and you blended in so seamlessly, that it seemed like a no brainer for us, really, to be like, all right, we got to have another guitar player. And the cool thing about it is, your style is different than Wyatt's, but they complement each other so well.
-Rationale: Travis explains how the audience response confirmed Brett was a great fit for the band.
+9. [SPEAKER_00] Well, I mean, you know, the world is on fire. America is doubly on fire between, you know, an ongoing global pandemic, which in some places getting better and some places getting worse. America is full of riots and protests right now that to some extent are spreading to other places in the world about racial inequality. There has been in the United States, in particular, quite a long history of police brutality, particularly against people of color. And I think that the world or the country has just kind of hit a breaking point, whether it's sort of the perfect storm of events that have led to about two weeks of consistent protests and in certain places, riots about all of this. And there have been companies and organizations all over basically making statements.
+Rationale: Sets the real-world context for the segment on gaming companies responding to racial justice protests and the pandemic.
 
-10. [SPEAKER_03] My job walking in... It's not a contest. My guitar or Dobro, man, you throw an instrument at me, I don't care. That was kind of the thing with Casey that was weird, I walked in, and it was like, can you play this? And I was like, I don't know, but I'll try. My mentality, I know it's a few of my friends' mentalities, like, I don't know if I can do that, but I'll take the challenge.
-Rationale: Brett's philosophy as a utility musician willing to try any instrument.
-
-11. [SPEAKER_03] There are a ton of sidemen out there that do what I do that are utility musicians that I have major respect for, because they can literally pick up an instrument. Milo Deering is a studio musician that I love to death. He works in Texas a lot. And that man can pick up any stringed instrument that I have ever seen and play the living hell out of it.
-Rationale: Brett names his inspiration as a multi-instrumentalist utility musician.
-
-12. [SPEAKER_00] This is tonight we're drinking. Brett, what are you drinking right now? This is what's known as a, what I've been told is a cowgirl cocktail. We're both cowgirls. It is whiskey and margarita mix, which has definitely been interesting.
-Rationale: The drinking segment revealing what they're having - a signature podcast moment.
-
-13. [SPEAKER_03] Chancy, if you're listening. This is your PSA. Please stop with the wild turkey shot. For me, Tyler Corrington. Shout out, Tyler. Rob, everybody in the band, it's-- oh, it's a rough night every time.
-Rationale: Humorous band dynamic moment about Chancy's wild turkey shots.
-
-14. [SPEAKER_00] Danny and Dennis, the owners of Third Street, which we-- the name Third Street was supposed to be kind of ambiguous to people who don't know Third Street, Laramie, Wyoming. But that is one of our favorite hangouts, and they were the ones that got us drinking wild turkey.
-Rationale: Reveals the story behind the album name Third Street.
-
-15. [SPEAKER_03] Guitar, nine years old. Technically. So I was, I said this earlier, my older brother is a drummer. He's a sound man too. He has his own production company and does a lot of stuff that we're involved with. But when I was nine years old, we started getting these magazines in the mail from Musicians Friend. And I remember my dad having a Fender Strat that he still has sitting in his leather work room. And basically my dad's then and this thing would sit in there and I'd run in there while he wasn't home and like hit strings real quick and run out, you know, a little eight-year-old kid.
-Rationale: Brett's origin story with guitar, family musical background.
-
-16. [SPEAKER_03] I was the kid before school waiting to either catch the bus or have my mom take me to school that was sitting in my dad's room with an old school stereo and a CD blaring Stevie Ray Vaughn's greatest hits, playing along and trying to figure it out like every morning and like mom never said a word about it.
-Rationale: Vivid childhood memory of practicing guitar to Stevie Ray Vaughan.
-
-17. [SPEAKER_03] I only took lessons for like three weeks because of this and this guy's son ended up playing bass for me and my band when I had it. Steve Smith, I walked in and I was like, I want to know how to play this. And he looked at me and he goes, son, you got to crawl before you can fly. I will never forget that quote as long as I live.
-Rationale: Memorable mentor quote that shaped Brett's musical development.
-
-18. [SPEAKER_03] Piano, banjo a little bit, when I was with Casey, it was a ganjo, six string. My dad has had a five string as long as I'm longer than I've been alive. It was his high school graduation present. So banjo, Dobro, mandolin, keys, steel guitar, drums a little bit. I'm not going to sit here and tell you that I can play all of these efficiently. I never will.
-Rationale: Brett lists the roughly seven instruments he plays, establishing his multi-instrumentalist identity.
-
-19. [SPEAKER_00] Brett, you grew up in Texas, in Waco, Texas, and you have a son, Johnny, how old is Johnny now? Johnny turns one June 11th. So he's just about one year old.
-Rationale: Key personal detail about Brett's son.
-
-20. [SPEAKER_03] I got the offer, you know, you all flew me out for a couple of shows after Sturgis and I was more than happy to come up. Me and my dad talked about it the whole way home from Sturgis and it was like, I remember him looking at me and he was like, this is what you need to do. He goes, one, I don't want you to stop playing music, because at that point, I didn't know what I was going to do. I didn't have a job. I was looking for one, I thought about restarting my career, I thought about going back in the medical field. But like he looked at me and he was like, I don't want you to stop playing music. I think you should figure this out.
-Rationale: Brett's dad encouraging him to join the band - pivotal decision moment.
-
-21. [SPEAKER_03] The hardest part? That's easy, being away from Johnny. I mean, that's the simple answer. It's a rough go, but like, I've talked to a lot of people about it. Me and Wyatt, I've had that conversation, me and Jay have had that conversation. This is what you know to do. I've only ever known to be a musician, I've tried other things and it's really hard to shake that bug.
-Rationale: Brett reveals the hardest part of being in the band - being away from his son.
-
-22. [SPEAKER_03] I haven't met an asshole up here. Granted, I hang out with you all most of the time, but literally even the people that I've really met in town, like I have yet to meet anyone that I've just looked at them and gone, God man, I do not want to hang out with you. It is literally here in Wyoming. I have yet to meet somebody that I went, all right, screw you, bro.
-Rationale: Brett's endorsement of Wyoming people as a Texan transplant.
-
-23. [SPEAKER_03] I could not ever repay Chancy for that one experience by itself. And I've told him that. That was a very special moment to be able to do that because how old my dad had been, but also like, I got to do it with your dad. And you know, like I had been to Wyoming before that point, I had played here in town and didn't know any of y'all, which was weird a couple of years ago without even knowing any of us.
-Rationale: Brett's emotional gratitude toward Chancy for showing his dad Wyoming for the first time.
-
-24. [SPEAKER_03] What's your favorite part of being in a band? Brotherhood. I had my own band for nine years, started at 14. I can call most of the guys that I've ever worked with, whether it's my band, whether it's Casey, whether it's y'all and say, Hey, what's up? You know, let's go get lunch. Let's have been, you know, just catch up. And those friendships because there's a different level.
-Rationale: Brett names brotherhood as his favorite part of being in a band.
-
-25. [SPEAKER_03] You got on a stage one night and then it turned into four and then it turned into a job. You can't ask for that. You finally did something right enough in your music career that you impressed a group of people that were like, nah, keep coming. So it was, it's a miracle in my head that it worked that way.
-Rationale: Brett reflects on how his one-night sit-in turned into a permanent position.
-
-
+10. [SPEAKER_01] So it's IO put out. I think this is the first bundle out there to support the NAACP legal defense and educational fund and the community bail fund for the protesters because the protesters have been kind of getting hammered on. So they put out a small bundle on itch.io. 1,427 items. Holy shit. All the proceeds are going to those two funds divided 50-50 and people jumped on big time. And like I said, it's good to see companies actually trying to make a difference instead of putting out, you know, some white text on black background, right?
+Rationale: Highlights the itch.io racial justice bundle as a concrete positive action by the gaming community, contrasting it with hollow corporate statements.

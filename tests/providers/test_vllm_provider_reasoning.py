@@ -447,6 +447,8 @@ def test_chat_does_not_fallback_when_tool_calls_present(free_tcp_port: int) -> N
             ]
         )
         provider = _build_provider(server.base_url)
+        callback = _RecordingCallback()
+        provider.set_response_callback(callback)
 
         dumped = provider.chat(
             messages=[{"role": "system", "content": "Evaluator"}]
@@ -454,6 +456,13 @@ def test_chat_does_not_fallback_when_tool_calls_present(free_tcp_port: int) -> N
 
         provider._client.close()
 
+    assert callback.events == [
+        ("start", "Judge"),
+        ("thought", '{"plan":"call tool"}'),
+        ("content", "\nTOOL submit_answer: "),
+        ("content", '{"question_id":"Q001"}'),
+        ("complete", ""),
+    ]
     assert dumped["content"] == ""
     assert dumped["reasoning_content"] == '{"plan":"call tool"}'
     assert dumped["tool_calls"][0]["id"] == "call_1"

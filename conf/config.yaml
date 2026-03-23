@@ -15,6 +15,10 @@ profiles:
       _target_: card_framework.providers.vllm_provider.VLLMProvider
       base_url: ${oc.env:CARD_FRAMEWORK_VLLM_BASE_URL}
       api_key: ${oc.env:CARD_FRAMEWORK_VLLM_API_KEY,EMPTY}
+    anthropic_claude_opus:
+      _target_: card_framework.providers.anthropic_provider.AnthropicProvider
+      api_key: ${oc.env:ANTHROPIC_API_KEY,""}
+      model: "claude-opus-4-6"
     transformers_local:
       _target_: card_framework.providers.transformers_provider.TransformersProvider
       model: "Salesforce/Llama-xLAM-2-3b-fc-r"
@@ -184,6 +188,83 @@ audio:
     low_data_policy: "quality_first_shorter"
     audio_codec: "pcm_s24le"
     manifest_filename: "manifest.json"
+  affect_analysis:
+    enabled: true
+    fail_on_error: false
+    reuse_existing_manifest: true
+    verbose_logging: true
+    output_dir_name: "affect_analysis"
+    manifest_filename: "manifest.json"
+    source_audio: "auto"
+    target_sample_rate_hz: 16000
+    context_padding_ms: 150
+    min_segment_duration_ms: 1200
+    prompt_max_hint_chars: 160
+    top_emotions_for_hint: 2
+    mapping:
+      default_preset: "neutral"
+      emotion_vectors_enabled: true
+      urgent_emotions:
+      - "angry"
+      - "fearful"
+      upbeat_emotions:
+      - "happy"
+      - "surprised"
+      urgent_arousal_threshold: 0.65
+      upbeat_valence_threshold: 0.60
+      warm_valence_threshold: 0.48
+      low_arousal_threshold: 0.45
+      engaged_arousal_threshold: 0.45
+      categorical_weight: 0.65
+      dimensional_weight: 0.35
+      calm_floor: 0.12
+      positive_surprise_boost: 0.35
+      negative_anger_bias: 0.85
+      negative_fear_bias: 0.90
+      melancholic_bias: 0.70
+      disgust_bias: 0.35
+      confidence_floor: 0.15
+      dominant_emotion_cap: 0.38
+      emotion_vector_max_sum: 0.8
+      apply_indextts_emotion_bias: true
+    profiling:
+      enabled: true
+      sample_interval_seconds: 0.2
+      command_timeout_seconds: 3.0
+      profile_filename: "resource_profile.json"
+    categorical:
+      enabled: true
+      provider: "emotion2vec_plus"
+      model_name: "emotion2vec_plus_large"
+      device: "auto"
+      batch_size: 4
+      hub: "hf"
+      granularity: "utterance"
+      extract_embedding: true
+      disable_update_check: true
+    dimensional:
+      enabled: true
+      provider: "audeering_msp_dim"
+      model_name: "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"
+      device: "auto"
+      use_fp16: true
+      batch_size: 4
+  summary_turn_linking:
+    enabled: true
+    top_k: 3
+    min_support_score: 0.08
+    same_speaker_bonus: 1.2
+    default_emotion_confidence: 0.5
+    min_emotion_confidence: 0.15
+    lexical_similarity_weight: 0.45
+    coverage_similarity_weight: 0.25
+    sequence_similarity_weight: 0.15
+    position_similarity_weight: 0.15
+    min_sequence_similarity_without_overlap: 0.6
+    require_emotion_vector: true
+    apply_indextts_bias: false
+    max_sum: 0.8
+    force_live_draft_rerender: true
   voice_clone:
     enabled: true
     live_drafting:
@@ -191,6 +272,9 @@ audio:
     provider: "indextts"
     execution_backend: "subprocess"
     stream_subprocess_output: true
+    normalize_emotion_vector: true
+    emotion_vector_apply_bias: true
+    emotion_vector_max_sum: 0.8
     runner_project_dir: "src/card_framework/_vendor/index_tts"
     uv_executable: "uv"
     fail_on_error: true
@@ -219,12 +303,26 @@ audio:
     max_mel_tokens: 1500
     calibration:
       artifact_path: "artifacts/calibration/voice_clone_calibration.json"
+    normalization:
+      enabled: true
+      target_lufs: -16.0
+      true_peak_db: -1.5
+      loudness_range_lu: 11.0
+      linear: true
+      dual_mono: false
+      timeout_seconds: 300
     emo_presets:
       neutral: "calm, neutral, steady conversational tone."
       warm: "warmly, gently, and supportively, like an empathetic co-host."
       engaged: "engaged, explanatory, thoughtful podcast tone."
       upbeat: "upbeat energy, curiosity, and lively enthusiasm."
       urgent: "focused urgency and serious emphasis."
+    emo_preset_vectors:
+      neutral: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.02, 0.24]
+      warm: [0.14, 0.00, 0.00, 0.00, 0.00, 0.00, 0.02, 0.24]
+      engaged: [0.10, 0.00, 0.00, 0.00, 0.00, 0.00, 0.06, 0.20]
+      upbeat: [0.24, 0.00, 0.00, 0.00, 0.00, 0.00, 0.14, 0.06]
+      urgent: [0.04, 0.18, 0.02, 0.14, 0.00, 0.00, 0.04, 0.02]
     gpu_heartbeat:
       enabled: true
       interval_seconds: 10
@@ -246,6 +344,14 @@ audio:
     min_available_overlap_ms: 120
     turn_end_guard_ms: 180
     mix_timeout_seconds: 300
+    normalization:
+      enabled: true
+      target_lufs: -16.0
+      true_peak_db: -1.5
+      loudness_range_lu: 11.0
+      linear: true
+      dual_mono: false
+      timeout_seconds: 300
 
 orchestrator:
   target_seconds:

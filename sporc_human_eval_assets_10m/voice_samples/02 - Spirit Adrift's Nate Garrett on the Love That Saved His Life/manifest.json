@@ -1,0 +1,89 @@
+{
+  "generated_at_utc": "2026-03-21T02:20:20+00:00",
+  "source_audio_path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_00767_https_feeds_soundcloud_com_stream_845779975_hotbloodedpodcast_spirit__Spirit_Adrift_s_Nate_Garrett_on_the_Love_That_Saved_His_Life/source_audio/sporc_00767_https_feeds_soundcloud_com_stream_845779975_hotbloodedpodcast_spirit_adrifts_nat.mp3",
+  "target_duration_ms": 30000,
+  "clip_method": "concat_turns",
+  "short_speaker_policy": "export_shorter",
+  "sample_rate_hz": 44100,
+  "channels": 1,
+  "codec": "pcm_s24le",
+  "edge_fade_ms": 20,
+  "min_slice_duration_ms": 1200,
+  "max_slices": 6,
+  "selection_order": "chronological",
+  "low_data_policy": "quality_first_shorter",
+  "samples": [
+    {
+      "speaker": "SPEAKER_00",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_00767_https_feeds_soundcloud_com_stream_845779975_hotbloodedpodcast_spirit__Spirit_Adrift_s_Nate_Garrett_on_the_Love_That_Saved_His_Life/speaker_samples/SPEAKER_01.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 30000,
+      "status": "ok",
+      "selected_slice_count": 5,
+      "dropped_slice_count": 193,
+      "ranges_ms": [
+        {
+          "start_time_ms": 700,
+          "end_time_ms": 9770
+        },
+        {
+          "start_time_ms": 10940,
+          "end_time_ms": 17610
+        },
+        {
+          "start_time_ms": 18700,
+          "end_time_ms": 26090
+        },
+        {
+          "start_time_ms": 26780,
+          "end_time_ms": 32090
+        },
+        {
+          "start_time_ms": 32860,
+          "end_time_ms": 34420
+        }
+      ],
+      "bootstrap_speaker": "SPEAKER_01"
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_00767_https_feeds_soundcloud_com_stream_845779975_hotbloodedpodcast_spirit__Spirit_Adrift_s_Nate_Garrett_on_the_Love_That_Saved_His_Life/speaker_samples/SPEAKER_00.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 21540,
+      "status": "shorter_than_requested",
+      "selected_slice_count": 6,
+      "dropped_slice_count": 1044,
+      "ranges_ms": [
+        {
+          "start_time_ms": 268780,
+          "end_time_ms": 274250
+        },
+        {
+          "start_time_ms": 275980,
+          "end_time_ms": 277290
+        },
+        {
+          "start_time_ms": 278140,
+          "end_time_ms": 280650
+        },
+        {
+          "start_time_ms": 281820,
+          "end_time_ms": 284090
+        },
+        {
+          "start_time_ms": 285340,
+          "end_time_ms": 289770
+        },
+        {
+          "start_time_ms": 291100,
+          "end_time_ms": 296650
+        }
+      ],
+      "bootstrap_speaker": "SPEAKER_00"
+    }
+  ],
+  "bootstrap_speaker_mapping": {
+    "SPEAKER_01": "SPEAKER_00",
+    "SPEAKER_00": "SPEAKER_02"
+  }
+}

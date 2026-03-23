@@ -13,7 +13,9 @@ x-setup-and-run-base: &setup-and-run-base
     HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
     PYTHONUNBUFFERED: "1"
     TRANSFORMERS_CACHE: /root/.cache/huggingface/transformers
-  shm_size: "16gb"
+  shm_size: "8gb"
+  mem_limit: "8g"
+  memswap_limit: "10g"
   stdin_open: true
   tty: true
   volumes:

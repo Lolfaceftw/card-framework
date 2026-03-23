@@ -281,6 +281,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         cfg.diarizer.manifest_filepath = str(manifest_path)
         cfg.diarizer.out_dir = str(output_dir)
         cfg.diarizer.oracle_vad = False
+        cfg.diarizer.ignore_overlap = False
 
         cfg.diarizer.vad.model_path = self.vad_model
         cfg.diarizer.vad.external_vad_manifest = None

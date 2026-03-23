@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import atexit
+from collections.abc import Mapping
 from collections import deque
 from dataclasses import dataclass
 import gc
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
@@ -15,6 +17,7 @@ import threading
 import time
 from typing import Any
 
+from card_framework.audio_pipeline.emotion_vectors import EmotionVector
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.runtime import release_torch_device_memory_with_reporting
@@ -100,6 +103,9 @@ class _PersistentIndexTTSSubprocessWorker:
             use_accel=use_accel,
             use_torch_compile=use_torch_compile,
         )
+        environment = _build_persistent_worker_env(
+            source_root=_resolve_repo_source_root()
+        )
         self._process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -109,6 +115,7 @@ class _PersistentIndexTTSSubprocessWorker:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=environment,
         )
         self._reader_thread = threading.Thread(
             target=self._reader_loop,
@@ -137,6 +144,7 @@ class _PersistentIndexTTSSubprocessWorker:
         text: str,
         output_audio_path: Path,
         emo_text: str | None,
+        emotion_vector: EmotionVector | None,
         verbose: bool,
         max_text_tokens_per_segment: int,
         generation_kwargs: dict[str, Any],
@@ -164,6 +172,9 @@ class _PersistentIndexTTSSubprocessWorker:
                     "text": text,
                     "output_audio_path": str(output_audio_path),
                     "emo_text": emo_text,
+                    "emotion_vector": (
+                        emotion_vector.to_list() if emotion_vector is not None else None
+                    ),
                     "verbose": verbose,
                     "max_text_tokens_per_segment": max_text_tokens_per_segment,
                     "generation_kwargs": generation_kwargs,
@@ -391,6 +402,27 @@ def _build_persistent_worker_command(
     return command
 
 
+def _build_persistent_worker_env(
+    *,
+    source_root: Path,
+    existing_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Ensure nested workers can import the repo-local ``card_framework`` package."""
+    environment = dict(existing_env or os.environ)
+    source_root_text = str(source_root.resolve())
+    current_entries = [
+        entry for entry in environment.get("PYTHONPATH", "").split(os.pathsep) if entry
+    ]
+    if source_root_text not in current_entries:
+        environment["PYTHONPATH"] = os.pathsep.join([source_root_text, *current_entries])
+    return environment
+
+
+def _resolve_repo_source_root() -> Path:
+    """Return the repository ``src`` directory for subprocess import wiring."""
+    return Path(__file__).resolve().parents[3]
+
+
 def _resolve_persistent_runner_script_path() -> Path:
     """Return the repository-local persistent worker runner script path."""
     runner_script = (
@@ -566,6 +598,9 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
     runner_project_dir: Path | None = None
     uv_executable: str = "uv"
     stream_subprocess_output: bool = True
+    normalize_emotion_vector: bool = True
+    emotion_vector_apply_bias: bool = True
+    emotion_vector_max_sum: float = 0.8
 
     def synthesize(
         self,
@@ -574,6 +609,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         text: str,
         output_audio_path: Path,
         emo_text: str | None = None,
+        emotion_vector: EmotionVector | None = None,
         progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
@@ -605,6 +641,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
                 text=text.strip(),
                 output_audio_path=output_audio_path,
                 emo_text=emo_text,
+                emotion_vector=emotion_vector,
             )
         elif backend == "subprocess":
             rendered_path = self._synthesize_subprocess(
@@ -612,6 +649,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
                 text=text.strip(),
                 output_audio_path=output_audio_path,
                 emo_text=emo_text,
+                emotion_vector=emotion_vector,
             )
         else:
             raise NonRetryableAudioStageError(
@@ -646,11 +684,13 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         text: str,
         output_audio_path: Path,
         emo_text: str | None,
+        emotion_vector: EmotionVector | None,
     ) -> Path:
         """Run synthesis by importing IndexTTS2 in current Python process."""
         tts_model = self._get_or_init_model()
-        emo_vector = self._get_or_resolve_emo_vector(
+        emo_vector = self._resolve_direct_or_cached_emo_vector(
             tts_model=tts_model,
+            emotion_vector=emotion_vector,
             emo_text=emo_text,
         )
         normalized_emo_text = _normalize_emo_text(emo_text)
@@ -687,6 +727,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         text: str,
         output_audio_path: Path,
         emo_text: str | None,
+        emotion_vector: EmotionVector | None,
     ) -> Path:
         """Run synthesis via a persistent ``uv run --project`` worker."""
         worker = self._get_or_init_subprocess_worker()
@@ -695,6 +736,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             text=text,
             output_audio_path=output_audio_path,
             emo_text=emo_text,
+            emotion_vector=self._normalize_provider_emotion_vector(emotion_vector),
             verbose=self.verbose,
             max_text_tokens_per_segment=self.max_text_tokens_per_segment,
             generation_kwargs=self._generation_kwargs(),
@@ -781,6 +823,33 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             cached_vectors.setdefault(normalized_emo_text, emo_vector)
             resolved_vector = cached_vectors[normalized_emo_text]
         return list(resolved_vector)
+
+    def _resolve_direct_or_cached_emo_vector(
+        self,
+        *,
+        tts_model: object,
+        emotion_vector: EmotionVector | None,
+        emo_text: str | None,
+    ) -> list[float] | None:
+        """Prefer direct vectors and fall back to cached emotion-text analysis."""
+        direct_vector = self._normalize_provider_emotion_vector(emotion_vector)
+        if direct_vector is not None:
+            return direct_vector.to_list()
+        return self._get_or_resolve_emo_vector(tts_model=tts_model, emo_text=emo_text)
+
+    def _normalize_provider_emotion_vector(
+        self,
+        emotion_vector: EmotionVector | None,
+    ) -> EmotionVector | None:
+        """Normalize one direct vector before sending it to IndexTTS."""
+        if emotion_vector is None:
+            return None
+        if not self.normalize_emotion_vector:
+            return emotion_vector
+        return emotion_vector.with_index_tts_normalization(
+            apply_bias=self.emotion_vector_apply_bias,
+            max_sum=self.emotion_vector_max_sum,
+        )
 
     def _get_or_init_subprocess_worker(self) -> _PersistentIndexTTSSubprocessWorker:
         """Lazily initialize and share one warm subprocess worker per config."""

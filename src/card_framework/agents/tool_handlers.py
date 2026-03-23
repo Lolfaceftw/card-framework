@@ -11,6 +11,7 @@ from typing import Any
 from card_framework.agents.client import AgentTaskClient, get_default_agent_client
 from card_framework.agents.message_registry import MessageRegistry
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
+from card_framework.audio_pipeline.emotion_vectors import EmotionVector, serialize_emotion_vector
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, SummaryTurn, serialize_summary_turns
 
@@ -87,6 +88,28 @@ def _require_non_empty_string_argument(
             "error_code": f"empty_{argument_name}_argument",
         }
     return normalized_value, None
+
+
+def _coerce_optional_emotion_vector(
+    arguments: dict[str, Any],
+    argument_name: str = "emotion_vector",
+) -> tuple[list[float] | None, dict[str, Any] | None]:
+    """Validate one optional direct emotion-vector argument."""
+    if argument_name not in arguments or arguments.get(argument_name) is None:
+        return None, None
+    try:
+        vector = EmotionVector.from_raw(arguments.get(argument_name))
+    except ValueError:
+        return None, {
+            "error": (
+                f"Argument '{argument_name}' must be an 8-number IndexTTS emotion vector."
+            ),
+            "error_code": f"invalid_{argument_name}_argument",
+            argument_name: arguments.get(argument_name),
+        }
+    if vector is None:
+        return None, None
+    return vector.to_list(), None
 
 
 class BudgetContext:
@@ -218,6 +241,16 @@ class AddSpeakerMessageHandler(ToolHandler):
                         "type": "string",
                         "description": "Preset emotion/style label for this speaker turn.",
                     },
+                    "emotion_vector": {
+                        "type": "array",
+                        "description": (
+                            "Optional direct IndexTTS emotion vector in order: "
+                            "happy, angry, sad, afraid, disgusted, melancholic, surprised, calm."
+                        ),
+                        "items": {"type": "number"},
+                        "minItems": 8,
+                        "maxItems": 8,
+                    },
                 },
                 "required": ["speaker_id", "content", "emo_preset"],
             },
@@ -254,6 +287,9 @@ class AddSpeakerMessageHandler(ToolHandler):
         )
         if emo_preset_error is not None:
             return emo_preset_error
+        emotion_vector, emotion_vector_error = _coerce_optional_emotion_vector(arguments)
+        if emotion_vector_error is not None:
+            return emotion_vector_error
 
         turn_id = uuid.uuid4().hex
         if self._live_draft_session is not None:
@@ -262,11 +298,13 @@ class AddSpeakerMessageHandler(ToolHandler):
                 speaker=speaker_id,
                 text=content,
                 emo_preset=emo_preset,
+                emotion_vector=EmotionVector.from_raw(emotion_vector),
             )
         result = self._registry.add(
             speaker_id,
             content,
             emo_preset,
+            emotion_vector,
             turn_id=turn_id,
         )
         if self._live_draft_session is not None:
@@ -386,6 +424,16 @@ class EditMessageHandler(ToolHandler):
                             "the existing preset is preserved."
                         ),
                     },
+                    "emotion_vector": {
+                        "type": "array",
+                        "description": (
+                            "Optional replacement IndexTTS emotion vector. If omitted, "
+                            "the existing vector is preserved."
+                        ),
+                        "items": {"type": "number"},
+                        "minItems": 8,
+                        "maxItems": 8,
+                    },
                 },
                 "required": ["line", "new_content"],
             },
@@ -416,6 +464,10 @@ class EditMessageHandler(ToolHandler):
                 "error_code": "invalid_emo_preset_argument",
                 "line": line,
             }
+        emotion_vector, emotion_vector_error = _coerce_optional_emotion_vector(arguments)
+        if emotion_vector_error is not None:
+            emotion_vector_error["line"] = line
+            return emotion_vector_error
 
         existing = self._registry.get_message(line)
         if "error" in existing:
@@ -428,11 +480,18 @@ class EditMessageHandler(ToolHandler):
             normalized_emo_preset = emo_preset.strip()
             if normalized_emo_preset:
                 next_emo_preset = normalized_emo_preset
+        next_emotion_vector = (
+            emotion_vector
+            if emotion_vector is not None
+            else serialize_emotion_vector(existing.get("emotion_vector"))
+        )
         if (
             self._live_draft_session is not None
             and (
                 existing_content != new_content
                 or existing_emo_preset != next_emo_preset
+                or serialize_emotion_vector(existing.get("emotion_vector"))
+                != next_emotion_vector
             )
         ):
             self._live_draft_session.render_turn(
@@ -440,8 +499,14 @@ class EditMessageHandler(ToolHandler):
                 speaker=str(existing["speaker_id"]),
                 text=new_content,
                 emo_preset=next_emo_preset,
+                emotion_vector=EmotionVector.from_raw(next_emotion_vector),
             )
-        result = self._registry.edit(line, new_content, emo_preset=emo_preset)
+        result = self._registry.edit(
+            line,
+            new_content,
+            emo_preset=emo_preset,
+            emotion_vector=emotion_vector,
+        )
         if "error" not in result:
             if self._live_draft_session is not None:
                 self._live_draft_session.sync_snapshot(self._registry.snapshot())
@@ -664,6 +729,7 @@ def _snapshot_to_xml(snapshot: list[dict[str, Any]]) -> str:
                 speaker=str(message["speaker_id"]),
                 text=str(message["content"]),
                 emo_preset=str(message.get("emo_preset", DEFAULT_EMO_PRESET)),
+                emotion_vector=EmotionVector.from_raw(message.get("emotion_vector")),
             )
             for message in snapshot
         ]

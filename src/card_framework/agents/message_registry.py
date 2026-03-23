@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 
 from card_framework.agents.utils import count_words
+from card_framework.audio_pipeline.emotion_vectors import EmotionVector, serialize_emotion_vector
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, SummaryTurn
 
@@ -20,7 +21,7 @@ class MessageRegistry:
     """In-memory registry of speaker messages built up during one summarizer run."""
 
     def __init__(self) -> None:
-        # Each entry: {"speaker_id": str, "content": str, "emo_preset": str}
+        # Each entry also carries an optional direct emotion_vector payload.
         self._messages: list[dict] = []
 
     # â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -30,6 +31,7 @@ class MessageRegistry:
         speaker_id: str,
         content: str,
         emo_preset: str = DEFAULT_EMO_PRESET,
+        emotion_vector: list[float] | None = None,
         *,
         turn_id: str | None = None,
     ) -> dict:
@@ -44,6 +46,7 @@ class MessageRegistry:
                 "speaker_id": speaker_id,
                 "content": content,
                 "emo_preset": normalized_preset,
+                "emotion_vector": serialize_emotion_vector(emotion_vector),
             }
         )
         line = len(self._messages)
@@ -53,6 +56,7 @@ class MessageRegistry:
             "turn_id": resolved_turn_id,
             "speaker_id": speaker_id,
             "emo_preset": normalized_preset,
+            "emotion_vector": serialize_emotion_vector(emotion_vector),
             "word_count": wc,
         }
 
@@ -71,6 +75,7 @@ class MessageRegistry:
                     "turn_id": msg["turn_id"],
                     "speaker_id": msg["speaker_id"],
                     "emo_preset": msg.get("emo_preset", DEFAULT_EMO_PRESET),
+                    "emotion_vector": msg.get("emotion_vector"),
                     "word_count": wc,
                 }
             )
@@ -93,6 +98,7 @@ class MessageRegistry:
                 speaker=str(msg["speaker_id"]),
                 text=str(msg["content"]),
                 emo_preset=str(msg.get("emo_preset", DEFAULT_EMO_PRESET)),
+                emotion_vector=EmotionVector.from_raw(msg.get("emotion_vector")),
             )
             estimated_seconds = calibration.estimate_turn_seconds(turn)
             total_seconds += estimated_seconds
@@ -122,6 +128,7 @@ class MessageRegistry:
         line: int,
         new_content: str,
         emo_preset: str | None = None,
+        emotion_vector: list[float] | None = None,
     ) -> dict:
         """Replace content at *line* (1-indexed). Returns old/new counts."""
         idx = line - 1
@@ -136,15 +143,25 @@ class MessageRegistry:
         old_emo_preset = str(
             self._messages[idx].get("emo_preset", DEFAULT_EMO_PRESET)
         )
+        old_emotion_vector = serialize_emotion_vector(
+            self._messages[idx].get("emotion_vector")
+        )
         old_wc = count_words(old_content)
         new_emo_preset = old_emo_preset
+        new_emotion_vector = old_emotion_vector
         turn_id = str(self._messages[idx].get("turn_id", "")).strip() or uuid.uuid4().hex
         self._messages[idx]["turn_id"] = turn_id
         if emo_preset is not None:
             normalized_preset = emo_preset.strip()
             if normalized_preset:
                 new_emo_preset = normalized_preset
-        if old_content == new_content and old_emo_preset == new_emo_preset:
+        if emotion_vector is not None:
+            new_emotion_vector = serialize_emotion_vector(emotion_vector)
+        if (
+            old_content == new_content
+            and old_emo_preset == new_emo_preset
+            and old_emotion_vector == new_emotion_vector
+        ):
             return {
                 "line": line,
                 "turn_id": turn_id,
@@ -153,6 +170,8 @@ class MessageRegistry:
                 "delta_words": 0,
                 "old_emo_preset": old_emo_preset,
                 "new_emo_preset": old_emo_preset,
+                "old_emotion_vector": old_emotion_vector,
+                "new_emotion_vector": old_emotion_vector,
                 "changed": False,
                 "stagnation_hint": "no_change",
                 "total_word_count": self.get_counts()["total_word_count"],
@@ -160,6 +179,7 @@ class MessageRegistry:
 
         self._messages[idx]["content"] = new_content
         self._messages[idx]["emo_preset"] = new_emo_preset
+        self._messages[idx]["emotion_vector"] = new_emotion_vector
         new_wc = count_words(new_content)
 
         return {
@@ -170,6 +190,8 @@ class MessageRegistry:
             "delta_words": new_wc - old_wc,
             "old_emo_preset": old_emo_preset,
             "new_emo_preset": new_emo_preset,
+            "old_emotion_vector": old_emotion_vector,
+            "new_emotion_vector": new_emotion_vector,
             "changed": True,
             "total_word_count": self.get_counts()["total_word_count"],
         }
@@ -186,6 +208,7 @@ class MessageRegistry:
             "removed_turn_id": removed.get("turn_id", ""),
             "removed_speaker": removed["speaker_id"],
             "removed_emo_preset": removed.get("emo_preset", DEFAULT_EMO_PRESET),
+            "removed_emotion_vector": removed.get("emotion_vector"),
             "total_word_count": self.get_counts()["total_word_count"],
             "remaining_messages": len(self._messages),
         }
@@ -206,6 +229,7 @@ class MessageRegistry:
             "speaker_id": message["speaker_id"],
             "content": message["content"],
             "emo_preset": message.get("emo_preset", DEFAULT_EMO_PRESET),
+            "emotion_vector": message.get("emotion_vector"),
             "word_count": count_words(message["content"]),
         }
 
@@ -216,6 +240,7 @@ class MessageRegistry:
                 speaker=str(m["speaker_id"]),
                 text=str(m["content"]),
                 emo_preset=str(m.get("emo_preset", DEFAULT_EMO_PRESET)),
+                emotion_vector=EmotionVector.from_raw(m.get("emotion_vector")),
             )
             for m in self._messages
         ]
@@ -229,6 +254,7 @@ class MessageRegistry:
                 "speaker_id": m["speaker_id"],
                 "content": m["content"],
                 "emo_preset": m.get("emo_preset", DEFAULT_EMO_PRESET),
+                "emotion_vector": m.get("emotion_vector"),
             }
             for idx, m in enumerate(self._messages, start=1)
         ]
@@ -241,6 +267,7 @@ class MessageRegistry:
                 "speaker_id": m["speaker_id"],
                 "content": m["content"],
                 "emo_preset": m.get("emo_preset", DEFAULT_EMO_PRESET),
+                "emotion_vector": serialize_emotion_vector(m.get("emotion_vector")),
             }
             for m in snapshot
         ]

@@ -37,6 +37,8 @@ you are using Codex here and this list changes.
   task instead of assuming only `researcher` is allowed.
 - Keep the main thread responsible for coordination, integrating delegated
   results, validation, and the final user-facing response.
+- Every task that materially edits code must go through the required
+  critic-review loop described below before it is considered done.
 - When a delegated task includes open-web search, documentation lookup,
   standards research, or direct source-page retrieval, the delegated agent must
   follow `coder_docs/scrapling.md`.
@@ -80,6 +82,32 @@ surface exposes that capability.
 - Close or archive finished delegated threads when the collaboration surface
   exposes that control.
 
+## Required Code-Edit Critic Loop
+
+Use this loop for every task that materially edits repository code, config, or
+behavioral docs.
+
+1. After making a meaningful edit, spawn or reuse the best available review or
+   critic-style sub-agent. If the runtime does not expose a dedicated critic,
+   use the closest equivalent delegated reviewer. If delegated agents are not
+   available at all, perform the same loop in the main thread.
+2. Ask that critic to look for flaws, regressions, missing tests, unsafe
+   assumptions, docs drift, and other correctness or maintainability issues in
+   the changed work.
+3. If the critic finds issues, fix them immediately. The critic may suggest the
+   fix, validate a main-thread fix, or directly apply a bounded follow-up fix
+   when the runtime and write scope allow it, but the main thread stays
+   responsible for integration and final verification.
+4. After each fix pass, send the updated state back to that critic and ask for
+   feedback again.
+5. Repeat the review-fix-review cycle with no arbitrary max-iteration or
+   max-duration cap until the critic explicitly reports no material flaws, or
+   until the task is blocked by an external constraint such as missing
+   credentials, unavailable hardware, or a failing dependency outside the
+   workspace.
+6. Do not treat code generation, test success, or terminal output alone as a
+   substitute for this critic signoff loop.
+
 ## Integration With Other Repo Docs
 
 - Start each session with `coder_docs/codebase_guide.md` and
@@ -94,6 +122,8 @@ surface exposes that capability.
   `../.codex/config.toml` exposes a broader sub-agent inventory.
 - Do not invent agent names or capabilities that are not present in the active
   runtime configuration.
+- Do not skip the critic-review loop after code edits just because the first
+  implementation appears to work locally.
 - Do not use non-Scrapling web tooling for page retrieval when Scrapling can do
   the job.
 - Do not ask a delegated agent to rediscover a URL that is already known.

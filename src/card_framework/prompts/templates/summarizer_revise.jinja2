@@ -47,8 +47,8 @@ If you receive a stall or repetition warning: OVER duration -> remove or shorten
 
 <tool_usage_rules>
 You are in REVISE MODE. You have these tools available:
-- `edit_message(line, new_content, emo_preset?)` -> Replace content at a specific line number. This is your PRIMARY tool.
-- `add_speaker_message(speaker_id, content, emo_preset)` -> Add a new speaker turn when the draft is too short or missing a needed transition.
+- `edit_message(line, new_content, emo_preset?, emotion_vector?)` -> Replace content at a specific line number. This is your PRIMARY tool.
+- `add_speaker_message(speaker_id, content, emo_preset, emotion_vector?)` -> Add a new speaker turn when the draft is too short or missing a needed transition.
 - `remove_message(line)` -> Remove a message entirely. Use sparingly.
 - `estimate_duration()` -> Check the current duration total. In live audio mode this reflects actual rendered audio; otherwise it reflects calibrated estimates. Called automatically after mutations.
 - `count_words()` -> Check current word-count telemetry.

@@ -68,6 +68,44 @@ def test_map_words_to_speakers_prefers_max_overlap_over_start_anchor() -> None:
     assert [token.speaker for token in tokens] == ["SPEAKER_01"]
 
 
+def test_map_words_to_speakers_records_overlapping_speakers() -> None:
+    tokens = map_words_to_speakers(
+        word_timestamps=[
+            WordTimestamp(word="bridge", start_time_ms=900, end_time_ms=1400),
+        ],
+        diarization_turns=[
+            DiarizationTurn(speaker="SPEAKER_00", start_time_ms=700, end_time_ms=1300),
+            DiarizationTurn(speaker="SPEAKER_01", start_time_ms=1000, end_time_ms=2000),
+        ],
+        default_speaker="SPEAKER_99",
+    )
+
+    assert tokens[0].speaker == "SPEAKER_00"
+    assert tokens[0].overlap_speakers == ("SPEAKER_01",)
+
+
+def test_build_word_speaker_segments_preserves_overlap_metadata_in_json_segments() -> None:
+    segments = build_word_speaker_segments(
+        word_timestamps=[
+            WordTimestamp(word="hello", start_time_ms=0, end_time_ms=350),
+            WordTimestamp(word="bridge", start_time_ms=900, end_time_ms=1400),
+        ],
+        diarization_turns=[
+            DiarizationTurn(speaker="SPEAKER_00", start_time_ms=0, end_time_ms=1300),
+            DiarizationTurn(speaker="SPEAKER_01", start_time_ms=1000, end_time_ms=2000),
+        ],
+        default_speaker="SPEAKER_99",
+        language="en",
+        merge_gap_ms=800,
+        restore_punctuation_model=False,
+    )
+
+    assert len(segments) == 2
+    assert segments[0].extras == {}
+    assert segments[1].speaker == "SPEAKER_00"
+    assert segments[1].extras["overlap_speakers"] == ["SPEAKER_01"]
+
+
 def test_realign_speakers_with_punctuation_preserves_edge_minority_turn() -> None:
     tokens = [
         WordSpeakerToken(word="Well", speaker="SPEAKER_00", start_time_ms=0, end_time_ms=100),

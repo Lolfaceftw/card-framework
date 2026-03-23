@@ -183,3 +183,70 @@ def test_transcript_index_cache_misses_when_transcript_hash_changes(
     )
 
     assert provider.encode_calls == 2
+
+
+def test_transcript_index_cache_reuses_embeddings_when_affect_hint_changes(
+    tmp_path,
+) -> None:
+    first_provider = _FakeEmbeddingProvider()
+    first_index = TranscriptIndex(
+        embedding_provider=first_provider,
+        cache_dir=tmp_path / "embedding_cache",
+    )
+    second_provider = _FakeEmbeddingProvider()
+    second_index = TranscriptIndex(
+        embedding_provider=second_provider,
+        cache_dir=tmp_path / "embedding_cache",
+    )
+
+    first_index.index_segments(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "text": "apple transcript",
+                "affect_hint": "preset=neutral",
+            }
+        ],
+        sample_id="sample-a",
+    )
+    second_index.index_segments(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "text": "apple transcript",
+                "affect_hint": "preset=urgent",
+            }
+        ],
+        sample_id="sample-a",
+    )
+
+    assert first_provider.encode_calls == 1
+    assert second_provider.encode_calls == 0
+
+
+def test_transcript_index_preserves_emotion_vector_metadata() -> None:
+    provider = _FakeEmbeddingProvider()
+    index = TranscriptIndex(embedding_provider=provider)
+
+    index.index_segments(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "text": "apple transcript",
+                "emotion_vector": [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24],
+                "emotion_vector_source": "affect_analysis",
+            }
+        ]
+    )
+
+    assert index.segments[0]["emotion_vector"] == [
+        0.14,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.02,
+        0.24,
+    ]
+    assert index.segments[0]["emotion_vector_source"] == "affect_analysis"

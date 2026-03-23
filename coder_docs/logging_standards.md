@@ -33,5 +33,7 @@ repository.
 - Follow the runtime logging configuration rather than adding ad hoc terminal
   prints.
 - Keep operator-facing progress output distinct from diagnostic log payloads.
+- When validating or supervising a real run, inspect persisted logs rather than
+  treating the live terminal stream as sufficient evidence on its own.
 - When changing logger shape or terminal behavior, update the relevant docs in
   `coder_docs/codebase_guide.md` and other operator-facing Markdown files.

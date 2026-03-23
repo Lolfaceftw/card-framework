@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from card_framework.audio_pipeline.eta import StageProgressCallback
+from card_framework.shared.emotion_vector import EmotionVector
 
 
 @dataclass(slots=True, frozen=True)
@@ -16,6 +17,10 @@ class VoiceCloneTurn:
     speaker: str
     text: str
     emo_preset: str = "neutral"
+    emotion_vector: EmotionVector | None = None
+    emotion_vector_source: str = ""
+    source_segment_indices: tuple[int, ...] = ()
+    source_segment_weights: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.speaker.strip():
@@ -24,6 +29,36 @@ class VoiceCloneTurn:
             raise ValueError("text must be non-empty")
         if not self.emo_preset.strip():
             raise ValueError("emo_preset must be non-empty")
+        object.__setattr__(
+            self,
+            "emotion_vector",
+            EmotionVector.from_raw(self.emotion_vector),
+        )
+        object.__setattr__(
+            self,
+            "emotion_vector_source",
+            str(self.emotion_vector_source).strip(),
+        )
+        object.__setattr__(
+            self,
+            "source_segment_indices",
+            tuple(int(index) for index in self.source_segment_indices),
+        )
+        object.__setattr__(
+            self,
+            "source_segment_weights",
+            tuple(float(weight) for weight in self.source_segment_weights),
+        )
+        if self.source_segment_weights and not self.source_segment_indices:
+            raise ValueError(
+                "source_segment_weights require source_segment_indices."
+            )
+        if self.source_segment_weights and (
+            len(self.source_segment_indices) != len(self.source_segment_weights)
+        ):
+            raise ValueError(
+                "source_segment_weights must match source_segment_indices length."
+            )
 
 
 @dataclass(slots=True, frozen=True)
@@ -51,6 +86,10 @@ class VoiceCloneArtifact:
     reference_audio_path: Path
     output_audio_path: Path
     emo_preset: str = "neutral"
+    emotion_vector: EmotionVector | None = None
+    emotion_vector_source: str = ""
+    source_segment_indices: tuple[int, ...] = ()
+    source_segment_weights: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if self.turn_index <= 0:
@@ -61,6 +100,36 @@ class VoiceCloneArtifact:
             raise ValueError("text must be non-empty")
         if not self.emo_preset.strip():
             raise ValueError("emo_preset must be non-empty")
+        object.__setattr__(
+            self,
+            "emotion_vector",
+            EmotionVector.from_raw(self.emotion_vector),
+        )
+        object.__setattr__(
+            self,
+            "emotion_vector_source",
+            str(self.emotion_vector_source).strip(),
+        )
+        object.__setattr__(
+            self,
+            "source_segment_indices",
+            tuple(int(index) for index in self.source_segment_indices),
+        )
+        object.__setattr__(
+            self,
+            "source_segment_weights",
+            tuple(float(weight) for weight in self.source_segment_weights),
+        )
+        if self.source_segment_weights and not self.source_segment_indices:
+            raise ValueError(
+                "source_segment_weights require source_segment_indices."
+            )
+        if self.source_segment_weights and (
+            len(self.source_segment_indices) != len(self.source_segment_weights)
+        ):
+            raise ValueError(
+                "source_segment_weights must match source_segment_indices length."
+            )
 
 
 @runtime_checkable
@@ -74,6 +143,7 @@ class VoiceCloneProvider(Protocol):
         text: str,
         output_audio_path: Path,
         emo_text: str | None = None,
+        emotion_vector: EmotionVector | None = None,
         progress_callback: StageProgressCallback | None = None,
     ) -> Path:
         """
@@ -84,6 +154,7 @@ class VoiceCloneProvider(Protocol):
             text: Text to synthesize.
             output_audio_path: Target output WAV path.
             emo_text: Optional emotion-guidance text for expressive synthesis.
+            emotion_vector: Optional direct IndexTTS emotion vector.
             progress_callback: Optional callback for synthesis progress updates.
 
         Returns:

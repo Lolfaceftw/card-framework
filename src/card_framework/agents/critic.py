@@ -20,6 +20,7 @@ from card_framework.audio_pipeline.live_draft_voice_clone import (
     _snapshot_matches_summary_xml,
     load_live_draft_voice_clone_state,
 )
+from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
 from card_framework.providers.response_callbacks import (
     CompositeResponseCallback,
     StreamingRepeatGuardCallback,
@@ -32,6 +33,8 @@ from card_framework.shared.llm_provider import (
 )
 from card_framework.shared.prompt_manager import PromptManager
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml
+
+_SENTENCE_ENDING_PUNCTUATION_PATTERN = re.compile(r"""[.!?](?:["'”’)\]]+)?\s*$""")
 
 
 class CriticExecutor(BaseA2AExecutor):
@@ -187,6 +190,12 @@ class CriticExecutor(BaseA2AExecutor):
                     3,
                 )
                 return total_seconds, "actual_audio"
+        fallback_audio_dir = self._resolve_live_draft_turn_dir(
+            draft_audio_state_path=draft_audio_state_path,
+            expected_turn_count=len(turns),
+        )
+        if fallback_audio_dir is not None:
+            return fallback_audio_dir, "actual_audio_dir"
         if turns:
             if self.calibration is not None:
                 return self.calibration.estimate_turns_seconds(turns), "estimated_wpm"
@@ -197,6 +206,29 @@ class CriticExecutor(BaseA2AExecutor):
             )
             return derived_seconds, "default_wpm"
         return 0.0, "empty"
+
+    def _resolve_live_draft_turn_dir(
+        self,
+        *,
+        draft_audio_state_path: Path | None,
+        expected_turn_count: int,
+    ) -> float | None:
+        """Fall back to the live-draft turn directory when the sidecar is unavailable."""
+        if draft_audio_state_path is None or expected_turn_count <= 0:
+            return None
+        turn_dir = draft_audio_state_path.parent / "live_draft_turns"
+        if not turn_dir.is_dir():
+            return None
+        wav_paths = sorted(turn_dir.glob("*.wav"))
+        if len(wav_paths) != expected_turn_count:
+            return None
+        total_duration_ms = 0
+        for wav_path in wav_paths:
+            duration_ms = probe_audio_duration_ms(wav_path)
+            if duration_ms is None or duration_ms <= 0:
+                return None
+            total_duration_ms += int(duration_ms)
+        return round(total_duration_ms / 1000.0, 3)
 
     def _run_deterministic_checks(
         self,
@@ -232,7 +264,9 @@ class CriticExecutor(BaseA2AExecutor):
 
         if turns:
             last_block_text = turns[-1].text.strip()
-            if last_block_text and not re.search(r"[.!?]\s*$", last_block_text):
+            if last_block_text and not _SENTENCE_ENDING_PUNCTUATION_PATTERN.search(
+                last_block_text
+            ):
                 failures.append(
                     "TRUNCATION: The last speaker block does not end with sentence-ending punctuation (. ! ?)."
                 )

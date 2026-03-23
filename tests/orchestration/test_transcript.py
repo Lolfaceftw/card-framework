@@ -36,3 +36,50 @@ def test_transcript_to_full_text_matches_prompt_format() -> None:
 
     assert transcript.to_full_text() == "[SPEAKER_00]: hello world\n"
 
+
+def test_transcript_to_full_text_includes_affect_hint_when_present() -> None:
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "hello world",
+                    "affect_hint": "preset=urgent; top=angry:0.75",
+                }
+            ]
+        }
+    )
+
+    assert (
+        transcript.to_full_text()
+        == "[SPEAKER_00] [affect: preset=urgent; top=angry:0.75]: hello world\n"
+    )
+
+
+def test_transcript_retrieval_segments_preserve_affect_fields() -> None:
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "hello world",
+                    "affect_hint": "preset=warm",
+                    "suggested_emo_preset": "warm",
+                    "emotion_vector": [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24],
+                    "emotion_vector_source": "affect_analysis",
+                }
+            ]
+        }
+    )
+
+    assert transcript.retrieval_segments() == [
+        {
+            "speaker": "SPEAKER_00",
+            "text": "hello world",
+            "affect_hint": "preset=warm",
+            "suggested_emo_preset": "warm",
+            "emotion_vector": [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24],
+            "emotion_vector_source": "affect_analysis",
+        }
+    ]
+

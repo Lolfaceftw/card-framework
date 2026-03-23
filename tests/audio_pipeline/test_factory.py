@@ -2,11 +2,13 @@
 
 import pytest
 
+from card_framework.audio_pipeline.affect_analysis import TranscriptAffectAnalyzer
 from card_framework.audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
     build_interjector_orchestrator,
     build_speaker_diarizer,
     build_speaker_sample_generator,
+    build_transcript_affect_analyzer,
     build_voice_clone_orchestrator,
 )
 from card_framework.audio_pipeline.eta import LinearStageEtaStrategy
@@ -83,6 +85,40 @@ def test_factory_builds_default_strategies() -> None:
     assert orchestrator.diarizer.clustering_sparse_search_volume == 60
     assert orchestrator.diarizer.clustering_maj_vote_spk_count is True
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
+
+
+def test_factory_builds_transcript_affect_analyzer(tmp_path: Path) -> None:
+    analyzer = build_transcript_affect_analyzer(
+        {
+            "work_dir": str(tmp_path / "audio_stage"),
+            "voice_clone": {
+                "emo_presets": {
+                    "neutral": "calm",
+                    "warm": "warm",
+                    "engaged": "engaged",
+                    "upbeat": "upbeat",
+                    "urgent": "urgent",
+                }
+            },
+            "affect_analysis": {
+                "enabled": True,
+                "output_dir_name": "affect_analysis",
+                "categorical": {
+                    "enabled": True,
+                    "provider": "emotion2vec_plus",
+                    "device": "cpu",
+                },
+                "dimensional": {
+                    "enabled": True,
+                    "provider": "audeering_msp_dim",
+                    "device": "cpu",
+                },
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    assert isinstance(analyzer, TranscriptAffectAnalyzer)
 
 
 def test_factory_builds_eta_strategy_from_config() -> None:

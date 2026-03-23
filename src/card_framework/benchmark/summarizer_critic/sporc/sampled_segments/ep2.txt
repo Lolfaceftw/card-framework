@@ -1,79 +1,32 @@
-Episode: RamCast Episode 2
-Sample ID: sporc_00316_https_anchor_fm_s_428da8a0_podcast_play_23389209_https_3A_2F_2Fd3ctxlq1ktw2nl_cl
+Episode: Spirit Adrift's Nate Garrett on the Love That Saved His Life
+Sample ID: sporc_00767_https_feeds_soundcloud_com_stream_845779975_hotbloodedpodcast_spirit_adrifts_nat
 
-1. [SPEAKER_08] So for today's Ram casts, we interview Joshua Dominguez, Justin Fung, talking about financial literacy, philosophy, and what Kai would say to Hitler. Check it out and enjoy. All right. What's good. Ram fam is me, Ram Lord, AKA Kennedy Hart. I'm here with Kai and we got two big guests here. We got Justin Fung, JFung Cuts. And we got Josh, the Armenian God worm. What's good guys?
-Rationale: Episode introduction establishing hosts, guests, and key topics.
+1. [SPEAKER_00] This week's guest is Nate Garrett, who is the singer and songwriter and guitarist of the metal band Spirit of Drift. In several interviews I've read with him, he has mentioned a conversation that he had with his girlfriend, Nicole, who's now his wife, where she looked at him and said, you don't even smell like liquor. You smell like death. It was in that moment where he decided to go to detox and start his recovery.
+Rationale: Host introduction establishing the central narrative of the episode — Nate's near-fatal alcoholism, his wife Nicole's pivotal words, and his recovery.
 
-2. [SPEAKER_08] Hey, but first and foremost, all I want to say is Rest in Peace, George Floyd. There's a new era of him. No videos of him resisting and those fucking cops, bro. Those sucker motherfucker cops, bro. Fuck them. Rest in Peace, George Floyd.
-Rationale: Sets the social/political context of the episode around George Floyd's killing.
+2. [SPEAKER_02] My wife and I have been through some really terrible thing, like some some of the worst stuff that a person can go through, you know, like family members dying, parents dying, relatives committing suicide, relatives going to prison. I mean, physical, mental abuse, a lot of which on my part was self inflicted, you know, just all kinds of shit. But I think there's something about losing that dog that was like, it's been like the hardest thing I think either of us has ever done.
+Rationale: Nate contextualizes the depth of hardship he and Nicole have endured together, including losing their dog Lizzie.
 
-3. [SPEAKER_08] One big news besides the George Floyd thing is that the NBA 2020 Hall of Fame is moved to 221. That shit's fucking crazy, bro.
-Rationale: News segment about NBA Hall of Fame postponement, connects to Kobe tribute.
+3. [SPEAKER_02] I've I experienced every extreme that there is being like a wild person to like party in and borderline criminal behavior and just like super dangerous insane shit. Like I've pushed that. I push that literally up to like the brink of physical death, you know, so I feel like I don't think there's a whole lot more that that type of thing has to offer. So then it's like, what else does life have to offer that's super extreme? And it's like, okay, getting married to a person is kind of extreme. That's a pretty like wild thing to do. It's like a risky, kind of crazy thing to do. So you can look at it as selling out or you can look at it as like, all right, I have wrung out every bit of excitement that there is from this side of life. So let me see what this other thing is like.
+Rationale: Nate reframes marriage as an extreme life experience, revealing his philosophy on commitment after years of dangerous living.
 
-4. [SPEAKER_10] That's one of me and Kennedy's big rules. If you ever mentioned Kobe in a sentence, it has to end with rest in peace.
-Rationale: Establishes their Kobe tribute rule, a key cultural touchstone for the hosts.
+4. [SPEAKER_02] I just remember thinking about like, you know, I had basically I've had quite a few near death experiences. But the one that I had, you know, leading up to 2015 was like, for sure the closest I've come. I remember just laying there in bed one night thinking like, wouldn't it be kind of lame if one of us died and we had never gotten married? You know, and I know that sounds kind of morbid, but it was not — it's real. That's like the honest truth about my motivation to get married.
+Rationale: Reveals Nate's deeply personal motivation for proposing — a bone-deep awareness of mortality after his near-death experience.
 
-5. [SPEAKER_10] Thank you for the ramcast though. We got accepted on Spotify and Apple podcast. We're a little bit too much for mainstream media. It's Spotify, but I'm surprised. Yeah, the mainstream media. Hey, we made it.
-Rationale: Milestone announcement about the podcast being on Spotify and Apple Podcasts.
+5. [SPEAKER_02] I drop the shot glass and it just like explodes everywhere. And Guinness goes everywhere. It goes all over this blonde girl that's like sitting on this table minding her own business. And I'm like shit. And the reaction was not at all what I expected because she started talking shit, but she wasn't like mad, which just blew my mind. It was something like, Oh, is that your first time ever doing that? Or something like really sarcastic and like smart and just like busting my balls. And I was like, well, that was like really funny. And she wasn't mean, you know, it was like she was beautiful, but she was talking to me like one of my buddies would talk.
+Rationale: The charming origin story of how Nate met Nicole on St. Patrick's Day — a key narrative moment.
 
-6. [SPEAKER_10] How does it feel to be an essential worker, Cam? Do you feel essential?
-Rationale: Transitions to COVID essential worker discussion, a core episode topic.
+6. [SPEAKER_02] It's 2012, 2013, 2014, it was like, I know every single day I wanted to stop. And I knew I, I set out loud many times to Nicole, like, and other people, you know, if, if I can't stop doing this, I'm gonna die, like, I'm gonna die. I would say that every day. And you know, that's how powerful addiction is, even knowing that consciously. I would wake up and take half a Xanax and be like, all right, gonna kick today, like, today's the day I stopped drinking. And then by the end of the day, I drank a whole bottle of wild turkey. And now I also have half a Xanax in my body.
+Rationale: Nate describes the daily agony and futility of trying to quit, illustrating the grip of addiction.
 
-7. [SPEAKER_08] Legit, we leave the customers. It's just because there's times where it's like there's fucking hella customers asking me stupid questions, wanting to help them. And I'm the only one there because all of the old ass dudes, they're not allowed to work.
-Rationale: Kennedy describing his Home Depot essential worker experience during COVID.
+7. [SPEAKER_02] When that plane landed, my wife was there to pick me up, girlfriend at the time. And I got in the car and she was like, dude, you don't even smell like alcohol. You smell like death. You smell like poison or something. And I literally just said, take, I was like, take my ass to rehab or detox or whatever. I'm, I'm done. Like, I'm done with this. And I guess she could tell there was like something different. And I think it was two days later, I went to detox and haven't had a drink.
+Rationale: The pivotal turning-point moment of the episode — Nicole's words and Nate's decision to get sober.
 
-8. [SPEAKER_08] Not that I agree with Karl Marx or his communist views, but he does say shit like it was in some of his writings where like the owners would be nowhere without the workers. I'm like, yeah, it's true.
-Rationale: Kennedy referencing Karl Marx on worker value, showing the philosophical side of the episode.
+8. [SPEAKER_02] She never laid down any ultimatums. There were quite a few times where she was like, I'm going to have to like go stay with my sister because I can't watch you do this to yourself anymore. But it was never like, fuck you, like stop drinking now or I'm going to leave. Like, you know how hard that is to not say that to somebody that was doing what I was doing. Like she never made me feel bad about it. Which is crazy. I don't know how she knew how to do that because a lot of recovery experts aren't even that good at it.
+Rationale: Nate explains how Nicole's approach to his addiction was remarkably effective — no ultimatums, just love and patience.
 
-9. [SPEAKER_08] I mean, what college, the crazy thing about college is that it's dope is that they actually make you read like real shit.
-Rationale: Transition to college education discussion and reading habits.
+9. [SPEAKER_02] Nicole picked me up after three days and her sister was like out of town. So we went to her sister's place and it kind of gave us a break from my whole family situation that was very traumatic and stressful, you know, and I just started running. And I wrote the first two spirit of drift songs like that week. It was like I had built up a dam and the dam broke and let all the creativity and all the music that was in me that had been just stuck in there, like poisoned, you know, it all just started coming out.
+Rationale: Connects Nate's recovery directly to the birth of Spirit Adrift — the creative breakthrough after getting sober.
 
-10. [SPEAKER_08] That's fucking terrible bro. Like it is anything worse like you're attacking someone based off of anything but their character. That's just fucking. It's unfair too. It's unfair.
-Rationale: Kennedy's statement on racism and judging people by character, central to the race discussion.
-
-11. [SPEAKER_08] Yesterday he was wearing a baggy white shirt. Baggy shorts. They would not even come near me. So I was like that's kind of racist. They don't really know anything about him. Because he's one of the nicest guys I know. Like I remember for Christmas he came up to me and he gave me like one dollar. He started giving everybody in the store like one dollar.
-Rationale: Kennedy sharing a specific racism experience at work involving his Black coworker being avoided by customers.
-
-12. [SPEAKER_08] And then once I have this Karen she went up to me like I was just busy doing my job. She came up to me and she's like I need you to call the manager. I'm like did I do something. She's like no. You see that your buddy over there? He has not helped me. And I've been waiting for 20 minutes and I'm like he's with the customer right now.
-Rationale: Karen retail encounter story, illustrating the retail work experience theme.
-
-13. [SPEAKER_08] That's one of my projects. I want to make a show based off of retail experiences but in a more Hollywood manner. Like the office but in a retail store.
-Rationale: Kennedy reveals a creative ambition inspired by retail work.
-
-14. [SPEAKER_02] I've actually been doing another side job too. Our my uncle's friend he needed some help for his shipping drop shipping warehouse. So I just do shipping. On my free days and then on my free time I read and then work out.
-Rationale: Justin describing his multiple hustles and productive routine.
-
-15. [SPEAKER_02] So follow my illegal barbershop. J Fung Cuts. Follow the cuts, not the story. Just come get a cut. You don't need the story.
-Rationale: Justin plugging his barbering business, a recurring topic.
-
-16. [SPEAKER_02] We've been reading more of like financial stuff like financial literacy and like mindset books and shit. Put you in a mindset ahead about every or most people are not financially literate so they don't understand how money works.
-Rationale: Introduces the financial literacy theme, a major episode topic.
-
-17. [SPEAKER_02] That book opens your mindset on like how like why rich people stay rich and why poor and middle-class people stay the way they are. It's like the quote is like poor middle-class people work for money while rich people their money work for them.
-Rationale: Justin explaining Rich Dad Poor Dad's core concept, central to the financial literacy discussion.
-
-18. [SPEAKER_02] Don't be a trader because when you trade when you day trade and do shit like that the biggest thing in this world that kills all your profit and shit it's taxes and capital gains. So if you're like doing stocks and stuff don't buy and sell and trade if you don't really know because then whatever you make there the government's fucking taking 35% of that.
-Rationale: Investment advice on taxes and day trading, key financial literacy content.
-
-19. [SPEAKER_02] The easiest way and the safest way to invest for all like beginners and stuff is through index funds because you're basically buying like a recipe. I buy the S&P 500 fund and then that basically buys off 500 companies. There's no point in investing because you're fighting against the S&P if you don't just put your money in the S&P.
-Rationale: Practical investing advice about index funds, core financial education content.
-
-20. [SPEAKER_02] It's like investing is a way to make money work for you. It's another stream of passive income. So like what you guys are doing, when you guys told me I'm like this honestly is a really smart way because me reading about making like passive income streams you guys could scale this so big.
-Rationale: Justin connecting passive income concepts to the podcast, bridging financial literacy and their content ambitions.
-
-21. [SPEAKER_08] If you guys could talk to one person history throughout the world throughout all the history of world, who would it be?
-Rationale: Introduces the hypothetical historical figures segment.
-
-22. [SPEAKER_08] Gandhi was a savage though. Bro from the book I'm reading right now. They're like Gandhi was like the most powerful man on earth. He actually united 200 million people without doing anything and made them all like do it for one cause for like peace bro. That's like the craziest power you could have over people like the ability to persuade people to believe in something. 200 million bro.
-Rationale: Discussion of Gandhi as Josh's historical pick, showing philosophical interests.
-
-23. [SPEAKER_10] I low-key love quarantine because it's like everybody's lazy as fuck right now and I'm doing shit. Just the time to just work on your stuff that you want to do. You have so much self time and so much time to get better at whatever you want to do. Like by the time you come out, you're just like a better person or you're a better human being.
-Rationale: Kai expressing the quarantine productivity mindset, a major theme.
-
-24. [SPEAKER_02] My vision is like work hard until like I'm a certain like my 30s or some shit and when that's when everybody starts trying to like work I'm gonna just live life and just do whatever the fuck I want. Everything's just set up to where it's like I don't have to do nothing just sit there. Money comes in. Make a business where people work for me and make me money.
-Rationale: Justin articulating his long-term financial vision, capturing the aspirational tone.
-
-25. [SPEAKER_08] All right guys. Thank you for watching. Make sure to check out my social. Instagram is kai kt.0125. Thank Kennedy. My Instagram is ram lord but with the one instead of el because it looks dope like that. Thank you guys for watching. Thank you Justin and Josh for spinning some knowledge and have a good night.
-Rationale: Episode closing with social media plugs and farewell.
-
-
+10. [SPEAKER_02] I'd be dead 100% 100% dead, like no question about it. Killing yourself with alcohol and drugs is pretty, I'd imagine it's like the loneliest thing a person could do. Because that addictive fucking demon, whatever it is that's in you, it's hell bent on like isolating you from anyone that wants to actually help. And she managed to make it through that. I don't know how and just like stuck with me until I figured it out. And I don't think there's anybody else alive that would have done that. So when I say I would be dead, if I hadn't met her, I literally mean that.
+Rationale: Nate's most direct statement about Nicole saving his life — the emotional thesis of the entire episode.

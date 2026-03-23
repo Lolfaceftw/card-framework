@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import re
 import threading
+from typing import Any
 import uuid
 
 import numpy as np
@@ -22,21 +23,42 @@ from card_framework.shared.events import event_bus
 from card_framework.shared.perf import report_loading_duration
 
 
-def _normalize_segments(segments: list[dict]) -> list[dict[str, str]]:
+def _normalize_segments(segments: list[dict]) -> list[dict[str, Any]]:
     """Normalize retrieval segments into a stable cacheable payload."""
-    return [
-        {
+    normalized_segments: list[dict[str, Any]] = []
+    for segment in segments:
+        normalized = {
             "speaker": str(segment.get("speaker", "UNKNOWN")).strip() or "UNKNOWN",
             "text": str(segment.get("text", "")),
         }
-        for segment in segments
-    ]
+        affect_hint = str(segment.get("affect_hint", "")).strip()
+        if affect_hint:
+            normalized["affect_hint"] = affect_hint
+        suggested_emo_preset = str(segment.get("suggested_emo_preset", "")).strip()
+        if suggested_emo_preset:
+            normalized["suggested_emo_preset"] = suggested_emo_preset
+        emotion_vector = segment.get("emotion_vector")
+        if isinstance(emotion_vector, list) and len(emotion_vector) == 8:
+            normalized["emotion_vector"] = [
+                float(value) for value in emotion_vector
+            ]
+        emotion_vector_source = str(segment.get("emotion_vector_source", "")).strip()
+        if emotion_vector_source:
+            normalized["emotion_vector_source"] = emotion_vector_source
+        normalized_segments.append(normalized)
+    return normalized_segments
 
 
 def _stable_segments_hash(segments: list[dict[str, str]]) -> str:
-    """Hash a normalized retrieval-segment payload deterministically."""
+    """Hash the embedding-relevant retrieval payload deterministically."""
     serialized = json.dumps(
-        segments,
+        [
+            {
+                "speaker": str(segment.get("speaker", "UNKNOWN")),
+                "text": str(segment.get("text", "")),
+            }
+            for segment in segments
+        ],
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

@@ -94,6 +94,7 @@ def test_nemo_diarizer_builds_msdd_config_with_vad_postprocessing_overrides(
     assert vad_parameters.pad_offset == pytest.approx(0.0)
     assert vad_parameters.min_duration_on == pytest.approx(0.3)
     assert vad_parameters.min_duration_off == pytest.approx(0.7)
+    assert cfg.diarizer.ignore_overlap is False
     clustering_parameters = cfg.diarizer.clustering.parameters
     assert clustering_parameters.oracle_num_speakers is False
     assert clustering_parameters.max_num_speakers == 5

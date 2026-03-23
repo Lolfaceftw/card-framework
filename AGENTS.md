@@ -16,7 +16,8 @@ Markdown files under `coder_docs/`.
 ## Capability Gates
 
 - If your environment supports delegated agents or sub-agents, follow
-  `coder_docs/research_agents.md` for delegation rules.
+  `coder_docs/research_agents.md` for delegation rules, including the required
+  post-edit critic-review loop.
 - If your environment does not support delegated agents, do the equivalent work
   in the main thread and keep the same scoping and integration discipline.
 - If your environment exposes Scrapling MCP, follow `coder_docs/scrapling.md`
@@ -63,6 +64,15 @@ Markdown files under `coder_docs/`.
 - Assume configuration exists; do not hardcode deploy-varying values,
   credentials, or environment-specific endpoints.
 - Use `uv` as the package manager for this repository and `ruff` as the linter.
+- For repo-local runtime execution, prefer the Docker Compose workflow in
+  `coder_docs/docker_workflow.md`; if CUDA is available to Docker, use the
+  `gpu` profile and the bounded container limits from `compose.yml`.
+- When asked to run a repo entrypoint or script, actually execute it and
+  validate the run by probing logs plus RAM and GPU telemetry instead of
+  relying only on the live terminal stream.
+- For code edits, treat the task as incomplete until the critic-review loop in
+  `coder_docs/research_agents.md` reports no material flaws or an external
+  blocker remains.
 - When implementation changes affect behavior, interfaces, contracts, outputs,
   workflows, or operator expectations, update the relevant tests and Markdown
   docs in the same change.
