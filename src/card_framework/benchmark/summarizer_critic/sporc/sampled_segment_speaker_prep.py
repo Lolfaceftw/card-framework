@@ -375,7 +375,7 @@ def _load_audio_cfg(config_path: Path) -> dict[str, Any]:
     resolved = deepcopy(audio_cfg)
     speaker_samples_cfg = dict(resolved.get("speaker_samples", {}))
     speaker_samples_cfg["enabled"] = True
-    speaker_samples_cfg["source_audio"] = "source"
+    speaker_samples_cfg["source_audio"] = "vocals"
     resolved["speaker_samples"] = speaker_samples_cfg
     return resolved
 

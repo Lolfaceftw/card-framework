@@ -14,7 +14,10 @@ import sys
 from typing import Any
 from uuid import uuid4
 
+from card_framework.audio_pipeline.factory import build_source_separator
 from card_framework.audio_pipeline.io import write_transcript_atomic
+from card_framework.audio_pipeline.runtime import resolve_device
+from card_framework.cli.calibrate import load_audio_config
 from card_framework.orchestration.transcript import Transcript, TranscriptSegment
 from card_framework.shared.paths import REPO_ROOT
 from card_framework.shared.summary_xml import parse_summary_xml
@@ -204,6 +207,22 @@ def build_parser() -> argparse.ArgumentParser:
             "Gemini chat per eligible host turn."
         ),
     )
+    parser.add_argument(
+        "--source-separate-voice-samples",
+        action="store_true",
+        help=(
+            "Source-separate the packaged speaker-sample WAVs first and use the "
+            "cleaned vocals stems for every sweep run."
+        ),
+    )
+    parser.add_argument(
+        "--voice-sample-separation-device",
+        default="auto",
+        help=(
+            "Device used when source-separating packaged speaker samples. "
+            "Examples: auto, cuda, cpu."
+        ),
+    )
     return parser
 
 
@@ -243,11 +262,32 @@ def main(argv: list[str] | None = None) -> int:
         "duration_presets": [preset.label for preset in presets],
         "llm_profile": str(args.llm_profile),
         "llm_model": str(args.llm_model),
+        "docker_monitoring_enabled": True,
         "prepare_only": bool(args.prepare_only),
+        "source_separate_voice_samples": bool(args.source_separate_voice_samples),
         "runs": [],
     }
     summary_path = (output_root / "run_summary.json").resolve()
     _write_json(summary_payload, summary_path)
+
+    if args.source_separate_voice_samples:
+        cleaned_voice_samples_root = (
+            output_root / "source_separated_voice_samples"
+        ).resolve()
+        _append_note(
+            notes_path,
+            "Preparing source-separated speaker samples from the packaged "
+            f"voice-reference WAVs under `{cleaned_voice_samples_root}`.",
+        )
+        episodes = _source_separate_episode_voice_samples(
+            episodes=episodes,
+            cleaned_root=cleaned_voice_samples_root,
+            device=str(args.voice_sample_separation_device),
+        )
+        summary_payload["source_separated_voice_samples_root"] = str(
+            cleaned_voice_samples_root
+        )
+        _write_json(summary_payload, summary_path)
 
     if not args.prepare_only and not args.skip_setup:
         setup_log_path = (logs_root / "setup_only.log").resolve()
@@ -297,9 +337,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.prepare_only:
                 continue
 
-            log_path = (
-                logs_root / f"{episode.order:02d}_{_slugify(episode.title)}_{preset.label}.log"
+            log_stem = f"{episode.order:02d}_{_slugify(episode.title)}_{preset.label}"
+            stdout_path = (logs_root / f"{log_stem}.stdout.log").resolve()
+            stderr_path = (logs_root / f"{log_stem}.stderr.log").resolve()
+            monitor_path = (
+                logs_root / f"{log_stem}.resource_monitor.jsonl"
             ).resolve()
+            status_path = (logs_root / f"{log_stem}.run_status.json").resolve()
             _append_note(
                 notes_path,
                 "Launching Docker GPU stage-2 run for "
@@ -319,18 +363,64 @@ def main(argv: list[str] | None = None) -> int:
                     args.disable_interjector_tool_call_planning
                 ),
             )
-            return_code = _run_with_tee(command=command, log_path=log_path)
-            run_record["log_path"] = str(log_path)
+            return_code = _run_docker_command_monitored(
+                command=command,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                monitor_path=monitor_path,
+                status_path=status_path,
+            )
+            run_record["stdout_path"] = str(stdout_path)
+            run_record["stderr_path"] = str(stderr_path)
+            run_record["monitor_path"] = str(monitor_path)
+            run_record["run_status_path"] = str(status_path)
             run_record["return_code"] = return_code
 
             if return_code != 0:
+                recovery_paths = _attempt_live_draft_recovery(
+                    preset_root=preset_root,
+                    stdout_path=stdout_path,
+                    logs_root=logs_root,
+                    log_stem=log_stem,
+                    llm_profile=str(args.llm_profile),
+                    llm_model=str(args.llm_model),
+                )
+                if recovery_paths is not None:
+                    run_record["status"] = "completed_after_recovery"
+                    run_record["recovery"] = recovery_paths
+                    run_record["artifacts"] = _collect_artifact_paths(preset_root)
+                    export_paths = _export_human_readable_artifacts(
+                        episode=episode,
+                        preset=preset,
+                        preset_root=preset_root,
+                        final_exports_root=final_exports_root,
+                    )
+                    run_record["human_readable_exports"] = export_paths
+                    review_payload = _observe_completed_output(preset_root)
+                    run_record["llm_output_review"] = review_payload
+                    _append_note(
+                        notes_path,
+                        "Recovered a max-iterations-capped run for "
+                        f"`{episode.title}` at `{preset.label}` via persisted "
+                        f"live-draft stage-3/stage-4 recovery. Exports live under "
+                        f"`{final_exports_root}`.",
+                    )
+                    _append_note(
+                        notes_path,
+                        "Observed recovered LLM output for "
+                        f"`{episode.title}` at `{preset.label}`: "
+                        + _render_output_review_note(review_payload),
+                    )
+                    _write_json(summary_payload, summary_path)
+                    continue
+
                 run_record["status"] = "failed"
                 exit_code = 1
                 _append_note(
                     notes_path,
                     "Docker GPU stage-2 run failed for "
                     f"`{episode.title}` at `{preset.label}`. "
-                    f"Log: `{log_path}`.",
+                    f"Status: `{status_path}`.",
                 )
                 _write_json(summary_payload, summary_path)
                 if not args.continue_on_error:
@@ -646,6 +736,162 @@ def _parse_hms_to_ms(value: str) -> int:
     return ((hours * 60 + minutes) * 60 + seconds) * 1000
 
 
+def _source_separate_episode_voice_samples(
+    *,
+    episodes: tuple[ParsedEpisode, ...],
+    cleaned_root: Path,
+    device: str,
+) -> tuple[ParsedEpisode, ...]:
+    cleaned_root.mkdir(parents=True, exist_ok=True)
+    audio_cfg = load_audio_config(REPO_ROOT)
+    separator = build_source_separator(audio_cfg)
+    resolved_device = resolve_device(device)
+    cleaned_episodes: list[ParsedEpisode] = []
+    for episode in episodes:
+        cleaned_episodes.append(
+            _source_separate_episode_voice_samples_for_episode(
+                episode=episode,
+                cleaned_root=cleaned_root,
+                separator=separator,
+                device=resolved_device,
+            )
+        )
+    return tuple(cleaned_episodes)
+
+
+def _source_separate_episode_voice_samples_for_episode(
+    *,
+    episode: ParsedEpisode,
+    cleaned_root: Path,
+    separator: Any,
+    device: str,
+) -> ParsedEpisode:
+    episode_root = (cleaned_root / _human_episode_label(episode.order, episode.title)).resolve()
+    episode_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = (episode_root / "manifest.json").resolve()
+
+    if manifest_path.is_file():
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if _voice_sample_manifest_complete(
+            manifest_payload=manifest_payload,
+            voice_samples_dir=episode_root,
+        ):
+            return ParsedEpisode(
+                order=episode.order,
+                title=episode.title,
+                sample_id=episode.sample_id,
+                audio_slice_path=episode.audio_slice_path,
+                transcript_blocks=episode.transcript_blocks,
+                speakers=episode.speakers,
+                voice_samples_dir=episode_root,
+                original_voice_manifest=manifest_payload,
+                bootstrap_mapping=episode.bootstrap_mapping,
+            )
+
+    original_manifest = dict(episode.original_voice_manifest)
+    raw_samples = original_manifest.get("samples", [])
+    if not isinstance(raw_samples, list) or not raw_samples:
+        raise ValueError(
+            f"Episode voice-sample manifest is missing usable samples: {episode.title}"
+        )
+
+    cleaned_samples: list[dict[str, Any]] = []
+    for item in raw_samples:
+        if not isinstance(item, dict):
+            continue
+        speaker = str(item.get("speaker") or "").strip()
+        if not speaker:
+            continue
+        source_audio_path = _resolve_episode_voice_sample_path(
+            episode=episode,
+            sample_entry=item,
+            speaker=speaker,
+        )
+        cleaned_audio_path = (episode_root / f"{speaker}.wav").resolve()
+        separation_output_dir = (episode_root / "_separation" / speaker).resolve()
+        vocals_path = separator.separate_vocals(
+            input_audio_path=source_audio_path,
+            output_dir=separation_output_dir,
+            device=device,
+            progress_callback=None,
+        )
+        shutil.copyfile(vocals_path, cleaned_audio_path)
+        cleaned_entry = dict(item)
+        cleaned_entry["path"] = cleaned_audio_path.name
+        cleaned_entry["cleaned_from_path"] = str(source_audio_path)
+        cleaned_samples.append(cleaned_entry)
+
+    cleaned_manifest = dict(original_manifest)
+    cleaned_manifest["generated_at_utc"] = _utc_now_iso()
+    cleaned_manifest["samples"] = cleaned_samples
+    cleaned_manifest["cleaned_voice_samples"] = True
+    cleaned_manifest["source_sample_cleaning_mode"] = (
+        "demucs_vocals_from_existing_voice_samples"
+    )
+    cleaned_manifest["source_sample_cleaning_device"] = device
+    _write_json(cleaned_manifest, manifest_path)
+    return ParsedEpisode(
+        order=episode.order,
+        title=episode.title,
+        sample_id=episode.sample_id,
+        audio_slice_path=episode.audio_slice_path,
+        transcript_blocks=episode.transcript_blocks,
+        speakers=episode.speakers,
+        voice_samples_dir=episode_root,
+        original_voice_manifest=cleaned_manifest,
+        bootstrap_mapping=episode.bootstrap_mapping,
+    )
+
+
+def _voice_sample_manifest_complete(
+    *,
+    manifest_payload: dict[str, Any],
+    voice_samples_dir: Path,
+) -> bool:
+    raw_samples = manifest_payload.get("samples", [])
+    if not isinstance(raw_samples, list) or not raw_samples:
+        return False
+    for item in raw_samples:
+        if not isinstance(item, dict):
+            return False
+        path_value = str(item.get("path") or "").strip()
+        if not path_value:
+            return False
+        candidate = (voice_samples_dir / Path(path_value).name).resolve()
+        if not candidate.is_file():
+            return False
+    return True
+
+
+def _resolve_episode_voice_sample_path(
+    *,
+    episode: ParsedEpisode,
+    sample_entry: dict[str, Any],
+    speaker: str,
+) -> Path:
+    path_value = str(sample_entry.get("path") or "").strip()
+    candidates: list[Path] = []
+    if path_value:
+        raw_candidate = Path(path_value).expanduser()
+        candidates.append(raw_candidate)
+        candidates.append((episode.voice_samples_dir / raw_candidate.name).resolve())
+    candidates.append((episode.voice_samples_dir / f"{speaker}.wav").resolve())
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_file():
+            return resolved
+
+    raise FileNotFoundError(
+        "Unable to resolve packaged voice sample for "
+        f"{episode.title} speaker {speaker}: {path_value or '<missing path>'}"
+    )
+
+
 def _materialize_preset_inputs(*, preset_root: Path, episode: ParsedEpisode) -> Path:
     speaker_samples_dir = (preset_root / "speaker_samples").resolve()
     speaker_samples_dir.mkdir(parents=True, exist_ok=True)
@@ -931,6 +1177,207 @@ def _run_with_tee(*, command: list[str], log_path: Path) -> int:
             handle.write(line)
             handle.flush()
         return process.wait()
+
+
+def _run_docker_command_monitored(
+    *,
+    command: list[str],
+    stdout_path: Path,
+    stderr_path: Path,
+    monitor_path: Path,
+    status_path: Path,
+    sample_interval_seconds: float = 5.0,
+) -> int:
+    if not command or command[0] != "docker":
+        raise ValueError("Monitored docker command must start with 'docker'.")
+    args_json_path = status_path.with_name(f"{status_path.stem}.args.json")
+    args_json_path.write_text(
+        json.dumps(command[1:], indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    monitor_script_path = (REPO_ROOT / "scripts" / "run_docker_monitored.py").resolve()
+    wrapper_command = [
+        "uv",
+        "run",
+        "python",
+        str(monitor_script_path),
+        "--repo-root",
+        str(REPO_ROOT),
+        "--args-json",
+        str(args_json_path),
+        "--stdout-path",
+        str(stdout_path),
+        "--stderr-path",
+        str(stderr_path),
+        "--monitor-path",
+        str(monitor_path),
+        "--status-path",
+        str(status_path),
+        "--sample-interval-seconds",
+        str(sample_interval_seconds),
+    ]
+    completed = subprocess.run(
+        wrapper_command,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    return int(completed.returncode)
+
+
+def _stdout_log_contains_max_iterations(stdout_path: Path) -> bool:
+    if not stdout_path.is_file():
+        return False
+    try:
+        payload = stdout_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "Max iterations (" in payload
+
+
+def _stdout_log_contains_context_window_failure(stdout_path: Path) -> bool:
+    if not stdout_path.is_file():
+        return False
+    try:
+        payload = stdout_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return (
+        "maximum context length is 131072 tokens" in payload
+        and "Please reduce the length of the messages or completion." in payload
+    )
+
+
+def _find_live_draft_state_path(run_root: Path) -> Path | None:
+    voice_clone_dir = (run_root / "audio_stage" / "voice_clone").resolve()
+    candidates = sorted(
+        voice_clone_dir.glob("live_draft_*.state.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _build_stage4_recovery_command(
+    *,
+    preset_root: Path,
+    llm_profile: str,
+    llm_model: str,
+) -> list[str]:
+    summary_path = (preset_root / "summary.xml").resolve()
+    voice_clone_manifest_path = (
+        preset_root / "audio_stage" / "voice_clone" / "manifest.json"
+    ).resolve()
+    return [
+        "docker",
+        "compose",
+        "--profile",
+        "gpu",
+        "run",
+        "--rm",
+        "setup-and-run-gpu",
+        "--no-menu",
+        "--output-root",
+        str(_to_container_path(preset_root)),
+        "--override",
+        "pipeline.start_stage=stage-4",
+        "--override",
+        f"pipeline.final_summary_path={_to_container_path(summary_path)}",
+        "--override",
+        "pipeline.voice_clone_manifest_path="
+        + str(_to_container_path(voice_clone_manifest_path)),
+        "--override",
+        f"selection.llm={llm_profile}",
+        "--override",
+        f"selection.stage_llm.summarizer={llm_profile}",
+        "--override",
+        f"selection.stage_llm.critic={llm_profile}",
+        "--override",
+        f"selection.stage_llm.interjector={llm_profile}",
+        "--override",
+        f"profiles.llm.{llm_profile}.model={llm_model}",
+        "--override",
+        "audio.device=cuda",
+        "--override",
+        "audio.voice_clone.device=cuda",
+        "--override",
+        "audio.interjector.enabled=true",
+        "--override",
+        "logging.print_to_terminal=true",
+        "--override",
+        "logging.summarizer_critic_print_to_terminal=true",
+    ]
+
+
+def _attempt_live_draft_recovery(
+    *,
+    preset_root: Path,
+    stdout_path: Path,
+    logs_root: Path,
+    log_stem: str,
+    llm_profile: str,
+    llm_model: str,
+) -> dict[str, str] | None:
+    recovery_reason = ""
+    if _stdout_log_contains_max_iterations(stdout_path):
+        recovery_reason = "max_iterations"
+    elif _stdout_log_contains_context_window_failure(stdout_path):
+        recovery_reason = "context_window"
+    if not recovery_reason:
+        return None
+    state_path = _find_live_draft_state_path(preset_root)
+    if state_path is None:
+        return None
+
+    recovery_log_path = (logs_root / f"{log_stem}.stage3_recovery.log").resolve()
+    recovery_command = [
+        "docker",
+        "compose",
+        "--profile",
+        "gpu",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "bash",
+        "setup-and-run-gpu",
+        "-lc",
+        "uv run python scripts/recover_sporc_live_draft_stage3.py --run-root "
+        + str(_to_container_path(preset_root)),
+    ]
+    if _run_with_tee(command=recovery_command, log_path=recovery_log_path) != 0:
+        return None
+
+    stage4_stdout_path = (logs_root / f"{log_stem}.stage4_recovery.stdout.log").resolve()
+    stage4_stderr_path = (logs_root / f"{log_stem}.stage4_recovery.stderr.log").resolve()
+    stage4_monitor_path = (
+        logs_root / f"{log_stem}.stage4_recovery.resource_monitor.jsonl"
+    ).resolve()
+    stage4_status_path = (
+        logs_root / f"{log_stem}.stage4_recovery.run_status.json"
+    ).resolve()
+    stage4_command = _build_stage4_recovery_command(
+        preset_root=preset_root,
+        llm_profile=llm_profile,
+        llm_model=llm_model,
+    )
+    stage4_return_code = _run_docker_command_monitored(
+        command=stage4_command,
+        stdout_path=stage4_stdout_path,
+        stderr_path=stage4_stderr_path,
+        monitor_path=stage4_monitor_path,
+        status_path=stage4_status_path,
+    )
+    if stage4_return_code != 0:
+        return None
+    return {
+        "recovered_from_max_iterations": str(recovery_reason == "max_iterations").lower(),
+        "recovered_from_reason": recovery_reason,
+        "live_draft_state_path": str(state_path.resolve()),
+        "stage3_recovery_log_path": str(recovery_log_path),
+        "stage4_recovery_stdout_path": str(stage4_stdout_path),
+        "stage4_recovery_stderr_path": str(stage4_stderr_path),
+        "stage4_recovery_monitor_path": str(stage4_monitor_path),
+        "stage4_recovery_status_path": str(stage4_status_path),
+    }
 
 
 def _collect_artifact_paths(output_root: Path) -> dict[str, str]:

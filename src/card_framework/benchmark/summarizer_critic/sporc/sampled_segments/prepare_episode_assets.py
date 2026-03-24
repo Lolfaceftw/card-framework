@@ -188,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     audio_cfg = load_audio_config(REPO_ROOT, config_path=config_path)
     speaker_samples_cfg = dict(audio_cfg.get("speaker_samples", {}))
-    speaker_samples_cfg["source_audio"] = "source"
+    speaker_samples_cfg["source_audio"] = "vocals"
     audio_cfg = dict(audio_cfg)
     audio_cfg["speaker_samples"] = speaker_samples_cfg
 

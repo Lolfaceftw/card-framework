@@ -187,6 +187,26 @@ def test_resolve_bootstrap_speaker_mapping_explains_missing_clean_speaker() -> N
         )
 
 
+def test_load_audio_cfg_prefers_vocals_for_clean_speaker_samples(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from card_framework.benchmark.summarizer_critic.sporc import (
+        sampled_segment_speaker_prep as module,
+    )
+
+    def fake_load_audio_config(project_root: Path, *, config_path: Path | None = None):
+        del project_root, config_path
+        return {"speaker_samples": {"target_duration_seconds": 30}}
+
+    monkeypatch.setattr(module, "load_audio_config", fake_load_audio_config)
+
+    audio_cfg = module._load_audio_cfg(tmp_path / "config.yaml")
+
+    assert audio_cfg["speaker_samples"]["enabled"] is True
+    assert audio_cfg["speaker_samples"]["source_audio"] == "vocals"
+
+
 def test_main_prepares_episode_audio_and_speaker_samples(
     tmp_path: Path,
     monkeypatch,
@@ -252,7 +272,8 @@ def test_main_prepares_episode_audio_and_speaker_samples(
         speaker_samples_output_dir: Path,
         status_reporter=None,
     ):
-        del project_root, audio_cfg, bootstrap_audio_work_dir, status_reporter
+        del project_root, bootstrap_audio_work_dir, status_reporter
+        assert audio_cfg["speaker_samples"]["source_audio"] == "vocals"
         speaker_samples_output_dir.mkdir(parents=True, exist_ok=True)
         sample_audio_path_0 = (speaker_samples_output_dir / "speaker_00.wav").resolve()
         sample_audio_path_1 = (speaker_samples_output_dir / "speaker_01.wav").resolve()

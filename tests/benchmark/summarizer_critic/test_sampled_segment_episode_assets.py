@@ -323,7 +323,8 @@ def test_main_prepares_episode_assets_and_summary(
         speaker_samples_output_dir: Path,
         status_reporter=None,
     ):
-        del project_root, audio_cfg, bootstrap_audio_work_dir, status_reporter
+        del project_root, bootstrap_audio_work_dir, status_reporter
+        assert audio_cfg["speaker_samples"]["source_audio"] == "vocals"
         bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
         bootstrap_transcript_path.write_text(
             json.dumps(
@@ -565,7 +566,8 @@ def test_main_prefers_mapping_that_covers_sampled_speakers(
         speaker_samples_output_dir: Path,
         status_reporter=None,
     ):
-        del project_root, audio_cfg, bootstrap_audio_work_dir, status_reporter
+        del project_root, bootstrap_audio_work_dir, status_reporter
+        assert audio_cfg["speaker_samples"]["source_audio"] == "vocals"
         bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
         bootstrap_transcript_path.write_text(
             json.dumps(
