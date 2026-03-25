@@ -1,5 +1,92 @@
 # Stage-4 Interjector Timing Refinement Experiments
 
+## 2026-03-25 - Echo Agreements Needed Phrase-Match Placement And Tempo Fit, Not More Raw Offset Guessing
+
+- The focused `dam broke` pack finally isolated the actual remaining delay after leading-silence trimming.
+- The bad case was no longer just a clip-boundary problem: the echo clip itself was unfolding too slowly relative to the host phrase, and the stage-4 CTC aligner still could not provide a trustworthy phrase clock on that turn.
+- A focused Faster-Whisper-native word-timing pack showed that `tempo160_align_dam` and especially `tempo175_align_dam` sounded right, while raw offset variants still sounded delayed.
+- The runtime fix is now:
+  1. keep the existing CTC aligner for the normal stage-4 path,
+  2. add an echo-only phrase matcher backed by Faster-Whisper native word timestamps,
+  3. use that matched host phrase span to place `echo_agreement` overlays,
+  4. time-compress the overlay with FFmpeg `atempo` when the overlay phrase is materially slower than the host phrase,
+  5. keep the generic impossible-timestamp guard so broken timing sources still fail safe instead of steering placement.
+- The new pacing-fit config defaults are conservative and explicit:
+  - `echo_alignment_offset_ms: 0`
+  - `target_host_fill_ratio: 0.95`
+  - `min_overflow_ratio: 1.05`
+  - `max_tempo: 1.75`
+  - `timing_backend: faster_whisper_native`
+- Stage-4 manifests now record `tempo_adjustment_ratio` on accepted and rejected repair attempts so the final run can show when a short echo was pace-fit instead of left raw.
+
+### Stage-4 Validation Run
+- Re-ran **stage 4 only** on episode 2 at the existing `5m` summary/voice-clone boundary:
+  - output root: `artifacts/sporc_human_eval_stage2_sweeps/interjector_echo_pacing_fit_ep2_5m_20260325_175507`
+- Runtime completed successfully with:
+  - `11` accepted interjections
+  - `2` rejected interjections
+- The new runtime path was exercised for real accepted echoes, not just in unit tests:
+  - host turn `3`: `timing_source=echo_phrase_match`, `tempo_adjustment_ratio=1.75`
+  - host turn `7`: `timing_source=echo_phrase_match`, `tempo_adjustment_ratio≈1.423`
+- Observed resource profile from the internal 30-second monitor loop:
+  - peak container RAM: about `6.79 GiB / 7.75 GiB`
+  - peak GPU memory: about `9.72 GiB / 12 GiB`
+- Two failed launch attempts happened before the successful rerun because stage-4 Docker overrides were first passed as host-style Windows absolute paths, then as repo-relative paths that Hydra resolved against the new output root. The working fix was to pass explicit container-visible paths under `/workspace/card-framework/...`.
+
+## 2026-03-25 - Forced-Alignment Timebase Bug In Stage-4
+
+### Problem
+- The focused `dam broke` echo investigation exposed a larger bug than simple onset or pacing.
+- The stage-4 aligner was producing token timestamps that exceeded the real WAV duration.
+- Example on the same host-turn WAV:
+  - real audio duration: about `11517 ms`
+  - aligned last token end: about `16632 ms`
+- The same inflation showed up on short anchor-only clips, which invalidated the earlier offset packs.
+
+### Root Cause
+- `_decode_audio_waveform(...)` in `src/card_framework/audio_pipeline/interjector.py` decoded stage-3 WAVs for forced alignment without resampling them.
+- Stage-3 turn WAVs are commonly `22050 Hz`, but the CTC aligner expects `16000 Hz`.
+- That created a timebase stretch that made alignment timestamps physically impossible for the actual file duration.
+
+### Fix
+- Resample forced-alignment decode input to `16000 Hz` before it reaches the aligner.
+- Add a hard duration sanity gate:
+  - if any aligned token extends beyond the probed audio duration plus a small tolerance, reject that alignment result and fall back safely.
+- Apply the same guard to both full-turn alignment and anchor-window refinement.
+
+### Validation
+- Added focused tests that prove:
+  - forced-alignment decode now requests `16000 Hz`
+  - impossible aligned timestamps fall back instead of being trusted
+  - anchor-window refinement rejects impossible timings too
+
+## 2026-03-25 - Single-Anchor Echo Pacing Diagnosis
+
+### Problem
+- The focused `dam broke` echo still sounded delayed even after fixing synthesized leading silence.
+- A pure start-offset sweep was misleading, because the underlying `dam broke` overlay clip itself was slower than the host phrase.
+
+### Measurement
+- Verified host-turn alignment on the original stage-3 turn:
+  - `dam`: `9870-10227 ms`
+  - `broke`: `10416-10941 ms`
+- Verified overlay alignment on the accepted stage-4 echo clip:
+  - `dam`: `21-420 ms`
+  - `broke`: `903-1869 ms`
+- Implication:
+  - if the overlay starts exactly at the host anchor, `dam` lands only about `21 ms` late
+  - but `broke` lands about `357 ms` late
+- Conclusion: the remaining issue is phrase-level pacing mismatch, not just clip-boundary placement.
+
+### Follow-Up
+- Built a micro-pack that isolates one host anchor and compares:
+  - earlier raw offsets
+  - time-compressed overlay variants
+- Pack root:
+  - `artifacts/interjector_single_anchor_pacing_ep2_turn8_20260325_171731`
+- Review helper:
+  - `artifacts/interjector_single_anchor_pacing_ep2_turn8_20260325_171731/review_pacing.ps1`
+
 ## 2026-03-25 - Implementation Pass 1
 
 ### Goal

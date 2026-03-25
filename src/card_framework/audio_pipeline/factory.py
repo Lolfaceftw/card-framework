@@ -540,6 +540,7 @@ def build_interjector_orchestrator(
     leading_silence_trim_cfg = _as_mapping(
         interjector_cfg.get("leading_silence_trim", {})
     )
+    echo_pacing_fit_cfg = _as_mapping(interjector_cfg.get("echo_pacing_fit", {}))
     return InterjectorOrchestrator(
         planner=LLMInterjectionPlanner(
             llm=llm,
@@ -571,13 +572,10 @@ def build_interjector_orchestrator(
             interjector_cfg.get("backchannel_reaction_latency_ms", 120)
         ),
         echo_alignment_offset_ms=int(
-            interjector_cfg.get("echo_alignment_offset_ms", 20)
+            interjector_cfg.get("echo_alignment_offset_ms", 0)
         ),
         min_host_progress_ratio=min_host_progress_ratio,
         max_host_progress_ratio=max_host_progress_ratio,
-        min_available_overlap_ms=int(
-            interjector_cfg.get("min_available_overlap_ms", 120)
-        ),
         turn_end_guard_ms=int(interjector_cfg.get("turn_end_guard_ms", 180)),
         mix_timeout_seconds=int(interjector_cfg.get("mix_timeout_seconds", 300)),
         merged_output_normalization=_build_audio_normalization_policy(
@@ -602,6 +600,42 @@ def build_interjector_orchestrator(
         ),
         trim_leading_silence_preserve_ms=int(
             leading_silence_trim_cfg.get("preserve_ms", 5)
+        ),
+        echo_pacing_fit_enabled=bool(
+            echo_pacing_fit_cfg.get("enabled", True)
+        ),
+        echo_pacing_timing_backend=str(
+            echo_pacing_fit_cfg.get("timing_backend", "faster_whisper_native")
+        ),
+        echo_pacing_model_name=str(
+            echo_pacing_fit_cfg.get("model_name", "tiny.en")
+        ),
+        echo_pacing_device=str(
+            echo_pacing_fit_cfg.get("device", "cpu")
+        ),
+        echo_pacing_compute_type_cpu=str(
+            echo_pacing_fit_cfg.get("compute_type_cpu", "int8")
+        ),
+        echo_pacing_compute_type_cuda=str(
+            echo_pacing_fit_cfg.get("compute_type_cuda", "int8_float16")
+        ),
+        echo_pacing_beam_size=int(
+            echo_pacing_fit_cfg.get("beam_size", 1)
+        ),
+        echo_pacing_target_host_fill_ratio=float(
+            echo_pacing_fit_cfg.get("target_host_fill_ratio", 0.95)
+        ),
+        echo_pacing_min_overflow_ratio=float(
+            echo_pacing_fit_cfg.get("min_overflow_ratio", 1.05)
+        ),
+        echo_pacing_max_tempo=float(
+            echo_pacing_fit_cfg.get("max_tempo", 1.75)
+        ),
+        echo_pacing_min_phrase_match_similarity=float(
+            echo_pacing_fit_cfg.get("min_phrase_match_similarity", 0.75)
+        ),
+        echo_pacing_max_window_delta=int(
+            echo_pacing_fit_cfg.get("max_window_delta", 1)
         ),
     )
 

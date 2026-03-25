@@ -355,10 +355,9 @@ audio:
     max_interjection_words: 5
     max_interjections_per_host_turn: 1
     backchannel_reaction_latency_ms: 120
-    echo_alignment_offset_ms: 20
+    echo_alignment_offset_ms: 0
     min_host_progress_ratio: 0.35
     max_host_progress_ratio: 0.90
-    min_available_overlap_ms: 120
     turn_end_guard_ms: 180
     mix_timeout_seconds: 300
     timing_refinement:
@@ -369,6 +368,19 @@ audio:
       threshold_db: -50.0
       min_duration_ms: 0
       preserve_ms: 5
+    echo_pacing_fit:
+      enabled: true
+      timing_backend: "faster_whisper_native"
+      model_name: "tiny.en"
+      device: "cpu"
+      compute_type_cpu: "int8"
+      compute_type_cuda: "int8_float16"
+      beam_size: 1
+      target_host_fill_ratio: 0.95
+      min_overflow_ratio: 1.05
+      max_tempo: 1.75
+      min_phrase_match_similarity: 0.75
+      max_window_delta: 1
     repair:
       enabled: true
       prompt_max_tokens: 220

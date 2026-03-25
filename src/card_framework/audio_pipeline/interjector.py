@@ -30,8 +30,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 import json
 import math
 from pathlib import Path
@@ -46,6 +47,7 @@ from card_framework.audio_pipeline.audio_normalization import (
     AudioNormalizationPolicy,
     normalize_audio_file,
 )
+from card_framework.audio_pipeline.contracts import WordTimestamp
 from card_framework.audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
 from card_framework.audio_pipeline.runtime import (
@@ -67,8 +69,12 @@ InterjectionStyle: TypeAlias = Literal["backchannel", "echo_agreement"]
 AlignmentSource: TypeAlias = Literal[
     "forced_alignment",
     "anchor_window_refinement",
+    "echo_phrase_match",
     "uniform_fallback",
 ]
+
+_FORCED_ALIGNMENT_SAMPLE_RATE_HZ = 16000
+_ALIGNMENT_DURATION_TOLERANCE_MS = 50
 
 
 class InterjectionDecision(BaseModel):
@@ -135,6 +141,21 @@ class _PreparedOverlayAudio:
     path: Path
     duration_ms: int
     leading_silence_trim_ms: int
+    tempo_adjustment_ratio: float = 1.0
+
+
+@dataclass(slots=True, frozen=True)
+class _MatchedPhraseSpan:
+    """Describe one matched phrase span inside aligned words."""
+
+    start_time_ms: int
+    end_time_ms: int
+    similarity: float
+
+    @property
+    def duration_ms(self) -> int:
+        """Return the inclusive duration of the matched phrase span."""
+        return max(0, self.end_time_ms - self.start_time_ms)
 
 
 @dataclass(slots=True, frozen=True)
@@ -148,6 +169,7 @@ class InterjectionRepairAttempt:
     timing_source: AlignmentSource
     timing_variant: Literal["default", "tightened"]
     leading_silence_trim_ms: int
+    tempo_adjustment_ratio: float
     status: Literal["accepted", "retry"]
 
 
@@ -173,6 +195,7 @@ class InterjectorArtifact:
     timing_source: AlignmentSource
     timing_variant: Literal["default", "tightened"]
     leading_silence_trim_ms: int
+    tempo_adjustment_ratio: float
     repair_attempt_count: int
     repair_attempts: tuple[InterjectionRepairAttempt, ...]
     output_audio_path: Path
@@ -255,6 +278,101 @@ class InterjectionPlanner(Protocol):
 
     def plan(self, summary_turns: Sequence[VoiceCloneTurn]) -> list[InterjectionDecision]:
         """Return validated per-turn interjection decisions."""
+
+
+class WordTimingBackend(Protocol):
+    """Protocol for optional short-audio word-timing backends."""
+
+    def align_words(self, *, audio_path: Path, language: str) -> list[WordTimestamp]:
+        """Return ordered word timestamps for one short audio clip."""
+
+    def close(self) -> None:
+        """Release any cached backend resources."""
+
+
+@dataclass(slots=True)
+class _FasterWhisperNativeWordTimingBackend:
+    """Provide native Faster-Whisper word timestamps for short echo fitting."""
+
+    model_name: str = "tiny.en"
+    device: str = "cpu"
+    compute_type_cpu: str = "int8"
+    compute_type_cuda: str = "int8_float16"
+    beam_size: int = 1
+    _model_cache: dict[tuple[str, str], Any] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    def align_words(self, *, audio_path: Path, language: str) -> list[WordTimestamp]:
+        """Return native Whisper word timestamps for one short audio clip."""
+        ensure_command_available("ffmpeg")
+        try:
+            from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+        except Exception as exc:  # pragma: no cover - dependency path
+            raise NonRetryableAudioStageError(
+                "faster-whisper is unavailable for echo pacing fit."
+            ) from exc
+
+        compute_type = (
+            self.compute_type_cuda if self.device == "cuda" else self.compute_type_cpu
+        )
+        cache_key = (self.device, compute_type)
+        model = self._model_cache.get(cache_key)
+        if model is None:
+            model = WhisperModel(
+                self.model_name,
+                device=self.device,
+                compute_type=compute_type,
+            )
+            self._model_cache[cache_key] = model
+
+        normalized_language = language.strip().lower() or None
+        try:
+            segments, _info = model.transcribe(
+                str(audio_path),
+                language=normalized_language,
+                beam_size=max(1, self.beam_size),
+                word_timestamps=True,
+                vad_filter=False,
+                condition_on_previous_text=False,
+            )
+        except Exception as exc:  # pragma: no cover - runtime path
+            raise NonRetryableAudioStageError(
+                f"Faster-Whisper echo timing failed for {audio_path}."
+            ) from exc
+
+        words: list[WordTimestamp] = []
+        for segment in segments:
+            for word in getattr(segment, "words", ()) or ():
+                text_value = str(getattr(word, "word", "") or "").strip()
+                start_seconds = getattr(word, "start", None)
+                end_seconds = getattr(word, "end", None)
+                if not text_value or start_seconds is None or end_seconds is None:
+                    continue
+                start_ms = max(0, int(round(float(start_seconds) * 1000)))
+                end_ms = max(start_ms, int(round(float(end_seconds) * 1000)))
+                words.append(
+                    WordTimestamp(
+                        word=text_value,
+                        start_time_ms=start_ms,
+                        end_time_ms=end_ms,
+                    )
+                )
+        return words
+
+    def close(self) -> None:
+        """Release cached model instances and their device memory."""
+        for cache_key, model in list(self._model_cache.items()):
+            close = getattr(model, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            del model
+            self._model_cache.pop(cache_key, None)
 
 
 @dataclass(slots=True)
@@ -457,10 +575,9 @@ class InterjectorOrchestrator:
     max_interjection_words: int = 5
     max_interjections_per_host_turn: int = 1
     backchannel_reaction_latency_ms: int = 120
-    echo_alignment_offset_ms: int = 20
+    echo_alignment_offset_ms: int = 0
     min_host_progress_ratio: float = 0.35
     max_host_progress_ratio: float = 0.90
-    min_available_overlap_ms: int = 120
     turn_end_guard_ms: int = 180
     mix_audio_codec: str = "pcm_s24le"
     mix_timeout_seconds: int = 300
@@ -475,6 +592,28 @@ class InterjectorOrchestrator:
     trim_leading_silence_threshold_db: float = -50.0
     trim_leading_silence_min_duration_ms: int = 0
     trim_leading_silence_preserve_ms: int = 5
+    echo_pacing_fit_enabled: bool = True
+    echo_pacing_timing_backend: str = "faster_whisper_native"
+    echo_pacing_model_name: str = "tiny.en"
+    echo_pacing_device: str = "cpu"
+    echo_pacing_compute_type_cpu: str = "int8"
+    echo_pacing_compute_type_cuda: str = "int8_float16"
+    echo_pacing_beam_size: int = 1
+    echo_pacing_target_host_fill_ratio: float = 0.95
+    echo_pacing_min_overflow_ratio: float = 1.05
+    echo_pacing_max_tempo: float = 1.75
+    echo_pacing_min_phrase_match_similarity: float = 0.75
+    echo_pacing_max_window_delta: int = 1
+    _echo_word_timing_backend: WordTimingBackend | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _echo_word_timing_cache: dict[tuple[str, str], tuple[WordTimestamp, ...]] = field(
+        init=False,
+        default_factory=dict,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Validate orchestrator configuration."""
@@ -500,8 +639,6 @@ class InterjectorOrchestrator:
             raise ValueError(
                 "min_host_progress_ratio must be <= max_host_progress_ratio."
             )
-        if self.min_available_overlap_ms <= 0:
-            raise ValueError("min_available_overlap_ms must be > 0.")
         if self.turn_end_guard_ms < 0:
             raise ValueError("turn_end_guard_ms must be >= 0.")
         if not self.mix_audio_codec.strip():
@@ -516,8 +653,37 @@ class InterjectorOrchestrator:
             raise ValueError("trim_leading_silence_min_duration_ms must be >= 0.")
         if self.trim_leading_silence_preserve_ms < 0:
             raise ValueError("trim_leading_silence_preserve_ms must be >= 0.")
+        if self.echo_pacing_beam_size <= 0:
+            raise ValueError("echo_pacing_beam_size must be > 0.")
+        if not 0.0 < self.echo_pacing_target_host_fill_ratio <= 1.0:
+            raise ValueError(
+                "echo_pacing_target_host_fill_ratio must be within (0.0, 1.0]."
+            )
+        if self.echo_pacing_min_overflow_ratio < 1.0:
+            raise ValueError("echo_pacing_min_overflow_ratio must be >= 1.0.")
+        if not 1.0 <= self.echo_pacing_max_tempo <= 2.0:
+            raise ValueError("echo_pacing_max_tempo must be within [1.0, 2.0].")
+        if not 0.0 <= self.echo_pacing_min_phrase_match_similarity <= 1.0:
+            raise ValueError(
+                "echo_pacing_min_phrase_match_similarity must be within [0.0, 1.0]."
+            )
+        if self.echo_pacing_max_window_delta < 0:
+            raise ValueError("echo_pacing_max_window_delta must be >= 0.")
         if self.aligner is None:
             self.aligner = CtcForcedAlignerGateway()
+        if self.echo_pacing_fit_enabled:
+            if self.echo_pacing_timing_backend != "faster_whisper_native":
+                raise ValueError(
+                    "Unsupported echo_pacing_timing_backend: "
+                    f"{self.echo_pacing_timing_backend}"
+                )
+            self._echo_word_timing_backend = _FasterWhisperNativeWordTimingBackend(
+                model_name=self.echo_pacing_model_name,
+                device=self.echo_pacing_device,
+                compute_type_cpu=self.echo_pacing_compute_type_cpu,
+                compute_type_cuda=self.echo_pacing_compute_type_cuda,
+                beam_size=self.echo_pacing_beam_size,
+            )
 
     def run(
         self,
@@ -527,69 +693,70 @@ class InterjectorOrchestrator:
         language: str = "en",
     ) -> InterjectorRunResult:
         """Generate overlaps and mix them into the stage-3 merged audio."""
-        summary_turns = parse_summary_turns(summary_xml)
-        manifest_bundle = _load_voice_clone_manifest_bundle(
-            summary_turns=summary_turns,
-            manifest_path=voice_clone_manifest_path,
-        )
-        sample_refs = load_speaker_sample_references(
-            manifest_bundle.speaker_samples_manifest_path
-        )
-        decisions = self.planner.plan(summary_turns)
-
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        artifacts, overlays, rejected_artifacts = self._render_interjection_artifacts(
-            decisions=decisions,
-            manifest_bundle=manifest_bundle,
-            sample_refs=sample_refs,
-            language=language,
-        )
-        if not artifacts:
-            fallback_decisions = _build_heuristic_interjection_decisions(
-                _build_eligible_turns(summary_turns),
-                max_interjection_words=self.max_interjection_words,
-                min_host_progress_ratio=self.min_host_progress_ratio,
-                max_host_progress_ratio=min(self.max_host_progress_ratio, 0.75),
-                max_interjections=self.max_interjections_per_host_turn,
+        try:
+            summary_turns = parse_summary_turns(summary_xml)
+            manifest_bundle = _load_voice_clone_manifest_bundle(
+                summary_turns=summary_turns,
+                manifest_path=voice_clone_manifest_path,
             )
-            fallback_artifacts, fallback_overlays, fallback_rejections = (
-                self._render_interjection_artifacts(
-                decisions=fallback_decisions,
+            sample_refs = load_speaker_sample_references(
+                manifest_bundle.speaker_samples_manifest_path
+            )
+            decisions = self.planner.plan(summary_turns)
+
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            artifacts, overlays, rejected_artifacts = self._render_interjection_artifacts(
+                decisions=decisions,
                 manifest_bundle=manifest_bundle,
                 sample_refs=sample_refs,
                 language=language,
-                )
             )
-            artifacts = fallback_artifacts
-            overlays = fallback_overlays
-            rejected_artifacts.extend(fallback_rejections)
+            if not artifacts:
+                fallback_decisions = _build_heuristic_interjection_decisions(
+                    _build_eligible_turns(summary_turns),
+                    max_interjection_words=self.max_interjection_words,
+                    min_host_progress_ratio=self.min_host_progress_ratio,
+                    max_host_progress_ratio=min(self.max_host_progress_ratio, 0.75),
+                    max_interjections=self.max_interjections_per_host_turn,
+                )
+                fallback_artifacts, fallback_overlays, fallback_rejections = (
+                    self._render_interjection_artifacts(
+                        decisions=fallback_decisions,
+                        manifest_bundle=manifest_bundle,
+                        sample_refs=sample_refs,
+                        language=language,
+                    )
+                )
+                artifacts = fallback_artifacts
+                overlays = fallback_overlays
+                rejected_artifacts.extend(fallback_rejections)
 
-        merged_output_audio_path = self.output_dir / self.merged_output_filename
-        _mix_audio_with_overlays(
-            base_audio_path=manifest_bundle.base_audio_path,
-            overlays=overlays,
-            output_path=merged_output_audio_path,
-            audio_codec=self.mix_audio_codec,
-            timeout_seconds=self.mix_timeout_seconds,
-        )
-        normalize_audio_file(
-            audio_path=merged_output_audio_path,
-            policy=self.merged_output_normalization,
-        )
+            merged_output_audio_path = self.output_dir / self.merged_output_filename
+            _mix_audio_with_overlays(
+                base_audio_path=manifest_bundle.base_audio_path,
+                overlays=overlays,
+                output_path=merged_output_audio_path,
+                audio_codec=self.mix_audio_codec,
+                timeout_seconds=self.mix_timeout_seconds,
+            )
+            normalize_audio_file(
+                audio_path=merged_output_audio_path,
+                policy=self.merged_output_normalization,
+            )
 
-        generated_at_utc = _utc_now_iso()
-        manifest_path = self.output_dir / self.manifest_filename
-        _write_json_atomic(
-            {
-                "generated_at_utc": generated_at_utc,
-                "voice_clone_manifest_path": str(voice_clone_manifest_path),
-                "speaker_samples_manifest_path": str(
-                    manifest_bundle.speaker_samples_manifest_path
-                ),
-                "artifact_count": len(artifacts),
-                "rejected_artifact_count": len(rejected_artifacts),
-                "merged_output_audio_path": str(merged_output_audio_path),
-                "artifacts": [
+            generated_at_utc = _utc_now_iso()
+            manifest_path = self.output_dir / self.manifest_filename
+            _write_json_atomic(
+                {
+                    "generated_at_utc": generated_at_utc,
+                    "voice_clone_manifest_path": str(voice_clone_manifest_path),
+                    "speaker_samples_manifest_path": str(
+                        manifest_bundle.speaker_samples_manifest_path
+                    ),
+                    "artifact_count": len(artifacts),
+                    "rejected_artifact_count": len(rejected_artifacts),
+                    "merged_output_audio_path": str(merged_output_audio_path),
+                    "artifacts": [
                     {
                         "host_turn_index": artifact.host_turn_index,
                         "interjection_style": artifact.interjection_style,
@@ -606,28 +773,30 @@ class InterjectorOrchestrator:
                         "next_turn_start_time_ms": artifact.next_turn_start_time_ms,
                         "legal_overlap_end_time_ms": artifact.legal_overlap_end_time_ms,
                         "available_overlap_ms": artifact.available_overlap_ms,
-                            "timing_source": artifact.timing_source,
-                            "timing_variant": artifact.timing_variant,
-                            "leading_silence_trim_ms": artifact.leading_silence_trim_ms,
-                            "repair_attempt_count": artifact.repair_attempt_count,
-                            "repair_attempts": [
-                                {
-                                    "attempt_index": attempt.attempt_index,
-                                    "text": attempt.text,
-                                    "duration_ms": attempt.duration_ms,
-                                    "available_overlap_ms": attempt.available_overlap_ms,
-                                    "timing_source": attempt.timing_source,
-                                    "timing_variant": attempt.timing_variant,
-                                    "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
-                                    "status": attempt.status,
-                                }
-                                for attempt in artifact.repair_attempts
+                        "timing_source": artifact.timing_source,
+                        "timing_variant": artifact.timing_variant,
+                        "leading_silence_trim_ms": artifact.leading_silence_trim_ms,
+                        "tempo_adjustment_ratio": artifact.tempo_adjustment_ratio,
+                        "repair_attempt_count": artifact.repair_attempt_count,
+                        "repair_attempts": [
+                            {
+                                "attempt_index": attempt.attempt_index,
+                                "text": attempt.text,
+                                "duration_ms": attempt.duration_ms,
+                                "available_overlap_ms": attempt.available_overlap_ms,
+                                "timing_source": attempt.timing_source,
+                                "timing_variant": attempt.timing_variant,
+                                "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
+                                "tempo_adjustment_ratio": attempt.tempo_adjustment_ratio,
+                                "status": attempt.status,
+                            }
+                            for attempt in artifact.repair_attempts
                         ],
                         "output_audio_path": str(artifact.output_audio_path),
                     }
                     for artifact in artifacts
-                ],
-                "rejected_artifacts": [
+                    ],
+                    "rejected_artifacts": [
                     {
                         "host_turn_index": artifact.host_turn_index,
                         "interjection_style": artifact.interjection_style,
@@ -648,29 +817,37 @@ class InterjectorOrchestrator:
                             {
                                 "attempt_index": attempt.attempt_index,
                                 "text": attempt.text,
-                                    "duration_ms": attempt.duration_ms,
-                                    "available_overlap_ms": attempt.available_overlap_ms,
-                                    "timing_source": attempt.timing_source,
-                                    "timing_variant": attempt.timing_variant,
-                                    "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
-                                    "status": attempt.status,
-                                }
-                                for attempt in artifact.repair_attempts
+                                "duration_ms": attempt.duration_ms,
+                                "available_overlap_ms": attempt.available_overlap_ms,
+                                "timing_source": attempt.timing_source,
+                                "timing_variant": attempt.timing_variant,
+                                "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
+                                "tempo_adjustment_ratio": attempt.tempo_adjustment_ratio,
+                                "status": attempt.status,
+                            }
+                            for attempt in artifact.repair_attempts
                         ],
                     }
                     for artifact in rejected_artifacts
-                ],
-            },
-            manifest_path,
-        )
-        return InterjectorRunResult(
-            output_dir=self.output_dir,
-            manifest_path=manifest_path,
-            generated_at_utc=generated_at_utc,
-            artifacts=tuple(artifacts),
-            rejected_artifacts=tuple(rejected_artifacts),
-            merged_output_audio_path=merged_output_audio_path,
-        )
+                    ],
+                },
+                manifest_path,
+            )
+            return InterjectorRunResult(
+                output_dir=self.output_dir,
+                manifest_path=manifest_path,
+                generated_at_utc=generated_at_utc,
+                artifacts=tuple(artifacts),
+                rejected_artifacts=tuple(rejected_artifacts),
+                merged_output_audio_path=merged_output_audio_path,
+            )
+        finally:
+            self._echo_word_timing_cache.clear()
+            if self._echo_word_timing_backend is not None:
+                try:
+                    self._echo_word_timing_backend.close()
+                except Exception:
+                    pass
 
     def _render_interjection_artifacts(
         self,
@@ -738,6 +915,7 @@ class InterjectorOrchestrator:
                 anchor_tokens=anchor_tokens,
                 reference_audio_path=reference.path,
                 next_turn_text=self._lookup_next_turn_text(manifest_bundle, host_turn),
+                language=language,
             )
             if rendered_artifact is None:
                 if rejected_artifact is not None:
@@ -792,6 +970,7 @@ class InterjectorOrchestrator:
         anchor_tokens: Sequence[AlignedToken],
         reference_audio_path: Path,
         next_turn_text: str,
+        language: str,
     ) -> tuple[
         tuple[InterjectorArtifact, _SynthesizedOverlay] | None,
         RejectedInterjectionArtifact | None,
@@ -811,11 +990,22 @@ class InterjectorOrchestrator:
         seen_states: set[tuple[str, str]] = set()
 
         while True:
+            echo_phrase_span = self._resolve_echo_phrase_span(
+                host_turn=host_turn,
+                anchor_tokens=anchor_tokens,
+                current_text=current_text,
+                language=language,
+                style=style,
+            )
+            resolved_timing_source: AlignmentSource = (
+                "echo_phrase_match" if echo_phrase_span is not None else timing_source
+            )
             overlay_window = self._compute_overlay_timing_window(
                 decision=decision,
                 host_turn=host_turn,
                 anchor_tokens=anchor_tokens,
                 timing_variant=timing_variant,
+                echo_phrase_span=echo_phrase_span,
             )
             if overlay_window is None:
                 seen_states.add((current_text, timing_variant))
@@ -829,7 +1019,7 @@ class InterjectorOrchestrator:
                             decision=decision,
                             host_turn=host_turn,
                             next_turn_start_time_ms=next_turn_start_time_ms,
-                            timing_source=timing_source,
+                            timing_source=resolved_timing_source,
                             timing_variant=timing_variant,
                             last_text=current_text,
                             available_overlap_ms=0,
@@ -851,16 +1041,16 @@ class InterjectorOrchestrator:
                 if next_state is None:
                     return (
                         None,
-                        self._build_rejected_interjection_artifact(
-                            decision=decision,
-                            host_turn=host_turn,
-                            next_turn_start_time_ms=next_turn_start_time_ms,
-                            timing_source=timing_source,
-                            timing_variant=timing_variant,
-                            last_text=current_text,
-                            available_overlap_ms=0,
-                            repair_attempts=repair_attempts,
-                            failure_reason="no_legal_overlap_window",
+                    self._build_rejected_interjection_artifact(
+                        decision=decision,
+                        host_turn=host_turn,
+                        next_turn_start_time_ms=next_turn_start_time_ms,
+                        timing_source=resolved_timing_source,
+                        timing_variant=timing_variant,
+                        last_text=current_text,
+                        available_overlap_ms=0,
+                        repair_attempts=repair_attempts,
+                        failure_reason="no_legal_overlap_window",
                         ),
                     )
                 current_text, timing_variant = next_state
@@ -891,6 +1081,14 @@ class InterjectorOrchestrator:
                 audio_codec=self.mix_audio_codec,
                 timeout_seconds=self.mix_timeout_seconds,
             )
+            prepared_audio = self._maybe_apply_echo_pacing_fit(
+                decision=decision,
+                host_turn=host_turn,
+                current_text=current_text,
+                prepared_audio=prepared_audio,
+                echo_phrase_span=echo_phrase_span,
+                language=language,
+            )
             duration_ms = prepared_audio.duration_ms
 
             fits_window = duration_ms <= overlay_window.available_overlap_ms
@@ -900,9 +1098,10 @@ class InterjectorOrchestrator:
                     text=current_text,
                     duration_ms=duration_ms,
                     available_overlap_ms=overlay_window.available_overlap_ms,
-                    timing_source=timing_source,
+                    timing_source=resolved_timing_source,
                     timing_variant=timing_variant,
                     leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
+                    tempo_adjustment_ratio=prepared_audio.tempo_adjustment_ratio,
                     status="accepted" if fits_window else "retry",
                 )
             )
@@ -928,9 +1127,10 @@ class InterjectorOrchestrator:
                     next_turn_start_time_ms=next_turn_start_time_ms,
                     legal_overlap_end_time_ms=overlay_window.legal_overlap_end_time_ms,
                     available_overlap_ms=overlay_window.available_overlap_ms,
-                    timing_source=timing_source,
+                    timing_source=resolved_timing_source,
                     timing_variant=timing_variant,
                     leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
+                    tempo_adjustment_ratio=prepared_audio.tempo_adjustment_ratio,
                     repair_attempt_count=max(0, len(repair_attempts) - 1),
                     repair_attempts=tuple(repair_attempts),
                     output_audio_path=final_output_path,
@@ -957,7 +1157,7 @@ class InterjectorOrchestrator:
                         decision=decision,
                         host_turn=host_turn,
                         next_turn_start_time_ms=next_turn_start_time_ms,
-                        timing_source=timing_source,
+                        timing_source=resolved_timing_source,
                         timing_variant=timing_variant,
                         last_text=current_text,
                         available_overlap_ms=overlay_window.available_overlap_ms,
@@ -984,7 +1184,7 @@ class InterjectorOrchestrator:
                         decision=decision,
                         host_turn=host_turn,
                         next_turn_start_time_ms=next_turn_start_time_ms,
-                        timing_source=timing_source,
+                        timing_source=resolved_timing_source,
                         timing_variant=timing_variant,
                         last_text=current_text,
                         available_overlap_ms=overlay_window.available_overlap_ms,
@@ -1104,6 +1304,139 @@ class InterjectorOrchestrator:
             repair_attempts=tuple(repair_attempts),
         )
 
+    def _resolve_echo_phrase_span(
+        self,
+        *,
+        host_turn: _VoiceCloneBaseTurn,
+        anchor_tokens: Sequence[AlignedToken],
+        current_text: str,
+        language: str,
+        style: InterjectionStyle,
+    ) -> _MatchedPhraseSpan | None:
+        """Return a matched host-phrase span for echo timing when available."""
+        if (
+            not self.echo_pacing_fit_enabled
+            or style != "echo_agreement"
+            or self._echo_word_timing_backend is None
+        ):
+            return None
+        normalized_tokens = _normalized_text_tokens(current_text)
+        if len(normalized_tokens) < 2:
+            return None
+        try:
+            host_words = self._get_echo_word_timings(
+                audio_path=host_turn.output_audio_path,
+                language=language,
+            )
+        except Exception:
+            return None
+        preferred_center_ms: int | None = None
+        if anchor_tokens:
+            preferred_center_ms = int(
+                round(
+                    (anchor_tokens[0].start_time_ms + anchor_tokens[-1].end_time_ms)
+                    / 2.0
+                )
+            )
+        return _find_best_matching_phrase_span(
+            aligned_words=host_words,
+            target_text=current_text,
+            min_similarity=self.echo_pacing_min_phrase_match_similarity,
+            max_window_delta=self.echo_pacing_max_window_delta,
+            preferred_center_ms=preferred_center_ms,
+        )
+
+    def _get_echo_word_timings(
+        self,
+        *,
+        audio_path: Path,
+        language: str,
+    ) -> tuple[WordTimestamp, ...]:
+        """Return cached native word timings for one short audio artifact."""
+        if self._echo_word_timing_backend is None:
+            return ()
+        cache_key = (str(audio_path.resolve()), language.strip().lower())
+        cached = self._echo_word_timing_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        words = tuple(
+            self._echo_word_timing_backend.align_words(
+                audio_path=audio_path,
+                language=language,
+            )
+        )
+        self._echo_word_timing_cache[cache_key] = words
+        return words
+
+    def _maybe_apply_echo_pacing_fit(
+        self,
+        *,
+        decision: InterjectionDecision,
+        host_turn: _VoiceCloneBaseTurn,
+        current_text: str,
+        prepared_audio: _PreparedOverlayAudio,
+        echo_phrase_span: _MatchedPhraseSpan | None,
+        language: str,
+    ) -> _PreparedOverlayAudio:
+        """Time-compress one echo overlay when its internal pacing is too slow."""
+        if (
+            not self.echo_pacing_fit_enabled
+            or decision.interjection_style != "echo_agreement"
+            or echo_phrase_span is None
+            or echo_phrase_span.duration_ms <= 0
+            or self._echo_word_timing_backend is None
+        ):
+            return prepared_audio
+        normalized_tokens = _normalized_text_tokens(current_text)
+        if len(normalized_tokens) < 2:
+            return prepared_audio
+        try:
+            overlay_words = self._get_echo_word_timings(
+                audio_path=prepared_audio.path,
+                language=language,
+            )
+        except Exception:
+            return prepared_audio
+        overlay_phrase_span = _find_best_matching_phrase_span(
+            aligned_words=overlay_words,
+            target_text=current_text,
+            min_similarity=self.echo_pacing_min_phrase_match_similarity,
+            max_window_delta=self.echo_pacing_max_window_delta,
+        )
+        if overlay_phrase_span is None or overlay_phrase_span.duration_ms <= 0:
+            return prepared_audio
+
+        target_phrase_duration_ms = max(
+            1,
+            int(
+                round(
+                    echo_phrase_span.duration_ms * self.echo_pacing_target_host_fill_ratio
+                )
+            ),
+        )
+        overflow_ratio = overlay_phrase_span.duration_ms / float(target_phrase_duration_ms)
+        if overflow_ratio < self.echo_pacing_min_overflow_ratio:
+            return prepared_audio
+
+        tempo_adjustment_ratio = min(
+            self.echo_pacing_max_tempo,
+            max(1.0, overflow_ratio),
+        )
+        adjusted_duration_ms = _apply_audio_tempo_in_place(
+            audio_path=prepared_audio.path,
+            tempo_ratio=tempo_adjustment_ratio,
+            audio_codec=self.mix_audio_codec,
+            timeout_seconds=self.mix_timeout_seconds,
+        )
+        if adjusted_duration_ms is None or adjusted_duration_ms <= 0:
+            return prepared_audio
+        return _PreparedOverlayAudio(
+            path=prepared_audio.path,
+            duration_ms=adjusted_duration_ms,
+            leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
+            tempo_adjustment_ratio=tempo_adjustment_ratio,
+        )
+
     def _lookup_next_turn_text(
         self,
         manifest_bundle: _VoiceCloneManifestBundle,
@@ -1122,13 +1455,21 @@ class InterjectorOrchestrator:
         host_turn: _VoiceCloneBaseTurn,
         anchor_tokens: Sequence[AlignedToken],
         timing_variant: Literal["default", "tightened"] = "default",
+        echo_phrase_span: _MatchedPhraseSpan | None = None,
     ) -> _OverlayTimingWindow | None:
         """Return the legal overlap timing window for a validated decision."""
         if host_turn.duration_ms <= 0:
             return None
 
-        anchor_start_ms = host_turn.global_start_time_ms + anchor_tokens[0].start_time_ms
-        anchor_end_ms = host_turn.global_start_time_ms + anchor_tokens[-1].end_time_ms
+        if (
+            echo_phrase_span is not None
+            and (decision.interjection_style or "backchannel") == "echo_agreement"
+        ):
+            anchor_start_ms = host_turn.global_start_time_ms + echo_phrase_span.start_time_ms
+            anchor_end_ms = host_turn.global_start_time_ms + echo_phrase_span.end_time_ms
+        else:
+            anchor_start_ms = host_turn.global_start_time_ms + anchor_tokens[0].start_time_ms
+            anchor_end_ms = host_turn.global_start_time_ms + anchor_tokens[-1].end_time_ms
         if timing_variant == "tightened":
             overlay_start_time_ms = anchor_start_ms
         elif (decision.interjection_style or "backchannel") == "echo_agreement":
@@ -1675,6 +2016,100 @@ def _normalize_token(token: str) -> str:
     return normalized.casefold()
 
 
+def _normalized_text_tokens(text: str) -> list[str]:
+    """Return normalized tokens with punctuation stripped for fuzzy phrase matching."""
+    return [
+        normalized
+        for token in _split_tokens(text)
+        if (normalized := _normalize_token(token))
+    ]
+
+
+def _find_best_matching_phrase_span(
+    *,
+    aligned_words: Sequence[WordTimestamp],
+    target_text: str,
+    min_similarity: float,
+    max_window_delta: int,
+    preferred_center_ms: int | None = None,
+) -> _MatchedPhraseSpan | None:
+    """Return the best-matching sequential word span for a short echo phrase."""
+    target_tokens = _normalized_text_tokens(target_text)
+    if not target_tokens:
+        return None
+
+    normalized_words = [
+        (
+            _normalize_token(word.word),
+            word.start_time_ms,
+            word.end_time_ms,
+        )
+        for word in aligned_words
+        if _normalize_token(word.word)
+    ]
+    if not normalized_words:
+        return None
+
+    target_phrase = " ".join(target_tokens)
+    min_window_size = max(1, len(target_tokens) - max_window_delta)
+    max_window_size = min(
+        len(normalized_words),
+        len(target_tokens) + max_window_delta,
+    )
+    best_span: _MatchedPhraseSpan | None = None
+    best_distance_ms: int | None = None
+    for window_size in range(min_window_size, max_window_size + 1):
+        for start_index in range(0, len(normalized_words) - window_size + 1):
+            window = normalized_words[start_index : start_index + window_size]
+            window_tokens = [item[0] for item in window]
+            window_phrase = " ".join(window_tokens)
+            phrase_similarity = SequenceMatcher(
+                None,
+                target_phrase,
+                window_phrase,
+            ).ratio()
+            boundary_similarity = (
+                SequenceMatcher(None, target_tokens[0], window_tokens[0]).ratio()
+                + SequenceMatcher(None, target_tokens[-1], window_tokens[-1]).ratio()
+            ) / 2.0
+            score = (phrase_similarity * 0.7) + (boundary_similarity * 0.3)
+            if score < min_similarity:
+                continue
+            candidate = _MatchedPhraseSpan(
+                start_time_ms=window[0][1],
+                end_time_ms=window[-1][2],
+                similarity=score,
+            )
+            candidate_center_ms = int(
+                round((candidate.start_time_ms + candidate.end_time_ms) / 2.0)
+            )
+            candidate_distance_ms = (
+                abs(candidate_center_ms - preferred_center_ms)
+                if preferred_center_ms is not None
+                else None
+            )
+            if best_span is None:
+                best_span = candidate
+                best_distance_ms = candidate_distance_ms
+                continue
+            if candidate.similarity > best_span.similarity:
+                best_span = candidate
+                best_distance_ms = candidate_distance_ms
+                continue
+            if (
+                preferred_center_ms is not None
+                and abs(candidate.similarity - best_span.similarity) <= 0.01
+                and candidate_distance_ms is not None
+                and (
+                    best_distance_ms is None
+                    or candidate_distance_ms < best_distance_ms
+                )
+            ):
+                best_span = candidate
+                best_distance_ms = candidate_distance_ms
+    return best_span
+
+
 def _align_turn_tokens(
     *,
     audio_path: Path,
@@ -1716,6 +2151,14 @@ def _align_turn_tokens(
         )
 
     if len(aligned_words) != len(tokens):
+        return TurnAlignmentResult(
+            tokens=tuple(_fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)),
+            source="uniform_fallback",
+        )
+    if _aligned_words_exceed_audio_duration(
+        aligned_words=aligned_words,
+        duration_ms=duration_ms,
+    ):
         return TurnAlignmentResult(
             tokens=tuple(_fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)),
             source="uniform_fallback",
@@ -1790,6 +2233,11 @@ def _refine_anchor_window_alignment(
 
     if len(aligned_words) != len(window_tokens):
         return ()
+    if _aligned_words_exceed_audio_duration(
+        aligned_words=aligned_words,
+        duration_ms=duration_ms,
+    ):
+        return ()
     matches = sum(
         1
         for token, aligned_word in zip(window_tokens, aligned_words, strict=True)
@@ -1832,6 +2280,8 @@ def _decode_audio_waveform(audio_path: Path) -> Any:
         "f32le",
         "-ac",
         "1",
+        "-ar",
+        str(_FORCED_ALIGNMENT_SAMPLE_RATE_HZ),
         "-",
     ]
     try:
@@ -1853,6 +2303,25 @@ def _decode_audio_waveform(audio_path: Path) -> Any:
             f"Decoded waveform is empty for voice-clone artifact {audio_path}."
         )
     return waveform
+
+
+def _aligned_words_exceed_audio_duration(
+    *,
+    aligned_words: Sequence[Any],
+    duration_ms: int,
+) -> bool:
+    """Return whether any aligned token extends beyond the probed audio duration."""
+    max_end_time_ms = max(
+        (
+            max(
+                int(getattr(aligned_word, "start_time_ms", 0) or 0),
+                int(getattr(aligned_word, "end_time_ms", 0) or 0),
+            )
+            for aligned_word in aligned_words
+        ),
+        default=0,
+    )
+    return max_end_time_ms > duration_ms + _ALIGNMENT_DURATION_TOLERANCE_MS
 
 
 def _fallback_aligned_tokens(
@@ -2143,6 +2612,61 @@ def _trim_leading_silence_in_place(
         _remove_temp_output(temp_output_path)
         return None
     return trimmed_duration_ms
+
+
+def _apply_audio_tempo_in_place(
+    *,
+    audio_path: Path,
+    tempo_ratio: float,
+    audio_codec: str,
+    timeout_seconds: int,
+) -> int | None:
+    """Speed up one overlay in place so an echo phrase can land on time."""
+    if tempo_ratio <= 1.0:
+        return probe_audio_duration_ms(audio_path)
+    temp_output_path = _build_temp_output_path(audio_path)
+    ffmpeg_executable = resolve_command_path("ffmpeg")
+    command = [
+        ffmpeg_executable,
+        "-y",
+        "-i",
+        str(audio_path),
+        "-af",
+        f"atempo={tempo_ratio:.5f}",
+        "-c:a",
+        audio_codec,
+        "-vn",
+        "-f",
+        "wav",
+        str(temp_output_path),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _remove_temp_output(temp_output_path)
+        return None
+    if completed.returncode != 0:
+        _remove_temp_output(temp_output_path)
+        return None
+    adjusted_duration_ms = probe_audio_duration_ms(temp_output_path)
+    if adjusted_duration_ms is None or adjusted_duration_ms <= 0:
+        _remove_temp_output(temp_output_path)
+        return None
+    try:
+        temp_output_path.replace(audio_path)
+    except OSError:
+        _remove_temp_output(temp_output_path)
+        return None
+    return adjusted_duration_ms
 
 
 def _finalize_interjection_attempt_output(

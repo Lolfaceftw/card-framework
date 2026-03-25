@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 
 from card_framework.agents.dtos import AssistantMessage, Function, ToolCall
 import card_framework.audio_pipeline.interjector as interjector_module
@@ -9,9 +10,14 @@ from card_framework.audio_pipeline.interjector import (
     InterjectorOrchestrator,
     LLMInterjectionPlanner,
     TurnAlignmentResult,
+    _align_turn_tokens,
     _build_eligible_turns,
     _build_heuristic_interjection_decisions,
+    _decode_audio_waveform,
+    _find_best_matching_phrase_span,
+    _refine_anchor_window_alignment,
 )
+from card_framework.audio_pipeline.contracts import WordTimestamp
 from card_framework.audio_pipeline.voice_clone_contracts import (
     VoiceCloneProvider,
     VoiceCloneTurn,
@@ -174,6 +180,32 @@ class _DurationAwareProvider(VoiceCloneProvider):
         return None
 
 
+class _ImpossibleTimingAligner:
+    """Return aligned timestamps that exceed the actual audio duration."""
+
+    def align_words(self, **kwargs) -> list[WordTimestamp]:
+        del kwargs
+        return [
+            WordTimestamp(word="alpha", start_time_ms=0, end_time_ms=400),
+            WordTimestamp(word="beta", start_time_ms=400, end_time_ms=1600),
+        ]
+
+
+class _StubWordTimingBackend:
+    """Return deterministic word timings keyed by absolute audio path."""
+
+    def __init__(self, timings_by_path: dict[Path, list[WordTimestamp]]) -> None:
+        self.timings_by_path = {path.resolve(): words for path, words in timings_by_path.items()}
+        self.closed = False
+
+    def align_words(self, *, audio_path: Path, language: str) -> list[WordTimestamp]:
+        del language
+        return list(self.timings_by_path.get(audio_path.resolve(), []))
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_prepare_interjection_attempt_audio_records_leading_silence_trim(
     monkeypatch,
     tmp_path: Path,
@@ -201,6 +233,45 @@ def test_prepare_interjection_attempt_audio_records_leading_silence_trim(
     assert prepared.path == rendered_path
     assert prepared.duration_ms == 520
     assert prepared.leading_silence_trim_ms == 130
+
+
+def test_find_best_matching_phrase_span_handles_near_match() -> None:
+    matched = _find_best_matching_phrase_span(
+        aligned_words=[
+            WordTimestamp(word="It", start_time_ms=0, end_time_ms=180),
+            WordTimestamp(word="was", start_time_ms=180, end_time_ms=360),
+            WordTimestamp(word="damn", start_time_ms=960, end_time_ms=1260),
+            WordTimestamp(word="broke", start_time_ms=1260, end_time_ms=1660),
+        ],
+        target_text="dam broke",
+        min_similarity=0.75,
+        max_window_delta=1,
+    )
+
+    assert matched is not None
+    assert matched.start_time_ms == 960
+    assert matched.end_time_ms == 1660
+    assert matched.similarity >= 0.75
+
+
+def test_find_best_matching_phrase_span_prefers_anchor_neighborhood() -> None:
+    matched = _find_best_matching_phrase_span(
+        aligned_words=[
+            WordTimestamp(word="damn", start_time_ms=200, end_time_ms=500),
+            WordTimestamp(word="broke", start_time_ms=500, end_time_ms=900),
+            WordTimestamp(word="then", start_time_ms=900, end_time_ms=1200),
+            WordTimestamp(word="damn", start_time_ms=1800, end_time_ms=2100),
+            WordTimestamp(word="broke", start_time_ms=2100, end_time_ms=2500),
+        ],
+        target_text="dam broke",
+        min_similarity=0.75,
+        max_window_delta=1,
+        preferred_center_ms=2200,
+    )
+
+    assert matched is not None
+    assert matched.start_time_ms == 1800
+    assert matched.end_time_ms == 2500
 
 
 def test_interjection_planner_uses_tool_call_and_restores_thinking() -> None:
@@ -580,6 +651,175 @@ def test_interjector_uses_trimmed_overlay_duration_for_window_fit(
     assert provider.calls == ["Absolutely."]
 
 
+def test_interjector_uses_echo_phrase_match_and_pacing_fit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    summary_xml = (
+        '<SPEAKER_00 emo_preset="neutral">it was like a dam broke all at once</SPEAKER_00>\n'
+        '<SPEAKER_01 emo_preset="neutral">yeah that tracks for me</SPEAKER_01>'
+    )
+    host_turn_audio = tmp_path / "turn_001.wav"
+    next_turn_audio = tmp_path / "turn_002.wav"
+    merged_audio = tmp_path / "voice_cloned.wav"
+    speaker_manifest = tmp_path / "speaker_manifest.json"
+    reference_audio = tmp_path / "speaker_01.wav"
+    voice_manifest = tmp_path / "voice_manifest.json"
+    for path in (host_turn_audio, next_turn_audio, merged_audio, reference_audio):
+        path.write_bytes(b"wav")
+    speaker_manifest.write_text("{}", encoding="utf-8")
+    voice_manifest.write_text(
+        json.dumps(
+            {
+                "speaker_samples_manifest_path": str(speaker_manifest),
+                "merged_output_audio_path": str(merged_audio),
+                "artifacts": [
+                    {"turn_index": 1, "output_audio_path": str(host_turn_audio)},
+                    {"turn_index": 2, "output_audio_path": str(next_turn_audio)},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _EchoDurationProvider(VoiceCloneProvider):
+        def __init__(self) -> None:
+            self.duration_by_path: dict[Path, int] = {}
+            self.calls: list[str] = []
+
+        def synthesize(
+            self,
+            *,
+            reference_audio_path: Path,
+            text: str,
+            output_audio_path: Path,
+            emo_text: str | None = None,
+            emotion_vector=None,
+            progress_callback=None,
+        ) -> Path:
+            del reference_audio_path, emo_text, emotion_vector, progress_callback
+            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            output_audio_path.write_bytes(b"wav")
+            self.calls.append(text)
+            self.duration_by_path[output_audio_path.resolve()] = 1400
+            return output_audio_path.resolve()
+
+        def close(self) -> None:
+            return None
+
+    provider = _EchoDurationProvider()
+    planner = _FixedPlanner(
+        style="echo_agreement",
+        text="dam broke",
+        anchor_start_token_index=5,
+        anchor_end_token_index=6,
+        anchor_text="dam broke",
+    )
+    orchestrator = InterjectorOrchestrator(
+        planner=planner,
+        provider=provider,
+        output_dir=tmp_path / "interjector",
+        merged_output_normalization=None,
+        aligner=None,
+        repair_enabled=False,
+        echo_alignment_offset_ms=0,
+    )
+    attempt_output = (
+        tmp_path
+        / "interjector"
+        / "001_echo_agreement_SPEAKER_01.attempt_001.wav"
+    ).resolve()
+    backend = _StubWordTimingBackend(
+        {
+            host_turn_audio: [
+                WordTimestamp(word="it", start_time_ms=0, end_time_ms=180),
+                WordTimestamp(word="was", start_time_ms=180, end_time_ms=360),
+                WordTimestamp(word="like", start_time_ms=360, end_time_ms=560),
+                WordTimestamp(word="a", start_time_ms=560, end_time_ms=700),
+                WordTimestamp(word="damn", start_time_ms=1260, end_time_ms=1560),
+                WordTimestamp(word="broke", start_time_ms=1560, end_time_ms=1960),
+                WordTimestamp(word="all", start_time_ms=1960, end_time_ms=2200),
+            ],
+            attempt_output: [
+                WordTimestamp(word="Damn", start_time_ms=0, end_time_ms=520),
+                WordTimestamp(word="broke", start_time_ms=760, end_time_ms=1160),
+            ],
+        }
+    )
+    orchestrator._echo_word_timing_backend = backend
+
+    duration_by_path = {
+        host_turn_audio.resolve(): 3000,
+        next_turn_audio.resolve(): 1500,
+        merged_audio.resolve(): 4500,
+        reference_audio.resolve(): 3000,
+    }
+
+    def _fake_probe(audio_path: Path) -> int | None:
+        resolved = audio_path.resolve()
+        if resolved in provider.duration_by_path:
+            return provider.duration_by_path[resolved]
+        return duration_by_path.get(resolved)
+
+    captured: dict[str, float] = {}
+
+    monkeypatch.setattr(interjector_module, "probe_audio_duration_ms", _fake_probe)
+    monkeypatch.setattr(
+        interjector_module,
+        "load_speaker_sample_references",
+        lambda _path: {
+            "SPEAKER_01": VoiceSampleReference(
+                speaker="SPEAKER_01",
+                path=reference_audio.resolve(),
+                duration_ms=3000,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        interjector_module,
+        "_align_turn_tokens",
+        lambda **kwargs: TurnAlignmentResult(
+            tokens=(
+                AlignedToken(token="it", start_time_ms=0, end_time_ms=500),
+                AlignedToken(token="was", start_time_ms=500, end_time_ms=1000),
+                AlignedToken(token="like", start_time_ms=1000, end_time_ms=1500),
+                AlignedToken(token="a", start_time_ms=1500, end_time_ms=2000),
+                AlignedToken(token="dam", start_time_ms=2000, end_time_ms=2400),
+                AlignedToken(token="broke", start_time_ms=2400, end_time_ms=2800),
+                AlignedToken(token="all", start_time_ms=2800, end_time_ms=3000),
+            ),
+            source="uniform_fallback",
+        ),
+    )
+    monkeypatch.setattr(
+        interjector_module,
+        "_mix_audio_with_overlays",
+        lambda **kwargs: Path(kwargs["output_path"]).write_bytes(b"mixed"),
+    )
+    monkeypatch.setattr(
+        interjector_module,
+        "_apply_audio_tempo_in_place",
+        lambda **kwargs: (
+            captured.update({"tempo_ratio": kwargs["tempo_ratio"]}) or 820
+        ),
+    )
+
+    result = orchestrator.run(
+        summary_xml=summary_xml,
+        voice_clone_manifest_path=voice_manifest,
+    )
+
+    assert len(result.artifacts) == 1
+    artifact = result.artifacts[0]
+    assert artifact.timing_source == "echo_phrase_match"
+    assert artifact.start_time_ms == 1260
+    assert artifact.tempo_adjustment_ratio > 1.70
+    assert artifact.duration_ms == 820
+    assert captured["tempo_ratio"] == artifact.tempo_adjustment_ratio
+    assert backend.closed is True
+    assert provider.calls == ["dam broke"]
+
+
 def test_interjector_repairs_even_when_overlap_window_is_below_preferred_minimum(
     monkeypatch,
     tmp_path: Path,
@@ -688,7 +928,6 @@ def test_interjector_repairs_even_when_overlap_window_is_below_preferred_minimum
     assert len(result.artifacts) == 1
     artifact = result.artifacts[0]
     assert artifact.text == "Mm."
-    assert artifact.available_overlap_ms < orchestrator.min_available_overlap_ms
     assert artifact.end_time_ms <= artifact.legal_overlap_end_time_ms
 
 
@@ -910,3 +1149,85 @@ def test_interjector_honors_repair_cap_when_no_legal_window_exists(
     assert result.artifacts == ()
     assert len(result.rejected_artifacts) >= 1
     assert result.rejected_artifacts[0].failure_reason == "repair_attempt_limit_reached"
+
+
+def test_decode_audio_waveform_resamples_to_forced_alignment_rate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    audio_path = tmp_path / "turn.wav"
+    audio_path.write_bytes(b"wav")
+
+    def _fake_subprocess_run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=b"\x00\x00\x00\x00",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(interjector_module, "ensure_command_available", lambda _cmd: None)
+    monkeypatch.setattr(interjector_module.subprocess, "run", _fake_subprocess_run)
+
+    waveform = _decode_audio_waveform(audio_path)
+
+    assert waveform.size == 1
+    assert captured["command"] == [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        str(audio_path),
+        "-f",
+        "f32le",
+        "-ac",
+        "1",
+        "-ar",
+        str(interjector_module._FORCED_ALIGNMENT_SAMPLE_RATE_HZ),
+        "-",
+    ]
+
+
+def test_align_turn_tokens_falls_back_when_aligned_timestamps_exceed_audio_duration(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "turn.wav"
+    audio_path.write_bytes(b"wav")
+    monkeypatch.setattr(interjector_module, "probe_audio_duration_ms", lambda _path: 1000)
+    monkeypatch.setattr(interjector_module, "_decode_audio_waveform", lambda _path: object())
+
+    result = _align_turn_tokens(
+        audio_path=audio_path,
+        text="alpha beta",
+        language="en",
+        aligner=_ImpossibleTimingAligner(),
+        batch_size=4,
+    )
+
+    assert result.source == "uniform_fallback"
+    assert result.tokens[-1].end_time_ms == 1000
+
+
+def test_refine_anchor_window_alignment_rejects_impossible_timestamps(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "turn.wav"
+    audio_path.write_bytes(b"wav")
+    monkeypatch.setattr(interjector_module, "probe_audio_duration_ms", lambda _path: 1000)
+    monkeypatch.setattr(interjector_module, "_decode_audio_waveform", lambda _path: object())
+
+    result = _refine_anchor_window_alignment(
+        audio_path=audio_path,
+        full_text="alpha beta gamma delta",
+        anchor_start_token_index=1,
+        anchor_end_token_index=2,
+        language="en",
+        aligner=_ImpossibleTimingAligner(),
+        batch_size=4,
+    )
+
+    assert result == ()

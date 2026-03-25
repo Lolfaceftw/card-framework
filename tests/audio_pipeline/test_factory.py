@@ -566,6 +566,11 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
     assert orchestrator.trim_leading_silence_threshold_db == pytest.approx(-50.0)
     assert orchestrator.trim_leading_silence_min_duration_ms == 0
     assert orchestrator.trim_leading_silence_preserve_ms == 5
+    assert orchestrator.echo_pacing_fit_enabled is True
+    assert orchestrator.echo_pacing_timing_backend == "faster_whisper_native"
+    assert orchestrator.echo_pacing_model_name == "tiny.en"
+    assert orchestrator.echo_pacing_target_host_fill_ratio == pytest.approx(0.95)
+    assert orchestrator.echo_pacing_max_tempo == pytest.approx(1.75)
 
 
 def test_factory_disables_interjector_orchestrator_by_default(tmp_path: Path) -> None:
