@@ -160,6 +160,21 @@ def test_factory_builds_turn_emotion_resolution_strategy() -> None:
     )
 
 
+def test_factory_defaults_turn_emotion_resolution_to_vector_only_path() -> None:
+    strategy = build_turn_emotion_resolution_strategy(
+        {
+            "summary_turn_emotion": {},
+            "voice_clone": {},
+        }
+    )
+
+    assert strategy.config.fallback_order == (
+        "source_linked",
+        "explicit",
+        "preset",
+    )
+
+
 def test_factory_defaults_summary_turn_linker_to_no_forced_rerender() -> None:
     linker = build_summary_turn_emotion_linker(
         {
@@ -171,6 +186,24 @@ def test_factory_defaults_summary_turn_linker_to_no_forced_rerender() -> None:
 
     assert linker is not None
     assert linker.config.force_live_draft_rerender is False
+
+
+def test_factory_disables_emo_text_fallback_for_voice_clone_by_default(
+    tmp_path: Path,
+) -> None:
+    orchestrator = build_voice_clone_orchestrator(
+        {
+            "work_dir": str(tmp_path / "audio_stage"),
+            "voice_clone": {
+                "enabled": True,
+                "provider": "passthrough",
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    assert orchestrator.emo_text_fallback_enabled is False
 
 
 def test_factory_builds_eta_strategy_from_config() -> None:
@@ -529,6 +562,10 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
     assert orchestrator.fallback_anchor_realignment_enabled is False
     assert orchestrator.repair_enabled is True
     assert orchestrator.repair_max_attempts == 3
+    assert orchestrator.trim_leading_silence_enabled is True
+    assert orchestrator.trim_leading_silence_threshold_db == pytest.approx(-50.0)
+    assert orchestrator.trim_leading_silence_min_duration_ms == 0
+    assert orchestrator.trim_leading_silence_preserve_ms == 5
 
 
 def test_factory_disables_interjector_orchestrator_by_default(tmp_path: Path) -> None:

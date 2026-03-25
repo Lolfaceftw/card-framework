@@ -101,10 +101,7 @@ def test_voice_clone_orchestrator_uses_preset_vector_and_normalizes_output(
 
     result = orchestrator.run(
         summary_xml=(
-            '<SPEAKER_00 emo_preset="warm" '
-            'emotion_vector_source="summary_turn_linking" '
-            'source_segment_indices="1,3" '
-            'source_segment_weights="0.600000,0.400000">'
+            '<SPEAKER_00 emo_preset="warm">'
             "hello there"
             "</SPEAKER_00>"
         ),
@@ -116,6 +113,87 @@ def test_voice_clone_orchestrator_uses_preset_vector_and_normalizes_output(
     assert normalized_paths == [result.merged_output_audio_path]
     manifest_payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest_payload["artifacts"][0]["emotion_vector"] == preset_vector.to_list()
-    assert manifest_payload["artifacts"][0]["emotion_vector_source"] == "summary_turn_linking"
-    assert manifest_payload["artifacts"][0]["source_segment_indices"] == [1, 3]
-    assert manifest_payload["artifacts"][0]["source_segment_weights"] == [0.6, 0.4]
+    assert manifest_payload["artifacts"][0]["emotion_vector_source"] == "preset_vector"
+    assert manifest_payload["artifacts"][0]["source_segment_indices"] == []
+    assert manifest_payload["artifacts"][0]["source_segment_weights"] == []
+
+
+def test_voice_clone_orchestrator_disables_emo_text_fallback_by_default(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "speaker_samples"
+    sample_dir.mkdir()
+    sample_path = sample_dir / "speaker.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = sample_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "path": str(sample_path),
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider = _FakeVoiceCloneProvider()
+    orchestrator = VoiceCloneOrchestrator(
+        provider=provider,
+        output_dir=tmp_path / "voice_clone",
+        emo_preset_catalog={"warm": "warmly"},
+        merge_segments=False,
+    )
+
+    orchestrator.run(
+        summary_xml='<SPEAKER_00 emo_preset="warm">hello there</SPEAKER_00>',
+        speaker_samples_manifest_path=manifest_path,
+    )
+
+    assert provider.calls[0]["emotion_vector"] is None
+    assert provider.calls[0]["emo_text"] is None
+
+
+def test_voice_clone_orchestrator_allows_opt_in_emo_text_fallback(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "speaker_samples"
+    sample_dir.mkdir()
+    sample_path = sample_dir / "speaker.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = sample_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "path": str(sample_path),
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider = _FakeVoiceCloneProvider()
+    orchestrator = VoiceCloneOrchestrator(
+        provider=provider,
+        output_dir=tmp_path / "voice_clone",
+        emo_preset_catalog={"warm": "warmly"},
+        emo_text_fallback_enabled=True,
+        merge_segments=False,
+    )
+
+    result = orchestrator.run(
+        summary_xml='<SPEAKER_00 emo_preset="warm">hello there</SPEAKER_00>',
+        speaker_samples_manifest_path=manifest_path,
+    )
+
+    assert provider.calls[0]["emotion_vector"] is None
+    assert provider.calls[0]["emo_text"] == "warmly"
+    manifest_payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest_payload["artifacts"][0]["emotion_vector_source"] == "emo_text"

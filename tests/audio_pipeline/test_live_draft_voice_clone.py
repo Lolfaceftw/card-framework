@@ -13,6 +13,9 @@ from card_framework.audio_pipeline.live_draft_voice_clone import (
 class _FakeVoiceCloneProvider:
     """Write placeholder audio files for live-draft session tests."""
 
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
     def synthesize(
         self,
         *,
@@ -23,9 +26,17 @@ class _FakeVoiceCloneProvider:
         emotion_vector=None,
         progress_callback=None,
     ) -> Path:
-        del reference_audio_path, emo_text, emotion_vector, progress_callback
+        del reference_audio_path, progress_callback
         output_audio_path.parent.mkdir(parents=True, exist_ok=True)
         output_audio_path.write_bytes(text.encode("utf-8"))
+        self.calls.append(
+            {
+                "text": text,
+                "emo_text": emo_text,
+                "emotion_vector": emotion_vector,
+                "output_audio_path": output_audio_path,
+            }
+        )
         return output_audio_path
 
 
@@ -165,3 +176,119 @@ def test_restore_snapshot_matches_summary_xml_with_link_metadata(
     assert restored is not None
     assert restored[0]["source_segment_indices"] == [2, 5]
     assert restored[0]["source_segment_weights"] == [0.7, 0.3]
+
+
+def test_live_draft_render_turn_uses_preset_vector_and_records_actual_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sample_dir = tmp_path / "speaker_samples"
+    sample_dir.mkdir()
+    sample_path = sample_dir / "speaker.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = sample_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "path": str(sample_path),
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_probe_audio_duration_ms(_path: Path) -> int:
+        return 2400
+
+    import card_framework.audio_pipeline.live_draft_voice_clone as live_draft_module
+
+    monkeypatch.setattr(
+        live_draft_module,
+        "probe_audio_duration_ms",
+        _fake_probe_audio_duration_ms,
+    )
+
+    provider = _FakeVoiceCloneProvider()
+    session = LiveDraftVoiceCloneSession(
+        provider=provider,
+        state_path=tmp_path / "voice_clone" / "state.json",
+        output_dir=tmp_path / "voice_clone",
+        speaker_samples_manifest_path=manifest_path,
+        emo_preset_catalog={"warm": "warmly"},
+        emo_preset_vector_catalog={
+            "warm": [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24]
+        },
+    )
+
+    record = session.render_turn(
+        turn_id="turn-001",
+        speaker="SPEAKER_00",
+        text="Hello there.",
+        emo_preset="warm",
+        emotion_vector_source="summary_turn_linking",
+    )
+
+    assert provider.calls[0]["emo_text"] is None
+    assert provider.calls[0]["emotion_vector"] is not None
+    assert record.emotion_vector_source == "preset_vector"
+
+
+def test_live_draft_render_turn_disables_emo_text_fallback_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sample_dir = tmp_path / "speaker_samples"
+    sample_dir.mkdir()
+    sample_path = sample_dir / "speaker.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = sample_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "path": str(sample_path),
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_probe_audio_duration_ms(_path: Path) -> int:
+        return 2400
+
+    import card_framework.audio_pipeline.live_draft_voice_clone as live_draft_module
+
+    monkeypatch.setattr(
+        live_draft_module,
+        "probe_audio_duration_ms",
+        _fake_probe_audio_duration_ms,
+    )
+
+    provider = _FakeVoiceCloneProvider()
+    session = LiveDraftVoiceCloneSession(
+        provider=provider,
+        state_path=tmp_path / "voice_clone" / "state.json",
+        output_dir=tmp_path / "voice_clone",
+        speaker_samples_manifest_path=manifest_path,
+        emo_preset_catalog={"warm": "warmly"},
+    )
+
+    record = session.render_turn(
+        turn_id="turn-001",
+        speaker="SPEAKER_00",
+        text="Hello there.",
+        emo_preset="warm",
+    )
+
+    assert provider.calls[0]["emotion_vector"] is None
+    assert provider.calls[0]["emo_text"] is None
+    assert record.emotion_vector_source == ""

@@ -174,6 +174,35 @@ class _DurationAwareProvider(VoiceCloneProvider):
         return None
 
 
+def test_prepare_interjection_attempt_audio_records_leading_silence_trim(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    rendered_path = tmp_path / "overlay.wav"
+    rendered_path.write_bytes(b"wav")
+
+    monkeypatch.setattr(
+        interjector_module,
+        "_trim_leading_silence_in_place",
+        lambda **kwargs: 520,
+    )
+
+    prepared = interjector_module._prepare_interjection_attempt_audio(
+        rendered_path=rendered_path,
+        original_duration_ms=650,
+        trim_leading_silence_enabled=True,
+        trim_leading_silence_threshold_db=-50.0,
+        trim_leading_silence_min_duration_ms=0,
+        trim_leading_silence_preserve_ms=5,
+        audio_codec="pcm_s24le",
+        timeout_seconds=30,
+    )
+
+    assert prepared.path == rendered_path
+    assert prepared.duration_ms == 520
+    assert prepared.leading_silence_trim_ms == 130
+
+
 def test_interjection_planner_uses_tool_call_and_restores_thinking() -> None:
     provider = _ThinkingLLMProvider()
     planner = LLMInterjectionPlanner(llm=LoggingLLMProvider(inner_provider=provider))
@@ -436,6 +465,119 @@ def test_interjector_repairs_long_candidate_until_it_fits(monkeypatch, tmp_path:
     assert artifact.next_turn_start_time_ms == 2000
     assert provider.calls == ["Absolutely.", "Yeah."]
     assert planner.repair_calls == 1
+
+
+def test_interjector_uses_trimmed_overlay_duration_for_window_fit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    summary_xml = (
+        '<SPEAKER_00 emo_preset="neutral">alpha beta gamma delta</SPEAKER_00>\n'
+        '<SPEAKER_01 emo_preset="neutral">yeah that tracks for me</SPEAKER_01>'
+    )
+    host_turn_audio = tmp_path / "turn_001.wav"
+    next_turn_audio = tmp_path / "turn_002.wav"
+    merged_audio = tmp_path / "voice_cloned.wav"
+    speaker_manifest = tmp_path / "speaker_manifest.json"
+    reference_audio = tmp_path / "speaker_01.wav"
+    voice_manifest = tmp_path / "voice_manifest.json"
+    for path in (host_turn_audio, next_turn_audio, merged_audio, reference_audio):
+        path.write_bytes(b"wav")
+    speaker_manifest.write_text("{}", encoding="utf-8")
+    voice_manifest.write_text(
+        json.dumps(
+            {
+                "speaker_samples_manifest_path": str(speaker_manifest),
+                "merged_output_audio_path": str(merged_audio),
+                "artifacts": [
+                    {"turn_index": 1, "output_audio_path": str(host_turn_audio)},
+                    {"turn_index": 2, "output_audio_path": str(next_turn_audio)},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = _DurationAwareProvider()
+    planner = _FixedPlanner(
+        style="backchannel",
+        text="Absolutely.",
+        anchor_start_token_index=2,
+        anchor_end_token_index=2,
+        anchor_text="gamma",
+    )
+    orchestrator = InterjectorOrchestrator(
+        planner=planner,
+        provider=provider,
+        output_dir=tmp_path / "interjector",
+        merged_output_normalization=None,
+        aligner=None,
+        repair_enabled=True,
+        repair_max_attempts=4,
+    )
+
+    duration_by_path = {
+        host_turn_audio.resolve(): 2000,
+        next_turn_audio.resolve(): 1500,
+        merged_audio.resolve(): 3500,
+        reference_audio.resolve(): 3000,
+    }
+
+    def _fake_probe(audio_path: Path) -> int | None:
+        resolved = audio_path.resolve()
+        if resolved in provider.duration_by_path:
+            return provider.duration_by_path[resolved]
+        return duration_by_path.get(resolved)
+
+    monkeypatch.setattr(interjector_module, "probe_audio_duration_ms", _fake_probe)
+    monkeypatch.setattr(
+        interjector_module,
+        "_trim_leading_silence_in_place",
+        lambda **kwargs: 520,
+    )
+    monkeypatch.setattr(
+        interjector_module,
+        "load_speaker_sample_references",
+        lambda _path: {
+            "SPEAKER_01": VoiceSampleReference(
+                speaker="SPEAKER_01",
+                path=reference_audio.resolve(),
+                duration_ms=3000,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        interjector_module,
+        "_align_turn_tokens",
+        lambda **kwargs: TurnAlignmentResult(
+            tokens=(
+                AlignedToken(token="alpha", start_time_ms=0, end_time_ms=400),
+                AlignedToken(token="beta", start_time_ms=400, end_time_ms=800),
+                AlignedToken(token="gamma", start_time_ms=800, end_time_ms=1100),
+                AlignedToken(token="delta", start_time_ms=1100, end_time_ms=2000),
+            ),
+            source="forced_alignment",
+        ),
+    )
+    monkeypatch.setattr(
+        interjector_module,
+        "_mix_audio_with_overlays",
+        lambda **kwargs: Path(kwargs["output_path"]).write_bytes(b"mixed"),
+    )
+
+    result = orchestrator.run(
+        summary_xml=summary_xml,
+        voice_clone_manifest_path=voice_manifest,
+    )
+
+    assert len(result.artifacts) == 1
+    artifact = result.artifacts[0]
+    assert artifact.text == "Absolutely."
+    assert artifact.duration_ms == 520
+    assert artifact.leading_silence_trim_ms == 130
+    assert artifact.repair_attempt_count == 0
+    assert artifact.end_time_ms == artifact.start_time_ms + 520
+    assert provider.calls == ["Absolutely."]
 
 
 def test_interjector_repairs_even_when_overlap_window_is_below_preferred_minimum(

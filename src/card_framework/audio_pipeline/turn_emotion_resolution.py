@@ -28,7 +28,6 @@ class TurnEmotionResolutionConfig:
         "source_linked",
         "explicit",
         "preset",
-        "emo_text",
     )
 
     def __post_init__(self) -> None:

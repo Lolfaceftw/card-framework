@@ -128,3 +128,75 @@
   - no accepted overlap that bleeds into the same speaker's own next full turn
   - repair loop engaged on narrow windows instead of silently clipping or accepting late collisions
 - Based on this run, no additional code change was required immediately after the first runtime validation pass. The remaining tuning question is whether to increase the end-guard margin for very tight but still legal overlaps.
+
+## 2026-03-25 - Leading Silence Cleanup For Echo Onsets
+
+### Problem
+- A follow-up audit of the same episode-2 `5m` validation run showed that the host-turn anchors were not the real reason the `detox` echo sounded late.
+- The accepted overlay clip itself contained meaningful leading silence before speech onset, so the scheduler placed the file boundary correctly while the audible echo still arrived about `100 ms` late.
+
+### Implementation
+- Added a stage-4 overlay preparation step in `src/card_framework/audio_pipeline/interjector.py` that trims leading silence from each synthesized interjection attempt before the runtime decides whether the candidate fits the legal overlap window.
+- Recorded `leading_silence_trim_ms` on accepted artifacts and per-attempt repair telemetry so later timing analysis can distinguish anchor errors from clip-onset padding.
+- Wired the new behavior through `src/card_framework/audio_pipeline/factory.py`, `conf/config.yaml`, and `src/card_framework/config/config.yaml` under `audio.interjector.leading_silence_trim`.
+- Defaulted the trim pass to remove any detected leading silence, while preserving a tiny configurable preroll (`preserve_ms: 5`) so the overlay does not feel unnaturally hard-cut.
+
+### Focused Validation
+- Focused tests and lint run:
+  - `uv run pytest tests/audio_pipeline/test_interjector.py tests/audio_pipeline/test_factory.py`
+  - `uv run ruff check src/card_framework/audio_pipeline/interjector.py src/card_framework/audio_pipeline/factory.py tests/audio_pipeline/test_interjector.py tests/audio_pipeline/test_factory.py`
+- Result: passing.
+
+### Next Validation Step
+- Rerun the monitored episode-2 `5m` GPU validation and compare the accepted `echo_agreement` onset against the host anchor again, now that the overlay asset itself is trimmed before mixing.
+
+## 2026-03-25 - Real Validation After Leading-Silence Cleanup
+
+### Run
+- Episode: `02 - Spirit Adrift's Nate Garrett on the Love That Saved His Life`
+- Target duration: `5m`
+- Output root:
+  - `artifacts/sporc_human_eval_stage2_sweeps/interjector_leading_silence_trim_ep2_5m_local_20260325_151713`
+
+### Runtime Notes
+- The first attempt to nest the whole SPoRC sweep inside Docker was not viable because `scripts/run_sporc_human_eval_stage2_sweep.py` already uses `scripts/run_docker_monitored.py` for some child Docker work, and that wrapper expects a host-level `docker` binary.
+- The validation therefore ran through the local `uv` entrypoint while still monitoring:
+  - host RAM
+  - GPU usage
+  - active child Docker containers
+  - `run_summary.json`
+  - latest `agent_interactions.log` line
+
+### Monitoring Snapshot
+- Peak observed host RAM during the monitored window: about `24.62 GB / 31.92 GB`
+- Peak observed GPU memory during the monitored window: about `9.48 GB / 12.29 GB`
+- Active child Docker container during the run:
+  - `card-framework-setup-and-run-gpu-run-767609e02550`
+- Final run status:
+  - `completed`
+  - return code `0`
+
+### Output
+- Stage-4 artifacts accepted: `10`
+- Stage-4 artifacts rejected: `3`
+- Final interjected audio:
+  - `artifacts/sporc_human_eval_stage2_sweeps/interjector_leading_silence_trim_ep2_5m_local_20260325_151713/runs/02_spirit_adrift_s_nate_garrett_on_the_love_that_saved_his_life/5m/audio_stage/interjector/voice_cloned_interjected.wav`
+
+### Timing Analysis
+- The new manifest now records `leading_silence_trim_ms` on every accepted interjection.
+- Example trims from the accepted artifacts:
+  - `001_backchannel_SPEAKER_00.wav`: `190 ms`
+  - `008_echo_agreement_SPEAKER_00.wav`: `220 ms`
+  - `022_backchannel_SPEAKER_00.wav`: `210 ms`
+- Residual audible onset inside the final accepted overlay WAVs was then measured directly from the PCM files:
+  - previous run average onset: `126.5 ms`
+  - previous run max onset: `245 ms`
+  - new run average onset: `0.0 ms`
+  - new run max onset: `0 ms`
+
+### Assessment
+- The timing bug diagnosed earlier is fixed for this run.
+- The accepted interjection WAVs now begin speaking at the file boundary instead of carrying hidden silence into the mix, so any remaining `echo_agreement` lag is no longer caused by prepended audio padding.
+- Remaining issues in this output are semantic rather than onset-related:
+  - some echo texts are still awkward fragments such as `With` and `dam broke`
+  - that is a separate `echo_agreement` content-selection problem, not a timing-onset problem

@@ -281,7 +281,6 @@ audio:
       - "source_linked"
       - "explicit"
       - "preset"
-      - "emo_text"
   voice_clone:
     enabled: true
     live_drafting:
@@ -289,6 +288,7 @@ audio:
     provider: "indextts"
     execution_backend: "subprocess"
     stream_subprocess_output: true
+    emo_text_fallback_enabled: false
     normalize_emotion_vector: true
     emotion_vector_apply_bias: true
     emotion_vector_max_sum: 0.8
@@ -364,6 +364,11 @@ audio:
     timing_refinement:
       enabled: true
       fallback_anchor_realignment_enabled: true
+    leading_silence_trim:
+      enabled: true
+      threshold_db: -50.0
+      min_duration_ms: 0
+      preserve_ms: 5
     repair:
       enabled: true
       prompt_max_tokens: 220

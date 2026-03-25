@@ -387,6 +387,9 @@ def build_voice_clone_orchestrator(
             if str(name).strip()
             if (vector := EmotionVector.from_raw(raw_vector)) is not None
         },
+        emo_text_fallback_enabled=bool(
+            voice_clone_cfg.get("emo_text_fallback_enabled", False)
+        ),
         merged_output_normalization=_build_audio_normalization_policy(
             _as_mapping(voice_clone_cfg.get("normalization", {}))
         ),
@@ -459,7 +462,7 @@ def build_turn_emotion_resolution_strategy(
     voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
     raw_fallback_order = summary_turn_emotion_cfg.get(
         "fallback_order",
-        ["source_linked", "explicit", "preset", "emo_text"],
+        ["source_linked", "explicit", "preset"],
     )
     if isinstance(raw_fallback_order, str):
         fallback_order = tuple(
@@ -534,6 +537,9 @@ def build_interjector_orchestrator(
     )
     timing_refinement_cfg = _as_mapping(interjector_cfg.get("timing_refinement", {}))
     repair_cfg = _as_mapping(interjector_cfg.get("repair", {}))
+    leading_silence_trim_cfg = _as_mapping(
+        interjector_cfg.get("leading_silence_trim", {})
+    )
     return InterjectorOrchestrator(
         planner=LLMInterjectionPlanner(
             llm=llm,
@@ -585,6 +591,18 @@ def build_interjector_orchestrator(
         ),
         repair_enabled=bool(repair_cfg.get("enabled", True)),
         repair_max_attempts=_optional_int(repair_cfg.get("max_attempts")),
+        trim_leading_silence_enabled=bool(
+            leading_silence_trim_cfg.get("enabled", True)
+        ),
+        trim_leading_silence_threshold_db=float(
+            leading_silence_trim_cfg.get("threshold_db", -50.0)
+        ),
+        trim_leading_silence_min_duration_ms=int(
+            leading_silence_trim_cfg.get("min_duration_ms", 0)
+        ),
+        trim_leading_silence_preserve_ms=int(
+            leading_silence_trim_cfg.get("preserve_ms", 5)
+        ),
     )
 
 

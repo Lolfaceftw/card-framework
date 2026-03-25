@@ -48,7 +48,11 @@ from card_framework.audio_pipeline.audio_normalization import (
 )
 from card_framework.audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
-from card_framework.audio_pipeline.runtime import ensure_command_available, probe_audio_duration_ms
+from card_framework.audio_pipeline.runtime import (
+    ensure_command_available,
+    probe_audio_duration_ms,
+    resolve_command_path,
+)
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneProvider, VoiceCloneTurn
 from card_framework.audio_pipeline.voice_clone_orchestrator import (
     load_speaker_sample_references,
@@ -125,6 +129,15 @@ class _OverlayTimingWindow:
 
 
 @dataclass(slots=True, frozen=True)
+class _PreparedOverlayAudio:
+    """Describe one synthesized overlay after optional onset cleanup."""
+
+    path: Path
+    duration_ms: int
+    leading_silence_trim_ms: int
+
+
+@dataclass(slots=True, frozen=True)
 class InterjectionRepairAttempt:
     """Describe one rendered interjection candidate and whether it fit."""
 
@@ -134,6 +147,7 @@ class InterjectionRepairAttempt:
     available_overlap_ms: int
     timing_source: AlignmentSource
     timing_variant: Literal["default", "tightened"]
+    leading_silence_trim_ms: int
     status: Literal["accepted", "retry"]
 
 
@@ -158,6 +172,7 @@ class InterjectorArtifact:
     available_overlap_ms: int
     timing_source: AlignmentSource
     timing_variant: Literal["default", "tightened"]
+    leading_silence_trim_ms: int
     repair_attempt_count: int
     repair_attempts: tuple[InterjectionRepairAttempt, ...]
     output_audio_path: Path
@@ -456,6 +471,10 @@ class InterjectorOrchestrator:
     fallback_anchor_realignment_enabled: bool = True
     repair_enabled: bool = True
     repair_max_attempts: int | None = None
+    trim_leading_silence_enabled: bool = True
+    trim_leading_silence_threshold_db: float = -50.0
+    trim_leading_silence_min_duration_ms: int = 0
+    trim_leading_silence_preserve_ms: int = 5
 
     def __post_init__(self) -> None:
         """Validate orchestrator configuration."""
@@ -493,6 +512,10 @@ class InterjectorOrchestrator:
             raise ValueError("alignment_batch_size must be > 0.")
         if self.repair_max_attempts is not None and self.repair_max_attempts <= 0:
             raise ValueError("repair_max_attempts must be > 0 when configured.")
+        if self.trim_leading_silence_min_duration_ms < 0:
+            raise ValueError("trim_leading_silence_min_duration_ms must be >= 0.")
+        if self.trim_leading_silence_preserve_ms < 0:
+            raise ValueError("trim_leading_silence_preserve_ms must be >= 0.")
         if self.aligner is None:
             self.aligner = CtcForcedAlignerGateway()
 
@@ -583,20 +606,22 @@ class InterjectorOrchestrator:
                         "next_turn_start_time_ms": artifact.next_turn_start_time_ms,
                         "legal_overlap_end_time_ms": artifact.legal_overlap_end_time_ms,
                         "available_overlap_ms": artifact.available_overlap_ms,
-                        "timing_source": artifact.timing_source,
-                        "timing_variant": artifact.timing_variant,
-                        "repair_attempt_count": artifact.repair_attempt_count,
-                        "repair_attempts": [
-                            {
-                                "attempt_index": attempt.attempt_index,
-                                "text": attempt.text,
-                                "duration_ms": attempt.duration_ms,
-                                "available_overlap_ms": attempt.available_overlap_ms,
-                                "timing_source": attempt.timing_source,
-                                "timing_variant": attempt.timing_variant,
-                                "status": attempt.status,
-                            }
-                            for attempt in artifact.repair_attempts
+                            "timing_source": artifact.timing_source,
+                            "timing_variant": artifact.timing_variant,
+                            "leading_silence_trim_ms": artifact.leading_silence_trim_ms,
+                            "repair_attempt_count": artifact.repair_attempt_count,
+                            "repair_attempts": [
+                                {
+                                    "attempt_index": attempt.attempt_index,
+                                    "text": attempt.text,
+                                    "duration_ms": attempt.duration_ms,
+                                    "available_overlap_ms": attempt.available_overlap_ms,
+                                    "timing_source": attempt.timing_source,
+                                    "timing_variant": attempt.timing_variant,
+                                    "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
+                                    "status": attempt.status,
+                                }
+                                for attempt in artifact.repair_attempts
                         ],
                         "output_audio_path": str(artifact.output_audio_path),
                     }
@@ -623,13 +648,14 @@ class InterjectorOrchestrator:
                             {
                                 "attempt_index": attempt.attempt_index,
                                 "text": attempt.text,
-                                "duration_ms": attempt.duration_ms,
-                                "available_overlap_ms": attempt.available_overlap_ms,
-                                "timing_source": attempt.timing_source,
-                                "timing_variant": attempt.timing_variant,
-                                "status": attempt.status,
-                            }
-                            for attempt in artifact.repair_attempts
+                                    "duration_ms": attempt.duration_ms,
+                                    "available_overlap_ms": attempt.available_overlap_ms,
+                                    "timing_source": attempt.timing_source,
+                                    "timing_variant": attempt.timing_variant,
+                                    "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
+                                    "status": attempt.status,
+                                }
+                                for attempt in artifact.repair_attempts
                         ],
                     }
                     for artifact in rejected_artifacts
@@ -850,11 +876,22 @@ class InterjectorOrchestrator:
                 text=current_text,
                 output_audio_path=attempt_output_path,
             )
-            duration_ms = probe_audio_duration_ms(rendered_path)
-            if duration_ms is None:
+            raw_duration_ms = probe_audio_duration_ms(rendered_path)
+            if raw_duration_ms is None:
                 raise NonRetryableAudioStageError(
                     f"Unable to determine interjection duration for {rendered_path}."
                 )
+            prepared_audio = _prepare_interjection_attempt_audio(
+                rendered_path=rendered_path,
+                original_duration_ms=raw_duration_ms,
+                trim_leading_silence_enabled=self.trim_leading_silence_enabled,
+                trim_leading_silence_threshold_db=self.trim_leading_silence_threshold_db,
+                trim_leading_silence_min_duration_ms=self.trim_leading_silence_min_duration_ms,
+                trim_leading_silence_preserve_ms=self.trim_leading_silence_preserve_ms,
+                audio_codec=self.mix_audio_codec,
+                timeout_seconds=self.mix_timeout_seconds,
+            )
+            duration_ms = prepared_audio.duration_ms
 
             fits_window = duration_ms <= overlay_window.available_overlap_ms
             repair_attempts.append(
@@ -865,13 +902,14 @@ class InterjectorOrchestrator:
                     available_overlap_ms=overlay_window.available_overlap_ms,
                     timing_source=timing_source,
                     timing_variant=timing_variant,
+                    leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
                     status="accepted" if fits_window else "retry",
                 )
             )
             seen_states.add((current_text, timing_variant))
             if fits_window:
                 final_output_path = _finalize_interjection_attempt_output(
-                    rendered_path=rendered_path,
+                    rendered_path=prepared_audio.path,
                     final_output_path=base_output_audio_path,
                 )
                 artifact = InterjectorArtifact(
@@ -892,6 +930,7 @@ class InterjectorOrchestrator:
                     available_overlap_ms=overlay_window.available_overlap_ms,
                     timing_source=timing_source,
                     timing_variant=timing_variant,
+                    leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
                     repair_attempt_count=max(0, len(repair_attempts) - 1),
                     repair_attempts=tuple(repair_attempts),
                     output_audio_path=final_output_path,
@@ -907,7 +946,7 @@ class InterjectorOrchestrator:
                     None,
                 )
 
-            _remove_temp_output(rendered_path)
+            _remove_temp_output(prepared_audio.path)
             if (
                 self.repair_max_attempts is not None
                 and attempt_index >= self.repair_max_attempts
@@ -1992,6 +2031,118 @@ def _build_interjection_attempt_output_path(
     stem = base_output_audio_path.stem
     suffix = base_output_audio_path.suffix or ".wav"
     return base_output_audio_path.with_name(f"{stem}.attempt_{attempt_index:03d}{suffix}")
+
+
+def _prepare_interjection_attempt_audio(
+    *,
+    rendered_path: Path,
+    original_duration_ms: int,
+    trim_leading_silence_enabled: bool,
+    trim_leading_silence_threshold_db: float,
+    trim_leading_silence_min_duration_ms: int,
+    trim_leading_silence_preserve_ms: int,
+    audio_codec: str,
+    timeout_seconds: int,
+) -> _PreparedOverlayAudio:
+    """Return one rendered overlay after optional leading-silence trimming."""
+    if (
+        not trim_leading_silence_enabled
+        or original_duration_ms <= 0
+    ):
+        return _PreparedOverlayAudio(
+            path=rendered_path,
+            duration_ms=original_duration_ms,
+            leading_silence_trim_ms=0,
+        )
+
+    trimmed_duration_ms = _trim_leading_silence_in_place(
+        audio_path=rendered_path,
+        original_duration_ms=original_duration_ms,
+        threshold_db=trim_leading_silence_threshold_db,
+        min_duration_ms=trim_leading_silence_min_duration_ms,
+        preserve_ms=trim_leading_silence_preserve_ms,
+        audio_codec=audio_codec,
+        timeout_seconds=timeout_seconds,
+    )
+    if trimmed_duration_ms is None or trimmed_duration_ms <= 0:
+        return _PreparedOverlayAudio(
+            path=rendered_path,
+            duration_ms=original_duration_ms,
+            leading_silence_trim_ms=0,
+        )
+    leading_silence_trim_ms = max(0, original_duration_ms - trimmed_duration_ms)
+    return _PreparedOverlayAudio(
+        path=rendered_path,
+        duration_ms=trimmed_duration_ms,
+        leading_silence_trim_ms=leading_silence_trim_ms,
+    )
+
+
+def _trim_leading_silence_in_place(
+    *,
+    audio_path: Path,
+    original_duration_ms: int,
+    threshold_db: float,
+    min_duration_ms: int,
+    preserve_ms: int,
+    audio_codec: str,
+    timeout_seconds: int,
+) -> int | None:
+    """Trim leading silence from one rendered overlay in place when ffmpeg can do so safely."""
+    temp_output_path = _build_temp_output_path(audio_path)
+    ffmpeg_executable = resolve_command_path("ffmpeg")
+    filter_expression = (
+        "silenceremove="
+        "start_periods=1:"
+        f"start_duration={max(0, min_duration_ms) / 1000.0:.3f}:"
+        f"start_threshold={threshold_db:.2f}dB:"
+        f"start_silence={max(0, preserve_ms) / 1000.0:.3f}"
+    )
+    command = [
+        ffmpeg_executable,
+        "-y",
+        "-i",
+        str(audio_path),
+        "-af",
+        filter_expression,
+        "-c:a",
+        audio_codec,
+        "-vn",
+        "-f",
+        "wav",
+        str(temp_output_path),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _remove_temp_output(temp_output_path)
+        return None
+    if completed.returncode != 0:
+        _remove_temp_output(temp_output_path)
+        return None
+    trimmed_duration_ms = probe_audio_duration_ms(temp_output_path)
+    if (
+        trimmed_duration_ms is None
+        or trimmed_duration_ms <= 0
+        or trimmed_duration_ms >= original_duration_ms
+    ):
+        _remove_temp_output(temp_output_path)
+        return None
+    try:
+        temp_output_path.replace(audio_path)
+    except OSError:
+        _remove_temp_output(temp_output_path)
+        return None
+    return trimmed_duration_ms
 
 
 def _finalize_interjection_attempt_output(

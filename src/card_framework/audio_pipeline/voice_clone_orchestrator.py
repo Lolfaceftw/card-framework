@@ -40,6 +40,15 @@ class VoiceCloneRunResult:
     merged_output_audio_path: Path | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class ResolvedVoiceCloneEmotion:
+    """Resolved render-time emotion control for one TTS call."""
+
+    emotion_vector: EmotionVector | None
+    emotion_vector_source: str
+    emo_text: str | None = None
+
+
 @dataclass(slots=True)
 class VoiceCloneOrchestrator:
     """
@@ -66,6 +75,7 @@ class VoiceCloneOrchestrator:
     merge_timeout_seconds: int = 300
     emo_preset_catalog: dict[str, str] | None = None
     emo_preset_vector_catalog: dict[str, EmotionVector] | None = None
+    emo_text_fallback_enabled: bool = False
     merged_output_normalization: AudioNormalizationPolicy | None = None
 
     def __post_init__(self) -> None:
@@ -137,21 +147,20 @@ class VoiceCloneOrchestrator:
                 speaker=turn.speaker,
             )
             try:
-                resolved_emotion_vector = _resolve_emotion_vector(
+                resolved_emotion = _resolve_voice_clone_emotion(
                     explicit_emotion_vector=turn.emotion_vector,
+                    explicit_emotion_vector_source=turn.emotion_vector_source,
                     emo_preset=turn.emo_preset,
                     emo_preset_vector_catalog=self.emo_preset_vector_catalog,
-                )
-                emo_text = _resolve_emo_text(
-                    emo_preset=turn.emo_preset,
                     emo_preset_catalog=self.emo_preset_catalog,
+                    emo_text_fallback_enabled=self.emo_text_fallback_enabled,
                 )
                 rendered_path = self.provider.synthesize(
                     reference_audio_path=reference.path,
                     text=turn.text,
                     output_audio_path=output_audio_path,
-                    emo_text=emo_text if resolved_emotion_vector is None else None,
-                    emotion_vector=resolved_emotion_vector,
+                    emo_text=resolved_emotion.emo_text,
+                    emotion_vector=resolved_emotion.emotion_vector,
                     progress_callback=progress_callback,
                 )
             except Exception as exc:
@@ -168,8 +177,8 @@ class VoiceCloneOrchestrator:
                     speaker=turn.speaker,
                     text=turn.text,
                     emo_preset=turn.emo_preset,
-                    emotion_vector=resolved_emotion_vector,
-                    emotion_vector_source=turn.emotion_vector_source,
+                    emotion_vector=resolved_emotion.emotion_vector,
+                    emotion_vector_source=resolved_emotion.emotion_vector_source,
                     source_segment_indices=turn.source_segment_indices,
                     source_segment_weights=turn.source_segment_weights,
                     reference_audio_path=reference.path,
@@ -375,6 +384,47 @@ def _resolve_emo_text(
     return emo_preset_catalog.get(DEFAULT_EMO_PRESET)
 
 
+def _resolve_voice_clone_emotion(
+    *,
+    explicit_emotion_vector: EmotionVector | None,
+    explicit_emotion_vector_source: str,
+    emo_preset: str,
+    emo_preset_vector_catalog: dict[str, EmotionVector] | None,
+    emo_preset_catalog: dict[str, str] | None,
+    emo_text_fallback_enabled: bool,
+) -> ResolvedVoiceCloneEmotion:
+    """Resolve the actual render-time emotion control for one stage-3 turn."""
+    if explicit_emotion_vector is not None:
+        return ResolvedVoiceCloneEmotion(
+            emotion_vector=explicit_emotion_vector,
+            emotion_vector_source=(
+                str(explicit_emotion_vector_source).strip() or "explicit"
+            ),
+            emo_text=None,
+        )
+    preset_vector = _resolve_preset_vector(
+        emo_preset=emo_preset,
+        emo_preset_vector_catalog=emo_preset_vector_catalog,
+    )
+    if preset_vector is not None:
+        return ResolvedVoiceCloneEmotion(
+            emotion_vector=preset_vector,
+            emotion_vector_source="preset_vector",
+            emo_text=None,
+        )
+    emo_text = None
+    if emo_text_fallback_enabled:
+        emo_text = _resolve_emo_text(
+            emo_preset=emo_preset,
+            emo_preset_catalog=emo_preset_catalog,
+        )
+    return ResolvedVoiceCloneEmotion(
+        emotion_vector=None,
+        emotion_vector_source="emo_text" if emo_text is not None else "",
+        emo_text=emo_text,
+    )
+
+
 def _resolve_emotion_vector(
     *,
     explicit_emotion_vector: EmotionVector | None,
@@ -384,6 +434,18 @@ def _resolve_emotion_vector(
     """Prefer explicit vectors and otherwise fall back to preset-level vectors."""
     if explicit_emotion_vector is not None:
         return explicit_emotion_vector
+    return _resolve_preset_vector(
+        emo_preset=emo_preset,
+        emo_preset_vector_catalog=emo_preset_vector_catalog,
+    )
+
+
+def _resolve_preset_vector(
+    *,
+    emo_preset: str,
+    emo_preset_vector_catalog: dict[str, EmotionVector] | None,
+) -> EmotionVector | None:
+    """Resolve one configured preset vector when available."""
     if not emo_preset_vector_catalog:
         return None
     normalized_preset = emo_preset.strip() or DEFAULT_EMO_PRESET

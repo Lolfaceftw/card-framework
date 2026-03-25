@@ -73,7 +73,7 @@ def test_resolution_strategy_prefers_source_linked_vectors() -> None:
     assert set(resolved.source_segment_indices) == {0, 1}
 
 
-def test_resolution_strategy_falls_back_to_explicit_then_preset_then_emo_text() -> None:
+def test_resolution_strategy_falls_back_to_explicit_then_preset_by_default() -> None:
     strategy = SourceLinkedTurnEmotionResolutionStrategy(
         config=TurnEmotionResolutionConfig(prelink_enabled=False),
         linker=None,
@@ -108,6 +108,24 @@ def test_resolution_strategy_falls_back_to_explicit_then_preset_then_emo_text() 
     )
     assert preset.emotion_vector_source == "preset_vector"
 
+    no_vector = SourceLinkedTurnEmotionResolutionStrategy(
+        config=TurnEmotionResolutionConfig(prelink_enabled=False),
+        linker=None,
+        emo_preset_vector_catalog={},
+    ).resolve_turn(
+        turn=SummaryTurn(
+            speaker="SPEAKER_00",
+            text="no vector turn.",
+            emo_preset="neutral",
+        ),
+        transcript=transcript,
+    )
+    assert no_vector.emotion_vector is None
+    assert no_vector.should_use_emo_text_fallback is False
+
+
+def test_resolution_strategy_allows_opt_in_emo_text_fallback() -> None:
+    transcript = Transcript.from_mapping({"segments": []})
     emo_text = SourceLinkedTurnEmotionResolutionStrategy(
         config=TurnEmotionResolutionConfig(
             prelink_enabled=False,

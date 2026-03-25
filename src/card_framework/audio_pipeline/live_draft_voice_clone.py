@@ -22,8 +22,7 @@ from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneArtifa
 from card_framework.audio_pipeline.voice_clone_orchestrator import (
     VoiceCloneOrchestrator,
     VoiceCloneRunResult,
-    _resolve_emotion_vector,
-    _resolve_emo_text,
+    _resolve_voice_clone_emotion,
     _write_json_atomic,
     load_speaker_sample_references,
     merge_audio_artifacts_to_wav,
@@ -207,6 +206,7 @@ class LiveDraftVoiceCloneSession:
     speaker_samples_manifest_path: Path
     emo_preset_catalog: dict[str, str] | None = None
     emo_preset_vector_catalog: dict[str, EmotionVector] | None = None
+    emo_text_fallback_enabled: bool = False
     manifest_filename: str = "manifest.json"
     merge_segments: bool = True
     merged_output_filename: str = "voice_cloned.wav"
@@ -240,6 +240,7 @@ class LiveDraftVoiceCloneSession:
                 if orchestrator.emo_preset_vector_catalog
                 else None
             ),
+            emo_text_fallback_enabled=orchestrator.emo_text_fallback_enabled,
             manifest_filename=orchestrator.manifest_filename,
             merge_segments=orchestrator.merge_segments,
             merged_output_filename=orchestrator.merged_output_filename,
@@ -328,21 +329,20 @@ class LiveDraftVoiceCloneSession:
             )
         output_audio_path = self._turn_output_path(turn_id=turn_id)
         temp_output_path = output_audio_path.with_name(f"{output_audio_path.stem}.tmp.wav")
-        emo_text = _resolve_emo_text(
-            emo_preset=emo_preset,
-            emo_preset_catalog=self.emo_preset_catalog,
-        )
-        resolved_emotion_vector = _resolve_emotion_vector(
+        resolved_emotion = _resolve_voice_clone_emotion(
             explicit_emotion_vector=emotion_vector,
+            explicit_emotion_vector_source=emotion_vector_source,
             emo_preset=emo_preset,
             emo_preset_vector_catalog=self.emo_preset_vector_catalog,
+            emo_preset_catalog=self.emo_preset_catalog,
+            emo_text_fallback_enabled=self.emo_text_fallback_enabled,
         )
         rendered_path = self.provider.synthesize(
             reference_audio_path=reference.path,
             text=text,
             output_audio_path=temp_output_path,
-            emo_text=emo_text if resolved_emotion_vector is None else None,
-            emotion_vector=resolved_emotion_vector,
+            emo_text=resolved_emotion.emo_text,
+            emotion_vector=resolved_emotion.emotion_vector,
         )
         duration_ms = probe_audio_duration_ms(rendered_path)
         if duration_ms is None or duration_ms <= 0:
@@ -364,8 +364,8 @@ class LiveDraftVoiceCloneSession:
             speaker=speaker,
             text=text,
             emo_preset=emo_preset.strip() or "neutral",
-            emotion_vector=resolved_emotion_vector,
-            emotion_vector_source=str(emotion_vector_source).strip(),
+            emotion_vector=resolved_emotion.emotion_vector,
+            emotion_vector_source=resolved_emotion.emotion_vector_source,
             source_segment_indices=tuple(int(value) for value in source_segment_indices),
             source_segment_weights=tuple(
                 float(value) for value in source_segment_weights
