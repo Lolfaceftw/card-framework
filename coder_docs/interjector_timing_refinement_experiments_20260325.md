@@ -1,5 +1,25 @@
 # Stage-4 Interjector Timing Refinement Experiments
 
+## 2026-03-25 - Residual Echo Delay Needed Word-Level Retiming, Not Another Whole-Phrase Tempo Sweep
+
+- After the phrase-level Faster-Whisper echo matcher landed, some `echo_agreement` cases were still audibly late even though the first word was much closer to the host anchor.
+- The remaining issue was uneven pacing inside the overlay phrase: one global `atempo` pass could tighten the first word and still leave the later word dragging behind the host phrase.
+- The runtime fix is now:
+  1. keep the existing Faster-Whisper phrase matcher to find the host phrase span,
+  2. build a per-word retiming plan from the matched host and overlay word windows,
+  3. split the overlay phrase into per-word timing segments,
+  4. speed up only the word segments that overflow the matched host-word budget,
+  5. concatenate the retimed segments back into the accepted overlay,
+  6. fall back to the old phrase-level `atempo` path when the matched word counts differ or the segments are too short to retime safely.
+- The new config knobs are:
+  - `word_level_enabled: true`
+  - `word_level_min_segment_ms: 80`
+  - `word_level_max_tempo: 1.75`
+- Stage-4 manifests now record:
+  - `tempo_adjustment_mode`
+  - `word_level_retiming_steps` on accepted artifacts
+  so later analysis can show whether a clip used word-level fitting or the older phrase-level fallback.
+
 ## 2026-03-25 - Echo Agreements Needed Phrase-Match Placement And Tempo Fit, Not More Raw Offset Guessing
 
 - The focused `dam broke` pack finally isolated the actual remaining delay after leading-silence trimming.

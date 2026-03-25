@@ -280,7 +280,6 @@ audio:
     fallback_order:
       - "source_linked"
       - "explicit"
-      - "preset"
   voice_clone:
     enabled: true
     live_drafting:
@@ -374,6 +373,9 @@ audio:
       max_tempo: 1.75
       min_phrase_match_similarity: 0.75
       max_window_delta: 1
+      word_level_enabled: true
+      word_level_min_segment_ms: 80
+      word_level_max_tempo: 1.75
     repair:
       enabled: true
       prompt_max_tokens: 220

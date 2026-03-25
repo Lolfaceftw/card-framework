@@ -611,6 +611,15 @@ def build_interjector_orchestrator(
         echo_pacing_max_window_delta=int(
             echo_pacing_fit_cfg.get("max_window_delta", 1)
         ),
+        echo_pacing_word_level_enabled=bool(
+            echo_pacing_fit_cfg.get("word_level_enabled", True)
+        ),
+        echo_pacing_word_level_min_segment_ms=int(
+            echo_pacing_fit_cfg.get("word_level_min_segment_ms", 80)
+        ),
+        echo_pacing_word_level_max_tempo=float(
+            echo_pacing_fit_cfg.get("word_level_max_tempo", 1.75)
+        ),
     )
 
 

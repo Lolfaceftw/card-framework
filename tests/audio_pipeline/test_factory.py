@@ -543,6 +543,9 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
     assert orchestrator.echo_pacing_model_name == "tiny.en"
     assert orchestrator.echo_pacing_target_host_fill_ratio == pytest.approx(0.95)
     assert orchestrator.echo_pacing_max_tempo == pytest.approx(1.75)
+    assert orchestrator.echo_pacing_word_level_enabled is True
+    assert orchestrator.echo_pacing_word_level_min_segment_ms == 80
+    assert orchestrator.echo_pacing_word_level_max_tempo == pytest.approx(1.75)
 
 
 def test_factory_disables_interjector_orchestrator_by_default(tmp_path: Path) -> None:

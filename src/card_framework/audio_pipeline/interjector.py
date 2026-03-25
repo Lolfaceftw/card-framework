@@ -142,20 +142,38 @@ class _PreparedOverlayAudio:
     duration_ms: int
     leading_silence_trim_ms: int
     tempo_adjustment_ratio: float = 1.0
+    tempo_adjustment_mode: Literal["none", "phrase", "word_level"] = "none"
+    word_level_retiming_steps: tuple[_WordLevelRetimingStep, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
 class _MatchedPhraseSpan:
     """Describe one matched phrase span inside aligned words."""
 
+    start_word_index: int
+    end_word_index: int
     start_time_ms: int
     end_time_ms: int
     similarity: float
+    matched_words: tuple[WordTimestamp, ...] = ()
 
     @property
     def duration_ms(self) -> int:
         """Return the inclusive duration of the matched phrase span."""
         return max(0, self.end_time_ms - self.start_time_ms)
+
+
+@dataclass(slots=True, frozen=True)
+class _WordLevelRetimingStep:
+    """Describe one word-sized echo retiming segment."""
+
+    word: str
+    source_start_ms: int
+    source_end_ms: int
+    source_duration_ms: int
+    target_duration_ms: int
+    applied_tempo_ratio: float
+    adjusted_duration_ms: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -171,6 +189,7 @@ class InterjectionRepairAttempt:
     leading_silence_trim_ms: int
     tempo_adjustment_ratio: float
     status: Literal["accepted", "retry"]
+    tempo_adjustment_mode: Literal["none", "phrase", "word_level"] = "none"
 
 
 @dataclass(slots=True, frozen=True)
@@ -199,6 +218,8 @@ class InterjectorArtifact:
     repair_attempt_count: int
     repair_attempts: tuple[InterjectionRepairAttempt, ...]
     output_audio_path: Path
+    tempo_adjustment_mode: Literal["none", "phrase", "word_level"] = "none"
+    word_level_retiming_steps: tuple[_WordLevelRetimingStep, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -604,6 +625,9 @@ class InterjectorOrchestrator:
     echo_pacing_max_tempo: float = 1.75
     echo_pacing_min_phrase_match_similarity: float = 0.75
     echo_pacing_max_window_delta: int = 1
+    echo_pacing_word_level_enabled: bool = True
+    echo_pacing_word_level_min_segment_ms: int = 80
+    echo_pacing_word_level_max_tempo: float = 1.75
     _echo_word_timing_backend: WordTimingBackend | None = field(
         init=False,
         default=None,
@@ -669,6 +693,12 @@ class InterjectorOrchestrator:
             )
         if self.echo_pacing_max_window_delta < 0:
             raise ValueError("echo_pacing_max_window_delta must be >= 0.")
+        if self.echo_pacing_word_level_min_segment_ms <= 0:
+            raise ValueError("echo_pacing_word_level_min_segment_ms must be > 0.")
+        if not 1.0 <= self.echo_pacing_word_level_max_tempo <= 2.0:
+            raise ValueError(
+                "echo_pacing_word_level_max_tempo must be within [1.0, 2.0]."
+            )
         if self.aligner is None:
             self.aligner = CtcForcedAlignerGateway()
         if self.echo_pacing_fit_enabled:
@@ -777,6 +807,19 @@ class InterjectorOrchestrator:
                         "timing_variant": artifact.timing_variant,
                         "leading_silence_trim_ms": artifact.leading_silence_trim_ms,
                         "tempo_adjustment_ratio": artifact.tempo_adjustment_ratio,
+                        "tempo_adjustment_mode": artifact.tempo_adjustment_mode,
+                        "word_level_retiming_steps": [
+                            {
+                                "word": step.word,
+                                "source_start_ms": step.source_start_ms,
+                                "source_end_ms": step.source_end_ms,
+                                "source_duration_ms": step.source_duration_ms,
+                                "target_duration_ms": step.target_duration_ms,
+                                "applied_tempo_ratio": step.applied_tempo_ratio,
+                                "adjusted_duration_ms": step.adjusted_duration_ms,
+                            }
+                            for step in artifact.word_level_retiming_steps
+                        ],
                         "repair_attempt_count": artifact.repair_attempt_count,
                         "repair_attempts": [
                             {
@@ -788,6 +831,7 @@ class InterjectorOrchestrator:
                                 "timing_variant": attempt.timing_variant,
                                 "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
                                 "tempo_adjustment_ratio": attempt.tempo_adjustment_ratio,
+                                "tempo_adjustment_mode": attempt.tempo_adjustment_mode,
                                 "status": attempt.status,
                             }
                             for attempt in artifact.repair_attempts
@@ -823,6 +867,7 @@ class InterjectorOrchestrator:
                                 "timing_variant": attempt.timing_variant,
                                 "leading_silence_trim_ms": attempt.leading_silence_trim_ms,
                                 "tempo_adjustment_ratio": attempt.tempo_adjustment_ratio,
+                                "tempo_adjustment_mode": attempt.tempo_adjustment_mode,
                                 "status": attempt.status,
                             }
                             for attempt in artifact.repair_attempts
@@ -1102,6 +1147,7 @@ class InterjectorOrchestrator:
                     timing_variant=timing_variant,
                     leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
                     tempo_adjustment_ratio=prepared_audio.tempo_adjustment_ratio,
+                    tempo_adjustment_mode=prepared_audio.tempo_adjustment_mode,
                     status="accepted" if fits_window else "retry",
                 )
             )
@@ -1131,6 +1177,8 @@ class InterjectorOrchestrator:
                     timing_variant=timing_variant,
                     leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
                     tempo_adjustment_ratio=prepared_audio.tempo_adjustment_ratio,
+                    tempo_adjustment_mode=prepared_audio.tempo_adjustment_mode,
+                    word_level_retiming_steps=prepared_audio.word_level_retiming_steps,
                     repair_attempt_count=max(0, len(repair_attempts) - 1),
                     repair_attempts=tuple(repair_attempts),
                     output_audio_path=final_output_path,
@@ -1418,6 +1466,39 @@ class InterjectorOrchestrator:
         if overflow_ratio < self.echo_pacing_min_overflow_ratio:
             return prepared_audio
 
+        if self.echo_pacing_word_level_enabled:
+            expected_word_count = len(normalized_tokens)
+            if (
+                len(echo_phrase_span.matched_words) == expected_word_count
+                and len(overlay_phrase_span.matched_words) == expected_word_count
+            ):
+                word_level_plan = _build_word_level_echo_retiming_plan(
+                    host_phrase_span=echo_phrase_span,
+                    overlay_phrase_span=overlay_phrase_span,
+                    target_host_fill_ratio=self.echo_pacing_target_host_fill_ratio,
+                    min_overflow_ratio=self.echo_pacing_min_overflow_ratio,
+                    max_tempo=self.echo_pacing_word_level_max_tempo,
+                    min_segment_ms=self.echo_pacing_word_level_min_segment_ms,
+                )
+                if word_level_plan:
+                    adjusted_duration_ms, retimed_steps = _apply_word_level_echo_retiming_in_place(
+                        audio_path=prepared_audio.path,
+                        steps=word_level_plan,
+                        audio_codec=self.mix_audio_codec,
+                        timeout_seconds=self.mix_timeout_seconds,
+                    )
+                    if adjusted_duration_ms is not None and adjusted_duration_ms > 0:
+                        return _PreparedOverlayAudio(
+                            path=prepared_audio.path,
+                            duration_ms=adjusted_duration_ms,
+                            leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
+                            tempo_adjustment_ratio=max(
+                                step.applied_tempo_ratio for step in retimed_steps
+                            ),
+                            tempo_adjustment_mode="word_level",
+                            word_level_retiming_steps=retimed_steps,
+                        )
+
         tempo_adjustment_ratio = min(
             self.echo_pacing_max_tempo,
             max(1.0, overflow_ratio),
@@ -1435,6 +1516,7 @@ class InterjectorOrchestrator:
             duration_ms=adjusted_duration_ms,
             leading_silence_trim_ms=prepared_audio.leading_silence_trim_ms,
             tempo_adjustment_ratio=tempo_adjustment_ratio,
+            tempo_adjustment_mode="phrase",
         )
 
     def _lookup_next_turn_text(
@@ -2039,11 +2121,7 @@ def _find_best_matching_phrase_span(
         return None
 
     normalized_words = [
-        (
-            _normalize_token(word.word),
-            word.start_time_ms,
-            word.end_time_ms,
-        )
+        (_normalize_token(word.word), word)
         for word in aligned_words
         if _normalize_token(word.word)
     ]
@@ -2062,6 +2140,7 @@ def _find_best_matching_phrase_span(
         for start_index in range(0, len(normalized_words) - window_size + 1):
             window = normalized_words[start_index : start_index + window_size]
             window_tokens = [item[0] for item in window]
+            window_words = tuple(item[1] for item in window)
             window_phrase = " ".join(window_tokens)
             phrase_similarity = SequenceMatcher(
                 None,
@@ -2076,9 +2155,12 @@ def _find_best_matching_phrase_span(
             if score < min_similarity:
                 continue
             candidate = _MatchedPhraseSpan(
-                start_time_ms=window[0][1],
-                end_time_ms=window[-1][2],
+                start_word_index=start_index,
+                end_word_index=start_index + window_size - 1,
+                start_time_ms=window_words[0].start_time_ms,
+                end_time_ms=window_words[-1].end_time_ms,
                 similarity=score,
+                matched_words=window_words,
             )
             candidate_center_ms = int(
                 round((candidate.start_time_ms + candidate.end_time_ms) / 2.0)
@@ -2108,6 +2190,67 @@ def _find_best_matching_phrase_span(
                 best_span = candidate
                 best_distance_ms = candidate_distance_ms
     return best_span
+
+
+def _build_word_level_echo_retiming_plan(
+    *,
+    host_phrase_span: _MatchedPhraseSpan,
+    overlay_phrase_span: _MatchedPhraseSpan,
+    target_host_fill_ratio: float,
+    min_overflow_ratio: float,
+    max_tempo: float,
+    min_segment_ms: int,
+) -> tuple[_WordLevelRetimingStep, ...]:
+    """Build a per-word retiming plan for one short echo phrase."""
+    host_words = tuple(host_phrase_span.matched_words)
+    overlay_words = tuple(overlay_phrase_span.matched_words)
+    if len(host_words) < 2 or len(host_words) != len(overlay_words):
+        return ()
+
+    steps: list[_WordLevelRetimingStep] = []
+    speedup_applied = False
+    for index, overlay_word in enumerate(overlay_words):
+        source_start_ms = overlay_word.start_time_ms
+        if index + 1 < len(overlay_words):
+            source_end_ms = overlay_words[index + 1].start_time_ms
+            host_segment_duration_ms = (
+                host_words[index + 1].start_time_ms - host_words[index].start_time_ms
+            )
+        else:
+            source_end_ms = overlay_phrase_span.end_time_ms
+            host_segment_duration_ms = (
+                host_phrase_span.end_time_ms - host_words[index].start_time_ms
+            )
+        source_duration_ms = max(0, source_end_ms - source_start_ms)
+        target_duration_ms = max(
+            1,
+            int(round(host_segment_duration_ms * target_host_fill_ratio)),
+        )
+        if source_duration_ms < min_segment_ms or target_duration_ms < min_segment_ms:
+            return ()
+        overflow_ratio = source_duration_ms / float(target_duration_ms)
+        applied_tempo_ratio = 1.0
+        if overflow_ratio >= min_overflow_ratio:
+            applied_tempo_ratio = min(max_tempo, max(1.0, overflow_ratio))
+            speedup_applied = speedup_applied or applied_tempo_ratio > 1.0
+        adjusted_duration_ms = max(
+            1,
+            int(round(source_duration_ms / applied_tempo_ratio)),
+        )
+        steps.append(
+            _WordLevelRetimingStep(
+                word=overlay_word.word,
+                source_start_ms=source_start_ms,
+                source_end_ms=source_end_ms,
+                source_duration_ms=source_duration_ms,
+                target_duration_ms=target_duration_ms,
+                applied_tempo_ratio=applied_tempo_ratio,
+                adjusted_duration_ms=adjusted_duration_ms,
+            )
+        )
+    if not speedup_applied:
+        return ()
+    return tuple(steps)
 
 
 def _align_turn_tokens(
@@ -2632,7 +2775,7 @@ def _apply_audio_tempo_in_place(
         "-i",
         str(audio_path),
         "-af",
-        f"atempo={tempo_ratio:.5f}",
+        _build_atempo_filter_chain(tempo_ratio),
         "-c:a",
         audio_codec,
         "-vn",
@@ -2667,6 +2810,118 @@ def _apply_audio_tempo_in_place(
         _remove_temp_output(temp_output_path)
         return None
     return adjusted_duration_ms
+
+
+def _apply_word_level_echo_retiming_in_place(
+    *,
+    audio_path: Path,
+    steps: Sequence[_WordLevelRetimingStep],
+    audio_codec: str,
+    timeout_seconds: int,
+) -> tuple[int | None, tuple[_WordLevelRetimingStep, ...]]:
+    """Retiming one echo clip by processing matched word segments separately."""
+    if not steps:
+        return None, ()
+
+    ffmpeg_executable = resolve_command_path("ffmpeg")
+    temp_dir = audio_path.parent / f"{audio_path.stem}_wordfit"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    rendered_steps: list[_WordLevelRetimingStep] = []
+    segment_paths: list[Path] = []
+    try:
+        for index, step in enumerate(steps, start=1):
+            segment_path = temp_dir / f"segment_{index:02d}.wav"
+            filters = [
+                (
+                    f"atrim=start={step.source_start_ms / 1000.0:.5f}:"
+                    f"end={step.source_end_ms / 1000.0:.5f}"
+                ),
+                "asetpts=PTS-STARTPTS",
+            ]
+            if step.applied_tempo_ratio != 1.0:
+                filters.append(_build_atempo_filter_chain(step.applied_tempo_ratio))
+            command = [
+                ffmpeg_executable,
+                "-y",
+                "-i",
+                str(audio_path),
+                "-af",
+                ",".join(filters),
+                "-c:a",
+                audio_codec,
+                "-vn",
+                "-f",
+                "wav",
+                str(segment_path),
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None, ()
+            if completed.returncode != 0:
+                return None, ()
+            adjusted_duration_ms = probe_audio_duration_ms(segment_path)
+            if adjusted_duration_ms is None or adjusted_duration_ms <= 0:
+                return None, ()
+            segment_paths.append(segment_path)
+            rendered_steps.append(
+                _WordLevelRetimingStep(
+                    word=step.word,
+                    source_start_ms=step.source_start_ms,
+                    source_end_ms=step.source_end_ms,
+                    source_duration_ms=step.source_duration_ms,
+                    target_duration_ms=step.target_duration_ms,
+                    applied_tempo_ratio=step.applied_tempo_ratio,
+                    adjusted_duration_ms=adjusted_duration_ms,
+                )
+            )
+
+        temp_output_path = _build_temp_output_path(audio_path)
+        merge_audio_artifacts_to_wav(
+            artifact_paths=segment_paths,
+            output_path=temp_output_path,
+            audio_codec=audio_codec,
+            timeout_seconds=timeout_seconds,
+        )
+        adjusted_duration_ms = probe_audio_duration_ms(temp_output_path)
+        if adjusted_duration_ms is None or adjusted_duration_ms <= 0:
+            _remove_temp_output(temp_output_path)
+            return None, ()
+        try:
+            temp_output_path.replace(audio_path)
+        except OSError:
+            _remove_temp_output(temp_output_path)
+            return None, ()
+        return adjusted_duration_ms, tuple(rendered_steps)
+    finally:
+        for segment_path in segment_paths:
+            _remove_temp_output(segment_path)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _build_atempo_filter_chain(tempo_ratio: float) -> str:
+    """Return an ffmpeg `atempo` filter chain for one tempo ratio."""
+    if tempo_ratio <= 0.0:
+        raise ValueError("tempo_ratio must be > 0.")
+    remaining_ratio = tempo_ratio
+    filters: list[str] = []
+    while remaining_ratio > 2.0 + 1e-6:
+        filters.append("atempo=2.00000")
+        remaining_ratio /= 2.0
+    while remaining_ratio < 0.5 - 1e-6:
+        filters.append("atempo=0.50000")
+        remaining_ratio /= 0.5
+    filters.append(f"atempo={remaining_ratio:.5f}")
+    return ",".join(filters)
 
 
 def _finalize_interjection_attempt_output(
