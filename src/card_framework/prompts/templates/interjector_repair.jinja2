@@ -1,0 +1,18 @@
+Revise this overlapping listener interjection so it fits the available overlap budget.
+
+Rules:
+- Preserve the same conversational intent and stay grounded in the same host anchor phrase.
+- Do not add new facts or extend the discussion.
+- Keep the same interjection style: `{{ interjection_style }}`.
+- Keep it natural for the next speaker's voice.
+- The revised text must fit inside an overlap budget of `{{ available_overlap_ms }}` ms.
+- The previous rendered version measured `{{ measured_duration_ms }}` ms.
+- Aim for at most {{ target_word_budget }} words and never exceed {{ max_interjection_words }} words.
+- Return JSON only as: {"interjection_text": "short text"}
+
+Context:
+- Attempt index: {{ attempt_index }}
+- Host turn text: {{ host_turn_text }}
+- Next full turn text: {{ next_turn_text }}
+- Anchor phrase: {{ anchor_text }}
+- Current interjection text: {{ current_text }}

@@ -532,10 +532,13 @@ def build_interjector_orchestrator(
     max_host_progress_ratio = float(
         interjector_cfg.get("max_host_progress_ratio", 0.90)
     )
+    timing_refinement_cfg = _as_mapping(interjector_cfg.get("timing_refinement", {}))
+    repair_cfg = _as_mapping(interjector_cfg.get("repair", {}))
     return InterjectorOrchestrator(
         planner=LLMInterjectionPlanner(
             llm=llm,
             max_tokens=int(interjector_cfg.get("analysis_max_tokens", 900)),
+            repair_max_tokens=int(repair_cfg.get("prompt_max_tokens", 220)),
             max_interjection_words=max_interjection_words,
             min_host_progress_ratio=min_host_progress_ratio,
             max_host_progress_ratio=max_host_progress_ratio,
@@ -574,6 +577,14 @@ def build_interjector_orchestrator(
         merged_output_normalization=_build_audio_normalization_policy(
             _as_mapping(interjector_cfg.get("normalization", {}))
         ),
+        timing_refinement_enabled=bool(
+            timing_refinement_cfg.get("enabled", True)
+        ),
+        fallback_anchor_realignment_enabled=bool(
+            timing_refinement_cfg.get("fallback_anchor_realignment_enabled", True)
+        ),
+        repair_enabled=bool(repair_cfg.get("enabled", True)),
+        repair_max_attempts=_optional_int(repair_cfg.get("max_attempts")),
     )
 
 

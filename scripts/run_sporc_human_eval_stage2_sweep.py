@@ -14,6 +14,8 @@ import sys
 from typing import Any
 from uuid import uuid4
 
+from omegaconf import OmegaConf
+
 from card_framework.audio_pipeline.factory import build_source_separator
 from card_framework.audio_pipeline.io import write_transcript_atomic
 from card_framework.audio_pipeline.runtime import resolve_device
@@ -33,6 +35,7 @@ DEFAULT_OUTPUT_PARENT = (
 DEFAULT_DURATION_PRESETS = ("30s", "1m", "5m")
 DEFAULT_LLM_PROFILE = "google_gemini"
 DEFAULT_LLM_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_CONFIG_PATH = (REPO_ROOT / "conf" / "config.yaml").resolve()
 
 SOURCE_PATTERN = re.compile(
     r"^Source:\s*(\d+)-(\d+)\s*\((\d{2}:\d{2}:\d{2})-(\d{2}:\d{2}:\d{2})\)\s*\|\s*([^|]+?)\s*\|\s*measured\s*([0-9.]+)s\s*$"
@@ -154,8 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-model",
-        default=DEFAULT_LLM_MODEL,
-        help="Model id to pin on the selected llm profile.",
+        default="",
+        help=(
+            "Optional explicit model id to pin on the selected llm profile. "
+            "If omitted, the profile's configured default model is used."
+        ),
     )
     parser.add_argument(
         "--prepare-only",
@@ -237,6 +243,10 @@ def main(argv: list[str] | None = None) -> int:
 
     presets = _parse_duration_presets(args.duration_presets)
     selected_indices = _parse_episode_indices(args.episode_indices)
+    resolved_llm_model = _resolve_llm_model(
+        llm_profile=str(args.llm_profile),
+        explicit_model=str(args.llm_model),
+    )
     package_summary = _load_package_summary(package_root)
     episodes = _load_prepared_episodes(
         package_root=package_root,
@@ -262,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         "notes_path": str(notes_path),
         "duration_presets": [preset.label for preset in presets],
         "llm_profile": str(args.llm_profile),
-        "llm_model": str(args.llm_model),
+        "llm_model": resolved_llm_model,
         "docker_monitoring_enabled": True,
         "prepare_only": bool(args.prepare_only),
         "source_separate_voice_samples": bool(args.source_separate_voice_samples),
@@ -299,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         setup_code = _run_setup_only(
             llm_profile=str(args.llm_profile),
-            llm_model=str(args.llm_model),
+            llm_model=resolved_llm_model,
             log_path=setup_log_path,
         )
         if setup_code != 0:
@@ -356,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
                 transcript_path=transcript_path,
                 target_seconds=preset.target_seconds,
                 llm_profile=str(args.llm_profile),
-                llm_model=str(args.llm_model),
+                llm_model=resolved_llm_model,
                 orchestrator_max_iterations=int(args.orchestrator_max_iterations),
                 summarizer_max_tool_turns=int(args.summarizer_max_tool_turns),
                 critic_max_tool_turns=int(args.critic_max_tool_turns),
@@ -384,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
                     logs_root=logs_root,
                     log_stem=log_stem,
                     llm_profile=str(args.llm_profile),
-                    llm_model=str(args.llm_model),
+                    llm_model=resolved_llm_model,
                 )
                 if recovery_paths is not None:
                     run_record["status"] = "completed_after_recovery"
@@ -459,6 +469,36 @@ def main(argv: list[str] | None = None) -> int:
         f"exit_code={exit_code}. Summary: `{summary_path}`.",
     )
     return exit_code
+
+
+def _resolve_llm_model(*, llm_profile: str, explicit_model: str) -> str:
+    """Resolve the model id for the selected profile.
+
+    Prefer an explicit CLI override when supplied. Otherwise, read the repo
+    config so the sweep inherits the profile's configured default model instead
+    of pinning an unrelated hard-coded model name.
+    """
+
+    cleaned_model = explicit_model.strip()
+    if cleaned_model:
+        return cleaned_model
+
+    config = OmegaConf.load(DEFAULT_CONFIG_PATH)
+    profile_cfg = OmegaConf.select(config, f"profiles.llm.{llm_profile}")
+    if profile_cfg is None:
+        raise ValueError(
+            f"Unable to resolve llm profile '{llm_profile}' from {DEFAULT_CONFIG_PATH}."
+        )
+    if isinstance(profile_cfg, dict):
+        resolved = profile_cfg.get("model")
+    else:
+        resolved = OmegaConf.select(profile_cfg, "model")
+    if isinstance(resolved, str) and resolved.strip():
+        return resolved.strip()
+    raise ValueError(
+        f"Unable to resolve a default model for llm profile '{llm_profile}' from "
+        f"{DEFAULT_CONFIG_PATH}."
+    )
 
 
 def _resolve_output_root(raw_value: str) -> Path:

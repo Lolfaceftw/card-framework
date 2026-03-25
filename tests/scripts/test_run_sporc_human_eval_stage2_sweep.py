@@ -93,6 +93,41 @@ def test_build_run_command_appends_quota_control_overrides() -> None:
     assert "audio.interjector.tool_call_planning_enabled=false" in joined
 
 
+def test_resolve_llm_model_uses_profile_default_when_cli_override_missing() -> None:
+    """Sweep runs should inherit the selected profile's configured model by default."""
+    module = _load_module()
+
+    resolved = module._resolve_llm_model(
+        llm_profile="deepseek_chat",
+        explicit_model="",
+    )
+
+    assert resolved == "deepseek-chat"
+
+
+def test_resolve_llm_model_prefers_explicit_cli_override() -> None:
+    """Explicit --llm-model should still override the configured profile default."""
+    module = _load_module()
+
+    resolved = module._resolve_llm_model(
+        llm_profile="deepseek_chat",
+        explicit_model="deepseek-chat-preview",
+    )
+
+    assert resolved == "deepseek-chat-preview"
+
+
+def test_resolve_llm_model_raises_clean_error_for_unknown_profile() -> None:
+    """Unknown LLM profiles should fail with a controlled user-facing error."""
+    module = _load_module()
+
+    with pytest.raises(ValueError, match="Unable to resolve llm profile"):
+        module._resolve_llm_model(
+            llm_profile="definitely_missing_profile",
+            explicit_model="",
+        )
+
+
 def test_build_run_command_can_request_unbounded_iterations() -> None:
     """Negative sweep override values should request an unbounded loop budget."""
     module = _load_module()

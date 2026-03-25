@@ -504,6 +504,15 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
             "interjector": {
                 "enabled": True,
                 "output_dir_name": "interjector",
+                "timing_refinement": {
+                    "enabled": True,
+                    "fallback_anchor_realignment_enabled": False,
+                },
+                "repair": {
+                    "enabled": True,
+                    "prompt_max_tokens": 180,
+                    "max_attempts": 3,
+                },
             },
         },
         llm=_FakeLLMProvider(),
@@ -516,6 +525,10 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
         tmp_path / "artifacts" / "audio_stage" / "interjector"
     ).resolve()
     assert orchestrator.merged_output_filename == "voice_cloned_interjected.wav"
+    assert orchestrator.timing_refinement_enabled is True
+    assert orchestrator.fallback_anchor_realignment_enabled is False
+    assert orchestrator.repair_enabled is True
+    assert orchestrator.repair_max_attempts == 3
 
 
 def test_factory_disables_interjector_orchestrator_by_default(tmp_path: Path) -> None:

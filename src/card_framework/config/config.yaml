@@ -331,6 +331,13 @@ audio:
     min_available_overlap_ms: 120
     turn_end_guard_ms: 180
     mix_timeout_seconds: 300
+    timing_refinement:
+      enabled: true
+      fallback_anchor_realignment_enabled: true
+    repair:
+      enabled: true
+      prompt_max_tokens: 220
+      max_attempts:
 
 orchestrator:
   target_seconds:

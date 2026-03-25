@@ -17,7 +17,7 @@
       <stage id="stage-1">Audio stage: source separation, Granite Speech ASR by default, diarization, alignment, and transcript JSON emission.</stage>
       <stage id="stage-2">Summarization stage: local A2A retrieval, summarizer, and critic agents cooperate until convergence or iteration cap. When `audio.voice_clone.live_drafting.enabled=true` and voice cloning is enabled, each mutating draft step also renders per-turn audio immediately and uses actual measured segment duration instead of WPM estimates.</stage>
       <stage id="stage-3">Voice-clone stage: summary XML plus generated speaker samples are rendered into per-turn cloned audio and optional merged output. In live-draft mode this stage usually finalizes already-rendered turn audio into the persisted manifest instead of re-synthesizing every turn.</stage>
-      <stage id="stage-4">Interjector stage: the next speaker can add short overlapping backchannels or echo-agreements onto the stage-3 merged audio using summary-aware token anchors.</stage>
+      <stage id="stage-4">Interjector stage: the next speaker can add short overlapping backchannels or echo-agreements onto the stage-3 merged audio using summary-aware token anchors, rendered-turn forced alignment, actual overlay-duration fit checks, and a repair loop that shortens or tightens interjections before they collide with the next full turn.</stage>
     </primaryWorkflow>
     <agentOperatingPrinciples>
       <principle>Treat configuration as authoritative; prefer overrides and config edits over hardcoded values.</principle>

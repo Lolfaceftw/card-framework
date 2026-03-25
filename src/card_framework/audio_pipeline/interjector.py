@@ -56,9 +56,15 @@ from card_framework.audio_pipeline.voice_clone_orchestrator import (
     parse_summary_turns,
 )
 from card_framework.shared.llm_provider import LLMProvider
+from card_framework.shared.events import event_bus
 
 
 InterjectionStyle: TypeAlias = Literal["backchannel", "echo_agreement"]
+AlignmentSource: TypeAlias = Literal[
+    "forced_alignment",
+    "anchor_window_refinement",
+    "uniform_fallback",
+]
 
 
 class InterjectionDecision(BaseModel):
@@ -80,6 +86,12 @@ class InterjectionPlanPayload(BaseModel):
     decisions: list[InterjectionDecision] = Field(default_factory=list)
 
 
+class InterjectionRepairPayload(BaseModel):
+    """Represent one repair-only response for an interjection candidate."""
+
+    interjection_text: str = ""
+
+
 _INTERJECTION_DECISION_TOOL_NAME = "submit_interjection_decision"
 
 
@@ -90,6 +102,39 @@ class AlignedToken:
     token: str
     start_time_ms: int
     end_time_ms: int
+
+
+@dataclass(slots=True, frozen=True)
+class TurnAlignmentResult:
+    """Describe one turn-level timing result used for interjection placement."""
+
+    tokens: tuple[AlignedToken, ...]
+    source: AlignmentSource
+
+
+@dataclass(slots=True, frozen=True)
+class _OverlayTimingWindow:
+    """Describe the legal overlap window for one rendered interjection."""
+
+    overlay_start_time_ms: int
+    host_turn_start_time_ms: int
+    host_turn_end_time_ms: int
+    next_turn_start_time_ms: int
+    legal_overlap_end_time_ms: int
+    available_overlap_ms: int
+
+
+@dataclass(slots=True, frozen=True)
+class InterjectionRepairAttempt:
+    """Describe one rendered interjection candidate and whether it fit."""
+
+    attempt_index: int
+    text: str
+    duration_ms: int
+    available_overlap_ms: int
+    timing_source: AlignmentSource
+    timing_variant: Literal["default", "tightened"]
+    status: Literal["accepted", "retry"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -104,8 +149,40 @@ class InterjectorArtifact:
     anchor_start_token_index: int
     anchor_end_token_index: int
     start_time_ms: int
+    end_time_ms: int
     duration_ms: int
+    host_turn_start_time_ms: int
+    host_turn_end_time_ms: int
+    next_turn_start_time_ms: int
+    legal_overlap_end_time_ms: int
+    available_overlap_ms: int
+    timing_source: AlignmentSource
+    timing_variant: Literal["default", "tightened"]
+    repair_attempt_count: int
+    repair_attempts: tuple[InterjectionRepairAttempt, ...]
     output_audio_path: Path
+
+
+@dataclass(slots=True, frozen=True)
+class RejectedInterjectionArtifact:
+    """Describe one interjection that could not be repaired into a valid overlap."""
+
+    host_turn_index: int
+    interjection_style: InterjectionStyle
+    speaker: str
+    anchor_text: str
+    anchor_start_token_index: int
+    anchor_end_token_index: int
+    host_turn_start_time_ms: int
+    host_turn_end_time_ms: int
+    next_turn_start_time_ms: int
+    legal_overlap_end_time_ms: int
+    available_overlap_ms: int
+    timing_source: AlignmentSource
+    timing_variant: Literal["default", "tightened"]
+    failure_reason: str
+    last_text: str
+    repair_attempts: tuple[InterjectionRepairAttempt, ...]
 
 
 @dataclass(slots=True, frozen=True)
@@ -116,6 +193,7 @@ class InterjectorRunResult:
     manifest_path: Path
     generated_at_utc: str
     artifacts: tuple[InterjectorArtifact, ...]
+    rejected_artifacts: tuple[RejectedInterjectionArtifact, ...]
     merged_output_audio_path: Path
 
 
@@ -170,6 +248,7 @@ class LLMInterjectionPlanner:
 
     llm: LLMProvider
     max_tokens: int = 900
+    repair_max_tokens: int = 220
     max_interjection_words: int = 5
     min_host_progress_ratio: float = 0.35
     max_host_progress_ratio: float = 0.90
@@ -231,6 +310,64 @@ class LLMInterjectionPlanner:
             min_host_progress_ratio=self.min_host_progress_ratio,
             max_host_progress_ratio=self.max_host_progress_ratio,
         )
+
+    def repair_interjection_text(
+        self,
+        *,
+        host_turn_text: str,
+        next_turn_text: str,
+        interjection_style: InterjectionStyle,
+        anchor_text: str,
+        current_text: str,
+        available_overlap_ms: int,
+        measured_duration_ms: int,
+        attempt_index: int,
+    ) -> str | None:
+        """Return a shorter grounded repair candidate that fits the overlap budget."""
+        from card_framework.shared.prompt_manager import PromptManager
+
+        target_word_budget = _estimate_target_word_budget(
+            available_overlap_ms=available_overlap_ms,
+            max_interjection_words=self.max_interjection_words,
+        )
+        system_prompt = (
+            "You revise one overlapping listener interjection so it fits a strict "
+            "audio timing budget. Keep the same conversational intent, stay "
+            "grounded in the host anchor phrase, do not add new facts, and return "
+            'JSON only as {"interjection_text": "..."} with no prose.'
+        )
+        user_prompt = PromptManager.get_prompt(
+            "interjector_repair",
+            host_turn_text=host_turn_text,
+            next_turn_text=next_turn_text,
+            interjection_style=interjection_style,
+            anchor_text=anchor_text,
+            current_text=current_text,
+            available_overlap_ms=available_overlap_ms,
+            measured_duration_ms=measured_duration_ms,
+            attempt_index=attempt_index,
+            max_interjection_words=self.max_interjection_words,
+            target_word_budget=target_word_budget,
+        )
+        try:
+            with _temporarily_disable_llm_thinking(self.llm):
+                raw_response = self.llm.generate(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=self.repair_max_tokens,
+                )
+        except Exception:
+            return None
+
+        payload = _parse_interjection_repair_payload(raw_response)
+        if payload is None:
+            return None
+        normalized = " ".join(payload.interjection_text.split()).strip()
+        if not normalized:
+            return None
+        if len(_split_tokens(normalized)) > self.max_interjection_words:
+            return None
+        return normalized
 
     def _plan_with_tool_call(
         self,
@@ -315,6 +452,10 @@ class InterjectorOrchestrator:
     merged_output_normalization: AudioNormalizationPolicy | None = None
     aligner: CtcForcedAlignerGateway | None = None
     alignment_batch_size: int = 8
+    timing_refinement_enabled: bool = True
+    fallback_anchor_realignment_enabled: bool = True
+    repair_enabled: bool = True
+    repair_max_attempts: int | None = None
 
     def __post_init__(self) -> None:
         """Validate orchestrator configuration."""
@@ -350,6 +491,8 @@ class InterjectorOrchestrator:
             raise ValueError("mix_timeout_seconds must be > 0.")
         if self.alignment_batch_size <= 0:
             raise ValueError("alignment_batch_size must be > 0.")
+        if self.repair_max_attempts is not None and self.repair_max_attempts <= 0:
+            raise ValueError("repair_max_attempts must be > 0 when configured.")
         if self.aligner is None:
             self.aligner = CtcForcedAlignerGateway()
 
@@ -372,7 +515,7 @@ class InterjectorOrchestrator:
         decisions = self.planner.plan(summary_turns)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        artifacts, overlays = self._render_interjection_artifacts(
+        artifacts, overlays, rejected_artifacts = self._render_interjection_artifacts(
             decisions=decisions,
             manifest_bundle=manifest_bundle,
             sample_refs=sample_refs,
@@ -386,12 +529,17 @@ class InterjectorOrchestrator:
                 max_host_progress_ratio=min(self.max_host_progress_ratio, 0.75),
                 max_interjections=self.max_interjections_per_host_turn,
             )
-            artifacts, overlays = self._render_interjection_artifacts(
+            fallback_artifacts, fallback_overlays, fallback_rejections = (
+                self._render_interjection_artifacts(
                 decisions=fallback_decisions,
                 manifest_bundle=manifest_bundle,
                 sample_refs=sample_refs,
                 language=language,
+                )
             )
+            artifacts = fallback_artifacts
+            overlays = fallback_overlays
+            rejected_artifacts.extend(fallback_rejections)
 
         merged_output_audio_path = self.output_dir / self.merged_output_filename
         _mix_audio_with_overlays(
@@ -416,6 +564,7 @@ class InterjectorOrchestrator:
                     manifest_bundle.speaker_samples_manifest_path
                 ),
                 "artifact_count": len(artifacts),
+                "rejected_artifact_count": len(rejected_artifacts),
                 "merged_output_audio_path": str(merged_output_audio_path),
                 "artifacts": [
                     {
@@ -427,10 +576,63 @@ class InterjectorOrchestrator:
                         "anchor_start_token_index": artifact.anchor_start_token_index,
                         "anchor_end_token_index": artifact.anchor_end_token_index,
                         "start_time_ms": artifact.start_time_ms,
+                        "end_time_ms": artifact.end_time_ms,
                         "duration_ms": artifact.duration_ms,
+                        "host_turn_start_time_ms": artifact.host_turn_start_time_ms,
+                        "host_turn_end_time_ms": artifact.host_turn_end_time_ms,
+                        "next_turn_start_time_ms": artifact.next_turn_start_time_ms,
+                        "legal_overlap_end_time_ms": artifact.legal_overlap_end_time_ms,
+                        "available_overlap_ms": artifact.available_overlap_ms,
+                        "timing_source": artifact.timing_source,
+                        "timing_variant": artifact.timing_variant,
+                        "repair_attempt_count": artifact.repair_attempt_count,
+                        "repair_attempts": [
+                            {
+                                "attempt_index": attempt.attempt_index,
+                                "text": attempt.text,
+                                "duration_ms": attempt.duration_ms,
+                                "available_overlap_ms": attempt.available_overlap_ms,
+                                "timing_source": attempt.timing_source,
+                                "timing_variant": attempt.timing_variant,
+                                "status": attempt.status,
+                            }
+                            for attempt in artifact.repair_attempts
+                        ],
                         "output_audio_path": str(artifact.output_audio_path),
                     }
                     for artifact in artifacts
+                ],
+                "rejected_artifacts": [
+                    {
+                        "host_turn_index": artifact.host_turn_index,
+                        "interjection_style": artifact.interjection_style,
+                        "speaker": artifact.speaker,
+                        "anchor_text": artifact.anchor_text,
+                        "anchor_start_token_index": artifact.anchor_start_token_index,
+                        "anchor_end_token_index": artifact.anchor_end_token_index,
+                        "host_turn_start_time_ms": artifact.host_turn_start_time_ms,
+                        "host_turn_end_time_ms": artifact.host_turn_end_time_ms,
+                        "next_turn_start_time_ms": artifact.next_turn_start_time_ms,
+                        "legal_overlap_end_time_ms": artifact.legal_overlap_end_time_ms,
+                        "available_overlap_ms": artifact.available_overlap_ms,
+                        "timing_source": artifact.timing_source,
+                        "timing_variant": artifact.timing_variant,
+                        "failure_reason": artifact.failure_reason,
+                        "last_text": artifact.last_text,
+                        "repair_attempts": [
+                            {
+                                "attempt_index": attempt.attempt_index,
+                                "text": attempt.text,
+                                "duration_ms": attempt.duration_ms,
+                                "available_overlap_ms": attempt.available_overlap_ms,
+                                "timing_source": attempt.timing_source,
+                                "timing_variant": attempt.timing_variant,
+                                "status": attempt.status,
+                            }
+                            for attempt in artifact.repair_attempts
+                        ],
+                    }
+                    for artifact in rejected_artifacts
                 ],
             },
             manifest_path,
@@ -440,6 +642,7 @@ class InterjectorOrchestrator:
             manifest_path=manifest_path,
             generated_at_utc=generated_at_utc,
             artifacts=tuple(artifacts),
+            rejected_artifacts=tuple(rejected_artifacts),
             merged_output_audio_path=merged_output_audio_path,
         )
 
@@ -450,66 +653,202 @@ class InterjectorOrchestrator:
         manifest_bundle: _VoiceCloneManifestBundle,
         sample_refs: dict[str, Any],
         language: str,
-    ) -> tuple[list[InterjectorArtifact], list[_SynthesizedOverlay]]:
+    ) -> tuple[
+        list[InterjectorArtifact],
+        list[_SynthesizedOverlay],
+        list[RejectedInterjectionArtifact],
+    ]:
         """Render audio artifacts for a set of interjection decisions."""
         artifacts: list[InterjectorArtifact] = []
         overlays: list[_SynthesizedOverlay] = []
+        rejected_artifacts: list[RejectedInterjectionArtifact] = []
         host_turn_counts: dict[int, int] = {}
-        turn_alignment_cache: dict[int, tuple[AlignedToken, ...]] = {}
+        turn_alignment_cache: dict[int, TurnAlignmentResult] = {}
 
         for decision in decisions:
             if not decision.should_interject:
                 continue
 
             host_turn = manifest_bundle.base_turns[decision.host_turn_index - 1]
+            if (decision.interjection_speaker or "").strip() == host_turn.speaker:
+                continue
             host_turn_counts.setdefault(host_turn.turn_index, 0)
             if (
                 host_turn_counts[host_turn.turn_index]
                 >= self.max_interjections_per_host_turn
             ):
                 continue
-            aligned_tokens = turn_alignment_cache.get(host_turn.turn_index)
-            if aligned_tokens is None:
-                aligned_tokens = tuple(
-                    _align_turn_tokens(
-                        audio_path=host_turn.output_audio_path,
-                        text=host_turn.text,
-                        language=language,
-                        aligner=self.aligner,
-                        batch_size=self.alignment_batch_size,
-                    )
+            alignment_result = turn_alignment_cache.get(host_turn.turn_index)
+            if alignment_result is None:
+                alignment_result = _align_turn_tokens(
+                    audio_path=host_turn.output_audio_path,
+                    text=host_turn.text,
+                    language=language,
+                    aligner=self.aligner,
+                    batch_size=self.alignment_batch_size,
                 )
-                turn_alignment_cache[host_turn.turn_index] = aligned_tokens
-            if not aligned_tokens:
+                turn_alignment_cache[host_turn.turn_index] = alignment_result
+            if not alignment_result.tokens:
                 continue
 
-            anchor_tokens = aligned_tokens[
-                decision.anchor_start_token_index : decision.anchor_end_token_index + 1
-            ]
-            if not anchor_tokens:
-                continue
-
-            overlay_start_time_ms = self._compute_overlay_start_time_ms(
+            anchor_tokens, timing_source = self._resolve_anchor_tokens(
                 decision=decision,
                 host_turn=host_turn,
-                anchor_tokens=anchor_tokens,
+                alignment_result=alignment_result,
+                language=language,
             )
-            if overlay_start_time_ms is None:
+            if not anchor_tokens:
                 continue
 
             reference = sample_refs.get(decision.interjection_speaker or "")
             if reference is None:
                 continue
 
-            output_audio_path = self.output_dir / _build_interjection_output_filename(
-                host_turn_index=host_turn.turn_index,
-                speaker=decision.interjection_speaker or reference.speaker,
-                style=decision.interjection_style or "backchannel",
+            rendered_artifact, rejected_artifact = self._render_interjection_with_repairs(
+                decision=decision,
+                host_turn=host_turn,
+                next_turn_start_time_ms=host_turn.global_start_time_ms + host_turn.duration_ms,
+                timing_source=timing_source,
+                anchor_tokens=anchor_tokens,
+                reference_audio_path=reference.path,
+                next_turn_text=self._lookup_next_turn_text(manifest_bundle, host_turn),
+            )
+            if rendered_artifact is None:
+                if rejected_artifact is not None:
+                    rejected_artifacts.append(rejected_artifact)
+                continue
+
+            artifact, overlay = rendered_artifact
+            artifacts.append(artifact)
+            host_turn_counts[host_turn.turn_index] += 1
+            overlays.append(overlay)
+        return artifacts, overlays, rejected_artifacts
+
+    def _resolve_anchor_tokens(
+        self,
+        *,
+        decision: InterjectionDecision,
+        host_turn: _VoiceCloneBaseTurn,
+        alignment_result: TurnAlignmentResult,
+        language: str,
+    ) -> tuple[tuple[AlignedToken, ...], AlignmentSource]:
+        """Resolve anchor timing, refining fallback alignment around the anchor when possible."""
+        anchor_tokens = alignment_result.tokens[
+            decision.anchor_start_token_index : decision.anchor_end_token_index + 1
+        ]
+        if anchor_tokens and (
+            alignment_result.source != "uniform_fallback"
+            or not self.timing_refinement_enabled
+            or not self.fallback_anchor_realignment_enabled
+        ):
+            return anchor_tokens, alignment_result.source
+
+        refined_tokens = _refine_anchor_window_alignment(
+            audio_path=host_turn.output_audio_path,
+            full_text=host_turn.text,
+            anchor_start_token_index=decision.anchor_start_token_index or 0,
+            anchor_end_token_index=decision.anchor_end_token_index or 0,
+            language=language,
+            aligner=self.aligner,
+            batch_size=self.alignment_batch_size,
+        )
+        if refined_tokens:
+            return refined_tokens, "anchor_window_refinement"
+        return anchor_tokens, alignment_result.source
+
+    def _render_interjection_with_repairs(
+        self,
+        *,
+        decision: InterjectionDecision,
+        host_turn: _VoiceCloneBaseTurn,
+        next_turn_start_time_ms: int,
+        timing_source: AlignmentSource,
+        anchor_tokens: Sequence[AlignedToken],
+        reference_audio_path: Path,
+        next_turn_text: str,
+    ) -> tuple[
+        tuple[InterjectorArtifact, _SynthesizedOverlay] | None,
+        RejectedInterjectionArtifact | None,
+    ]:
+        """Render one interjection and repair it until it fits the legal overlap window."""
+        speaker = decision.interjection_speaker or ""
+        style = decision.interjection_style or "backchannel"
+        current_text = decision.interjection_text or ""
+        base_output_audio_path = self.output_dir / _build_interjection_output_filename(
+            host_turn_index=host_turn.turn_index,
+            speaker=speaker,
+            style=style,
+        )
+        repair_attempts: list[InterjectionRepairAttempt] = []
+        attempt_index = 1
+        timing_variant: Literal["default", "tightened"] = "default"
+        seen_states: set[tuple[str, str]] = set()
+
+        while True:
+            overlay_window = self._compute_overlay_timing_window(
+                decision=decision,
+                host_turn=host_turn,
+                anchor_tokens=anchor_tokens,
+                timing_variant=timing_variant,
+            )
+            if overlay_window is None:
+                seen_states.add((current_text, timing_variant))
+                if (
+                    self.repair_max_attempts is not None
+                    and attempt_index >= self.repair_max_attempts
+                ):
+                    return (
+                        None,
+                        self._build_rejected_interjection_artifact(
+                            decision=decision,
+                            host_turn=host_turn,
+                            next_turn_start_time_ms=next_turn_start_time_ms,
+                            timing_source=timing_source,
+                            timing_variant=timing_variant,
+                            last_text=current_text,
+                            available_overlap_ms=0,
+                            repair_attempts=repair_attempts,
+                            failure_reason="repair_attempt_limit_reached",
+                        ),
+                    )
+                next_state = self._next_repair_state(
+                    decision=decision,
+                    host_turn=host_turn,
+                    next_turn_text=next_turn_text,
+                    current_text=current_text,
+                    measured_duration_ms=None,
+                    available_overlap_ms=0,
+                    attempt_index=attempt_index,
+                    timing_variant=timing_variant,
+                    seen_states=seen_states,
+                )
+                if next_state is None:
+                    return (
+                        None,
+                        self._build_rejected_interjection_artifact(
+                            decision=decision,
+                            host_turn=host_turn,
+                            next_turn_start_time_ms=next_turn_start_time_ms,
+                            timing_source=timing_source,
+                            timing_variant=timing_variant,
+                            last_text=current_text,
+                            available_overlap_ms=0,
+                            repair_attempts=repair_attempts,
+                            failure_reason="no_legal_overlap_window",
+                        ),
+                    )
+                current_text, timing_variant = next_state
+                attempt_index += 1
+                continue
+
+            attempt_output_path = _build_interjection_attempt_output_path(
+                base_output_audio_path=base_output_audio_path,
+                attempt_index=attempt_index,
             )
             rendered_path = self.provider.synthesize(
-                reference_audio_path=reference.path,
-                text=decision.interjection_text or "",
-                output_audio_path=output_audio_path,
+                reference_audio_path=reference_audio_path,
+                text=current_text,
+                output_audio_path=attempt_output_path,
             )
             duration_ms = probe_audio_duration_ms(rendered_path)
             if duration_ms is None:
@@ -517,42 +856,243 @@ class InterjectorOrchestrator:
                     f"Unable to determine interjection duration for {rendered_path}."
                 )
 
-            artifact = InterjectorArtifact(
-                host_turn_index=host_turn.turn_index,
-                interjection_style=decision.interjection_style or "backchannel",
-                speaker=decision.interjection_speaker or reference.speaker,
-                text=decision.interjection_text or "",
-                anchor_text=decision.anchor_text or "",
-                anchor_start_token_index=decision.anchor_start_token_index or 0,
-                anchor_end_token_index=decision.anchor_end_token_index or 0,
-                start_time_ms=overlay_start_time_ms,
-                duration_ms=duration_ms,
-                output_audio_path=rendered_path,
-            )
-            artifacts.append(artifact)
-            host_turn_counts[host_turn.turn_index] += 1
-            overlays.append(
-                _SynthesizedOverlay(
-                    path=rendered_path,
-                    start_time_ms=overlay_start_time_ms,
+            fits_window = duration_ms <= overlay_window.available_overlap_ms
+            repair_attempts.append(
+                InterjectionRepairAttempt(
+                    attempt_index=attempt_index,
+                    text=current_text,
+                    duration_ms=duration_ms,
+                    available_overlap_ms=overlay_window.available_overlap_ms,
+                    timing_source=timing_source,
+                    timing_variant=timing_variant,
+                    status="accepted" if fits_window else "retry",
                 )
             )
-        return artifacts, overlays
+            seen_states.add((current_text, timing_variant))
+            if fits_window:
+                final_output_path = _finalize_interjection_attempt_output(
+                    rendered_path=rendered_path,
+                    final_output_path=base_output_audio_path,
+                )
+                artifact = InterjectorArtifact(
+                    host_turn_index=host_turn.turn_index,
+                    interjection_style=style,
+                    speaker=speaker,
+                    text=current_text,
+                    anchor_text=decision.anchor_text or "",
+                    anchor_start_token_index=decision.anchor_start_token_index or 0,
+                    anchor_end_token_index=decision.anchor_end_token_index or 0,
+                    start_time_ms=overlay_window.overlay_start_time_ms,
+                    end_time_ms=overlay_window.overlay_start_time_ms + duration_ms,
+                    duration_ms=duration_ms,
+                    host_turn_start_time_ms=overlay_window.host_turn_start_time_ms,
+                    host_turn_end_time_ms=overlay_window.host_turn_end_time_ms,
+                    next_turn_start_time_ms=next_turn_start_time_ms,
+                    legal_overlap_end_time_ms=overlay_window.legal_overlap_end_time_ms,
+                    available_overlap_ms=overlay_window.available_overlap_ms,
+                    timing_source=timing_source,
+                    timing_variant=timing_variant,
+                    repair_attempt_count=max(0, len(repair_attempts) - 1),
+                    repair_attempts=tuple(repair_attempts),
+                    output_audio_path=final_output_path,
+                )
+                return (
+                    (
+                        artifact,
+                        _SynthesizedOverlay(
+                            path=final_output_path,
+                            start_time_ms=overlay_window.overlay_start_time_ms,
+                        ),
+                    ),
+                    None,
+                )
 
-    def _compute_overlay_start_time_ms(
+            _remove_temp_output(rendered_path)
+            if (
+                self.repair_max_attempts is not None
+                and attempt_index >= self.repair_max_attempts
+            ):
+                return (
+                    None,
+                    self._build_rejected_interjection_artifact(
+                        decision=decision,
+                        host_turn=host_turn,
+                        next_turn_start_time_ms=next_turn_start_time_ms,
+                        timing_source=timing_source,
+                        timing_variant=timing_variant,
+                        last_text=current_text,
+                        available_overlap_ms=overlay_window.available_overlap_ms,
+                        repair_attempts=repair_attempts,
+                        failure_reason="repair_attempt_limit_reached",
+                    ),
+                )
+
+            next_state = self._next_repair_state(
+                decision=decision,
+                host_turn=host_turn,
+                next_turn_text=next_turn_text,
+                current_text=current_text,
+                available_overlap_ms=overlay_window.available_overlap_ms,
+                measured_duration_ms=duration_ms,
+                attempt_index=attempt_index,
+                timing_variant=timing_variant,
+                seen_states=seen_states,
+            )
+            if next_state is None:
+                return (
+                    None,
+                    self._build_rejected_interjection_artifact(
+                        decision=decision,
+                        host_turn=host_turn,
+                        next_turn_start_time_ms=next_turn_start_time_ms,
+                        timing_source=timing_source,
+                        timing_variant=timing_variant,
+                        last_text=current_text,
+                        available_overlap_ms=overlay_window.available_overlap_ms,
+                        repair_attempts=repair_attempts,
+                        failure_reason="repair_state_exhausted",
+                    ),
+                )
+            current_text, timing_variant = next_state
+            attempt_index += 1
+
+    def _next_repair_state(
+        self,
+        *,
+        decision: InterjectionDecision,
+        host_turn: _VoiceCloneBaseTurn,
+        next_turn_text: str,
+        current_text: str,
+        available_overlap_ms: int,
+        measured_duration_ms: int | None,
+        attempt_index: int,
+        timing_variant: Literal["default", "tightened"],
+        seen_states: set[tuple[str, str]],
+    ) -> tuple[str, Literal["default", "tightened"]] | None:
+        """Return the next repair state without relying on an arbitrary numeric cap."""
+        if not self.repair_enabled:
+            return None
+        event_bus.publish(
+            "system_message",
+            (
+                "Repairing stage-4 interjection so it fits the overlap window: "
+                f"host_turn={host_turn.turn_index}, attempt={attempt_index}, "
+                f"duration_ms={measured_duration_ms}, "
+                f"available_overlap_ms={available_overlap_ms}"
+            ),
+        )
+        text_candidates: list[str] = []
+        if measured_duration_ms is not None and attempt_index == 1:
+            planner_repair = getattr(self.planner, "repair_interjection_text", None)
+            if callable(planner_repair):
+                repaired = planner_repair(
+                    host_turn_text=host_turn.text,
+                    next_turn_text=next_turn_text,
+                    interjection_style=decision.interjection_style or "backchannel",
+                    anchor_text=decision.anchor_text or "",
+                    current_text=current_text,
+                    available_overlap_ms=available_overlap_ms,
+                    measured_duration_ms=measured_duration_ms,
+                    attempt_index=attempt_index,
+                )
+                if repaired:
+                    text_candidates.append(repaired)
+
+        text_candidates.extend(
+            candidate
+            for candidate in (
+                _deterministically_shorten_interjection_text(current_text),
+                "Mm.",
+                "Yeah.",
+                "Right.",
+            )
+            if candidate
+        )
+
+        for candidate in text_candidates:
+            normalized = " ".join(candidate.split()).strip()
+            if not normalized:
+                continue
+            if (normalized, timing_variant) in seen_states:
+                continue
+            return normalized, timing_variant
+
+        if timing_variant == "default":
+            tightened_variant: Literal["default", "tightened"] = "tightened"
+            for candidate in [current_text, *text_candidates]:
+                normalized = " ".join(candidate.split()).strip()
+                if not normalized:
+                    continue
+                if (normalized, tightened_variant) in seen_states:
+                    continue
+                return normalized, tightened_variant
+        return None
+
+    def _build_rejected_interjection_artifact(
+        self,
+        *,
+        decision: InterjectionDecision,
+        host_turn: _VoiceCloneBaseTurn,
+        next_turn_start_time_ms: int,
+        timing_source: AlignmentSource,
+        timing_variant: Literal["default", "tightened"],
+        last_text: str,
+        available_overlap_ms: int,
+        repair_attempts: Sequence[InterjectionRepairAttempt],
+        failure_reason: str,
+    ) -> RejectedInterjectionArtifact:
+        """Build one rejected interjection record for the stage-4 manifest."""
+        host_turn_end_time_ms = host_turn.global_start_time_ms + host_turn.duration_ms
+        return RejectedInterjectionArtifact(
+            host_turn_index=host_turn.turn_index,
+            interjection_style=decision.interjection_style or "backchannel",
+            speaker=decision.interjection_speaker or "",
+            anchor_text=decision.anchor_text or "",
+            anchor_start_token_index=decision.anchor_start_token_index or 0,
+            anchor_end_token_index=decision.anchor_end_token_index or 0,
+            host_turn_start_time_ms=host_turn.global_start_time_ms,
+            host_turn_end_time_ms=host_turn_end_time_ms,
+            next_turn_start_time_ms=next_turn_start_time_ms,
+            legal_overlap_end_time_ms=max(
+                host_turn.global_start_time_ms,
+                host_turn_end_time_ms - self.turn_end_guard_ms,
+            ),
+            available_overlap_ms=available_overlap_ms,
+            timing_source=timing_source,
+            timing_variant=timing_variant,
+            failure_reason=failure_reason,
+            last_text=last_text,
+            repair_attempts=tuple(repair_attempts),
+        )
+
+    def _lookup_next_turn_text(
+        self,
+        manifest_bundle: _VoiceCloneManifestBundle,
+        host_turn: _VoiceCloneBaseTurn,
+    ) -> str:
+        """Return the next full summary turn text after the host turn."""
+        next_turn_offset = host_turn.turn_index
+        if next_turn_offset < len(manifest_bundle.base_turns):
+            return manifest_bundle.base_turns[next_turn_offset].text
+        return ""
+
+    def _compute_overlay_timing_window(
         self,
         *,
         decision: InterjectionDecision,
         host_turn: _VoiceCloneBaseTurn,
         anchor_tokens: Sequence[AlignedToken],
-    ) -> int | None:
-        """Return global overlay onset for a validated decision or ``None``."""
+        timing_variant: Literal["default", "tightened"] = "default",
+    ) -> _OverlayTimingWindow | None:
+        """Return the legal overlap timing window for a validated decision."""
         if host_turn.duration_ms <= 0:
             return None
 
         anchor_start_ms = host_turn.global_start_time_ms + anchor_tokens[0].start_time_ms
         anchor_end_ms = host_turn.global_start_time_ms + anchor_tokens[-1].end_time_ms
-        if (decision.interjection_style or "backchannel") == "echo_agreement":
+        if timing_variant == "tightened":
+            overlay_start_time_ms = anchor_start_ms
+        elif (decision.interjection_style or "backchannel") == "echo_agreement":
             # IEEE citation: Adapted overlap-start heuristic from turn-projection and
             # backchannel timing literature [2], [4], [5].
             overlay_start_time_ms = anchor_start_ms + self.echo_alignment_offset_ms
@@ -569,15 +1109,22 @@ class InterjectorOrchestrator:
         if progress_ratio > self.max_host_progress_ratio:
             return None
 
-        available_overlap_ms = (
-            host_turn.global_start_time_ms
-            + host_turn.duration_ms
-            - self.turn_end_guard_ms
-            - overlay_start_time_ms
+        host_turn_end_time_ms = host_turn.global_start_time_ms + host_turn.duration_ms
+        legal_overlap_end_time_ms = max(
+            host_turn.global_start_time_ms,
+            host_turn_end_time_ms - self.turn_end_guard_ms,
         )
-        if available_overlap_ms < self.min_available_overlap_ms:
+        available_overlap_ms = legal_overlap_end_time_ms - overlay_start_time_ms
+        if available_overlap_ms <= 0:
             return None
-        return overlay_start_time_ms
+        return _OverlayTimingWindow(
+            overlay_start_time_ms=overlay_start_time_ms,
+            host_turn_start_time_ms=host_turn.global_start_time_ms,
+            host_turn_end_time_ms=host_turn_end_time_ms,
+            next_turn_start_time_ms=host_turn_end_time_ms,
+            legal_overlap_end_time_ms=legal_overlap_end_time_ms,
+            available_overlap_ms=available_overlap_ms,
+        )
 
 
 @contextmanager
@@ -899,6 +1446,25 @@ def _extract_decisions_array_text(candidate: str) -> str | None:
     return candidate[match.end() :]
 
 
+def _parse_interjection_repair_payload(raw_response: str) -> InterjectionRepairPayload | None:
+    """Parse one repair-only JSON payload from an LLM response."""
+    candidate = raw_response.strip()
+    if not candidate:
+        return None
+    try:
+        return InterjectionRepairPayload.model_validate_json(candidate)
+    except Exception:
+        pass
+
+    match = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
+    if match is None:
+        return None
+    try:
+        return InterjectionRepairPayload.model_validate_json(match.group(0))
+    except Exception:
+        return None
+
+
 def _validate_llm_decisions(
     raw_decisions: Sequence[InterjectionDecision],
     *,
@@ -1039,6 +1605,26 @@ def _texts_share_anchor_tokens(interjection_text: str, anchor_text: str) -> bool
     return bool(interjection_tokens & anchor_tokens)
 
 
+def _estimate_target_word_budget(
+    *,
+    available_overlap_ms: int,
+    max_interjection_words: int,
+) -> int:
+    """Estimate a practical word budget from the available overlap window."""
+    estimated = max(1, available_overlap_ms // 320)
+    return max(1, min(max_interjection_words, int(estimated)))
+
+
+def _deterministically_shorten_interjection_text(text: str) -> str:
+    """Return a shorter fallback candidate when the repair LLM cannot help."""
+    tokens = _split_tokens(text)
+    if not tokens:
+        return "Mm."
+    if len(tokens) == 1:
+        return "Mm."
+    return " ".join(tokens[:-1]).strip()
+
+
 def _split_tokens(text: str) -> list[str]:
     """Return stable whitespace-tokenized text used by the LLM contract."""
     return [token for token in re.split(r"\s+", text.strip()) if token]
@@ -1057,11 +1643,11 @@ def _align_turn_tokens(
     language: str,
     aligner: CtcForcedAlignerGateway | None,
     batch_size: int,
-) -> list[AlignedToken]:
+) -> TurnAlignmentResult:
     """Align host-turn tokens to the synthesized stage-3 audio artifact."""
     tokens = _split_tokens(text)
     if not tokens:
-        return []
+        return TurnAlignmentResult(tokens=(), source="uniform_fallback")
 
     duration_ms = probe_audio_duration_ms(audio_path)
     if duration_ms is None:
@@ -1070,7 +1656,10 @@ def _align_turn_tokens(
         )
 
     if aligner is None:
-        return _fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)
+        return TurnAlignmentResult(
+            tokens=tuple(_fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)),
+            source="uniform_fallback",
+        )
 
     try:
         waveform = _decode_audio_waveform(audio_path)
@@ -1082,10 +1671,16 @@ def _align_turn_tokens(
             batch_size=batch_size,
         )
     except Exception:
-        return _fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)
+        return TurnAlignmentResult(
+            tokens=tuple(_fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)),
+            source="uniform_fallback",
+        )
 
     if len(aligned_words) != len(tokens):
-        return _fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)
+        return TurnAlignmentResult(
+            tokens=tuple(_fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)),
+            source="uniform_fallback",
+        )
 
     matches = sum(
         1
@@ -1093,16 +1688,90 @@ def _align_turn_tokens(
         if _normalize_token(token) == _normalize_token(aligned_word.word)
     )
     if matches < max(1, len(tokens) // 2):
-        return _fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)
-
-    return [
-        AlignedToken(
-            token=token,
-            start_time_ms=aligned_word.start_time_ms,
-            end_time_ms=aligned_word.end_time_ms,
+        return TurnAlignmentResult(
+            tokens=tuple(_fallback_aligned_tokens(tokens=tokens, duration_ms=duration_ms)),
+            source="uniform_fallback",
         )
-        for token, aligned_word in zip(tokens, aligned_words, strict=True)
-    ]
+    return TurnAlignmentResult(
+        tokens=tuple(
+            AlignedToken(
+                token=token,
+                start_time_ms=aligned_word.start_time_ms,
+                end_time_ms=aligned_word.end_time_ms,
+            )
+            for token, aligned_word in zip(tokens, aligned_words, strict=True)
+        ),
+        source="forced_alignment",
+    )
+
+
+def _refine_anchor_window_alignment(
+    *,
+    audio_path: Path,
+    full_text: str,
+    anchor_start_token_index: int,
+    anchor_end_token_index: int,
+    language: str,
+    aligner: CtcForcedAlignerGateway | None,
+    batch_size: int,
+) -> tuple[AlignedToken, ...]:
+    """Retry alignment on a small anchor-centered transcript window when full-turn alignment falls back."""
+    if aligner is None:
+        return ()
+
+    full_tokens = _split_tokens(full_text)
+    if not full_tokens:
+        return ()
+    window_start_index = max(0, anchor_start_token_index - 1)
+    window_end_index = min(len(full_tokens) - 1, anchor_end_token_index + 1)
+    if window_end_index < window_start_index:
+        return ()
+
+    window_tokens = full_tokens[window_start_index : window_end_index + 1]
+    if not window_tokens:
+        return ()
+
+    duration_ms = probe_audio_duration_ms(audio_path)
+    if duration_ms is None:
+        raise NonRetryableAudioStageError(
+            f"Unable to determine duration for voice-clone artifact {audio_path}."
+        )
+
+    try:
+        waveform = _decode_audio_waveform(audio_path)
+        aligned_words = aligner.align_words(
+            audio_waveform=waveform,
+            transcript_text=" ".join(window_tokens),
+            language=language,
+            device="cpu",
+            batch_size=batch_size,
+        )
+    except Exception:
+        return ()
+
+    if len(aligned_words) != len(window_tokens):
+        return ()
+    matches = sum(
+        1
+        for token, aligned_word in zip(window_tokens, aligned_words, strict=True)
+        if _normalize_token(token) == _normalize_token(aligned_word.word)
+    )
+    if matches < max(1, len(window_tokens) // 2):
+        return ()
+
+    local_anchor_start = anchor_start_token_index - window_start_index
+    local_anchor_end = anchor_end_token_index - window_start_index
+    if local_anchor_start < 0 or local_anchor_end >= len(aligned_words):
+        return ()
+
+    return tuple(
+        AlignedToken(
+            token=window_tokens[index],
+            start_time_ms=aligned_words[index].start_time_ms,
+            end_time_ms=aligned_words[index].end_time_ms,
+        )
+        for index in range(local_anchor_start, local_anchor_end + 1)
+    )
 
 
 def _decode_audio_waveform(audio_path: Path) -> Any:
@@ -1312,6 +1981,32 @@ def _build_interjection_output_filename(
     if not sanitized_speaker:
         sanitized_speaker = "speaker"
     return f"{host_turn_index:03d}_{style}_{sanitized_speaker}.wav"
+
+
+def _build_interjection_attempt_output_path(
+    *,
+    base_output_audio_path: Path,
+    attempt_index: int,
+) -> Path:
+    """Return the temporary synth path for one interjection repair attempt."""
+    stem = base_output_audio_path.stem
+    suffix = base_output_audio_path.suffix or ".wav"
+    return base_output_audio_path.with_name(f"{stem}.attempt_{attempt_index:03d}{suffix}")
+
+
+def _finalize_interjection_attempt_output(
+    *,
+    rendered_path: Path,
+    final_output_path: Path,
+) -> Path:
+    """Move the accepted attempt output into the canonical interjection artifact path."""
+    final_output_path.parent.mkdir(parents=True, exist_ok=True)
+    if rendered_path == final_output_path:
+        return final_output_path
+    if final_output_path.exists():
+        final_output_path.unlink()
+    rendered_path.replace(final_output_path)
+    return final_output_path
 
 
 def _mix_audio_with_overlays(
