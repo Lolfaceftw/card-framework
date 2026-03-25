@@ -195,7 +195,7 @@ def test_linker_preserves_existing_explicit_vectors_when_configured() -> None:
         text="hello from stage two",
         emo_preset="engaged",
         emotion_vector=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20],
-        emotion_vector_source="preset_vector",
+        emotion_vector_source="manual_override",
     )
 
     result = SummaryTurnEmotionLinker(
@@ -208,7 +208,7 @@ def test_linker_preserves_existing_explicit_vectors_when_configured() -> None:
     ).link_turns(turns=[turn], transcript=transcript)
 
     assert result.linked_turn_count == 0
-    assert result.turns[0].emotion_vector_source == "preset_vector"
+    assert result.turns[0].emotion_vector_source == "manual_override"
     assert result.turns[0].emotion_vector == EmotionVector.from_raw(
         [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20]
     )

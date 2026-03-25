@@ -20,11 +20,14 @@ def test_summary_xml_roundtrips_emotion_vector() -> None:
         ]
     )
 
+    assert 'emo_preset=' not in xml
+    assert 'emotion_categories="calm, happy, surprised"' in xml
+
     turns = parse_summary_xml(xml)
 
     assert len(turns) == 1
     assert turns[0].speaker == "SPEAKER_00"
-    assert turns[0].emo_preset == "warm"
+    assert turns[0].emo_preset == "neutral"
     assert turns[0].emotion_vector == EmotionVector.from_raw(
         [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24]
     )
@@ -46,6 +49,9 @@ def test_summary_xml_roundtrips_linked_support_metadata() -> None:
             )
         ]
     )
+
+    assert 'emo_preset=' not in xml
+    assert 'emotion_categories=' in xml
 
     turns = parse_summary_xml(xml)
 

@@ -204,9 +204,6 @@ class LiveDraftVoiceCloneSession:
     state_path: Path
     output_dir: Path
     speaker_samples_manifest_path: Path
-    emo_preset_catalog: dict[str, str] | None = None
-    emo_preset_vector_catalog: dict[str, EmotionVector] | None = None
-    emo_text_fallback_enabled: bool = False
     manifest_filename: str = "manifest.json"
     merge_segments: bool = True
     merged_output_filename: str = "voice_cloned.wav"
@@ -230,17 +227,6 @@ class LiveDraftVoiceCloneSession:
             state_path=state_path,
             output_dir=orchestrator.output_dir,
             speaker_samples_manifest_path=speaker_samples_manifest_path.resolve(),
-            emo_preset_catalog=(
-                dict(orchestrator.emo_preset_catalog)
-                if orchestrator.emo_preset_catalog
-                else None
-            ),
-            emo_preset_vector_catalog=(
-                dict(orchestrator.emo_preset_vector_catalog)
-                if orchestrator.emo_preset_vector_catalog
-                else None
-            ),
-            emo_text_fallback_enabled=orchestrator.emo_text_fallback_enabled,
             manifest_filename=orchestrator.manifest_filename,
             merge_segments=orchestrator.merge_segments,
             merged_output_filename=orchestrator.merged_output_filename,
@@ -332,10 +318,6 @@ class LiveDraftVoiceCloneSession:
         resolved_emotion = _resolve_voice_clone_emotion(
             explicit_emotion_vector=emotion_vector,
             explicit_emotion_vector_source=emotion_vector_source,
-            emo_preset=emo_preset,
-            emo_preset_vector_catalog=self.emo_preset_vector_catalog,
-            emo_preset_catalog=self.emo_preset_catalog,
-            emo_text_fallback_enabled=self.emo_text_fallback_enabled,
         )
         rendered_path = self.provider.synthesize(
             reference_audio_path=reference.path,
@@ -685,7 +667,6 @@ def _snapshot_matches_summary_xml(
     for item, turn in zip(snapshot, turns, strict=True):
         speaker_id = str(item.get("speaker_id", "")).strip()
         content = str(item.get("content", ""))
-        emo_preset = str(item.get("emo_preset", "")).strip() or "neutral"
         emotion_vector = serialize_emotion_vector(item.get("emotion_vector"))
         source_segment_indices = [
             int(value) for value in list(item.get("source_segment_indices", []))
@@ -697,7 +678,6 @@ def _snapshot_matches_summary_xml(
         if (
             speaker_id != turn.speaker
             or content != turn.text
-            or emo_preset != turn.emo_preset
             or emotion_vector
             != serialize_emotion_vector(
                 turn.emotion_vector.to_list() if turn.emotion_vector is not None else None

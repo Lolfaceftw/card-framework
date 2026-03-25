@@ -264,10 +264,6 @@ class AddSpeakerMessageHandler(ToolHandler):
                         "type": "string",
                         "description": "The summarized content for this speaker turn.",
                     },
-                    "emo_preset": {
-                        "type": "string",
-                        "description": "Preset emotion/style label for this speaker turn.",
-                    },
                     "emotion_vector": {
                         "type": "array",
                         "description": (
@@ -279,7 +275,7 @@ class AddSpeakerMessageHandler(ToolHandler):
                         "maxItems": 8,
                     },
                 },
-                "required": ["speaker_id", "content", "emo_preset"],
+                "required": ["speaker_id", "content"],
             },
         }
 
@@ -309,11 +305,9 @@ class AddSpeakerMessageHandler(ToolHandler):
         if content_error is not None:
             return content_error
 
-        emo_preset, emo_preset_error = _require_non_empty_string_argument(
-            arguments, "emo_preset"
-        )
-        if emo_preset_error is not None:
-            return emo_preset_error
+        emo_preset = str(arguments.get("emo_preset", DEFAULT_EMO_PRESET)).strip()
+        if not emo_preset:
+            emo_preset = DEFAULT_EMO_PRESET
         emotion_vector, emotion_vector_error = _coerce_optional_emotion_vector(arguments)
         if emotion_vector_error is not None:
             return emotion_vector_error
@@ -467,13 +461,6 @@ class EditMessageHandler(ToolHandler):
                     "new_content": {
                         "type": "string",
                         "description": "The replacement content.",
-                    },
-                    "emo_preset": {
-                        "type": "string",
-                        "description": (
-                            "Optional replacement emo preset for this line. If omitted, "
-                            "the existing preset is preserved."
-                        ),
                     },
                     "emotion_vector": {
                         "type": "array",

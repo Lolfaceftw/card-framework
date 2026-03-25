@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 
 from card_framework.agents.message_registry import MessageRegistry
-from card_framework.agents.tool_handlers import AddSpeakerMessageHandler, BudgetContext
+from card_framework.agents.tool_handlers import (
+    AddSpeakerMessageHandler,
+    BudgetContext,
+    EditMessageHandler,
+)
 from card_framework.audio_pipeline.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
     SummaryTurnEmotionLinkingConfig,
@@ -39,6 +43,24 @@ def test_add_speaker_message_schema_exposes_available_speakers() -> None:
     speaker_id_schema = handler.schema["parameters"]["properties"]["speaker_id"]
 
     assert speaker_id_schema["enum"] == ["SPEAKER_00"]
+    assert handler.schema["parameters"]["required"] == ["speaker_id", "content"]
+    assert "emo_preset" not in handler.schema["parameters"]["properties"]
+
+
+def test_edit_message_schema_exposes_vector_only_controls() -> None:
+    registry = MessageRegistry()
+    handler = EditMessageHandler(
+        registry,
+        BudgetContext(
+            registry,
+            calibration=None,
+            target_seconds=30,
+            duration_tolerance_ratio=0.05,
+        ),
+    )
+
+    assert handler.schema["parameters"]["required"] == ["line", "new_content"]
+    assert "emo_preset" not in handler.schema["parameters"]["properties"]
 
 
 def test_add_speaker_message_rejects_unknown_speaker_id() -> None:
@@ -127,7 +149,6 @@ def test_add_speaker_message_prelinks_source_grounded_vector() -> None:
                     apply_indextts_bias=False,
                 )
             ),
-            emo_preset_vector_catalog={},
         ),
         transcript=transcript,
     )

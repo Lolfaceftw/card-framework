@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -13,9 +13,7 @@ from card_framework.audio_pipeline.summary_turn_emotion_linker import (
 from card_framework.orchestration.transcript import Transcript
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, SummaryTurn
 
-_VALID_RESOLUTION_STEPS = frozenset(
-    {"source_linked", "explicit", "preset", "emo_text"}
-)
+_VALID_RESOLUTION_STEPS = frozenset({"source_linked", "explicit"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -27,7 +25,6 @@ class TurnEmotionResolutionConfig:
     fallback_order: tuple[str, ...] = (
         "source_linked",
         "explicit",
-        "preset",
     )
 
     def __post_init__(self) -> None:
@@ -94,12 +91,6 @@ class ResolvedTurnEmotion:
         object.__setattr__(self, "source_segment_indices", indices)
         object.__setattr__(self, "source_segment_weights", weights)
 
-    @property
-    def should_use_emo_text_fallback(self) -> bool:
-        """Return whether stage-3 should fall back to emo_text for this turn."""
-        return self.emotion_vector is None and self.emotion_vector_source == "emo_text"
-
-
 class TurnEmotionResolutionStrategy(Protocol):
     """Protocol for resolving one turn into a render-ready emotion payload."""
 
@@ -109,7 +100,7 @@ class TurnEmotionResolutionStrategy(Protocol):
         turn: SummaryTurn,
         transcript: Transcript,
     ) -> ResolvedTurnEmotion:
-        """Resolve one turn into an explicit vector or an emo_text fallback."""
+        """Resolve one turn into an explicit vector or no extra emotion control."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,7 +109,6 @@ class SourceLinkedTurnEmotionResolutionStrategy:
 
     config: TurnEmotionResolutionConfig
     linker: SummaryTurnEmotionLinker | None
-    emo_preset_vector_catalog: Mapping[str, EmotionVector] | None = None
 
     def resolve_turn(
         self,
@@ -143,20 +133,6 @@ class SourceLinkedTurnEmotionResolutionStrategy:
                     emotion_vector_source=turn.emotion_vector_source or "explicit",
                     source_segment_indices=turn.source_segment_indices,
                     source_segment_weights=turn.source_segment_weights,
-                    effective_emo_preset=effective_emo_preset,
-                )
-            elif step == "preset":
-                preset_vector = self._resolve_preset_vector(effective_emo_preset)
-                if preset_vector is not None:
-                    return ResolvedTurnEmotion(
-                        emotion_vector=preset_vector,
-                        emotion_vector_source="preset_vector",
-                        effective_emo_preset=effective_emo_preset,
-                    )
-            elif step == "emo_text":
-                return ResolvedTurnEmotion(
-                    emotion_vector=None,
-                    emotion_vector_source="emo_text",
                     effective_emo_preset=effective_emo_preset,
                 )
         return ResolvedTurnEmotion(
@@ -193,17 +169,6 @@ class SourceLinkedTurnEmotionResolutionStrategy:
             source_segment_indices=linked_turn.source_segment_indices,
             source_segment_weights=linked_turn.source_segment_weights,
             effective_emo_preset=effective_emo_preset,
-        )
-
-    def _resolve_preset_vector(self, emo_preset: str) -> EmotionVector | None:
-        """Resolve one configured preset vector when available."""
-        if not self.emo_preset_vector_catalog:
-            return None
-        raw_vector = self.emo_preset_vector_catalog.get(emo_preset)
-        if raw_vector is not None:
-            return EmotionVector.from_raw(raw_vector)
-        return EmotionVector.from_raw(
-            self.emo_preset_vector_catalog.get(DEFAULT_EMO_PRESET)
         )
 
 

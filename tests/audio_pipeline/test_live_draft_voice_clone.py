@@ -178,7 +178,84 @@ def test_restore_snapshot_matches_summary_xml_with_link_metadata(
     assert restored[0]["source_segment_weights"] == [0.7, 0.3]
 
 
-def test_live_draft_render_turn_uses_preset_vector_and_records_actual_source(
+def test_restore_snapshot_ignores_emo_preset_when_summary_xml_omits_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sample_dir = tmp_path / "speaker_samples"
+    sample_dir.mkdir()
+    sample_path = sample_dir / "speaker.wav"
+    sample_path.write_bytes(b"sample")
+    manifest_path = sample_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "path": str(sample_path),
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_probe_audio_duration_ms(_path: Path) -> int:
+        return 2400
+
+    import card_framework.audio_pipeline.live_draft_voice_clone as live_draft_module
+
+    monkeypatch.setattr(
+        live_draft_module,
+        "probe_audio_duration_ms",
+        _fake_probe_audio_duration_ms,
+    )
+
+    state_path = tmp_path / "voice_clone" / "live_draft_test.state.json"
+    session = LiveDraftVoiceCloneSession(
+        provider=_FakeVoiceCloneProvider(),
+        state_path=state_path,
+        output_dir=state_path.parent,
+        speaker_samples_manifest_path=manifest_path,
+    )
+
+    session.render_turn(
+        turn_id="turn-001",
+        speaker="SPEAKER_00",
+        text="Hello there.",
+        emo_preset="warm",
+        emotion_vector=[0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24],
+        emotion_vector_source="manual_override",
+    )
+    session.sync_snapshot(
+        [
+            {
+                "line": 1,
+                "turn_id": "turn-001",
+                "speaker_id": "SPEAKER_00",
+                "content": "Hello there.",
+                "emo_preset": "warm",
+                "emotion_vector": [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24],
+                "emotion_vector_source": "manual_override",
+            }
+        ]
+    )
+
+    restored = session.restore_snapshot_for_draft(
+        '<SPEAKER_00 emotion_categories="calm, happy, surprised" '
+        'emotion_vector="0.140000,0.000000,0.000000,0.000000,0.000000,0.000000,0.020000,0.240000" '
+        'emotion_vector_source="manual_override">'
+        "Hello there."
+        "</SPEAKER_00>"
+    )
+
+    assert restored is not None
+    assert restored[0]["emo_preset"] == "warm"
+
+
+def test_live_draft_render_turn_uses_explicit_vector_and_records_actual_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -219,10 +296,6 @@ def test_live_draft_render_turn_uses_preset_vector_and_records_actual_source(
         state_path=tmp_path / "voice_clone" / "state.json",
         output_dir=tmp_path / "voice_clone",
         speaker_samples_manifest_path=manifest_path,
-        emo_preset_catalog={"warm": "warmly"},
-        emo_preset_vector_catalog={
-            "warm": [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24]
-        },
     )
 
     record = session.render_turn(
@@ -230,12 +303,13 @@ def test_live_draft_render_turn_uses_preset_vector_and_records_actual_source(
         speaker="SPEAKER_00",
         text="Hello there.",
         emo_preset="warm",
-        emotion_vector_source="summary_turn_linking",
+        emotion_vector=[0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24],
+        emotion_vector_source="manual_override",
     )
 
     assert provider.calls[0]["emo_text"] is None
     assert provider.calls[0]["emotion_vector"] is not None
-    assert record.emotion_vector_source == "preset_vector"
+    assert record.emotion_vector_source == "manual_override"
 
 
 def test_live_draft_render_turn_disables_emo_text_fallback_by_default(
@@ -279,7 +353,6 @@ def test_live_draft_render_turn_disables_emo_text_fallback_by_default(
         state_path=tmp_path / "voice_clone" / "state.json",
         output_dir=tmp_path / "voice_clone",
         speaker_samples_manifest_path=manifest_path,
-        emo_preset_catalog={"warm": "warmly"},
     )
 
     record = session.render_turn(

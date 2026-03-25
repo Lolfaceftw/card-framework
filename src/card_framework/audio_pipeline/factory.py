@@ -15,7 +15,6 @@ from card_framework.audio_pipeline.affect_analysis import (
 )
 from card_framework.audio_pipeline.audio_normalization import AudioNormalizationPolicy
 from card_framework.audio_pipeline.contracts import SourceSeparator, SpeakerDiarizer, SpeechTranscriber
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector
 from card_framework.audio_pipeline.eta import (
     EtaUnitStageName,
     LinearStageEtaStrategy,
@@ -374,22 +373,6 @@ def build_voice_clone_orchestrator(
             voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav")
         ),
         merge_timeout_seconds=int(voice_clone_cfg.get("merge_timeout_seconds", 300)),
-        emo_preset_catalog={
-            str(name).strip(): str(emo_text).strip()
-            for name, emo_text in _as_mapping(voice_clone_cfg.get("emo_presets", {})).items()
-            if str(name).strip() and str(emo_text).strip()
-        },
-        emo_preset_vector_catalog={
-            str(name).strip(): vector
-            for name, raw_vector in _as_mapping(
-                voice_clone_cfg.get("emo_preset_vectors", {})
-            ).items()
-            if str(name).strip()
-            if (vector := EmotionVector.from_raw(raw_vector)) is not None
-        },
-        emo_text_fallback_enabled=bool(
-            voice_clone_cfg.get("emo_text_fallback_enabled", False)
-        ),
         merged_output_normalization=_build_audio_normalization_policy(
             _as_mapping(voice_clone_cfg.get("normalization", {}))
         ),
@@ -459,10 +442,9 @@ def build_turn_emotion_resolution_strategy(
 ) -> SourceLinkedTurnEmotionResolutionStrategy:
     """Build the live-draft turn-emotion resolution strategy from config."""
     summary_turn_emotion_cfg = _as_mapping(audio_cfg.get("summary_turn_emotion", {}))
-    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
     raw_fallback_order = summary_turn_emotion_cfg.get(
         "fallback_order",
-        ["source_linked", "explicit", "preset"],
+        ["source_linked", "explicit"],
     )
     if isinstance(raw_fallback_order, str):
         fallback_order = tuple(
@@ -488,14 +470,6 @@ def build_turn_emotion_resolution_strategy(
             fallback_order=fallback_order,
         ),
         linker=build_summary_turn_emotion_linker(audio_cfg),
-        emo_preset_vector_catalog={
-            str(name).strip(): vector
-            for name, raw_vector in _as_mapping(
-                voice_clone_cfg.get("emo_preset_vectors", {})
-            ).items()
-            if str(name).strip()
-            if (vector := EmotionVector.from_raw(raw_vector)) is not None
-        },
     )
 
 

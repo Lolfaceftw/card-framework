@@ -44,8 +44,6 @@ Resolution order:
 
 1. `source-linked vector`
 2. `explicit turn vector`
-3. `preset vector`
-4. `emo_text`
 
 Expected result:
 

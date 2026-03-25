@@ -32,11 +32,10 @@ If you receive a stall or repetition warning: OVER duration -> remove or shorten
 Because you process text in tokens, you are neurologically incapable of accurately estimating speech duration or counting words natively. You MUST rely on deterministic tools.
 
 Available tools:
-- `add_speaker_message(speaker_id, content, emo_preset)` -> Adds ONE speaker turn. Pick `emo_preset` from the approved set below. The system will automatically call `estimate_duration` and `count_words` right after.
-- `add_speaker_message(speaker_id, content, emo_preset, emotion_vector?)` -> You MAY include `emotion_vector` when the transcript excerpt already provides a strong source-grounded delivery vector. Use the exact 8-number order: happy, angry, sad, afraid, disgusted, melancholic, surprised, calm.
+- `add_speaker_message(speaker_id, content, emotion_vector?)` -> Adds ONE speaker turn. The system will automatically call `estimate_duration` and `count_words` right after. If the transcript excerpt already provides a strong source-grounded delivery vector, include it in the exact 8-number order: happy, angry, sad, afraid, disgusted, melancholic, surprised, calm.
 - `estimate_duration()` -> Returns the current duration total, per-message breakdown (with line numbers), and per-speaker duration totals. In live audio mode this reflects actual rendered audio; otherwise it reflects calibrated estimates. Called automatically after each mutation, but you can also call it manually at any time.
 - `count_words()` -> Returns total word count and per-speaker word totals for telemetry. Duration, not word count, is the main objective.
-- `edit_message(line, new_content, emo_preset?, emotion_vector?)` -> Replaces the content at a specific line number and can also change the emotion preset or direct vector when needed.
+- `edit_message(line, new_content, emotion_vector?)` -> Replaces the content at a specific line number and can also change the direct vector when needed.
 - `remove_message(line)` -> Removes the message at a line number. Remaining messages re-index.
 {% if is_embedding_enabled %}
 - `query_transcript(query, top_k?)` -> Searches the original transcript for segments matching your query. Use this when you need to recall what a speaker said about a specific topic, verify facts, or find additional details to include.
@@ -45,13 +44,8 @@ Available tools:
 - `finalize_draft()` -> Call this ONLY when you are fully satisfied with the draft. This submits it to the Critic. Do NOT call this until you have reviewed your work.
 </tool_usage_rules>
 
-<emo_presets>
-Use ONLY these emotion presets when adding or editing lines:
-{{ emo_preset_guide }}
-</emo_presets>
-
-If transcript lines include `[affect: ...]`, treat that as audio-grounded delivery evidence from the source segment. Use it to guide `emo_preset` selection and tone, but never let it override the actual transcript content or speaker identity.
-If transcript lines include `[emotion_vector: ...]`, prefer reusing that vector for the corresponding summary turn when the turn is still expressing the same delivery. Do not invent arbitrary vectors when the transcript does not support them.
+If transcript lines include `[affect: ...]`, treat that as audio-grounded delivery evidence from the source segment. Use it to guide tone, but never let it override the actual transcript content or speaker identity.
+If transcript lines include `[emotion_vector: ...]`, prefer reusing that vector for the corresponding summary turn when the turn is still expressing the same delivery. Do not invent arbitrary vectors when the transcript does not support them. The final summary XML will expose the raw vector and readable derived emotion categories automatically.
 {% if is_embedding_enabled %}
 <query_rules>
 Your question for the queries in tools should be about finding information. Queries will not be questions. You will treat it as a search engine. You are interacting with an embedding model for the queries. For example:
@@ -92,15 +86,14 @@ Read the full transcript carefully, and then proceed to the planning phase to pl
 Do planning internally before your next tool call. Do NOT call any `scratchpad` tool and do NOT emit `<scratchpad>` tags. Plan the dialogue structure:
 - Identify the key speakers and the order of their turns.
 - Estimate how many seconds each turn should roughly contribute to hit {{ min_seconds }}-{{ max_seconds }} total.
-- Choose an `emo_preset` for each turn based on the intended delivery.
-- Reuse transcript-provided `emotion_vector` values when they clearly match the source delivery and the turn remains semantically aligned.
+- Reuse transcript-provided `emotion_vector` values when they clearly match the source delivery and the turn remains semantically aligned. If the transcript does not support a clear vector for a turn, omit it instead of inventing a preset label.
 - Note which transcript topics each turn should cover.
 </phase_1_planning>
 
 <phase_2_incremental_build>
 Build the summary ONE speaker message at a time:
 1. Write SPEAKER_XX's message in your scratchpad.
-2. Call `add_speaker_message(speaker_id, content, emo_preset)` with that message.
+2. Call `add_speaker_message(speaker_id, content, emotion_vector?)` with that message.
 3. The system will automatically return `estimate_duration` and `count_words` results. Review the running duration total first.
 4. If the total is within {{ min_seconds }}-{{ max_seconds }}, the system will auto-save a draft. Review it, then continue or call `finalize_draft` when ready.
 5. Repeat for each speaker turn.
@@ -111,8 +104,8 @@ Each assistant response must contain exactly one tool call.
 
 <phase_3_budget_adjustment>
 If after adding all intended messages the total is OUTSIDE the budget:
-- OVER {{ max_seconds }} seconds: Use `edit_message(line, shorter_content, emo_preset?)` to trim specific messages, or `remove_message(line)` to drop a turn entirely.
-- UNDER {{ min_seconds }} seconds: Use `edit_message(line, expanded_content, emo_preset?)` to expand specific messages, or add more speaker turns with `add_speaker_message`.
+- OVER {{ max_seconds }} seconds: Use `edit_message(line, shorter_content, emotion_vector?)` to trim specific messages, or `remove_message(line)` to drop a turn entirely.
+- UNDER {{ min_seconds }} seconds: Use `edit_message(line, expanded_content, emotion_vector?)` to expand specific messages, or add more speaker turns with `add_speaker_message`.
 - After each adjustment, review the auto-returned `estimate_duration` to see if the budget is now met.
 </phase_3_budget_adjustment>
 

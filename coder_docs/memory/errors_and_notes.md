@@ -1,3 +1,15 @@
+### 2026-03-25T19:32:00+08:00 - Delegation Docs Must Be Config-Based, Not Hardcoded By Role Name
+- Problem: Runtime guidance still described one fixed delegated role model in places and tied web-research rules to a specific role name, which could discourage valid implementation or monitoring roles when the local sub-agent inventory is broader.
+- Solution: Treat the local runtime's delegation config as the source of truth, update `coder_docs/research_agents.md` to be role-name agnostic by using configured role descriptions, and keep `AGENTS.md`, `coder_docs/codebase_guide.md`, and related docs aligned with that capability-based model.
+
+### 2026-03-25T19:05:00+08:00 - Final Summary XML Should Emit Direct Emotion Vectors Plus Readable Categories, Not `emo_preset`
+- Problem: Even after stage-2 and stage-3 synthesis became vector-only, the emitted `summary.xml` still serialized `emo_preset`, which made the runtime look preset-driven from the outside and caused live-draft snapshot reuse to compare against a field that no longer represented the real TTS control path.
+- Solution: Stop serializing `emo_preset` in new summary XML, emit `emotion_vector` plus readable `emotion_categories` instead, keep the parser backward-compatible with older preset-bearing XML, and ignore omitted preset labels when validating reusable live-draft snapshots against the saved summary.
+
+### 2026-03-25T18:25:00+08:00 - Stage-2 And Stage-3 Emotion Control Must Stay Strictly Vector-Only Once Source Linking Exists
+- Problem: The runtime still carried two preset-derived escape hatches in turn-resolution and direct stage-3/live-draft synthesis: preset vectors and optional `emo_text`. That meant summary turns without a linked or explicit vector could still re-enter coarse preset-driven emotion control, which flattened the source-linked emotion system back toward the old bucketed behavior.
+- Solution: Make the shipped runtime strictly vector-only: resolve only `source_linked -> explicit`, keep `emo_preset` as readable metadata, stop converting presets into stage-3/live-draft vectors, and stop deriving stage-3/live-draft `emo_text` from `emo_preset`.
+
 ### 2026-03-25T18:04:00+08:00 - Docker Stage-4 Replays Need Container-Visible Absolute Input Paths, Not Host Windows Paths Or Output-Root-Relative Paths
 - Problem: Replaying `pipeline.start_stage=stage-4` through Docker Compose failed twice before the real validation run because the overrides for `pipeline.final_summary_path` and `pipeline.voice_clone_manifest_path` were first passed as host Windows absolute paths and then as plain repo-relative paths. Inside the Linux container, Hydra resolved those values under the new output root, which produced bogus paths like `/workspace/card-framework/<new-output-root>/artifacts/.../summary.xml`.
 - Solution: For Docker stage-4 reruns, pass explicit container-visible paths rooted at `/workspace/card-framework/...` for the existing summary XML and voice-clone manifest. Keep the new output root itself relative so setup-and-run can place fresh artifacts under the mounted repo checkout.

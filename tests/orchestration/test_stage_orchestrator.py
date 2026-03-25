@@ -308,7 +308,7 @@ def test_live_draft_does_not_rerender_when_summary_is_already_vector_resolved(
     original_summary = (
         '<SPEAKER_00 emo_preset="engaged" '
         'emotion_vector="0.100000,0.000000,0.000000,0.000000,0.000000,0.000000,0.060000,0.200000" '
-        'emotion_vector_source="preset_vector">hello from stage two</SPEAKER_00>'
+        'emotion_vector_source="manual_override">hello from stage two</SPEAKER_00>'
     )
     orchestrator = StageOrchestrator(
         orchestrator=_FakeLoopOrchestrator(),

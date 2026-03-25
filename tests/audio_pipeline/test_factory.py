@@ -135,17 +135,10 @@ def test_factory_builds_turn_emotion_resolution_strategy() -> None:
                 "fallback_order": [
                     "source_linked",
                     "explicit",
-                    "preset",
-                    "emo_text",
                 ],
             },
             "summary_turn_linking": {
                 "enabled": True,
-            },
-            "voice_clone": {
-                "emo_preset_vectors": {
-                    "engaged": [0.10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20]
-                }
             },
         }
     )
@@ -155,8 +148,6 @@ def test_factory_builds_turn_emotion_resolution_strategy() -> None:
     assert strategy.config.fallback_order == (
         "source_linked",
         "explicit",
-        "preset",
-        "emo_text",
     )
 
 
@@ -171,7 +162,6 @@ def test_factory_defaults_turn_emotion_resolution_to_vector_only_path() -> None:
     assert strategy.config.fallback_order == (
         "source_linked",
         "explicit",
-        "preset",
     )
 
 
@@ -186,24 +176,6 @@ def test_factory_defaults_summary_turn_linker_to_no_forced_rerender() -> None:
 
     assert linker is not None
     assert linker.config.force_live_draft_rerender is False
-
-
-def test_factory_disables_emo_text_fallback_for_voice_clone_by_default(
-    tmp_path: Path,
-) -> None:
-    orchestrator = build_voice_clone_orchestrator(
-        {
-            "work_dir": str(tmp_path / "audio_stage"),
-            "voice_clone": {
-                "enabled": True,
-                "provider": "passthrough",
-            },
-        },
-        project_root=tmp_path,
-    )
-
-    assert orchestrator is not None
-    assert orchestrator.emo_text_fallback_enabled is False
 
 
 def test_factory_builds_eta_strategy_from_config() -> None:

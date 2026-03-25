@@ -14,20 +14,17 @@ When a local runtime exposes an agent configuration file such as
 `../.codex/config.toml`, treat that local configuration as the source of truth
 for which delegated roles are actually available.
 
-## Current Local Config Snapshot
+## Runtime Delegation Inventory
 
-If you are using the checked-in Codex setup for this workspace, the current
-local config enables `multi_agent = true` and defines these sub-agents:
+When delegation is available, treat the local runtime's delegation config as the
+source of truth for what roles exist, their names, and their descriptions.
+Use the configured role list directly (if the runtime exposes a file such as
+`../.codex/config.toml`, that file is a good example of a local source
+of truth).
 
-- `explorer`: read-only codebase exploration.
-- `researcher`: external research and web retrieval with Scrapling.
-- `worker`: execution-focused implementation, fixes, and other executor-style
-  tasks.
-- `monitor`: long-running task monitoring.
-
-Other runtimes should map their equivalent roles onto the same behavioral
-categories where possible. Treat `../.codex/config.toml` as authoritative if
-you are using Codex here and this list changes.
+If this workspace includes a checked-in example that enables `multi_agent = true`,
+common role labels may include `explorer`, `researcher`, `worker`, and `monitor`,
+but you should not assume these names are universal.
 
 ## Policy
 
@@ -47,26 +44,26 @@ you are using Codex here and this list changes.
 
 ## Delegation Patterns
 
-### `explorer`
+### `explorer`-style role
 
 Use for read-only repository inspection, code search, and architecture
 discovery when parallel context gathering is helpful.
 
-### `researcher`
+### `researcher`-style role
 
 Use for open-web search, documentation lookup, standards research, and
 source-page retrieval.
 
-- `researcher` must follow `coder_docs/scrapling.md`.
+- Any `researcher`-style role must follow `coder_docs/scrapling.md`.
 - When the destination URL is already known, pass the direct URL instead of
   making the agent rediscover the source.
 
-### `worker`
+### `worker`-style role
 
 Use for bounded implementation, fixes, or other executor-style tasks when a
 write-capable sub-agent is configured and delegation is appropriate.
 
-### `monitor`
+### `monitor`-style role
 
 Use for long-running checks, waits, or monitoring tasks when the collaboration
 surface exposes that capability.

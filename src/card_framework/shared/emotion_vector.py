@@ -193,12 +193,20 @@ class EmotionVector:
             if float(value) > 0.0
         )
 
+    def top_component_labels(self, *, limit: int = 3) -> tuple[str, ...]:
+        """Return the strongest emotion labels without their numeric weights."""
+        return tuple(label for label, _value in self.top_components(limit=limit))
+
     def to_named_hint(self, *, limit: int = 3, precision: int = 2) -> str:
         """Return a prompt-friendly named summary of the strongest components."""
         return ", ".join(
             f"{label}:{value:.{precision}f}"
             for label, value in self.top_components(limit=limit)
         )
+
+    def to_category_string(self, *, limit: int = 3) -> str:
+        """Return a readable comma-separated category summary."""
+        return ", ".join(self.top_component_labels(limit=limit))
 
 
 def coerce_emotion_vector(value: Any) -> EmotionVector | None:

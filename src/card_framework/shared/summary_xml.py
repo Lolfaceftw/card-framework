@@ -131,8 +131,13 @@ def serialize_summary_turns(turns: list[SummaryTurn]) -> str:
 
 def _serialize_turn_attributes(turn: SummaryTurn) -> str:
     """Render one turn's XML attribute block."""
-    attributes = [f"emo_preset={quoteattr(turn.emo_preset)}"]
+    attributes: list[str] = []
     if turn.emotion_vector is not None:
+        emotion_categories = turn.emotion_vector.to_category_string(limit=3)
+        if emotion_categories:
+            attributes.append(
+                f"emotion_categories={quoteattr(emotion_categories)}"
+            )
         attributes.append(
             f"emotion_vector={quoteattr(turn.emotion_vector.to_compact_string())}"
         )

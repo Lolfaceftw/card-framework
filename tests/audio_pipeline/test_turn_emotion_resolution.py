@@ -9,7 +9,6 @@ from card_framework.audio_pipeline.turn_emotion_resolution import (
     TurnEmotionResolutionConfig,
 )
 from card_framework.orchestration.transcript import Transcript
-from card_framework.shared.emotion_vector import EmotionVector
 from card_framework.shared.summary_xml import SummaryTurn
 
 
@@ -52,11 +51,6 @@ def test_resolution_strategy_prefers_source_linked_vectors() -> None:
     strategy = SourceLinkedTurnEmotionResolutionStrategy(
         config=TurnEmotionResolutionConfig(),
         linker=_build_linker(),
-        emo_preset_vector_catalog={
-            "engaged": EmotionVector.from_raw(
-                [0.10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20]
-            )
-        },
     )
 
     resolved = strategy.resolve_turn(
@@ -73,13 +67,10 @@ def test_resolution_strategy_prefers_source_linked_vectors() -> None:
     assert set(resolved.source_segment_indices) == {0, 1}
 
 
-def test_resolution_strategy_falls_back_to_explicit_then_preset_by_default() -> None:
+def test_resolution_strategy_falls_back_to_explicit_then_no_vector_by_default() -> None:
     strategy = SourceLinkedTurnEmotionResolutionStrategy(
         config=TurnEmotionResolutionConfig(prelink_enabled=False),
         linker=None,
-        emo_preset_vector_catalog={
-            "warm": EmotionVector.from_raw([0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24])
-        },
     )
     transcript = Transcript.from_mapping({"segments": []})
 
@@ -95,77 +86,13 @@ def test_resolution_strategy_falls_back_to_explicit_then_preset_by_default() -> 
     )
     assert explicit.emotion_vector_source == "manual_override"
 
-    preset = strategy.resolve_turn(
+    no_vector = strategy.resolve_turn(
         turn=SummaryTurn(
             speaker="SPEAKER_00",
-            text="Preset fallback turn.",
+            text="Preset metadata only turn.",
             emo_preset="warm",
         ),
         transcript=transcript,
     )
-    assert preset.emotion_vector == EmotionVector.from_raw(
-        [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24]
-    )
-    assert preset.emotion_vector_source == "preset_vector"
-
-    no_vector = SourceLinkedTurnEmotionResolutionStrategy(
-        config=TurnEmotionResolutionConfig(prelink_enabled=False),
-        linker=None,
-        emo_preset_vector_catalog={},
-    ).resolve_turn(
-        turn=SummaryTurn(
-            speaker="SPEAKER_00",
-            text="no vector turn.",
-            emo_preset="neutral",
-        ),
-        transcript=transcript,
-    )
     assert no_vector.emotion_vector is None
-    assert no_vector.should_use_emo_text_fallback is False
-
-
-def test_resolution_strategy_allows_opt_in_emo_text_fallback() -> None:
-    transcript = Transcript.from_mapping({"segments": []})
-    emo_text = SourceLinkedTurnEmotionResolutionStrategy(
-        config=TurnEmotionResolutionConfig(
-            prelink_enabled=False,
-            fallback_order=("explicit", "preset", "emo_text"),
-        ),
-        linker=None,
-        emo_preset_vector_catalog={},
-    ).resolve_turn(
-        turn=SummaryTurn(
-            speaker="SPEAKER_00",
-            text="emo text fallback turn.",
-            emo_preset="neutral",
-        ),
-        transcript=transcript,
-    )
-    assert emo_text.emotion_vector is None
-    assert emo_text.should_use_emo_text_fallback is True
-
-
-def test_resolution_strategy_uses_default_preset_vector_for_unknown_preset() -> None:
-    strategy = SourceLinkedTurnEmotionResolutionStrategy(
-        config=TurnEmotionResolutionConfig(prelink_enabled=False),
-        linker=None,
-        emo_preset_vector_catalog={
-            "neutral": EmotionVector.from_raw(
-                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24]
-            )
-        },
-    )
-
-    resolved = strategy.resolve_turn(
-        turn=SummaryTurn(
-            speaker="SPEAKER_00",
-            text="Unknown preset turn.",
-            emo_preset="mystery",
-        ),
-        transcript=Transcript.from_mapping({"segments": []}),
-    )
-
-    assert resolved.emotion_vector == EmotionVector.from_raw(
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24]
-    )
-    assert resolved.emotion_vector_source == "preset_vector"
+    assert no_vector.emotion_vector_source == ""

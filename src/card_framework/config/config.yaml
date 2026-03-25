@@ -267,7 +267,6 @@ audio:
     fallback_order:
       - "source_linked"
       - "explicit"
-      - "preset"
   voice_clone:
     enabled: true
     live_drafting:
@@ -275,7 +274,6 @@ audio:
     provider: "indextts"
     execution_backend: "subprocess"
     stream_subprocess_output: true
-    emo_text_fallback_enabled: false
     runner_project_dir: "src/card_framework/_vendor/index_tts"
     uv_executable: "uv"
     fail_on_error: true
