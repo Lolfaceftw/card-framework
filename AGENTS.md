@@ -15,11 +15,15 @@ Markdown files under `coder_docs/`.
 
 ## Capability Gates
 
-- If your environment supports delegated agents or sub-agents, follow
-  `coder_docs/research_agents.md` for delegation rules, including the required
-  post-edit critic-review loop.
-- If your environment does not support delegated agents, do the equivalent work
-  in the main thread and keep the same scoping and integration discipline.
+- If your environment exposes delegated agents or sub-agents with a discoverable
+  local role inventory, follow `coder_docs/research_agents.md` for delegation
+  rules, including the required post-edit critic-review loop.
+- Delegate only when that inventory is non-empty and roles can be invoked.
+  If no usable delegated roles are available, do the equivalent work in the
+  main thread using the same scoping and integration discipline.
+- If your environment does not support delegated agents, keep the same
+  equivalent work in the main thread and keep the same scoping and integration
+  discipline.
 - If your environment exposes Scrapling MCP, follow `coder_docs/scrapling.md`
   for external web retrieval.
 - If Scrapling is unavailable, use the closest equivalent browsing or retrieval

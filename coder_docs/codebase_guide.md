@@ -24,7 +24,7 @@
       <principle>Preserve the separation between orchestration, provider adapters, prompts, and data-contract modules.</principle>
       <principle>Favor behavior-level understanding first: runtime pipeline, audio pipeline, and benchmark workflows are all first-class parts of this repo.</principle>
       <principle>Communication must stay direct and evidence-first. Do not flatter the user, apologize reflexively, or hide disagreement behind vague language.</principle>
-      <principle>If the active developer runtime supports delegation, follow its configured delegated-role inventory rather than assuming only a research-only role is allowed. If delegation is unavailable, keep the equivalent work in the main thread. In all cases, keep the main thread responsible for coordination, integration, and the final response.</principle>
+      <principle>If the active developer runtime supports delegation, follow its discoverable delegated-role inventory rather than assuming only a research-only role is allowed. Delegate only when that inventory is non-empty; if delegation is unavailable, keep the equivalent work in the main thread. In all cases, keep the main thread responsible for coordination, integration, and the final response.</principle>
       <principle>When a task asks you to run a repo entrypoint or script, execute it and validate the result through persisted logs plus RAM and GPU telemetry when relevant; do not rely only on the live terminal stream.</principle>
       <principle>Treat code-edit tasks as incomplete until the required critic-review loop in `coder_docs/research_agents.md` reports no material flaws, or until the remaining blocker is external to the workspace.</principle>
     </agentOperatingPrinciples>

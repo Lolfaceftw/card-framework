@@ -6,25 +6,27 @@ delegated web-research workflow in this repository.
 This file keeps its historical name for compatibility, but its guidance is now
 capability-based so it can work across different coding-agent runtimes.
 
-If your environment supports delegated agents or sub-agents, follow this file.
+If your environment supports delegated agents or sub-agents and exposes a
+discoverable, non-empty local role inventory, follow this file.
 If it does not, do the equivalent work in the main thread and keep the same
 scoping, source-quality, and integration rules.
 
-When a local runtime exposes an agent configuration file such as
-`../.codex/config.toml`, treat that local configuration as the source of truth
-for which delegated roles are actually available.
+When a local runtime exposes a delegation inventory source for sub-agents, treat
+that inventory as the source of truth for which delegated roles are actually
+available. Use a local file, CLI-discoverable registry, or API as the source,
+with `.codex/config.toml` as one optional example when present.
 
 ## Runtime Delegation Inventory
 
-When delegation is available, treat the local runtime's delegation config as the
-source of truth for what roles exist, their names, and their descriptions.
-Use the configured role list directly (if the runtime exposes a file such as
-`../.codex/config.toml`, that file is a good example of a local source
-of truth).
+When delegation is available, treat the local runtime's delegation inventory as
+the source of truth for what roles exist, their names, and their descriptions.
+If the runtime has a config source (for example `.codex/config.toml`), use it as
+one possible local inventory source.
 
-If this workspace includes a checked-in example that enables `multi_agent = true`,
-common role labels may include `explorer`, `researcher`, `worker`, and `monitor`,
-but you should not assume these names are universal.
+Use only roles explicitly discovered in that inventory. If no roles are
+discoverable, keep the work in the main thread.
+Role labels vary by runtime; examples may include `explorer`, `researcher`,
+`worker`, and `monitor`, but you should not assume these names are universal.
 
 ## Policy
 
@@ -32,41 +34,58 @@ but you should not assume these names are universal.
   and help move the task forward.
 - Choose the configured sub-agent whose description best matches the scoped
   task instead of assuming only `researcher` is allowed.
+- Delegate only to roles that are explicitly present in the discovered local
+  inventory.
 - Keep the main thread responsible for coordination, integrating delegated
   results, validation, and the final user-facing response.
 - Every task that materially edits code must go through the required
   critic-review loop described below before it is considered done.
 - When a delegated task includes open-web search, documentation lookup,
   standards research, or direct source-page retrieval, the delegated agent must
-  follow `coder_docs/scrapling.md`.
+  prefer `coder_docs/scrapling.md`.
+- If Scrapling is unavailable, use the closest equivalent browsing or retrieval
+  capability that preserves direct URL usage, minimal-noise extraction, and
+  authoritative source standards.
 - When delegation is unnecessary or platform instructions disallow it, continue
   in the main thread.
 
 ## Delegation Patterns
 
-### `explorer`-style role
+### `explorer`-style role (example)
 
 Use for read-only repository inspection, code search, and architecture
 discovery when parallel context gathering is helpful.
 
-### `researcher`-style role
+Use only when the runtime exposes an `explorer`-style role in its configured
+inventory.
+
+### `researcher`-style role (example)
 
 Use for open-web search, documentation lookup, standards research, and
 source-page retrieval.
 
-- Any `researcher`-style role must follow `coder_docs/scrapling.md`.
+- Any `researcher`-style role should prefer `coder_docs/scrapling.md`, or use the
+  closest equivalent retrieval path when Scrapling is unavailable.
 - When the destination URL is already known, pass the direct URL instead of
   making the agent rediscover the source.
+- Use only when the runtime exposes a `researcher`-style role in its configured
+  inventory.
 
-### `worker`-style role
+### `worker`-style role (example)
 
 Use for bounded implementation, fixes, or other executor-style tasks when a
 write-capable sub-agent is configured and delegation is appropriate.
 
-### `monitor`-style role
+Use only when the runtime exposes a `worker`-style role in its configured
+inventory.
+
+### `monitor`-style role (example)
 
 Use for long-running checks, waits, or monitoring tasks when the collaboration
 surface exposes that capability.
+
+Use only when the runtime exposes a `monitor`-style role in its configured
+inventory.
 
 ## Delegation Rules
 
@@ -115,8 +134,8 @@ behavioral docs.
 
 ## Do Not Do This
 
-- Do not hardcode repo-local guidance to a single agent name when
-  `../.codex/config.toml` exposes a broader sub-agent inventory.
+- Do not hardcode repo-local guidance to a single role name or a single example
+  config path.
 - Do not invent agent names or capabilities that are not present in the active
   runtime configuration.
 - Do not skip the critic-review loop after code edits just because the first

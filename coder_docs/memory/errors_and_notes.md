@@ -1,3 +1,7 @@
+### 2026-03-25T20:03:00+08:00 - Critic Review Found Delegation Predicate Drift
+- Problem: Delegation docs were partially inconsistent on the same gating condition (`discoverable` role inventory) and still contained stronger hardcoded assumptions around runtime-specific config sources and required Scrapling behavior.
+- Solution: Normalize delegation gating across `AGENTS.md`, `coder_docs/codebase_guide.md`, and `coder_docs/research_agents.md` to a single discoverable, non-empty inventory predicate; convert examples to optional placeholders; add an explicit non-Scrapling fallback policy for delegated retrieval tasks.
+
 ### 2026-03-25T19:32:00+08:00 - Delegation Docs Must Be Config-Based, Not Hardcoded By Role Name
 - Problem: Runtime guidance still described one fixed delegated role model in places and tied web-research rules to a specific role name, which could discourage valid implementation or monitoring roles when the local sub-agent inventory is broader.
 - Solution: Treat the local runtime's delegation config as the source of truth, update `coder_docs/research_agents.md` to be role-name agnostic by using configured role descriptions, and keep `AGENTS.md`, `coder_docs/codebase_guide.md`, and related docs aligned with that capability-based model.
