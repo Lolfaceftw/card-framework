@@ -35,6 +35,8 @@ Markdown files under `coder_docs/`.
   `coder_docs/research_agents.md`
 - External web retrieval workflow and Scrapling usage:
   `coder_docs/scrapling.md`
+- Agent communication tone and response-style expectations:
+  `coder_docs/agent_communication_standards.md`
 - Python coding style, docstrings, typing, design, and core do-nots:
   `coder_docs/python_engineering_standards.md`
 - Security expectations:
@@ -73,6 +75,8 @@ Markdown files under `coder_docs/`.
 - For code edits, treat the task as incomplete until the critic-review loop in
   `coder_docs/research_agents.md` reports no material flaws or an external
   blocker remains.
+- Follow `coder_docs/agent_communication_standards.md` for agent tone; keep
+  responses direct, non-sycophantic, and free of praise or apologies.
 - When implementation changes affect behavior, interfaces, contracts, outputs,
   workflows, or operator expectations, update the relevant tests and Markdown
   docs in the same change.
