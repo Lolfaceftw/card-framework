@@ -485,7 +485,7 @@ wheels = [
 
 [[package]]
 name = "card-framework"
-version = "1.2.0"
+version = "1.4.4"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["all"] },

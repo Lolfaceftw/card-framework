@@ -349,6 +349,7 @@ audio:
     backchannel_reaction_latency_ms: 120
     echo_alignment_offset_ms: 0
     min_host_progress_ratio: 0.35
+    echo_min_host_progress_ratio: 0.05
     max_host_progress_ratio: 0.90
     turn_end_guard_ms: 180
     mix_timeout_seconds: 300

@@ -1,5 +1,23 @@
 # Stage-4 Interjector Timing Refinement Experiments
 
+## 2026-03-25 - Listener-Perspective Prompting Needed Positive Echo Rules And An Earlier Echo Window
+
+- The first listener-perspective prompt pass solved the worst `echo_agreement` phrasing bugs, but it overcorrected into nearly all-`backchannel` decisions on episode 2.
+- The next diagnosis showed that prompt wording was only part of the problem: the strongest candidate on that summary (`dam broke`) sits near the start of a long host turn, and the old shared anchor policy only let both styles begin around `35%` through the host turn.
+- The runtime and prompt fixes now work together:
+  1. keep `backchannel` conservative at the old `35%-90%` window,
+  2. give `echo_agreement` its own earlier default window (`5%-90%`),
+  3. explicitly tell the planner to prefer echo when a short listener-safe quotable phrase exists,
+  4. tell the planner and repair loop that echoes should sound like quoted callbacks, not fresh listener sentences,
+  5. discourage weak one-word echoes and subject-pronoun rewrites such as `She handled it perfectly.`
+- Focused replays showed the prompt/scheduler pair moving in the right direction:
+  - the intermediate replay reintroduced accepted echoes but still allowed weak forms like `About` and listener-narration rewrites,
+  - the latest replay removed those specific failures and produced a cleaner quote-like echo (`It's so isolating.`) while keeping the earlier timing fixes intact.
+- The remaining gap is quality, not plumbing:
+  - accepted echoes are back,
+  - but the planner still does not consistently pick the strongest early vivid phrase (`dam broke`) on this summary.
+  - If future tuning is needed, the next place to focus is better positive ranking of candidate anchor phrases rather than more timing surgery.
+
 ## 2026-03-25 - Residual Echo Delay Needed Word-Level Retiming, Not Another Whole-Phrase Tempo Sweep
 
 - After the phrase-level Faster-Whisper echo matcher landed, some `echo_agreement` cases were still audibly late even though the first word was much closer to the host anchor.

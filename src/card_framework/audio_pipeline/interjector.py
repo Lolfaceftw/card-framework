@@ -405,6 +405,7 @@ class LLMInterjectionPlanner:
     repair_max_tokens: int = 220
     max_interjection_words: int = 5
     min_host_progress_ratio: float = 0.35
+    echo_min_host_progress_ratio: float = 0.05
     max_host_progress_ratio: float = 0.90
     prefer_tool_call_planning: bool = True
 
@@ -420,6 +421,7 @@ class LLMInterjectionPlanner:
             "interjector_system",
             max_interjection_words=self.max_interjection_words,
             min_host_progress_percent=round(self.min_host_progress_ratio * 100),
+            echo_min_host_progress_percent=round(self.echo_min_host_progress_ratio * 100),
             max_host_progress_percent=round(self.max_host_progress_ratio * 100),
         )
         user_prompt = PromptManager.get_prompt(
@@ -427,10 +429,12 @@ class LLMInterjectionPlanner:
             eligible_turns_block=_render_eligible_turns_block(
                 eligible_turns,
                 min_host_progress_ratio=self.min_host_progress_ratio,
+                echo_min_host_progress_ratio=self.echo_min_host_progress_ratio,
                 max_host_progress_ratio=self.max_host_progress_ratio,
             ),
             max_interjection_words=self.max_interjection_words,
             min_host_progress_percent=round(self.min_host_progress_ratio * 100),
+            echo_min_host_progress_percent=round(self.echo_min_host_progress_ratio * 100),
             max_host_progress_percent=round(self.max_host_progress_ratio * 100),
         )
         payload = None
@@ -462,6 +466,7 @@ class LLMInterjectionPlanner:
             eligible_turns=eligible_turns,
             max_interjection_words=self.max_interjection_words,
             min_host_progress_ratio=self.min_host_progress_ratio,
+            echo_min_host_progress_ratio=self.echo_min_host_progress_ratio,
             max_host_progress_ratio=self.max_host_progress_ratio,
         )
 
@@ -555,6 +560,7 @@ class LLMInterjectionPlanner:
                             + _render_eligible_turns_block(
                                 [item],
                                 min_host_progress_ratio=self.min_host_progress_ratio,
+                                echo_min_host_progress_ratio=self.echo_min_host_progress_ratio,
                                 max_host_progress_ratio=self.max_host_progress_ratio,
                             )
                         ),
@@ -598,6 +604,7 @@ class InterjectorOrchestrator:
     backchannel_reaction_latency_ms: int = 120
     echo_alignment_offset_ms: int = 0
     min_host_progress_ratio: float = 0.35
+    echo_min_host_progress_ratio: float = 0.05
     max_host_progress_ratio: float = 0.90
     turn_end_guard_ms: int = 180
     mix_audio_codec: str = "pcm_s24le"
@@ -657,11 +664,17 @@ class InterjectorOrchestrator:
             raise ValueError("echo_alignment_offset_ms must be >= 0.")
         if not 0.0 <= self.min_host_progress_ratio <= 1.0:
             raise ValueError("min_host_progress_ratio must be within [0.0, 1.0].")
+        if not 0.0 <= self.echo_min_host_progress_ratio <= 1.0:
+            raise ValueError("echo_min_host_progress_ratio must be within [0.0, 1.0].")
         if not 0.0 <= self.max_host_progress_ratio <= 1.0:
             raise ValueError("max_host_progress_ratio must be within [0.0, 1.0].")
         if self.min_host_progress_ratio > self.max_host_progress_ratio:
             raise ValueError(
                 "min_host_progress_ratio must be <= max_host_progress_ratio."
+            )
+        if self.echo_min_host_progress_ratio > self.max_host_progress_ratio:
+            raise ValueError(
+                "echo_min_host_progress_ratio must be <= max_host_progress_ratio."
             )
         if self.turn_end_guard_ms < 0:
             raise ValueError("turn_end_guard_ms must be >= 0.")
@@ -1566,7 +1579,12 @@ class InterjectorOrchestrator:
         progress_ratio = (
             overlay_start_time_ms - host_turn.global_start_time_ms
         ) / float(host_turn.duration_ms)
-        if progress_ratio < self.min_host_progress_ratio:
+        min_progress_ratio = (
+            self.echo_min_host_progress_ratio
+            if (decision.interjection_style or "backchannel") == "echo_agreement"
+            else self.min_host_progress_ratio
+        )
+        if progress_ratio < min_progress_ratio:
             return None
         if progress_ratio > self.max_host_progress_ratio:
             return None
@@ -1633,29 +1651,45 @@ def _render_eligible_turns_block(
     eligible_turns: Sequence[_EligibleTurn],
     *,
     min_host_progress_ratio: float,
+    echo_min_host_progress_ratio: float,
     max_host_progress_ratio: float,
 ) -> str:
     """Render prompt-friendly eligible turn descriptions for the LLM planner."""
     lines: list[str] = []
     for item in eligible_turns:
         host_tokens = _split_tokens(item.host_turn.text)
-        anchor_window = _compute_anchor_window_indices(
+        backchannel_anchor_window = _compute_anchor_window_indices(
             host_token_count=len(host_tokens),
             min_host_progress_ratio=min_host_progress_ratio,
             max_host_progress_ratio=max_host_progress_ratio,
         )
+        echo_anchor_window = _compute_anchor_window_indices(
+            host_token_count=len(host_tokens),
+            min_host_progress_ratio=echo_min_host_progress_ratio,
+            max_host_progress_ratio=max_host_progress_ratio,
+        )
+        backchannel_window_text = (
+            "none"
+            if backchannel_anchor_window is None
+            else f"{backchannel_anchor_window[0]}..{backchannel_anchor_window[1]}"
+        )
+        echo_window_text = (
+            "none"
+            if echo_anchor_window is None
+            else f"{echo_anchor_window[0]}..{echo_anchor_window[1]}"
+        )
         anchor_window_text = (
-            (
-                "Preferred anchor token window "
-                f"(approx {round(min_host_progress_ratio * 100)}%-"
-                f"{round(max_host_progress_ratio * 100)}% through host turn): "
-                f"{anchor_window[0]}..{anchor_window[1]}. "
-                "For backchannel, keep `anchor_end_token_index` inside this window. "
-                "For echo_agreement, keep `anchor_start_token_index` inside this "
-                "window."
-            )
-            if anchor_window is not None
-            else "Preferred anchor token window: none. Return should_interject=false."
+            "Preferred backchannel anchor token window "
+            f"(approx {round(min_host_progress_ratio * 100)}%-"
+            f"{round(max_host_progress_ratio * 100)}% through host turn): "
+            f"{backchannel_window_text}. "
+            "Preferred echo anchor token window "
+            f"(approx {round(echo_min_host_progress_ratio * 100)}%-"
+            f"{round(max_host_progress_ratio * 100)}% through host turn): "
+            f"{echo_window_text}. "
+            "If a style's window is `none`, do not use that style on this turn. "
+            "For backchannel, keep `anchor_end_token_index` inside the backchannel window. "
+            "For echo_agreement, keep `anchor_start_token_index` inside the echo window."
         )
         lines.extend(
             [
@@ -1933,6 +1967,7 @@ def _validate_llm_decisions(
     eligible_turns: Sequence[_EligibleTurn],
     max_interjection_words: int,
     min_host_progress_ratio: float = 0.35,
+    echo_min_host_progress_ratio: float = 0.05,
     max_host_progress_ratio: float = 0.90,
 ) -> list[InterjectionDecision]:
     """Validate planner output against deterministic pipeline constraints."""
@@ -1962,13 +1997,25 @@ def _validate_llm_decisions(
         style = raw_decision.interjection_style
         if style not in {"backchannel", "echo_agreement"}:
             continue
+        if style == "echo_agreement":
+            trimmed_anchor_span = _trim_echo_agreement_anchor_indices(
+                host_tokens,
+                start_index=start_index,
+                end_index=end_index,
+            )
+            if trimmed_anchor_span is None:
+                continue
+            start_index, end_index = trimmed_anchor_span
         anchor_progress_ratio = _estimate_anchor_progress_ratio(
             host_token_count=len(host_tokens),
             anchor_start_token_index=start_index,
             anchor_end_token_index=end_index,
             style=style,
         )
-        if anchor_progress_ratio < min_host_progress_ratio:
+        min_progress_ratio = (
+            echo_min_host_progress_ratio if style == "echo_agreement" else min_host_progress_ratio
+        )
+        if anchor_progress_ratio < min_progress_ratio:
             continue
         if anchor_progress_ratio > max_host_progress_ratio:
             continue
@@ -1983,11 +2030,15 @@ def _validate_llm_decisions(
         interjection_text = " ".join(
             str(raw_decision.interjection_text or "").split()
         ).strip()
-        if style == "echo_agreement" and (
-            not interjection_text
-            or not _texts_share_anchor_tokens(interjection_text, anchor_text)
-        ):
+        if style == "echo_agreement":
+            interjection_text = _sanitize_echo_agreement_text(interjection_text)
+        if style == "echo_agreement" and not interjection_text:
             interjection_text = anchor_text
+        elif style == "echo_agreement" and not _texts_share_anchor_tokens(
+            interjection_text,
+            anchor_text,
+        ):
+            continue
         if not interjection_text:
             continue
         if len(_split_tokens(interjection_text)) > max_interjection_words:
@@ -2067,6 +2118,36 @@ def _texts_share_anchor_tokens(interjection_text: str, anchor_text: str) -> bool
     return bool(interjection_tokens & anchor_tokens)
 
 
+def _sanitize_echo_agreement_text(text: str) -> str:
+    """Trim trailing text that spills past a terminal punctuation boundary."""
+    tokens = _split_tokens(text)
+    if not tokens:
+        return ""
+    last_terminal_index: int | None = None
+    for index, token in enumerate(tokens[:-1]):
+        if _token_ends_with_terminal_punctuation(token):
+            last_terminal_index = index
+    if last_terminal_index is None:
+        return " ".join(tokens).strip()
+    return " ".join(tokens[: last_terminal_index + 1]).strip()
+
+
+def _trim_echo_agreement_anchor_indices(
+    host_tokens: Sequence[str],
+    *,
+    start_index: int,
+    end_index: int,
+) -> tuple[int, int] | None:
+    """Trim an echo anchor span back to the last sentence-ending token when present."""
+    last_terminal_index: int | None = None
+    for index in range(start_index, end_index):
+        if _token_ends_with_terminal_punctuation(host_tokens[index]):
+            last_terminal_index = index
+    if last_terminal_index is None:
+        return start_index, end_index
+    return start_index, last_terminal_index
+
+
 def _estimate_target_word_budget(
     *,
     available_overlap_ms: int,
@@ -2084,7 +2165,8 @@ def _deterministically_shorten_interjection_text(text: str) -> str:
         return "Mm."
     if len(tokens) == 1:
         return "Mm."
-    return " ".join(tokens[:-1]).strip()
+    shortened = _sanitize_echo_agreement_text(" ".join(tokens[:-1]).strip())
+    return shortened or "Mm."
 
 
 def _split_tokens(text: str) -> list[str]:
@@ -2096,6 +2178,11 @@ def _normalize_token(token: str) -> str:
     """Normalize token text for tolerant equality checks."""
     normalized = re.sub(r"^[^\w]+|[^\w]+$", "", token, flags=re.UNICODE)
     return normalized.casefold()
+
+
+def _token_ends_with_terminal_punctuation(token: str) -> bool:
+    """Return whether a token ends with sentence-final punctuation."""
+    return bool(re.search(r"[.!?](?:[\"')\]]*)$", token))
 
 
 def _normalized_text_tokens(text: str) -> list[str]:

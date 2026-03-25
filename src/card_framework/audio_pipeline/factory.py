@@ -506,6 +506,9 @@ def build_interjector_orchestrator(
     min_host_progress_ratio = float(
         interjector_cfg.get("min_host_progress_ratio", 0.35)
     )
+    echo_min_host_progress_ratio = float(
+        interjector_cfg.get("echo_min_host_progress_ratio", 0.05)
+    )
     max_host_progress_ratio = float(
         interjector_cfg.get("max_host_progress_ratio", 0.90)
     )
@@ -522,6 +525,7 @@ def build_interjector_orchestrator(
             repair_max_tokens=int(repair_cfg.get("prompt_max_tokens", 220)),
             max_interjection_words=max_interjection_words,
             min_host_progress_ratio=min_host_progress_ratio,
+            echo_min_host_progress_ratio=echo_min_host_progress_ratio,
             max_host_progress_ratio=max_host_progress_ratio,
             prefer_tool_call_planning=bool(
                 interjector_cfg.get("tool_call_planning_enabled", True)
@@ -549,6 +553,7 @@ def build_interjector_orchestrator(
             interjector_cfg.get("echo_alignment_offset_ms", 0)
         ),
         min_host_progress_ratio=min_host_progress_ratio,
+        echo_min_host_progress_ratio=echo_min_host_progress_ratio,
         max_host_progress_ratio=max_host_progress_ratio,
         turn_end_guard_ms=int(interjector_cfg.get("turn_end_guard_ms", 180)),
         mix_timeout_seconds=int(interjector_cfg.get("mix_timeout_seconds", 300)),

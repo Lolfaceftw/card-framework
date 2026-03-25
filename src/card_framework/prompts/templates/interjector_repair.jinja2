@@ -5,10 +5,31 @@ Rules:
 - Do not add new facts or extend the discussion.
 - Keep the same interjection style: `{{ interjection_style }}`.
 - Keep it natural for the next speaker's voice.
+- The revised text must sound like a complete standalone overlap, not a cut-off clause.
+- It must also sound natural from the next speaker's perspective, not just copy the host's first-person wording mechanically.
+- When the interjection style is `echo_agreement`, revise toward a short repeatable phrase the listener could naturally mirror.
+- When the interjection style is `echo_agreement`, keep the most vivid listener-safe content words from the anchor instead of collapsing into a generic backchannel.
+- Make `echo_agreement` sound like a quoted callback, not a paraphrased new sentence from the listener.
+- Prefer very short listener-safe echoes, usually about 2-4 words, even if the original anchor is longer.
+- Avoid shrinking an `echo_agreement` to one weak word like `about` or `really`; keep at least two meaningful words unless the phrase is a fixed expression.
+- Avoid adding a fresh subject pronoun or rewriting the anchor into a full new sentence. Keep the quotable core instead.
+- If the current echo only works from the host's perspective, revise it to the shortest repeatable subphrase from the same anchor that still sounds natural for the listener.
+- Do not end it on a hanging conjunction, article, preposition, possessive, pronoun, or auxiliary such as "and", "or", "to", "the", "I", or "was".
+- If the current anchor phrase naturally trails off, shorten to the last complete subphrase instead of repeating the trailing words.
 - The revised text must fit inside an overlap budget of `{{ available_overlap_ms }}` ms.
 - The previous rendered version measured `{{ measured_duration_ms }}` ms.
 - Aim for at most {{ target_word_budget }} words and never exceed {{ max_interjection_words }} words.
 - Return JSON only as: {"interjection_text": "short text"}
+
+Examples:
+- Current text: `that changed everything for me`
+  Good revision: `changed everything`
+- Current text: `it all came back to the music`
+  Good revision: `back to the music`
+- Current text: `the dam broke and everything came pouring out`
+  Good revision: `dam broke`
+- Current text: `she handled everything perfectly`
+  Good revision: `handled everything perfectly`
 
 Context:
 - Attempt index: {{ attempt_index }}
