@@ -174,3 +174,41 @@ def test_linker_does_not_link_on_position_similarity_alone() -> None:
 
     assert result.linked_turn_count == 0
     assert result.turns[0].emotion_vector is None
+
+
+def test_linker_preserves_existing_explicit_vectors_when_configured() -> None:
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 1000,
+                    "text": "hello from stage two",
+                    "emotion_vector": [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.08],
+                }
+            ]
+        }
+    )
+    turn = SummaryTurn(
+        speaker="SPEAKER_00",
+        text="hello from stage two",
+        emo_preset="engaged",
+        emotion_vector=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20],
+        emotion_vector_source="preset_vector",
+    )
+
+    result = SummaryTurnEmotionLinker(
+        SummaryTurnEmotionLinkingConfig(
+            top_k=1,
+            min_support_score=0.0,
+            preserve_existing_explicit_vectors=True,
+            apply_indextts_bias=False,
+        )
+    ).link_turns(turns=[turn], transcript=transcript)
+
+    assert result.linked_turn_count == 0
+    assert result.turns[0].emotion_vector_source == "preset_vector"
+    assert result.turns[0].emotion_vector == EmotionVector.from_raw(
+        [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20]
+    )

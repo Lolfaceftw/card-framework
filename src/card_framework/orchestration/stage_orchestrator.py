@@ -13,6 +13,7 @@ import time
 from card_framework.audio_pipeline.gpu_heartbeat import VoiceCloneGpuHeartbeatService
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
 from card_framework.audio_pipeline.interjector import InterjectorOrchestrator, InterjectorRunResult
+from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
 from card_framework.audio_pipeline.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
 )
@@ -59,7 +60,7 @@ class StageOrchestrator:
     project_root: Path
     target_seconds: int
     duration_tolerance_ratio: float
-    max_iterations: int
+    max_iterations: int | None
     voice_clone_orchestrator: VoiceCloneOrchestrator | None = None
     interjector_orchestrator: InterjectorOrchestrator | None = None
     speaker_sample_preparer: Callable[[Transcript], Transcript] | None = None
@@ -74,6 +75,7 @@ class StageOrchestrator:
     loop_memory_artifact_path: Path | None = None
     live_draft_audio_enabled: bool = False
     summary_turn_emotion_linker: SummaryTurnEmotionLinker | None = None
+    post_render_duration_verification_enabled: bool = False
     session_store: PipelineSessionStore | None = None
     session_id: str = ""
     session_summary_output_path: Path | None = None
@@ -152,6 +154,7 @@ class StageOrchestrator:
                 summary_xml=final_summary,
                 transcript=transcript,
             )
+        self._verify_post_render_duration(voice_clone_result=voice_clone_result)
         self._mark_stage_completed(
             "stage-3",
             detail={"manifest_path": str(voice_clone_result.manifest_path)},
@@ -230,6 +233,7 @@ class StageOrchestrator:
                 target_seconds=self.target_seconds,
                 duration_tolerance_ratio=self.duration_tolerance_ratio,
                 max_iterations=self.max_iterations,
+                transcript=prepared_transcript,
                 full_transcript_text=full_text,
                 loop_memory_artifact_path=self.loop_memory_artifact_path,
                 loop_memory_context=self._build_loop_memory_context(
@@ -243,6 +247,7 @@ class StageOrchestrator:
                 target_seconds=self.target_seconds,
                 duration_tolerance_ratio=self.duration_tolerance_ratio,
                 max_iterations=self.max_iterations,
+                transcript=prepared_transcript,
                 full_transcript_text=full_text,
                 loop_memory_artifact_path=self.loop_memory_artifact_path,
                 loop_memory_context=self._build_loop_memory_context(
@@ -316,6 +321,7 @@ class StageOrchestrator:
                     summary_xml=final_summary,
                     transcript=prepared_transcript,
                 )
+            self._verify_post_render_duration(voice_clone_result=voice_clone_result)
             self._mark_stage_completed(
                 "stage-3",
                 detail={"manifest_path": str(voice_clone_result.manifest_path)},
@@ -357,6 +363,7 @@ class StageOrchestrator:
                     "matches; preserving fallback emotion behavior."
                 ),
             )
+            return summary_xml
         return serialize_summary_turns(list(linking_result.turns))
 
     def _should_rerender_live_draft_final_summary(
@@ -371,6 +378,64 @@ class StageOrchestrator:
         if self.summary_turn_emotion_linker.config.force_live_draft_rerender:
             return True
         return original_summary_xml.strip() != enriched_summary_xml.strip()
+
+    def _verify_post_render_duration(
+        self,
+        *,
+        voice_clone_result: VoiceCloneRunResult,
+    ) -> None:
+        """Fail fast when the final stage-3 audio misses the duration tolerance."""
+        if not self.post_render_duration_verification_enabled:
+            return
+        measured_seconds = self._measure_voice_clone_duration_seconds(
+            voice_clone_result=voice_clone_result
+        )
+        if measured_seconds is None:
+            raise RuntimeError(
+                "Post-render duration verification is enabled, but stage-3 audio "
+                "duration could not be measured."
+            )
+        tolerance_seconds = self.target_seconds * self.duration_tolerance_ratio
+        min_seconds = self.target_seconds - tolerance_seconds
+        max_seconds = self.target_seconds + tolerance_seconds
+        if min_seconds <= measured_seconds <= max_seconds:
+            event_bus.publish(
+                "status_message",
+                (
+                    "Post-render duration verification passed: "
+                    f"{measured_seconds:.2f}s within [{min_seconds:.2f}s, "
+                    f"{max_seconds:.2f}s]."
+                ),
+            )
+            return
+        raise RuntimeError(
+            "Post-render duration out of tolerance after stage-3 export: "
+            f"measured {measured_seconds:.2f}s, expected within "
+            f"[{min_seconds:.2f}s, {max_seconds:.2f}s]."
+        )
+
+    @staticmethod
+    def _measure_voice_clone_duration_seconds(
+        *,
+        voice_clone_result: VoiceCloneRunResult,
+    ) -> float | None:
+        """Measure merged stage-3 audio duration or fall back to summed artifacts."""
+        merged_output_audio_path = voice_clone_result.merged_output_audio_path
+        if merged_output_audio_path is not None:
+            duration_ms = probe_audio_duration_ms(merged_output_audio_path)
+            if duration_ms is not None and duration_ms > 0:
+                return duration_ms / 1000.0
+        total_duration_ms = 0
+        measured_any = False
+        for artifact in voice_clone_result.artifacts:
+            duration_ms = probe_audio_duration_ms(artifact.output_audio_path)
+            if duration_ms is None or duration_ms <= 0:
+                continue
+            total_duration_ms += duration_ms
+            measured_any = True
+        if not measured_any:
+            return None
+        return total_duration_ms / 1000.0
 
     def _build_loop_memory_context(self, *, transcript: Transcript) -> dict[str, str]:
         """Build a stable persistence scope for summarizer loop memory artifacts."""

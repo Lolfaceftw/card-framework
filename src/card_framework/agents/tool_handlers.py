@@ -13,6 +13,11 @@ from card_framework.agents.message_registry import MessageRegistry
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
 from card_framework.audio_pipeline.emotion_vectors import EmotionVector, serialize_emotion_vector
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
+from card_framework.audio_pipeline.turn_emotion_resolution import (
+    ResolvedTurnEmotion,
+    TurnEmotionResolutionStrategy,
+)
+from card_framework.orchestration.transcript import Transcript
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, SummaryTurn, serialize_summary_turns
 
 
@@ -112,6 +117,24 @@ def _coerce_optional_emotion_vector(
     return vector.to_list(), None
 
 
+def _resolve_turn_emotion(
+    *,
+    strategy: TurnEmotionResolutionStrategy | None,
+    transcript: Transcript | None,
+    turn: SummaryTurn,
+) -> ResolvedTurnEmotion:
+    """Resolve one turn's render-time emotion payload with safe fallback."""
+    if strategy is None or transcript is None:
+        return ResolvedTurnEmotion(
+            emotion_vector=turn.emotion_vector,
+            emotion_vector_source=turn.emotion_vector_source,
+            source_segment_indices=turn.source_segment_indices,
+            source_segment_weights=turn.source_segment_weights,
+            effective_emo_preset=turn.emo_preset,
+        )
+    return strategy.resolve_turn(turn=turn, transcript=transcript)
+
+
 class BudgetContext:
     """Compute duration-budget statistics from the current registry state."""
 
@@ -195,10 +218,14 @@ class AddSpeakerMessageHandler(ToolHandler):
         budget: BudgetContext,
         live_draft_session: LiveDraftVoiceCloneSession | None = None,
         allowed_speaker_ids: Sequence[str] | None = None,
+        turn_emotion_resolution_strategy: TurnEmotionResolutionStrategy | None = None,
+        transcript: Transcript | None = None,
     ) -> None:
         self._registry = registry
         self._budget = budget
         self._live_draft_session = live_draft_session
+        self._turn_emotion_resolution_strategy = turn_emotion_resolution_strategy
+        self._transcript = transcript
         self._allowed_speaker_ids = tuple(
             speaker_id.strip()
             for speaker_id in (allowed_speaker_ids or ())
@@ -292,19 +319,39 @@ class AddSpeakerMessageHandler(ToolHandler):
             return emotion_vector_error
 
         turn_id = uuid.uuid4().hex
+        resolved_turn_emotion = _resolve_turn_emotion(
+            strategy=self._turn_emotion_resolution_strategy,
+            transcript=self._transcript,
+            turn=SummaryTurn(
+                speaker=speaker_id,
+                text=content,
+                emo_preset=emo_preset,
+                emotion_vector=EmotionVector.from_raw(emotion_vector),
+            ),
+        )
         if self._live_draft_session is not None:
             self._live_draft_session.render_turn(
                 turn_id=turn_id,
                 speaker=speaker_id,
                 text=content,
                 emo_preset=emo_preset,
-                emotion_vector=EmotionVector.from_raw(emotion_vector),
+                emotion_vector=resolved_turn_emotion.emotion_vector,
+                emotion_vector_source=resolved_turn_emotion.emotion_vector_source,
+                source_segment_indices=resolved_turn_emotion.source_segment_indices,
+                source_segment_weights=resolved_turn_emotion.source_segment_weights,
             )
         result = self._registry.add(
             speaker_id,
             content,
             emo_preset,
-            emotion_vector,
+            (
+                resolved_turn_emotion.emotion_vector.to_list()
+                if resolved_turn_emotion.emotion_vector is not None
+                else None
+            ),
+            emotion_vector_source=resolved_turn_emotion.emotion_vector_source,
+            source_segment_indices=resolved_turn_emotion.source_segment_indices,
+            source_segment_weights=resolved_turn_emotion.source_segment_weights,
             turn_id=turn_id,
         )
         if self._live_draft_session is not None:
@@ -389,10 +436,14 @@ class EditMessageHandler(ToolHandler):
         registry: MessageRegistry,
         budget: BudgetContext,
         live_draft_session: LiveDraftVoiceCloneSession | None = None,
+        turn_emotion_resolution_strategy: TurnEmotionResolutionStrategy | None = None,
+        transcript: Transcript | None = None,
     ) -> None:
         self._registry = registry
         self._budget = budget
         self._live_draft_session = live_draft_session
+        self._turn_emotion_resolution_strategy = turn_emotion_resolution_strategy
+        self._transcript = transcript
 
     @property
     def name(self) -> str:
@@ -485,13 +536,44 @@ class EditMessageHandler(ToolHandler):
             if emotion_vector is not None
             else serialize_emotion_vector(existing.get("emotion_vector"))
         )
+        resolved_turn_emotion = _resolve_turn_emotion(
+            strategy=self._turn_emotion_resolution_strategy,
+            transcript=self._transcript,
+            turn=SummaryTurn(
+                speaker=str(existing["speaker_id"]),
+                text=new_content,
+                emo_preset=next_emo_preset,
+                emotion_vector=EmotionVector.from_raw(next_emotion_vector),
+                emotion_vector_source=str(
+                    existing.get("emotion_vector_source", "")
+                ).strip(),
+                source_segment_indices=tuple(
+                    int(value)
+                    for value in list(existing.get("source_segment_indices", []))
+                ),
+                source_segment_weights=tuple(
+                    float(value)
+                    for value in list(existing.get("source_segment_weights", []))
+                ),
+            ),
+        )
         if (
             self._live_draft_session is not None
             and (
                 existing_content != new_content
                 or existing_emo_preset != next_emo_preset
                 or serialize_emotion_vector(existing.get("emotion_vector"))
-                != next_emotion_vector
+                != (
+                    resolved_turn_emotion.emotion_vector.to_list()
+                    if resolved_turn_emotion.emotion_vector is not None
+                    else None
+                )
+                or str(existing.get("emotion_vector_source", "")).strip()
+                != resolved_turn_emotion.emotion_vector_source
+                or list(existing.get("source_segment_indices", []))
+                != list(resolved_turn_emotion.source_segment_indices)
+                or list(existing.get("source_segment_weights", []))
+                != list(resolved_turn_emotion.source_segment_weights)
             )
         ):
             self._live_draft_session.render_turn(
@@ -499,13 +581,23 @@ class EditMessageHandler(ToolHandler):
                 speaker=str(existing["speaker_id"]),
                 text=new_content,
                 emo_preset=next_emo_preset,
-                emotion_vector=EmotionVector.from_raw(next_emotion_vector),
+                emotion_vector=resolved_turn_emotion.emotion_vector,
+                emotion_vector_source=resolved_turn_emotion.emotion_vector_source,
+                source_segment_indices=resolved_turn_emotion.source_segment_indices,
+                source_segment_weights=resolved_turn_emotion.source_segment_weights,
             )
         result = self._registry.edit(
             line,
             new_content,
             emo_preset=emo_preset,
-            emotion_vector=emotion_vector,
+            emotion_vector=(
+                resolved_turn_emotion.emotion_vector.to_list()
+                if resolved_turn_emotion.emotion_vector is not None
+                else None
+            ),
+            emotion_vector_source=resolved_turn_emotion.emotion_vector_source,
+            source_segment_indices=resolved_turn_emotion.source_segment_indices,
+            source_segment_weights=resolved_turn_emotion.source_segment_weights,
         )
         if "error" not in result:
             if self._live_draft_session is not None:
@@ -730,6 +822,17 @@ def _snapshot_to_xml(snapshot: list[dict[str, Any]]) -> str:
                 text=str(message["content"]),
                 emo_preset=str(message.get("emo_preset", DEFAULT_EMO_PRESET)),
                 emotion_vector=EmotionVector.from_raw(message.get("emotion_vector")),
+                emotion_vector_source=str(
+                    message.get("emotion_vector_source", "")
+                ).strip(),
+                source_segment_indices=tuple(
+                    int(value)
+                    for value in list(message.get("source_segment_indices", []))
+                ),
+                source_segment_weights=tuple(
+                    float(value)
+                    for value in list(message.get("source_segment_weights", []))
+                ),
             )
             for message in snapshot
         ]
@@ -747,6 +850,8 @@ def build_summarizer_tools(
     agent_client: AgentTaskClient | None = None,
     live_draft_session: LiveDraftVoiceCloneSession | None = None,
     allowed_speaker_ids: Sequence[str] | None = None,
+    turn_emotion_resolution_strategy: TurnEmotionResolutionStrategy | None = None,
+    transcript: Transcript | None = None,
 ) -> ToolRegistry:
     """Build the full summarizer tool registry."""
     budget = BudgetContext(
@@ -763,6 +868,8 @@ def build_summarizer_tools(
             budget,
             live_draft_session=live_draft_session,
             allowed_speaker_ids=allowed_speaker_ids,
+            turn_emotion_resolution_strategy=turn_emotion_resolution_strategy,
+            transcript=transcript,
         )
     )
     tool_registry.register(EstimateDurationHandler(registry, budget, calibration))
@@ -772,6 +879,8 @@ def build_summarizer_tools(
             registry,
             budget,
             live_draft_session=live_draft_session,
+            turn_emotion_resolution_strategy=turn_emotion_resolution_strategy,
+            transcript=transcript,
         )
     )
     tool_registry.register(
@@ -805,6 +914,8 @@ def build_revise_tools(
     agent_client: AgentTaskClient | None = None,
     live_draft_session: LiveDraftVoiceCloneSession | None = None,
     allowed_speaker_ids: Sequence[str] | None = None,
+    turn_emotion_resolution_strategy: TurnEmotionResolutionStrategy | None = None,
+    transcript: Transcript | None = None,
 ) -> ToolRegistry:
     """Build revise-mode tools with add/edit/remove support."""
     budget = BudgetContext(
@@ -821,6 +932,8 @@ def build_revise_tools(
             budget,
             live_draft_session=live_draft_session,
             allowed_speaker_ids=allowed_speaker_ids,
+            turn_emotion_resolution_strategy=turn_emotion_resolution_strategy,
+            transcript=transcript,
         )
     )
     tool_registry.register(EstimateDurationHandler(registry, budget, calibration))
@@ -830,6 +943,8 @@ def build_revise_tools(
             registry,
             budget,
             live_draft_session=live_draft_session,
+            turn_emotion_resolution_strategy=turn_emotion_resolution_strategy,
+            transcript=transcript,
         )
     )
     tool_registry.register(

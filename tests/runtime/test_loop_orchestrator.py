@@ -18,13 +18,16 @@ class _FakeAgentClient:
 
 
 def test_run_summarizer_once_returns_agent_output() -> None:
+    sent_task_payloads = []
+
     async def _fake_send_task(
         port, task_data, timeout=120.0, max_retries=3, metadata=None
     ):
-        del task_data, timeout, max_retries
+        del timeout, max_retries
         assert port == 9010
         assert metadata is not None
         assert metadata.get("stage") == "summarizer_single_pass"
+        sent_task_payloads.append(task_data)
         return "<summary>ok</summary>"
 
     orchestrator = Orchestrator(
@@ -38,10 +41,31 @@ def test_run_summarizer_once_returns_agent_output() -> None:
         orchestrator.run_summarizer_once(
             target_seconds=300,
             duration_tolerance_ratio=0.05,
+            transcript={
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "hello world",
+                        "start_time": 0,
+                        "end_time": 1000,
+                        "emotion_vector": [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
+                    }
+                ]
+            },
             full_transcript_text="",
         )
     )
     assert result == "<summary>ok</summary>"
+    assert sent_task_payloads[0].transcript_payload["segments"][0]["emotion_vector"] == [
+        0.1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.2,
+    ]
 
 
 def test_run_critic_once_parses_valid_json() -> None:

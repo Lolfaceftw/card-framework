@@ -60,6 +60,7 @@ class SummarizerTaskRequest(BaseModel):
     previous_draft: str = ""
     loop_context: str = ""
     full_transcript: str = ""
+    transcript_payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class SummarizerTaskResponse(BaseModel):

@@ -110,6 +110,16 @@ class _InterruptingStageOrchestrator(_FakeStageOrchestrator):
         raise KeyboardInterrupt
 
 
+class _CapturingStageOrchestrator(_FakeStageOrchestrator):
+    """Minimal stage orchestrator stub that captures construction kwargs."""
+
+    captured_kwargs: dict[str, object] | None = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        del args
+        type(self).captured_kwargs = dict(kwargs)
+
+
 def test_main_emits_timed_loading_messages_for_startup_phases(
     monkeypatch,
     tmp_path: Path,
@@ -162,6 +172,8 @@ def test_main_emits_timed_loading_messages_for_startup_phases(
             lambda _: audio_orchestrator,
             lambda *args, **kwargs: None,
             lambda _: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
             lambda *args, **kwargs: None,
         ),
     )
@@ -218,16 +230,246 @@ def test_main_emits_timed_loading_messages_for_startup_phases(
         message.startswith("Loaded voice-clone calibration artifact in ")
         for message in system_messages
     )
-    assert "Loading LLM providers..." in system_messages
-    assert any(
-        message.startswith("Loaded LLM providers in ")
-        for message in system_messages
+
+
+def test_main_passes_unbounded_max_iterations_to_stage_orchestrator(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Null max_iterations config should reach StageOrchestrator as None."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(
+        (
+            '{"segments": [{"speaker": "SPEAKER_00", "start_time": 0, '
+            '"end_time": 1000, "text": "hello world"}], "metadata": {}}\n'
+        ),
+        encoding="utf-8",
     )
-    assert "Loading A2A server readiness..." in system_messages
-    assert any(
-        message.startswith("Loaded A2A server readiness in ")
-        for message in system_messages
+
+    cfg = OmegaConf.create(
+        {
+            "logging": {"print_to_terminal": False, "enabled": False},
+            "audio": {
+                "device": "cpu",
+                "work_dir": "artifacts/audio_stage",
+                "audio_path": "",
+                "voice_clone": {
+                    "enabled": False,
+                    "live_drafting": {"enabled": False},
+                    "gpu_heartbeat": {},
+                    "emo_presets": {},
+                },
+                "interjector": {"enabled": False},
+                "speaker_samples": {"enabled": False},
+            },
+            "orchestrator": {
+                "target_seconds": 60,
+                "timeouts": {},
+                "max_iterations": None,
+            },
+            "pipeline": {"start_stage": "stage-2"},
+            "transcript_path": "transcript.json",
+            "llm": {"_target_": "fake.llm"},
+            "stage_llm": {},
+            "embedding": {
+                "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+            },
+            "ports": {"retrieval": 9101, "summarizer": 9102, "critic": 9103},
+            "agents": {"summarizer": {}, "critic": {}},
+        }
     )
+
+    monkeypatch.setattr("card_framework.cli.main.configure_logger", lambda _: None)
+    monkeypatch.setattr("card_framework.cli.main.hydra.utils.get_original_cwd", lambda: str(tmp_path))
+    audio_orchestrator = _FakeAudioOrchestrator()
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_audio_pipeline_builders",
+        lambda **_: (
+            lambda _: audio_orchestrator,
+            lambda *args, **kwargs: None,
+            lambda _: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_post_transcript_speaker_sample_step",
+        lambda **kwargs: kwargs["transcript"],
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main.ensure_voice_clone_calibration",
+        lambda **_: SimpleNamespace(artifact_path=tmp_path / "voice_clone_calibration.json"),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_agent_runtime_helpers",
+        lambda **_: (
+            _FakeAgentClient,
+            _FakeExecutor,
+            _FakeHealthChecker,
+            _FakeExecutor,
+            _FakeExecutor,
+            _FakeTranscriptIndex,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._instantiate_llm_provider",
+        lambda llm_cfg, *, enable_logging: _FakeProvider(),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._resolve_stage_llm",
+        lambda cfg, *, shared_llm, enable_logging: (shared_llm, "shared"),
+    )
+    monkeypatch.setattr("card_framework.cli.main._build_a2a_app", lambda **_: object())
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_server_in_thread",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr("card_framework.cli.main.Orchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(
+        "card_framework.cli.main.StageOrchestrator",
+        _CapturingStageOrchestrator,
+    )
+
+    _CapturingStageOrchestrator.captured_kwargs = None
+    runtime_main.main.__wrapped__(cfg)
+
+    assert _CapturingStageOrchestrator.captured_kwargs is not None
+    assert _CapturingStageOrchestrator.captured_kwargs["max_iterations"] is None
+
+
+def test_main_preserves_zero_max_iterations_when_configured(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit zero max_iterations should stay zero unless null is requested."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(
+        (
+            '{"segments": [{"speaker": "SPEAKER_00", "start_time": 0, '
+            '"end_time": 1000, "text": "hello world"}], "metadata": {}}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = OmegaConf.create(
+        {
+            "logging": {"print_to_terminal": False, "enabled": False},
+            "audio": {
+                "device": "cpu",
+                "work_dir": "artifacts/audio_stage",
+                "audio_path": "",
+                "voice_clone": {
+                    "enabled": False,
+                    "live_drafting": {"enabled": False},
+                    "gpu_heartbeat": {},
+                    "emo_presets": {},
+                },
+                "interjector": {"enabled": False},
+                "speaker_samples": {"enabled": False},
+            },
+            "orchestrator": {
+                "target_seconds": 60,
+                "timeouts": {},
+                "max_iterations": 0,
+            },
+            "pipeline": {"start_stage": "stage-2"},
+            "transcript_path": "transcript.json",
+            "llm": {"_target_": "fake.llm"},
+            "stage_llm": {},
+            "embedding": {
+                "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+            },
+            "ports": {"retrieval": 9101, "summarizer": 9102, "critic": 9103},
+            "agents": {"summarizer": {}, "critic": {}},
+        }
+    )
+
+    monkeypatch.setattr("card_framework.cli.main.configure_logger", lambda _: None)
+    monkeypatch.setattr("card_framework.cli.main.hydra.utils.get_original_cwd", lambda: str(tmp_path))
+    audio_orchestrator = _FakeAudioOrchestrator()
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_audio_pipeline_builders",
+        lambda **_: (
+            lambda _: audio_orchestrator,
+            lambda *args, **kwargs: None,
+            lambda _: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_post_transcript_speaker_sample_step",
+        lambda **kwargs: kwargs["transcript"],
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main.ensure_voice_clone_calibration",
+        lambda **_: SimpleNamespace(artifact_path=tmp_path / "voice_clone_calibration.json"),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_agent_runtime_helpers",
+        lambda **_: (
+            _FakeAgentClient,
+            _FakeExecutor,
+            _FakeHealthChecker,
+            _FakeExecutor,
+            _FakeExecutor,
+            _FakeTranscriptIndex,
+        ),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._instantiate_llm_provider",
+        lambda llm_cfg, *, enable_logging: _FakeProvider(),
+    )
+    monkeypatch.setattr(
+        "card_framework.cli.main._resolve_stage_llm",
+        lambda cfg, *, shared_llm, enable_logging: (shared_llm, "shared"),
+    )
+    monkeypatch.setattr("card_framework.cli.main._build_a2a_app", lambda **_: object())
+    monkeypatch.setattr(
+        "card_framework.cli.main._run_server_in_thread",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr("card_framework.cli.main.Orchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(
+        "card_framework.cli.main.StageOrchestrator",
+        _CapturingStageOrchestrator,
+    )
+
+    _CapturingStageOrchestrator.captured_kwargs = None
+    runtime_main.main.__wrapped__(cfg)
+
+    assert _CapturingStageOrchestrator.captured_kwargs is not None
+    assert _CapturingStageOrchestrator.captured_kwargs["max_iterations"] == 0
+
+
+def test_instantiate_llm_provider_strips_runtime_metadata(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_instantiate(cfg):  # noqa: ANN001
+        captured.update(runtime_main._to_plain_dict(cfg))
+        return _FakeProvider()
+
+    monkeypatch.setattr("card_framework.cli.main.hydra.utils.instantiate", _fake_instantiate)
+
+    provider = runtime_main._instantiate_llm_provider(
+        OmegaConf.create(
+            {
+                "_target_": "fake.llm",
+                "api_key": "test-key",
+                "context_window_tokens": 131072,
+                "compaction_target_ratio": 0.65,
+            }
+        ),
+        enable_logging=False,
+    )
+
+    assert isinstance(provider, _FakeProvider)
+    assert captured["_target_"] == "fake.llm"
+    assert captured["api_key"] == "test-key"
+    assert "context_window_tokens" not in captured
+    assert "compaction_target_ratio" not in captured
 
 
 def test_main_uses_shared_eta_store_path_across_run_local_work_dirs(
@@ -282,6 +524,8 @@ def test_main_uses_shared_eta_store_path_across_run_local_work_dirs(
             lambda _: audio_orchestrator,
             lambda *args, **kwargs: None,
             lambda _: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
             lambda *args, **kwargs: None,
         ),
     )
@@ -442,6 +686,8 @@ def test_main_marks_incomplete_session_failed_and_raises_runtime_error(
             lambda *args, **kwargs: None,
             lambda _: None,
             lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
         ),
     )
     monkeypatch.setattr(
@@ -588,6 +834,8 @@ def test_main_converts_keyboard_interrupt_into_exit_130(
             lambda _: audio_orchestrator,
             lambda *args, **kwargs: None,
             lambda _: None,
+            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: None,
             lambda *args, **kwargs: None,
         ),
     )

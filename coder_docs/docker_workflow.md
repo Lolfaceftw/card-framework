@@ -76,6 +76,13 @@ Docker can expose NVIDIA or CUDA devices:
 docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
 ```
 
+Request an unbounded summarizer or critic loop budget when you need to remove
+the stage-2 iteration cap entirely:
+
+```bash
+docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --override orchestrator.max_iterations=null --audio-path audio.wav
+```
+
 Run only the stage-1 audio pipeline in the GPU container and stop after the
 transcript is written:
 

@@ -69,7 +69,8 @@ class SummaryTurnEmotionLinkingConfig:
     require_emotion_vector: bool = True
     apply_indextts_bias: bool = False
     max_sum: float = 0.8
-    force_live_draft_rerender: bool = True
+    preserve_existing_explicit_vectors: bool = True
+    force_live_draft_rerender: bool = False
 
     def __post_init__(self) -> None:
         if self.top_k <= 0:
@@ -149,6 +150,13 @@ class SummaryTurnEmotionLinker:
         used_declared_support_count = 0
         total_turns = len(turns)
         for turn_index, turn in enumerate(turns):
+            if (
+                self.config.preserve_existing_explicit_vectors
+                and turn.emotion_vector is not None
+            ):
+                enriched_turns.append(turn)
+                fallback_turn_count += 1
+                continue
             supports, used_declared_support = self._select_support_segments(
                 turn=turn,
                 transcript=transcript,

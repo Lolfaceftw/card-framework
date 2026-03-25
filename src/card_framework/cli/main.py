@@ -97,6 +97,9 @@ _STAGE_TWO_BOOTSTRAP_STOPWORDS = {
 _AUDIO_PIPELINE_BUILDERS: tuple[object, object, object, object, object, object] | None = None
 _A2A_SERVER_HELPERS: tuple[object, ...] | None = None
 _AGENT_RUNTIME_HELPERS: tuple[object, object, object, object, object, object] | None = None
+_LLM_PROFILE_RUNTIME_METADATA_KEYS = frozenset(
+    {"context_window_tokens", "compaction_target_ratio"}
+)
 
 
 def _suppress_chatty_logger_propagation() -> None:
@@ -292,11 +295,36 @@ def _instantiate_llm_provider(
     enable_logging: bool,
 ) -> LLMProvider:
     """Instantiate an LLM provider and apply logging wrapper when enabled."""
-    llm: LLMProvider = hydra.utils.instantiate(llm_cfg)
+    llm_payload = _strip_llm_runtime_metadata(llm_cfg)
+    llm: LLMProvider = hydra.utils.instantiate(llm_payload)
     _attach_stream_callback(llm)
     if enable_logging:
         return LoggingLLMProvider(inner_provider=llm)
     return llm
+
+
+def _strip_llm_runtime_metadata(llm_cfg: DictConfig | dict) -> DictConfig | dict:
+    """Remove repo-local profile metadata keys before provider instantiation."""
+    payload = _to_plain_dict(llm_cfg)
+    if not payload:
+        return llm_cfg
+    for key in _LLM_PROFILE_RUNTIME_METADATA_KEYS:
+        payload.pop(key, None)
+    if isinstance(llm_cfg, DictConfig):
+        return OmegaConf.create(payload)
+    return payload
+
+
+def _normalize_max_iterations(raw_value: object) -> int | None:
+    """Normalize one configured max-iteration value into a loop budget."""
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in {"", "none", "null"}:
+            return None
+        raw_value = normalized
+    return int(raw_value)
 
 
 def _attach_stream_callback(llm: LLMProvider) -> None:
@@ -1685,6 +1713,15 @@ def main(cfg: DictConfig) -> None:
                 _suppress_chatty_logger_propagation()
 
     shared_agent_client: Any | None = None
+    from card_framework.agents.prompt_compaction import (
+        LLMDrivenPromptCompactionStrategy,
+        NoOpPromptCompactionStrategy,
+        build_context_budget_manager,
+    )
+    from card_framework.audio_pipeline.factory import (
+        build_turn_emotion_resolution_strategy,
+    )
+
     if (
         stage_plan.run_summarizer_stage
         or stage_plan.run_critic_stage
@@ -1850,6 +1887,36 @@ def main(cfg: DictConfig) -> None:
             ),
         )
 
+    selection_cfg = _to_plain_dict(cfg.get("selection", {}))
+    stage_llm_selection_cfg = _to_plain_dict(selection_cfg.get("stage_llm", {}))
+    summarizer_llm_profile_name = str(
+        stage_llm_selection_cfg.get("summarizer", "default")
+    ).strip()
+    if summarizer_llm_profile_name in {"", "default"}:
+        summarizer_llm_profile_name = str(selection_cfg.get("llm", "")).strip()
+
+    profiles_cfg_dict = _to_plain_dict(cfg.get("profiles", {}))
+    llm_profiles_cfg_dict = _to_plain_dict(profiles_cfg_dict.get("llm", {}))
+    context_budget_manager = build_context_budget_manager(
+        orchestrator_cfg=orchestrator_cfg_dict,
+        llm_profiles_cfg=llm_profiles_cfg_dict,
+    )
+    if (
+        context_budget_manager.config.enabled
+        and context_budget_manager.config.compress_with_same_provider
+    ):
+        prompt_compaction_strategy = LLMDrivenPromptCompactionStrategy(
+            llm=summarizer_llm,
+            token_estimator=context_budget_manager.token_estimator,
+        )
+    else:
+        prompt_compaction_strategy = NoOpPromptCompactionStrategy(
+            token_estimator=context_budget_manager.token_estimator
+        )
+    turn_emotion_resolution_strategy = build_turn_emotion_resolution_strategy(
+        audio_cfg_dict
+    )
+
     is_embedding_enabled = "NoOpEmbeddingProvider" not in cfg.embedding.get(
         "_target_", ""
     )
@@ -1956,6 +2023,10 @@ def main(cfg: DictConfig) -> None:
                     ).items()
                     if str(name).strip() and str(emo_text).strip()
                 },
+                llm_profile_name=summarizer_llm_profile_name,
+                context_budget_manager=context_budget_manager,
+                prompt_compaction_strategy=prompt_compaction_strategy,
+                turn_emotion_resolution_strategy=turn_emotion_resolution_strategy,
                 agent_client=shared_agent_client,
                 event_bus=event_bus,
             ),
@@ -2013,6 +2084,9 @@ def main(cfg: DictConfig) -> None:
         )
 
     loop_memory_cfg = _to_plain_dict(orchestrator_cfg_dict.get("loop_memory", {}))
+    post_render_duration_cfg = _to_plain_dict(
+        orchestrator_cfg_dict.get("post_render_duration_verification", {})
+    )
     loop_memory_artifact_path: Path | None = None
     loop_memory_artifact_value = str(loop_memory_cfg.get("artifact_path", "")).strip()
     if loop_memory_artifact_value:
@@ -2036,7 +2110,9 @@ def main(cfg: DictConfig) -> None:
         project_root=project_root,
         target_seconds=target_seconds,
         duration_tolerance_ratio=duration_tolerance_ratio,
-        max_iterations=int(orchestrator_cfg_dict.get("max_iterations", 60)),
+        max_iterations=_normalize_max_iterations(
+            orchestrator_cfg_dict.get("max_iterations", 60)
+        ),
         voice_clone_orchestrator=voice_clone_orchestrator,
         interjector_orchestrator=interjector_orchestrator,
         speaker_sample_preparer=speaker_sample_preparer,
@@ -2051,6 +2127,9 @@ def main(cfg: DictConfig) -> None:
         loop_memory_artifact_path=loop_memory_artifact_path,
         live_draft_audio_enabled=live_draft_audio_enabled,
         summary_turn_emotion_linker=build_summary_turn_emotion_linker(audio_cfg_dict),
+        post_render_duration_verification_enabled=bool(
+            post_render_duration_cfg.get("enabled", False)
+        ),
         session_store=session_store,
         session_id=session_id,
         session_summary_output_path=session_summary_output_path,

@@ -15,6 +15,8 @@ profiles:
       _target_: card_framework.providers.vllm_provider.VLLMProvider
       base_url: "http://localhost:8000/v1"
       api_key: ${oc.env:CARD_FRAMEWORK_VLLM_API_KEY,EMPTY}
+      context_window_tokens: 32768
+      compaction_target_ratio: 0.65
     anthropic_claude_opus:
       _target_: card_framework.providers.anthropic_provider.AnthropicProvider
       api_key: ${oc.env:ANTHROPIC_API_KEY,""}
@@ -29,15 +31,21 @@ profiles:
       api_key: ${oc.env:DEEPSEEK_API_KEY,""}
       model: "deepseek-chat"
       base_url: "https://api.deepseek.com"
+      context_window_tokens: 131072
+      compaction_target_ratio: 0.65
     deepseek_reasoner:
       _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
       api_key: ${oc.env:DEEPSEEK_API_KEY,""}
       model: "deepseek-reasoner"
       base_url: "https://api.deepseek.com"
+      context_window_tokens: 131072
+      compaction_target_ratio: 0.65
     google_gemini:
       _target_: card_framework.providers.google_genai_provider.GoogleGenAIProvider
       api_key: ${oc.env:GEMINI_API_KEY,""}
       model: "gemini-2.5-pro"
+      context_window_tokens: 131072
+      compaction_target_ratio: 0.65
     glm_46:
       _target_: card_framework.providers.glm_provider.GLMProvider
       api_key: ${oc.env:ZAI_API_KEY,""}
@@ -251,7 +259,16 @@ audio:
     require_emotion_vector: true
     apply_indextts_bias: false
     max_sum: 0.8
-    force_live_draft_rerender: true
+    preserve_existing_explicit_vectors: true
+    force_live_draft_rerender: false
+  summary_turn_emotion:
+    prelink_enabled: true
+    prelink_strategy: "source_linked"
+    fallback_order:
+      - "source_linked"
+      - "explicit"
+      - "preset"
+      - "emo_text"
   voice_clone:
     enabled: true
     live_drafting:
@@ -320,6 +337,15 @@ orchestrator:
   target_minutes: 5
   duration_tolerance_ratio: 0.05
   max_iterations: 60
+  post_render_duration_verification:
+    enabled: true
+  prompt_compaction:
+    enabled: true
+    trigger_ratio: 0.80
+    retry_on_overflow: true
+    max_overflow_retries: 1
+    compress_with_same_provider: true
+    keep_latest_iterations: 1
   loop_memory:
     artifact_path: "artifacts/audio_stage/summarizer_loop_memory.json"
   timeouts:

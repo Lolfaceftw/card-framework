@@ -57,6 +57,10 @@ from card_framework.audio_pipeline.gateways.indextts_voice_clone_gateway import 
 from card_framework.audio_pipeline.orchestrator import AudioToScriptOrchestrator
 from card_framework.audio_pipeline.runtime import resolve_device, resolve_path
 from card_framework.audio_pipeline.speaker_samples import SpeakerSampleGenerator
+from card_framework.audio_pipeline.turn_emotion_resolution import (
+    SourceLinkedTurnEmotionResolutionStrategy,
+    TurnEmotionResolutionConfig,
+)
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneProvider
 from card_framework.audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
 from card_framework.shared.llm_provider import LLMProvider
@@ -437,10 +441,58 @@ def build_summary_turn_emotion_linker(
                     voice_clone_cfg.get("emotion_vector_max_sum", 0.8),
                 )
             ),
+            preserve_existing_explicit_vectors=bool(
+                linking_cfg.get("preserve_existing_explicit_vectors", True)
+            ),
             force_live_draft_rerender=bool(
-                linking_cfg.get("force_live_draft_rerender", True)
+                linking_cfg.get("force_live_draft_rerender", False)
             ),
         )
+    )
+
+
+def build_turn_emotion_resolution_strategy(
+    audio_cfg: Mapping[str, Any],
+) -> SourceLinkedTurnEmotionResolutionStrategy:
+    """Build the live-draft turn-emotion resolution strategy from config."""
+    summary_turn_emotion_cfg = _as_mapping(audio_cfg.get("summary_turn_emotion", {}))
+    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
+    raw_fallback_order = summary_turn_emotion_cfg.get(
+        "fallback_order",
+        ["source_linked", "explicit", "preset", "emo_text"],
+    )
+    if isinstance(raw_fallback_order, str):
+        fallback_order = tuple(
+            step.strip()
+            for step in raw_fallback_order.split(",")
+            if step.strip()
+        )
+    else:
+        fallback_order = tuple(
+            str(step).strip()
+            for step in list(raw_fallback_order)
+            if str(step).strip()
+        )
+    return SourceLinkedTurnEmotionResolutionStrategy(
+        config=TurnEmotionResolutionConfig(
+            prelink_enabled=bool(
+                summary_turn_emotion_cfg.get("prelink_enabled", True)
+            ),
+            strategy_name=str(
+                summary_turn_emotion_cfg.get("prelink_strategy", "source_linked")
+            ).strip()
+            or "source_linked",
+            fallback_order=fallback_order,
+        ),
+        linker=build_summary_turn_emotion_linker(audio_cfg),
+        emo_preset_vector_catalog={
+            str(name).strip(): vector
+            for name, raw_vector in _as_mapping(
+                voice_clone_cfg.get("emo_preset_vectors", {})
+            ).items()
+            if str(name).strip()
+            if (vector := EmotionVector.from_raw(raw_vector)) is not None
+        },
     )
 
 

@@ -177,8 +177,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Optional override for orchestrator.max_iterations. Values <= 0 keep "
-            "the repo default."
+            "Optional override for orchestrator.max_iterations. Values > 0 set "
+            "an explicit cap, 0 keeps the repo default, and values < 0 request "
+            "an unbounded loop budget."
         ),
     )
     parser.add_argument(
@@ -773,6 +774,7 @@ def _source_separate_episode_voice_samples_for_episode(
     if manifest_path.is_file():
         manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         if _voice_sample_manifest_complete(
+            episode=episode,
             manifest_payload=manifest_payload,
             voice_samples_dir=episode_root,
         ):
@@ -845,6 +847,7 @@ def _source_separate_episode_voice_samples_for_episode(
 
 def _voice_sample_manifest_complete(
     *,
+    episode: ParsedEpisode,
     manifest_payload: dict[str, Any],
     voice_samples_dir: Path,
 ) -> bool:
@@ -854,12 +857,21 @@ def _voice_sample_manifest_complete(
     for item in raw_samples:
         if not isinstance(item, dict):
             return False
+        speaker = str(item.get("speaker") or "").strip()
+        if not speaker:
+            return False
         path_value = str(item.get("path") or "").strip()
         if not path_value:
             return False
         candidate = (voice_samples_dir / Path(path_value).name).resolve()
         if not candidate.is_file():
             return False
+        direct_source_candidate = (episode.voice_samples_dir / f"{speaker}.wav").resolve()
+        cleaned_from_path = str(item.get("cleaned_from_path") or "").strip()
+        if direct_source_candidate.is_file() and cleaned_from_path:
+            cleaned_from_basename = Path(cleaned_from_path).name.lower()
+            if cleaned_from_basename != direct_source_candidate.name.lower():
+                return False
     return True
 
 
@@ -869,13 +881,19 @@ def _resolve_episode_voice_sample_path(
     sample_entry: dict[str, Any],
     speaker: str,
 ) -> Path:
+    direct_speaker_candidate = (episode.voice_samples_dir / f"{speaker}.wav").resolve()
     path_value = str(sample_entry.get("path") or "").strip()
+    if direct_speaker_candidate.is_file():
+        manifest_basename = Path(path_value).name.lower() if path_value else ""
+        if manifest_basename != direct_speaker_candidate.name.lower():
+            return direct_speaker_candidate
+
     candidates: list[Path] = []
     if path_value:
         raw_candidate = Path(path_value).expanduser()
         candidates.append(raw_candidate)
         candidates.append((episode.voice_samples_dir / raw_candidate.name).resolve())
-    candidates.append((episode.voice_samples_dir / f"{speaker}.wav").resolve())
+    candidates.append(direct_speaker_candidate)
 
     seen: set[Path] = set()
     for candidate in candidates:
@@ -974,22 +992,23 @@ def _rewrite_voice_samples_manifest(
                 if speaker:
                     samples_by_speaker[speaker] = dict(item)
 
+    available_source_speakers = set(samples_by_speaker)
     rewritten_samples: list[dict[str, Any]] = []
     for transcript_speaker in episode.speakers:
-        source_speaker = episode.bootstrap_mapping.get(
-            transcript_speaker,
-            transcript_speaker,
+        source_speaker = _resolve_packaged_source_speaker(
+            transcript_speaker=transcript_speaker,
+            available_source_speakers=available_source_speakers,
+            bootstrap_mapping=episode.bootstrap_mapping,
         )
-        source_audio_path = (episode.voice_samples_dir / f"{source_speaker}.wav").resolve()
-        if not source_audio_path.exists():
-            raise FileNotFoundError(
-                "Missing source voice sample for transcript speaker "
-                f"{transcript_speaker}: {source_audio_path}"
-            )
+        source_entry = dict(samples_by_speaker.get(source_speaker, {}))
+        source_audio_path = _resolve_episode_voice_sample_path(
+            episode=episode,
+            sample_entry=source_entry,
+            speaker=source_speaker,
+        )
         dest_audio_path = (speaker_samples_dir / f"{transcript_speaker}.wav").resolve()
         shutil.copyfile(source_audio_path, dest_audio_path)
 
-        source_entry = dict(samples_by_speaker.get(source_speaker, {}))
         sample_entry = {
             "speaker": transcript_speaker,
             "path": dest_audio_path.name,
@@ -1029,6 +1048,30 @@ def _rewrite_voice_samples_manifest(
     manifest_path = (speaker_samples_dir / "manifest.json").resolve()
     _write_json(rewritten_manifest, manifest_path)
     return manifest_path
+
+
+def _resolve_packaged_source_speaker(
+    *,
+    transcript_speaker: str,
+    available_source_speakers: set[str],
+    bootstrap_mapping: dict[str, str],
+) -> str:
+    """Choose the packaged source speaker for a sampled transcript speaker.
+
+    Packaged SPoRC voice-sample folders may already be rewritten to transcript
+    speaker labels, while some historical payloads still carry a bootstrap
+    mapping for sparse-coverage fallback. Prefer a direct transcript-labeled
+    sample whenever it exists so we do not collapse distinct speakers onto the
+    same reference voice.
+    """
+    if transcript_speaker in available_source_speakers:
+        return transcript_speaker
+
+    mapped_source_speaker = str(bootstrap_mapping.get(transcript_speaker, "")).strip()
+    if mapped_source_speaker in available_source_speakers:
+        return mapped_source_speaker
+
+    return transcript_speaker
 
 
 def _run_setup_only(*, llm_profile: str, llm_model: str, log_path: Path) -> int:
@@ -1130,6 +1173,13 @@ def _build_run_command(
             [
                 "--override",
                 f"orchestrator.max_iterations={orchestrator_max_iterations}",
+            ]
+        )
+    elif orchestrator_max_iterations < 0:
+        command.extend(
+            [
+                "--override",
+                "orchestrator.max_iterations=null",
             ]
         )
     if summarizer_max_tool_turns > 0:

@@ -163,3 +163,22 @@ def test_packaged_qwen_embedding_profile_uses_tuned_defaults() -> None:
     assert qwen_profile.batch_size == 1
     assert qwen_profile.max_seq_length == 384
     assert qwen_profile.attention_implementation == "eager"
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        Path(__file__).resolve().parents[2] / "conf" / "config.yaml",
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "card_framework"
+        / "config"
+        / "config.yaml",
+    ],
+)
+def test_summary_turn_linking_defaults_do_not_force_live_draft_rerender(
+    config_path: Path,
+) -> None:
+    cfg = OmegaConf.load(config_path)
+
+    assert cfg.audio.summary_turn_linking.force_live_draft_rerender is False

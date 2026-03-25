@@ -197,6 +197,7 @@ class Orchestrator:
         target_seconds: int,
         duration_tolerance_ratio: float,
         max_iterations: int | None,
+        transcript: TranscriptLike | None = None,
         full_transcript_text: str = "",
         loop_memory_artifact_path: Path | None = None,
         loop_memory_context: Mapping[str, str] | None = None,
@@ -208,6 +209,7 @@ class Orchestrator:
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
             max_iterations=max_iterations,
+            transcript=transcript,
             full_transcript_text=full_transcript_text,
             loop_memory_artifact_path=loop_memory_artifact_path,
             loop_memory_context=loop_memory_context,
@@ -223,6 +225,7 @@ class Orchestrator:
         *,
         target_seconds: int,
         duration_tolerance_ratio: float,
+        transcript: TranscriptLike | None = None,
         full_transcript_text: str = "",
     ) -> str:
         """Run a single summarizer pass without critic feedback iterations."""
@@ -242,6 +245,11 @@ class Orchestrator:
             previous_draft="",
             loop_context="",
             full_transcript=full_transcript_text,
+            transcript_payload=(
+                coerce_transcript(transcript).to_payload()
+                if transcript is not None
+                else {}
+            ),
         )
         return await self.agent_client.send_task(
             self.summarizer_port,
@@ -285,6 +293,7 @@ class Orchestrator:
         target_seconds: int,
         duration_tolerance_ratio: float,
         max_iterations: int | None,
+        transcript: TranscriptLike | None = None,
         full_transcript_text: str = "",
         loop_memory_artifact_path: Path | None = None,
         loop_memory_context: Mapping[str, str] | None = None,
@@ -294,6 +303,11 @@ class Orchestrator:
         """Run the loop and return structured per-iteration diagnostics."""
         feedback = ""
         draft = ""
+        transcript_payload = (
+            coerce_transcript(transcript).to_payload()
+            if transcript is not None
+            else {}
+        )
         iteration_details: list[IterationDiagnostic] = []
         last_word_count = 0
         last_estimated_seconds = 0.0
@@ -370,6 +384,7 @@ class Orchestrator:
                 previous_draft=draft if feedback else "",
                 loop_context=loop_context,
                 full_transcript=full_transcript_text,
+                transcript_payload=transcript_payload,
             )
             summarizer_started = time.perf_counter()
             draft = await self.agent_client.send_task(

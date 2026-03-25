@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 
+import pytest
+
 from card_framework.shared.paths import REPO_ROOT
 
 
@@ -91,6 +93,24 @@ def test_build_run_command_appends_quota_control_overrides() -> None:
     assert "audio.interjector.tool_call_planning_enabled=false" in joined
 
 
+def test_build_run_command_can_request_unbounded_iterations() -> None:
+    """Negative sweep override values should request an unbounded loop budget."""
+    module = _load_module()
+
+    command = module._build_run_command(
+        output_root=(REPO_ROOT / "artifacts" / "tmp" / "quota-test").resolve(),
+        transcript_path=(REPO_ROOT / "artifacts" / "tmp" / "transcript.json").resolve(),
+        target_seconds=300,
+        llm_profile="deepseek_chat",
+        llm_model="deepseek-chat",
+        orchestrator_max_iterations=-1,
+    )
+
+    joined = " ".join(command)
+    assert "orchestrator.max_iterations=null" in joined
+    assert "orchestrator.max_iterations=-1" not in joined
+
+
 def test_source_separate_episode_voice_samples_rewrites_manifest_to_cleaned_wavs(
     tmp_path: Path,
     monkeypatch,
@@ -160,6 +180,256 @@ def test_source_separate_episode_voice_samples_rewrites_manifest_to_cleaned_wavs
     assert (cleaned_episode.voice_samples_dir / "SPEAKER_01.wav").read_bytes().endswith(
         b"_clean"
     )
+
+
+def test_source_separate_episode_voice_samples_prefers_direct_transcript_speaker_wavs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Cleaning should ignore legacy bootstrap-wired manifest paths when direct transcript refs exist."""
+    module = _load_module()
+    voice_samples_dir = (tmp_path / "voice_samples").resolve()
+    voice_samples_dir.mkdir(parents=True, exist_ok=True)
+    (voice_samples_dir / "SPEAKER_00.wav").write_bytes(b"RIFF_host")
+    (voice_samples_dir / "SPEAKER_02.wav").write_bytes(b"RIFF_guest")
+    episode = module.ParsedEpisode(
+        order=3,
+        title="Episode Gamma",
+        sample_id="sample-003",
+        audio_slice_path=(tmp_path / "episode.mp3").resolve(),
+        transcript_blocks=(),
+        speakers=("SPEAKER_00", "SPEAKER_02"),
+        voice_samples_dir=voice_samples_dir,
+        original_voice_manifest={
+            "samples": [
+                {"speaker": "SPEAKER_00", "path": "SPEAKER_00.wav"},
+                {"speaker": "SPEAKER_02", "path": "SPEAKER_00.wav"},
+            ]
+        },
+        bootstrap_mapping={"SPEAKER_00": "SPEAKER_02"},
+    )
+
+    class _FakeSeparator:
+        def separate_vocals(
+            self,
+            input_audio_path: Path,
+            output_dir: Path,
+            *,
+            device: str,
+            progress_callback=None,
+        ) -> Path:
+            del device, progress_callback
+            vocals_path = (output_dir / "htdemucs" / input_audio_path.stem / "vocals.wav").resolve()
+            vocals_path.parent.mkdir(parents=True, exist_ok=True)
+            vocals_path.write_bytes(input_audio_path.read_bytes() + b"_clean")
+            return vocals_path
+
+    monkeypatch.setattr(module, "load_audio_config", lambda project_root: {"separation": {}})
+    monkeypatch.setattr(module, "build_source_separator", lambda audio_cfg: _FakeSeparator())
+    monkeypatch.setattr(module, "resolve_device", lambda raw: raw)
+
+    cleaned_episode = module._source_separate_episode_voice_samples(
+        episodes=(episode,),
+        cleaned_root=(tmp_path / "cleaned").resolve(),
+        device="cpu",
+    )[0]
+
+    manifest_payload = json.loads(
+        (cleaned_episode.voice_samples_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    samples = {sample["speaker"]: sample for sample in manifest_payload["samples"]}
+    assert samples["SPEAKER_02"]["cleaned_from_path"].endswith("SPEAKER_02.wav")
+    assert (cleaned_episode.voice_samples_dir / "SPEAKER_00.wav").read_bytes() == b"RIFF_host_clean"
+    assert (cleaned_episode.voice_samples_dir / "SPEAKER_02.wav").read_bytes() == b"RIFF_guest_clean"
+
+
+def test_voice_sample_manifest_complete_rejects_stale_bootstrap_cleaned_from_path(
+    tmp_path: Path,
+) -> None:
+    """Existing cleaned caches should be rebuilt if provenance still points at the wrong bootstrap speaker."""
+    module = _load_module()
+    source_voice_samples_dir = (tmp_path / "source_voice_samples").resolve()
+    source_voice_samples_dir.mkdir(parents=True, exist_ok=True)
+    (source_voice_samples_dir / "SPEAKER_00.wav").write_bytes(b"RIFF_host")
+    (source_voice_samples_dir / "SPEAKER_02.wav").write_bytes(b"RIFF_guest")
+    cleaned_voice_samples_dir = (tmp_path / "cleaned_voice_samples").resolve()
+    cleaned_voice_samples_dir.mkdir(parents=True, exist_ok=True)
+    (cleaned_voice_samples_dir / "SPEAKER_00.wav").write_bytes(b"RIFF_host_clean")
+    (cleaned_voice_samples_dir / "SPEAKER_02.wav").write_bytes(b"RIFF_guest_clean")
+
+    episode = module.ParsedEpisode(
+        order=3,
+        title="Episode Gamma",
+        sample_id="sample-003",
+        audio_slice_path=(tmp_path / "episode.mp3").resolve(),
+        transcript_blocks=(),
+        speakers=("SPEAKER_00", "SPEAKER_02"),
+        voice_samples_dir=source_voice_samples_dir,
+        original_voice_manifest={"samples": []},
+        bootstrap_mapping={"SPEAKER_00": "SPEAKER_02"},
+    )
+    stale_manifest = {
+        "samples": [
+            {
+                "speaker": "SPEAKER_00",
+                "path": "SPEAKER_00.wav",
+                "cleaned_from_path": str(source_voice_samples_dir / "SPEAKER_00.wav"),
+            },
+            {
+                "speaker": "SPEAKER_02",
+                "path": "SPEAKER_02.wav",
+                "cleaned_from_path": str(source_voice_samples_dir / "SPEAKER_00.wav"),
+            },
+        ]
+    }
+
+    assert module._voice_sample_manifest_complete(
+        episode=episode,
+        manifest_payload=stale_manifest,
+        voice_samples_dir=cleaned_voice_samples_dir,
+    ) is False
+
+
+def test_rewrite_voice_samples_manifest_prefers_direct_transcript_speaker_samples(
+    tmp_path: Path,
+) -> None:
+    """Direct packaged transcript speakers should not be overridden by bootstrap fallback."""
+    module = _load_module()
+    voice_samples_dir = (tmp_path / "voice_samples").resolve()
+    voice_samples_dir.mkdir(parents=True, exist_ok=True)
+    (voice_samples_dir / "host_reference.wav").write_bytes(b"RIFF_host")
+    (voice_samples_dir / "bootstrap_guest.wav").write_bytes(b"RIFF_bootstrap_guest")
+    (voice_samples_dir / "SPEAKER_02.wav").write_bytes(b"RIFF_guest")
+    audio_slice_path = (REPO_ROOT / "artifacts" / "tmp" / "speaker-map-episode-002.mp3").resolve()
+    audio_slice_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_slice_path.write_bytes(b"ID3")
+    episode = module.ParsedEpisode(
+        order=2,
+        title="Episode Beta",
+        sample_id="sample-002",
+        audio_slice_path=audio_slice_path,
+        transcript_blocks=(),
+        speakers=("SPEAKER_00", "SPEAKER_02"),
+        voice_samples_dir=voice_samples_dir,
+        original_voice_manifest={
+            "samples": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "path": "host_reference.wav",
+                    "duration_ms": 15_895,
+                    "ranges_ms": [{"start_time_ms": 10, "end_time_ms": 100}],
+                },
+                {
+                    "speaker": "SPEAKER_02",
+                    "path": "bootstrap_guest.wav",
+                    "duration_ms": 30_000,
+                    "ranges_ms": [{"start_time_ms": 200, "end_time_ms": 400}],
+                },
+            ]
+        },
+        bootstrap_mapping={"SPEAKER_00": "SPEAKER_02"},
+    )
+
+    speaker_samples_dir = (tmp_path / "rewritten").resolve()
+    speaker_samples_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = module._rewrite_voice_samples_manifest(
+        episode=episode,
+        speaker_samples_dir=speaker_samples_dir,
+    )
+
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    samples = {sample["speaker"]: sample for sample in manifest_payload["samples"]}
+    assert samples["SPEAKER_00"]["duration_ms"] == 15_895
+    assert samples["SPEAKER_00"]["ranges_ms"] == [{"start_time_ms": 10, "end_time_ms": 100}]
+    assert samples["SPEAKER_02"]["duration_ms"] == 30_000
+    assert samples["SPEAKER_02"]["ranges_ms"] == [{"start_time_ms": 200, "end_time_ms": 400}]
+    assert (speaker_samples_dir / "SPEAKER_00.wav").read_bytes() == b"RIFF_host"
+    assert (speaker_samples_dir / "SPEAKER_02.wav").read_bytes() == b"RIFF_guest"
+
+
+def test_rewrite_voice_samples_manifest_uses_bootstrap_mapping_only_as_missing_speaker_fallback(
+    tmp_path: Path,
+) -> None:
+    """Bootstrap fallback should only supply transcript speakers without direct packaged refs."""
+    module = _load_module()
+    voice_samples_dir = (tmp_path / "voice_samples").resolve()
+    voice_samples_dir.mkdir(parents=True, exist_ok=True)
+    (voice_samples_dir / "SPEAKER_00.wav").write_bytes(b"RIFF_host")
+    (voice_samples_dir / "SPEAKER_02.wav").write_bytes(b"RIFF_guest")
+    audio_slice_path = (REPO_ROOT / "artifacts" / "tmp" / "speaker-map-episode-003.mp3").resolve()
+    audio_slice_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_slice_path.write_bytes(b"ID3")
+    episode = module.ParsedEpisode(
+        order=3,
+        title="Episode Gamma",
+        sample_id="sample-003",
+        audio_slice_path=audio_slice_path,
+        transcript_blocks=(),
+        speakers=("SPEAKER_00", "SPEAKER_01", "SPEAKER_02"),
+        voice_samples_dir=voice_samples_dir,
+        original_voice_manifest={
+            "samples": [
+                {"speaker": "SPEAKER_00", "path": "SPEAKER_00.wav", "duration_ms": 11_000},
+                {"speaker": "SPEAKER_02", "path": "SPEAKER_02.wav", "duration_ms": 22_000},
+            ]
+        },
+        bootstrap_mapping={"SPEAKER_01": "SPEAKER_00", "SPEAKER_00": "SPEAKER_02"},
+    )
+
+    speaker_samples_dir = (tmp_path / "rewritten").resolve()
+    speaker_samples_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = module._rewrite_voice_samples_manifest(
+        episode=episode,
+        speaker_samples_dir=speaker_samples_dir,
+    )
+
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    samples = {sample["speaker"]: sample for sample in manifest_payload["samples"]}
+    assert samples["SPEAKER_00"]["duration_ms"] == 11_000
+    assert samples["SPEAKER_01"]["duration_ms"] == 11_000
+    assert samples["SPEAKER_02"]["duration_ms"] == 22_000
+    assert (speaker_samples_dir / "SPEAKER_00.wav").read_bytes() == b"RIFF_host"
+    assert (speaker_samples_dir / "SPEAKER_01.wav").read_bytes() == b"RIFF_host"
+    assert (speaker_samples_dir / "SPEAKER_02.wav").read_bytes() == b"RIFF_guest"
+
+
+def test_rewrite_voice_samples_manifest_does_not_reverse_bootstrap_map_into_wrong_voice(
+    tmp_path: Path,
+) -> None:
+    """Missing speakers should fail rather than silently borrowing a reverse-mapped voice."""
+    module = _load_module()
+    voice_samples_dir = (tmp_path / "voice_samples").resolve()
+    voice_samples_dir.mkdir(parents=True, exist_ok=True)
+    (voice_samples_dir / "SPEAKER_00.wav").write_bytes(b"RIFF_host")
+    audio_slice_path = (REPO_ROOT / "artifacts" / "tmp" / "speaker-map-episode-004.mp3").resolve()
+    audio_slice_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_slice_path.write_bytes(b"ID3")
+    episode = module.ParsedEpisode(
+        order=4,
+        title="Episode Delta",
+        sample_id="sample-004",
+        audio_slice_path=audio_slice_path,
+        transcript_blocks=(),
+        speakers=("SPEAKER_02",),
+        voice_samples_dir=voice_samples_dir,
+        original_voice_manifest={
+            "samples": [
+                {"speaker": "SPEAKER_00", "path": "SPEAKER_00.wav", "duration_ms": 11_000},
+            ]
+        },
+        bootstrap_mapping={"SPEAKER_00": "SPEAKER_02"},
+    )
+
+    speaker_samples_dir = (tmp_path / "rewritten").resolve()
+    speaker_samples_dir.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(FileNotFoundError):
+        module._rewrite_voice_samples_manifest(
+            episode=episode,
+            speaker_samples_dir=speaker_samples_dir,
+        )
 
 
 def test_run_docker_command_monitored_writes_args_json_and_invokes_wrapper(

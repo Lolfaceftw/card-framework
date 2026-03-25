@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from card_framework.audio_pipeline.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
     SummaryTurnEmotionLinkingConfig,
@@ -284,3 +286,242 @@ def test_stage_three_only_links_summary_turn_emotions(tmp_path: Path) -> None:
     asyncio.run(orchestrator.run(transcript=transcript, retrieval_enabled=False))
 
     assert 'emotion_vector_source="summary_turn_linking"' in captured["summary_xml"]
+
+
+def test_live_draft_does_not_rerender_when_summary_is_already_vector_resolved(
+    tmp_path: Path,
+) -> None:
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 1000,
+                    "text": "hello from stage two",
+                    "emotion_vector": [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.08],
+                }
+            ],
+            "metadata": {},
+        }
+    )
+    original_summary = (
+        '<SPEAKER_00 emo_preset="engaged" '
+        'emotion_vector="0.100000,0.000000,0.000000,0.000000,0.000000,0.000000,0.060000,0.200000" '
+        'emotion_vector_source="preset_vector">hello from stage two</SPEAKER_00>'
+    )
+    orchestrator = StageOrchestrator(
+        orchestrator=_FakeLoopOrchestrator(),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.1,
+        max_iterations=1,
+        live_draft_audio_enabled=True,
+        summary_turn_emotion_linker=SummaryTurnEmotionLinker(
+            SummaryTurnEmotionLinkingConfig(
+                top_k=1,
+                min_support_score=0.0,
+                preserve_existing_explicit_vectors=True,
+                apply_indextts_bias=False,
+                force_live_draft_rerender=False,
+            )
+        ),
+    )
+
+    enriched_summary = orchestrator._link_summary_turn_emotions(
+        summary_xml=original_summary,
+        transcript=transcript,
+    )
+
+    assert enriched_summary == original_summary
+    assert (
+        orchestrator._should_rerender_live_draft_final_summary(
+            original_summary_xml=original_summary,
+            enriched_summary_xml=enriched_summary,
+        )
+        is False
+    )
+
+
+def test_post_render_duration_verification_raises_when_out_of_tolerance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    merged_audio_path = tmp_path / "voice_cloned.wav"
+    merged_audio_path.write_text("placeholder", encoding="utf-8")
+    orchestrator = StageOrchestrator(
+        orchestrator=_FakeLoopOrchestrator(),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
+        max_iterations=1,
+        post_render_duration_verification_enabled=True,
+    )
+    monkeypatch.setattr(
+        "card_framework.orchestration.stage_orchestrator.probe_audio_duration_ms",
+        lambda _path: 70000,
+    )
+
+    with pytest.raises(RuntimeError, match="Post-render duration out of tolerance"):
+        orchestrator._verify_post_render_duration(
+            voice_clone_result=VoiceCloneRunResult(
+                output_dir=tmp_path,
+                manifest_path=tmp_path / "manifest.json",
+                generated_at_utc="2026-03-24T00:00:00+00:00",
+                artifacts=(),
+                merged_output_audio_path=merged_audio_path,
+            )
+        )
+
+
+def test_post_render_duration_verification_accepts_in_tolerance_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    merged_audio_path = tmp_path / "voice_cloned.wav"
+    merged_audio_path.write_text("placeholder", encoding="utf-8")
+    orchestrator = StageOrchestrator(
+        orchestrator=_FakeLoopOrchestrator(),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
+        max_iterations=1,
+        post_render_duration_verification_enabled=True,
+    )
+    monkeypatch.setattr(
+        "card_framework.orchestration.stage_orchestrator.probe_audio_duration_ms",
+        lambda _path: 60000,
+    )
+
+    orchestrator._verify_post_render_duration(
+        voice_clone_result=VoiceCloneRunResult(
+            output_dir=tmp_path,
+            manifest_path=tmp_path / "manifest.json",
+            generated_at_utc="2026-03-24T00:00:00+00:00",
+            artifacts=(),
+            merged_output_audio_path=merged_audio_path,
+        )
+    )
+
+
+def test_stage_three_only_applies_post_render_duration_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_summary_path = tmp_path / "existing_summary.xml"
+    final_summary_path.write_text(
+        "<SPEAKER_00>Hello from stage three</SPEAKER_00>",
+        encoding="utf-8",
+    )
+    merged_audio_path = tmp_path / "voice_cloned.wav"
+    merged_audio_path.write_text("placeholder", encoding="utf-8")
+    transcript = Transcript.from_mapping({"segments": [], "metadata": {}})
+
+    def _fake_run_voice_clone_stage(
+        self: StageOrchestrator,
+        *,
+        summary_xml: str,
+        transcript: Transcript,
+    ) -> VoiceCloneRunResult:
+        del self, summary_xml, transcript
+        return VoiceCloneRunResult(
+            output_dir=tmp_path,
+            manifest_path=tmp_path / "manifest.json",
+            generated_at_utc="2026-03-24T00:00:00+00:00",
+            artifacts=(),
+            merged_output_audio_path=merged_audio_path,
+        )
+
+    monkeypatch.setattr(
+        StageOrchestrator,
+        "_run_voice_clone_stage",
+        _fake_run_voice_clone_stage,
+    )
+    monkeypatch.setattr(
+        "card_framework.orchestration.stage_orchestrator.probe_audio_duration_ms",
+        lambda _path: 70000,
+    )
+    orchestrator = StageOrchestrator(
+        orchestrator=_FakeLoopOrchestrator(),
+        stage_plan=PipelineStagePlan(
+            start_stage="stage-3",
+            final_summary_path=final_summary_path,
+        ),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
+        max_iterations=1,
+        voice_clone_orchestrator=_FakeVoiceCloneOrchestrator(tmp_path / "voice_clone"),
+        post_render_duration_verification_enabled=True,
+    )
+
+    with pytest.raises(RuntimeError, match="Post-render duration out of tolerance"):
+        asyncio.run(orchestrator.run(transcript=transcript, retrieval_enabled=False))
+
+
+def test_full_loop_does_not_mark_stage_three_complete_when_verification_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    merged_audio_path = tmp_path / "voice_cloned.wav"
+    merged_audio_path.write_text("placeholder", encoding="utf-8")
+    session_store = _FakeSessionStore()
+    transcript = Transcript.from_mapping(
+        {
+            "segments": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 1000,
+                    "text": "hello from stage two",
+                }
+            ],
+            "metadata": {},
+        }
+    )
+
+    def _fake_run_voice_clone_stage(
+        self: StageOrchestrator,
+        *,
+        summary_xml: str,
+        transcript: Transcript,
+    ) -> VoiceCloneRunResult:
+        del self, summary_xml, transcript
+        return VoiceCloneRunResult(
+            output_dir=tmp_path,
+            manifest_path=tmp_path / "manifest.json",
+            generated_at_utc="2026-03-24T00:00:00+00:00",
+            artifacts=(),
+            merged_output_audio_path=merged_audio_path,
+        )
+
+    monkeypatch.setattr(
+        StageOrchestrator,
+        "_run_voice_clone_stage",
+        _fake_run_voice_clone_stage,
+    )
+    monkeypatch.setattr(
+        "card_framework.orchestration.stage_orchestrator.probe_audio_duration_ms",
+        lambda _path: 70000,
+    )
+    orchestrator = StageOrchestrator(
+        orchestrator=_FakeLoopOrchestrator(),
+        stage_plan=PipelineStagePlan(start_stage="stage-2"),
+        project_root=tmp_path,
+        target_seconds=60,
+        duration_tolerance_ratio=0.05,
+        max_iterations=1,
+        voice_clone_orchestrator=_FakeVoiceCloneOrchestrator(tmp_path / "voice_clone"),
+        post_render_duration_verification_enabled=True,
+        session_store=session_store,
+        session_id="session-1",
+    )
+
+    with pytest.raises(RuntimeError, match="Post-render duration out of tolerance"):
+        asyncio.run(orchestrator.run(transcript=transcript, retrieval_enabled=False))
+
+    assert session_store.started == ["stage-2", "stage-3"]
+    assert session_store.completed == ["stage-2"]

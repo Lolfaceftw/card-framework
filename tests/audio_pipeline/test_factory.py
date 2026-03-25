@@ -8,6 +8,8 @@ from card_framework.audio_pipeline.factory import (
     build_interjector_orchestrator,
     build_speaker_diarizer,
     build_speaker_sample_generator,
+    build_summary_turn_emotion_linker,
+    build_turn_emotion_resolution_strategy,
     build_transcript_affect_analyzer,
     build_voice_clone_orchestrator,
 )
@@ -29,6 +31,9 @@ from card_framework.audio_pipeline.gateways.granite_speech_gateway import Granit
 from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
 from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
 from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
+from card_framework.audio_pipeline.turn_emotion_resolution import (
+    SourceLinkedTurnEmotionResolutionStrategy,
+)
 from card_framework.shared.llm_provider import LLMProvider
 
 
@@ -119,6 +124,53 @@ def test_factory_builds_transcript_affect_analyzer(tmp_path: Path) -> None:
     )
 
     assert isinstance(analyzer, TranscriptAffectAnalyzer)
+
+
+def test_factory_builds_turn_emotion_resolution_strategy() -> None:
+    strategy = build_turn_emotion_resolution_strategy(
+        {
+            "summary_turn_emotion": {
+                "prelink_enabled": True,
+                "prelink_strategy": "source_linked",
+                "fallback_order": [
+                    "source_linked",
+                    "explicit",
+                    "preset",
+                    "emo_text",
+                ],
+            },
+            "summary_turn_linking": {
+                "enabled": True,
+            },
+            "voice_clone": {
+                "emo_preset_vectors": {
+                    "engaged": [0.10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20]
+                }
+            },
+        }
+    )
+
+    assert isinstance(strategy, SourceLinkedTurnEmotionResolutionStrategy)
+    assert strategy.config.prelink_enabled is True
+    assert strategy.config.fallback_order == (
+        "source_linked",
+        "explicit",
+        "preset",
+        "emo_text",
+    )
+
+
+def test_factory_defaults_summary_turn_linker_to_no_forced_rerender() -> None:
+    linker = build_summary_turn_emotion_linker(
+        {
+            "summary_turn_linking": {
+                "enabled": True,
+            }
+        }
+    )
+
+    assert linker is not None
+    assert linker.config.force_live_draft_rerender is False
 
 
 def test_factory_builds_eta_strategy_from_config() -> None:
