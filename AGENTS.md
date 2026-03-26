@@ -81,6 +81,11 @@ Markdown files under `coder_docs/`.
   blocker remains.
 - Follow `coder_docs/agent_communication_standards.md` for agent tone; keep
   responses direct, non-sycophantic, and free of praise or apologies.
+- Any change that affects the next published version must follow semantic
+  versioning (`MAJOR.MINOR.PATCH`) and start from a checked-out release branch
+  whose version suffix matches the intended release; see
+  `coder_docs/git_github_workflow.md` and
+  `coder_docs/github_actions_release_spec.md`.
 - When implementation changes affect behavior, interfaces, contracts, outputs,
   workflows, or operator expectations, update the relevant tests and Markdown
   docs in the same change.

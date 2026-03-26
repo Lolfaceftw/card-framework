@@ -23,6 +23,7 @@ wheels/
 # Outputs and Reports
 outputs/
 artifacts/
+/artifacts?*/
 neo4j_data/
 summary.json
 summary.xml

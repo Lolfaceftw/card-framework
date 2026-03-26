@@ -7,6 +7,14 @@ repository.
 This is a repo-specific operations document. It is intentionally narrow and
 describes the workflows and checks that exist in this checkout now.
 
+## Semantic Versioning Policy
+
+- Use semantic versioning `MAJOR.MINOR.PATCH` for every published release version.
+- Bump `MAJOR` for backward-incompatible public changes such as API, CLI, config, contract, workflow, or output changes.
+- Bump `MINOR` for backward-compatible new features, new optional capabilities, or materially expanded public behavior.
+- Bump `PATCH` for backward-compatible bug fixes, release-process fixes, packaging corrections, and internal or docs changes that do not change the public contract.
+- When one release contains multiple change types, choose the highest-impact required bump.
+
 ## Current Workflow Inventory
 
 As of 2026-03-09, this repository has one checked-in GitHub Actions workflow:
@@ -28,14 +36,18 @@ on them.
 
 ## Release Build Standards
 
-Before pushing a release tag, create a dedicated semver-named release branch
-such as `release/vX.Y.Z` from the target integration branch. Run the version
-bump, release preflight, and review flow there, merge that branch, and only
-then push the matching `vX.Y.Z` tag from the merged integration-branch commit.
+Before pushing a release tag, create and switch to a dedicated semver-named
+release branch whose suffix matches the intended version, such as
+`release/vX.Y.Z`, from the target integration branch. If the active agent
+runtime requires a branch prefix, preserve the same semantic suffix, for
+example `codex/release/vX.Y.Z`. Run the version bump, release preflight, and
+review flow there, merge that branch, and only then push the matching `vX.Y.Z`
+tag from the merged integration-branch commit.
 That release-preparation branch must satisfy all of the following:
 
 1. The branch name and intended tag agree on the same semantic version.
-   Example: branch `release/v1.0.4` pairs with tag `v1.0.4`.
+   Example: branch `release/v1.0.4` or `codex/release/v1.0.4` pairs with tag
+   `v1.0.4`.
 2. `pyproject.toml` version matches the intended tag without the leading `v`.
    Example: tag `v1.0.4` requires `version = "1.0.4"`.
 3. The release artifacts build with:
@@ -100,7 +112,8 @@ done only after the triggered GitHub Actions run is watched to completion and
 its success is verified.
 
 The pushed `vX.Y.Z` tag should point at the merged integration-branch commit
-that came from `release/vX.Y.Z`, not at an unmerged topic-branch tip.
+that came from `release/vX.Y.Z`, or a runtime-prefixed equivalent such as
+`codex/release/vX.Y.Z`, not at an unmerged topic-branch tip.
 
 Required sequence after pushing `vX.Y.Z`:
 
@@ -154,7 +167,8 @@ Current repo rule:
 
 Use this checklist for every release-tag push:
 
-- Release branch `release/vX.Y.Z` created from the current integration branch
+- Checked out release branch `release/vX.Y.Z`, or runtime-prefixed equivalent,
+  created from the current integration branch
 - Release branch merged before the matching tag is created
 - Version bumped in `pyproject.toml`
 - `uv lock` updated when dependency metadata changed
