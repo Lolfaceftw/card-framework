@@ -3,6 +3,7 @@ diagram_screenshots/
 *.bbl
 *.bcf
 *.blg
+*.log
 *.lof
 *.lot
 *.out

@@ -30,7 +30,6 @@ stage-specific LLM overrides & \codepath{default/default/default} & Summarizer, 
 Profile & Public model / alias & Benchmark & Score & Base & Base score & Status \\
 \midrule
 \codepath{anthropic_claude_opus} & \codepath{claude-opus-4-6} & Terminal-Bench 2.0 & 65.4\% & Gemini 3.1 Pro & 68.5\% & exact \\
-\codepath{transformers_local} & public repo \codepath{Salesforce/xLAM-2-3b-fc-r} & BFCL v4 overall & 41.22 & Nanbeige4-3B-Thinking-2511 & 51.40 & exact public row \\
 \codepath{glm_46} & \codepath{glm-4.6} & BFCL v4 overall & 72.38 & Gemini 3 Pro Preview & 72.51 & exact \\
 \codepath{nanbeige_thinking} & \codepath{Nanbeige4-3B-Thinking-2511} & BFCL v4 overall & 51.40 & xLAM-2-3b-fc-r & 41.22 & exact \\
 \bottomrule
@@ -49,6 +48,7 @@ Profiles that do not currently have a matched exact public benchmark row are sum
 Profile & Exact issue & Nearest public evidence & Score & Safe interpretation \\
 \midrule
 \codepath{vllm_local} & provider-only profile & none & n/a & The profile is transport configuration, not a model. \\
+\codepath{transformers_local} & configured model string is \codepath{Salesforce/Llama-xLAM-2-3b-fc-r}, not the public repo slug & \codepath{Salesforce/xLAM-2-3b-fc-r} BFCL v4 row & 41.22 & Treat the public xLAM row as the closest benchmark evidence unless the configured alias is reconciled to the published slug. \\
 \codepath{deepseek_chat} & mutable alias & DeepSeek-V3.2-Exp public row & 54.12 on BFCL v4 (proxy) & Use only as nearby family evidence for the current API alias. \\
 \codepath{deepseek_reasoner} & mutable alias & DeepSeek-V3.2-Exp prompt+thinking row & 56.73 on BFCL v4 (proxy) & Use only as nearby family evidence for the current reasoning alias. \\
 \codepath{google_gemini} & no exact public row found for \codepath{gemini-2.5-pro} & Gemini 3.1 Pro public page & 68.5\% Terminal-Bench 2.0 & Different model generation; do not treat as exact 2.5 Pro evidence. \\
