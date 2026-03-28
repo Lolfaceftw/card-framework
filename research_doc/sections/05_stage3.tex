@@ -1,0 +1,67 @@
+\chapter{Stage-3: Voice Cloning and Summary Realization}
+
+\section{Speaker-sample preparation and realization path}
+
+Stage-3 consumes \codepath{summary.xml} and the speaker-sample manifest. In live-draft mode it can finalize already rendered turn-level audio without re-synthesizing every turn. Otherwise it performs a batch stage-3 render from the accepted summary. The batch path is implemented in \codepath{src/card_framework/audio_pipeline/voice_clone_orchestrator.py}; the incremental path is implemented in \codepath{src/card_framework/audio_pipeline/live_draft_voice_clone.py}.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Speaker-sample parameter & Default value & Meaning \\
+\midrule
+target duration per speaker & 30 s & Target sample length for each speaker reference \\
+max slices & 6 & Maximum selected clean slices per speaker \\
+minimum slice duration & 1200 ms & Lower bound for eligible source slices \\
+sample rate & 44100 Hz & Export rate for generated speaker references \\
+codec & \codepath{pcm_s24le} & Output format for speaker sample WAVs \\
+\bottomrule
+\end{tabular}
+\caption{Default speaker-sample generation settings.}
+\label{tab:speaker-samples}
+\end{table}
+
+When post-render verification is enabled, the stage-3 export is checked again against the stage-2 target using the same tolerance band from Eq.~\ref{eq:durationband}. If a merged stage-3 output exists, it is probed directly; otherwise durations are summed over per-turn artifacts.
+
+\section{Public benchmark positioning of the TTS family}
+
+The repository uses the IndexTTS family for voice cloning. Table~\ref{tab:tts-public} summarizes the public comparison extracted from the IndexTTS paper [\cite{indextts2025,indextts_repo}].
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+System & Avg WER/CER & Avg speaker similarity & Avg MOS \\
+\midrule
+IndexTTS & 3.7 & 0.776 & 4.01 \\
+XTTS & 6.0 & 0.663 & 3.11 \\
+CosyVoice2 & 5.9 & 0.788 & 3.81 \\
+F5-TTS & 8.2 & 0.779 & 3.66 \\
+FishSpeech & 8.3 & 0.612 & 3.57 \\
+\bottomrule
+\end{tabular}
+\caption{Public zero-shot TTS comparison reported by the IndexTTS paper.}
+\label{tab:tts-public}
+\end{table}
+
+\section{Repository-local end-to-end duration evidence}
+
+An internal SPoRC DeepSeek bundle covering 15 outputs across five episodes and three duration presets records concrete final durations for all stage-3/stage-4 outputs [\cite{internal_deepseek_bundle_20260324}]. Table~\ref{tab:stage3-duration-bundle} summarizes the observed range by preset.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Target preset & Count & Min observed duration (s) & Max observed duration (s) \\
+\midrule
+30s & 5 & 29.246 & 31.498 \\
+1m & 5 & 58.375 & 62.322 \\
+5m & 5 & 268.158 & 293.236 \\
+\bottomrule
+\end{tabular}
+\caption{Observed final durations in the repository-local 15-output SPoRC DeepSeek bundle.}
+\label{tab:stage3-duration-bundle}
+\end{table}

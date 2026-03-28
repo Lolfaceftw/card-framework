@@ -1,0 +1,64 @@
+\chapter{Scope and Defaults}
+
+This document describes the implemented methodology of the \texttt{card-framework} repository as a staged pipeline from stage-1 through stage-4. The emphasis is the shipped code path, not a conceptual rewrite. The document therefore follows the actual runtime composition in \codepath{conf/config.yaml}, \codepath{src/card_framework/cli/main.py}, \codepath{src/card_framework/runtime/pipeline_plan.py}, and \codepath{src/card_framework/orchestration/stage_orchestrator.py}.
+
+The most important default settings are summarized in Table~\ref{tab:default-runtime}. These defaults matter because they change what the methodology is in practice: the default run does not use embeddings, does run affect analysis, and does use live-draft audio so stage-2 duration control is based on actual rendered audio durations rather than a WPM proxy.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{3.5cm}L{3.0cm}Y}
+\toprule
+Setting & Default value & Practical consequence \\
+\midrule
+\codepath{selection.llm} & \codepath{vllm_local} & The default runtime uses a local vLLM-compatible provider profile; benchmarking this profile requires separately identifying the backend model served behind it. \\
+\codepath{selection.embedding} & \codepath{disabled} & Retrieval embeddings are disabled by default, so stage-2 uses full-transcript mode and does not expose \codepath{query_transcript} as an active tool. \\
+\codepath{audio.affect_analysis.enabled} & \codepath{true} & Stage-1 and stage-2 transcripts are enriched with categorical and dimensional affect metadata, including direct emotion vectors. \\
+\codepath{audio.voice_clone.enabled} & \codepath{true} & The accepted summary is rendered into cloned speaker audio unless the run is intentionally staged earlier. \\
+\codepath{audio.voice_clone.live_drafting.enabled} & \codepath{true} & Mutating stage-2 tool calls render turn audio immediately; budget checks then use measured audio durations. \\
+\codepath{orchestrator.duration_tolerance_ratio} & \codepath{0.05} & The runtime enforces a \(\pm 5\%\) duration tolerance band around the requested target duration. \\
+\bottomrule
+\end{tabularx}
+\caption{Shipped default runtime settings most relevant to the methodology.}
+\label{tab:default-runtime}
+\end{table}
+
+The overall dataflow is shown in Fig.~\ref{fig:pipeline-overview}.
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\footnotesize,
+  node distance=0.95cm and 0.9cm,
+  box/.style={draw, rounded corners=2pt, fill=cflight, align=center, text width=2.75cm, minimum height=1.05cm},
+  arrow/.style={-Latex, thick, cfblue}
+]
+\node[box] (input) {Input audio\\\codepath{audio.wav}};
+\node[box, right=of input] (stage1) {Stage-1\\separation + ASR\\diarization + alignment};
+\node[box, right=of stage1] (transcript) {Transcript artifact\\\codepath{transcript.json}};
+\node[box, right=of transcript] (stage2) {Stage-2\\affect-aware summarizer + critic loop};
+\node[box, right=of stage2] (summary) {Summary artifact\\\codepath{summary.xml}};
+
+\node[box, below=1.15cm of transcript] (samples) {Speaker samples\\\codepath{speaker_samples/}\\\codepath{manifest.json}};
+\node[box, right=of samples] (stage3) {Stage-3\\voice cloning + merge};
+\node[box, right=of stage3] (manifest) {Stage-3 manifest\\merged cloned WAV};
+\node[box, right=of manifest] (stage4) {Stage-4\\interjector overlay planning + repair};
+\node[box, above=1.05cm of stage4] (final) {Final artifact\\interjected merged WAV};
+
+\draw[arrow] (input) -- (stage1);
+\draw[arrow] (stage1) -- (transcript);
+\draw[arrow] (transcript) -- (stage2);
+\draw[arrow] (stage2) -- (summary);
+\draw[arrow] (transcript) -- (samples);
+\draw[arrow] (summary) -- (stage3);
+\draw[arrow] (samples) -- (stage3);
+\draw[arrow] (stage3) -- (manifest);
+\draw[arrow] (summary) |- (stage4);
+\draw[arrow] (manifest) -- (stage4);
+\draw[arrow] (stage4) -- (final);
+\end{tikzpicture}%
+}
+\caption{End-to-end pipeline implemented by the repository. Stage-2 can begin from an existing transcript, stage-3 from an existing summary, and stage-4 from an existing summary plus a stage-3 manifest.}
+\label{fig:pipeline-overview}
+\end{figure}

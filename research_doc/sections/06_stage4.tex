@@ -1,0 +1,98 @@
+\chapter{Stage-4: Interjector Planning, Alignment, and Repair}
+
+\section{Purpose and repair flow}
+
+Stage-4 adds short overlapping backchannels or echo agreements from the next speaker onto the merged stage-3 audio. It is implemented in \codepath{src/card_framework/audio_pipeline/interjector.py}. The system uses summary-aware anchor spans, host-turn alignment, optional Faster-Whisper-native phrase matching for echo agreements, loudness-normalized overlay synthesis, and a repair loop that shortens or tightens candidates when they would violate the legal overlap window.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\footnotesize,
+  node distance=1.1cm and 1.15cm,
+  box/.style={draw, rounded corners=2pt, fill=cflight, align=center, text width=2.7cm, minimum height=0.95cm},
+  arrow/.style={-Latex, thick, cfblue},
+  decision/.style={diamond, draw, fill=white, aspect=2.1, align=center, inner sep=1.5pt, text width=1.9cm}
+]
+\node[box] (host) {host turn\\+ anchor};
+\node[box, right=of host] (align) {forced alignment\\or phrase match};
+\node[box, right=of align] (synth) {synthesize\\overlay};
+\node[box, below=1.15cm of synth] (prep) {trim silence\\+ tempo fit};
+\node[decision, right=1.35cm of prep] (fit) {fits legal\\window?};
+\node[box, above right=0.95cm and 1.3cm of fit] (accept) {accept + mix\\overlay};
+\node[box, below right=1.0cm and 1.3cm of fit] (repair) {shorten text\\or tighten timing};
+\node[box, left=1.2cm of repair] (reject) {reject and log\\manifest artifact};
+
+\draw[arrow] (host) -- (align);
+\draw[arrow] (align) -- (synth);
+\draw[arrow] (synth) -- (prep);
+\draw[arrow] (prep) -- (fit);
+\draw[arrow] (fit) -- node[above right, xshift=0.05cm] {yes} (accept);
+\draw[arrow] (fit) -- node[below right, xshift=0.05cm] {no} (repair);
+\draw[arrow] (repair.east) -- ++(2.0,0) |- (align.south);
+\draw[arrow] (repair) -- (reject);
+\end{tikzpicture}%
+}
+\caption{Stage-4 overlay repair loop. The implementation iterates over repair states until either the overlay fits the legal window or the reachable states are exhausted.}
+\label{fig:stage4repair}
+\end{figure}
+
+\section{Timing equations}
+
+The simplest hard constraint is the overlap fit test,
+
+\begin{equation}
+\text{fits} \iff d_{\mathrm{overlay}} \leq d_{\mathrm{available}}.
+\end{equation}
+
+For short echo agreements, the implementation also tries to align the overlay phrase with a matched host phrase. The phrase matcher uses an internal similarity score
+
+\begin{equation}
+\mathrm{score} = 0.7\,\mathrm{SeqSim}(\text{target}, \text{window}) + 0.3\,\mathrm{BoundarySim}(\text{target}, \text{window}),
+\end{equation}
+
+then tempo-fits the overlay if the phrase overflows the host phrase duration budget. If the host phrase duration is \(d_h\), the target host fill ratio is \(\rho\), and the raw overlay phrase duration is \(d_o\), then
+
+\begin{equation}
+d_{\mathrm{target}} = \mathrm{round}(d_h \rho), \qquad r_{\mathrm{tempo}} = \min(r_{\max}, \max(1, d_o / d_{\mathrm{target}})).
+\end{equation}
+
+\heuristicnote
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Stage-4 timing parameter & Symbol / meaning & Default value \\
+\midrule
+target host fill ratio & \(\rho\) & 0.95 \\
+minimum overflow ratio & trigger for tempo fit & 1.05 \\
+maximum phrase tempo & \(r_{\max}\) & 1.75 \\
+word-level minimum segment & local retiming lower bound & 80 ms \\
+word-level maximum tempo & local retiming cap & 1.75 \\
+\bottomrule
+\end{tabular}
+\caption{Default quantitative controls for the stage-4 timing-refinement path.}
+\label{tab:stage4-config}
+\end{table}
+
+\section{Repository-local stage-4 validation}
+
+The stage-4 system is unusually well documented by internal experimental notes [\cite{internal_interjector_timing_20260325}]. Table~\ref{tab:stage4-internal} summarizes the main monitored validation outcomes.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{3.3cm}cccY}
+\toprule
+Run & Accepted & Rejected & Final duration (s) & Quantitative highlight \\
+\midrule
+Stage-4-only validation rerun & 11 & 2 & n/a & Real accepted echoes used \codepath{timing_source=echo_phrase_match} with tempo ratios up to 1.75. \\
+Full GPU 5m validation & 13 & 1 & 306.594 & Stayed within the 5\% band around a 300 s target; no accepted self-overlaps. \\
+Leading-silence cleanup validation & 10 & 3 & n/a & Accepted overlays had residual onset reduced from 126.5 ms average / 245 ms max to 0 ms average / 0 ms max. \\
+\bottomrule
+\end{tabularx}
+\caption{Repository-local stage-4 validation results.}
+\label{tab:stage4-internal}
+\end{table}

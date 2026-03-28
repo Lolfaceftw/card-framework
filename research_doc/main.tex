@@ -1,0 +1,126 @@
+\documentclass[11pt]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[sfdefault,lining]{FiraSans}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{microtype}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage[table]{xcolor}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xurl}
+\usepackage[hidelinks,pdfpagelabels=true,plainpages=false]{hyperref}
+\usepackage{bookmark}
+\usepackage[backend=biber,style=ieee,sorting=none,url=true,doi=true,isbn=false,eprint=true]{biblatex}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,shapes.geometric,shapes.misc}
+
+\addbibresource{references.bib}
+
+\captionsetup{font=small,labelfont=bf}
+\setlength{\emergencystretch}{2em}
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\setlist[itemize]{leftmargin=1.5em}
+\setlist[enumerate]{leftmargin=1.75em}
+\setcounter{tocdepth}{2}
+\renewcommand*{\bibfont}{\small}
+\urlstyle{same}
+\sisetup{detect-all=true}
+
+\definecolor{cfblue}{HTML}{1F4E79}
+\definecolor{cflight}{HTML}{EAF2F8}
+\definecolor{cfcodebg}{HTML}{F7F9FB}
+\definecolor{cfgray}{HTML}{58616A}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\lstdefinestyle{cfpython}{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{cfblue}\bfseries,
+  commentstyle=\color{cfgray},
+  stringstyle=\color{teal!60!black},
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  framerule=0.3pt,
+  backgroundcolor=\color{cfcodebg},
+  rulecolor=\color{black!20},
+  breaklines=true,
+  tabsize=2,
+  captionpos=b
+}
+
+\lstdefinestyle{cfxml}{
+  language=XML,
+  basicstyle=\ttfamily\small,
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  framerule=0.3pt,
+  backgroundcolor=\color{cfcodebg},
+  rulecolor=\color{black!20},
+  breaklines=true,
+  captionpos=b
+}
+
+\DeclareRobustCommand{\codepath}[1]{\path{#1}}
+\newcommand{\implnote}[1]{\par\smallskip\noindent\textbf{Implementation anchor.} #1\par\smallskip}
+\newcommand{\heuristicnote}{\textbf{Heuristic note.} The scoring or mapping rule in this subsection is a repository implementation heuristic. It is documented here because it materially affects runtime behavior, not because it is claimed as a canonical external benchmark method.}
+
+\title{A Research-Style Methodology of the \texttt{card-framework} Pipeline\\
+\large Stage-1 Through Stage-4 Runtime\\
+\large Affect Analysis and Tool Orchestration}
+\author{Repository methodology document}
+\date{Compiled on 2026-03-28}
+
+\begin{document}
+
+\pagenumbering{gobble}
+\hypersetup{pageanchor=false}
+\maketitle
+\clearpage
+\hypersetup{pageanchor=true}
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\listoffigures
+\clearpage
+\listoftables
+\clearpage
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+\input{sections/01_scope}
+\input{sections/02_contracts}
+\input{sections/03_stage1}
+\input{sections/04_stage2}
+\input{sections/05_stage3}
+\input{sections/06_stage4}
+\input{sections/07_models}
+\input{sections/08_internal_benchmarks}
+\input{sections/09_limitations}
+
+\appendix
+\input{sections/A_appendix}
+
+\clearpage
+\printbibliography[heading=bibintoc,title={References}]
+
+\end{document}

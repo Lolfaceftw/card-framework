@@ -1,0 +1,12 @@
+diagram_screenshots/
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.log
+*.lof
+*.lot
+*.out
+*.pdf
+*.run.xml
+*.toc
