@@ -1,0 +1,165 @@
+\chapter{Stage-2: Summarizer--Critic Orchestration}
+
+\section{A2A architecture}
+
+Stage-2 is the control center of the repository. A \texttt{StageOrchestrator} launches the summarizer--critic loop, optionally indexes transcript embeddings, prepares live-draft state and speaker samples, then persists the accepted \codepath{summary.xml}. Under the shipped defaults, embeddings are disabled, so retrieval indexing is bypassed and the full transcript is given directly to the summarizer and critic.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.96\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\footnotesize,
+  node distance=0.95cm and 1.3cm,
+  box/.style={draw, rounded corners=2pt, fill=cflight, align=center, text width=3.05cm, minimum height=0.95cm},
+  arrow/.style={-Latex, thick, cfblue}
+]
+\node[box] (stage) {Stage orchestrator};
+\node[box, below=of stage] (loop) {Loop driver\\summarizer--critic loop};
+\node[box, left=of loop] (retrieval) {Retrieval agent\\MMR search};
+\node[box, right=of loop] (summ) {Summarizer agent\\tool XML drafting};
+\node[box, below=of summ] (critic) {Critic agent\\LLM + deterministic checks};
+\node[box, right=of critic] (live) {Live draft audio\\actual turn durations};
+
+\draw[arrow] (stage) -- (loop);
+\draw[arrow] (loop) -- (retrieval);
+\draw[arrow] (loop) -- (summ);
+\draw[arrow] (loop) -- (critic);
+\draw[arrow] (summ) -- (critic);
+\draw[arrow] (critic) -- (summ);
+\draw[arrow] (summ) -- (live);
+\draw[arrow] (live) -- (critic);
+\end{tikzpicture}%
+}
+\caption{Stage-2 local A2A topology. Retrieval is only active when embeddings are enabled. Under the shipped defaults, the summarizer and critic operate in full-transcript mode and use actual live-draft audio durations.}
+\label{fig:a2a-loop}
+\end{figure}
+
+\section{Summarizer tool registry and policies}
+
+The stage-2 summarizer does not generate the final XML in one unconstrained pass. It operates through an explicit tool registry assembled in \codepath{src/card_framework/agents/tool_handlers.py} and dispatched in \codepath{src/card_framework/agents/summarizer_tool_dispatcher.py}. The active tools are listed in Table~\ref{tab:summarizer-tools}.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{L{3.2cm}Y L{2.4cm}}
+\toprule
+Tool & Purpose & Default availability \\
+\midrule
+\codepath{add_speaker_message} & Append one speaker turn, optionally with an explicit 8D emotion vector; in live-draft mode this immediately synthesizes turn audio. & yes \\
+\codepath{edit_message} & Replace the content of one existing line and optionally replace its emotion vector; re-renders that turn in live-draft mode when needed. & yes \\
+\codepath{remove_message} & Remove one line and delete its live-draft artifact when present. & yes \\
+\codepath{estimate_duration} & Return current duration telemetry. With live drafting enabled this uses actual rendered audio, not WPM estimation. & yes \\
+\codepath{count_words} & Return total word count, per-line counts, and per-speaker totals. & yes \\
+\codepath{query_transcript} & Retrieve transcript segments via the retrieval agent. & only when embeddings are enabled \\
+\codepath{save_draft} & Snapshot the current registry state into XML. & yes \\
+\codepath{finalize_draft} & Declare the current draft ready for critic evaluation. & yes \\
+\bottomrule
+\end{tabularx}
+\caption{Summarizer tools exposed to the LLM.}
+\label{tab:summarizer-tools}
+\end{table}
+
+The dispatcher then enforces orchestration rules that materially shape model behavior:
+
+\begin{itemize}
+  \item only one mutating tool call is executed per assistant turn;
+  \item replay-deduplication and mutation fingerprints are used to detect repeated no-op or oscillatory edits;
+  \item once the draft is within budget, the runtime auto-saves the draft and injects a review-only turn that requires either \codepath{finalize_draft()} or one more mutating action;
+  \item staged discovery can require multiple successful \codepath{query_transcript} calls before mutation or finalization, but this guardrail is only relevant when embeddings are enabled and the provider/model matches the configured guardrail predicates.
+\end{itemize}
+
+\section{Duration-first control with actual audio by default}
+
+The accepted-duration band is defined by a target duration \(t\) and tolerance ratio \(r\):
+
+\begin{equation}
+\tau = tr, \qquad [t_{\min}, t_{\max}] = [t - \tau, t + \tau].
+\label{eq:durationband}
+\end{equation}
+
+Under the shipped defaults, live drafting is enabled, so the draft duration used by \codepath{estimate_duration} and later critic checks is the sum of actual synthesized turn durations,
+
+\begin{equation}
+T_{\mathrm{draft}} = \sum_{i=1}^{n} \frac{d_i}{1000},
+\end{equation}
+
+where \(d_i\) is the measured duration in milliseconds of rendered turn \(i\). The runtime still records a per-turn actual WPM statistic for diagnostics,
+
+\begin{equation}
+\mathrm{actual\_wpm} = \frac{w}{d_{\mathrm{ms}} / 1000} \cdot 60,
+\end{equation}
+
+but that is not the primary budget estimator under the default path.
+
+The summarizer timeout floor is also raised in live-draft mode:
+
+\begin{equation}
+T_{\mathrm{summ}} = \max(1800, 6t),
+\end{equation}
+
+where \(t\) is the requested target duration in seconds.
+
+\begin{lstlisting}[style=cfpython,caption={Condensed stage-2 loop adapted from \codepath{src/card_framework/runtime/loop_orchestrator.py}.},label={lst:stage2loop}]
+while max_iterations is None or iteration < max_iterations:
+    summarizer_task = SummarizerTaskRequest(...)
+    draft = await agent_client.send_task(summarizer_port, summarizer_task)
+
+    critic_task = CriticTaskRequest(...)
+    verdict = CriticTaskResponse.model_validate_json(
+        await agent_client.send_task(critic_port, critic_task)
+    )
+
+    if verdict.status == "pass":
+        return draft
+    feedback = verdict.feedback
+\end{lstlisting}
+
+\section{Retrieval mode and MMR}
+
+When a real embedding provider is configured, transcript segments are indexed and retrieved with maximal marginal relevance (MMR),
+
+\begin{equation}
+\mathrm{MMR}(d) = \lambda \, \mathrm{sim}(q,d) - (1-\lambda)\max_{s \in S}\mathrm{sim}(d,s),
+\end{equation}
+
+where \(q\) is the query, \(d\) is a candidate document segment, and \(S\) is the already selected set [\cite{carbonell1998mmr}]. The implementation lives in \codepath{src/card_framework/retrieval/embeddings.py}. Under the shipped defaults, however, embeddings are disabled and both summarizer and critic receive the full transcript text directly.
+
+\section{Default benchmark comparison: embeddings enabled vs disabled}
+
+Because embeddings are disabled by default, the most relevant internal stage-2 comparison is the matched enabled-vs-disabled SPoRC duration sweep pair run with 100 examples per preset, transcript-only mode, seed 42, and the same \codepath{vllm_default} summarizer, critic, and judge [\cite{internal_sporc_duration_sweep_enabled_20260319,internal_sporc_duration_sweep_20260320}]. Table~\ref{tab:embedding-compare} shows the result.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\begin{tabular}{lcccccc}
+\toprule
+Preset & En. comp. & Dis. comp. & Delta & En. restarts & Dis. restarts & Tol. ok \\
+\midrule
+30s & 0.502 & 0.551 & +0.049 & 1 & 7 & 1.000 / 1.000 \\
+1m & 0.505 & 0.627 & +0.122 & 0 & 10 & 1.000 / 1.000 \\
+5m & 0.471 & 0.630 & +0.159 & 1 & 14 & 1.000 / 1.000 \\
+\bottomrule
+\end{tabular}
+\caption{Matched 100-example SPoRC comparison between embeddings enabled and disabled. The shipped default is the disabled condition.}
+\label{tab:embedding-compare}
+\end{table}
+
+The default-disabled result is also replicated by a second 100-example disabled sweep with composite scores 0.583, 0.620, and 0.638 for 30 seconds, 1 minute, and 5 minutes respectively [\cite{internal_sporc_duration_sweep_disabled_20260320b}].
+
+The repository also contains a judge-only sweep over QMSum reference summaries [\cite{internal_faithful_judge_sweep_20260313}]. Table~\ref{tab:judge-sweep} captures its main quantitative result.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Judge model & Candidate win rate & Mean overall & Errors & Wall clock (s) \\
+\midrule
+Qwen3.5-27B & 0.9800 & 0.6021 & 0 & 417.9 \\
+Qwen3.5-9B & 0.7778 & 0.5722 & 1 & 401.8 \\
+Qwen3.5-4B & 0.8427 & 0.5515 & 11 & 278.6 \\
+\bottomrule
+\end{tabular}
+\caption{Repository-local faithful-judge sweep over 100 QMSum cases per model.}
+\label{tab:judge-sweep}
+\end{table}

@@ -1,0 +1,24 @@
+\chapter{Repository-Local Benchmark Summary}
+
+The repository contains internal markdown benchmark notes and monitored run summaries. These are not substitutes for external benchmark literature, but they are the most direct evidence for how this exact implementation behaves.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{L{2.8cm}L{1.2cm}Y}
+\toprule
+Internal source & Sample size / count & Main quantitative result \\
+\midrule
+SPoRC enabled-vs-disabled embedding sweep [\cite{internal_sporc_duration_sweep_enabled_20260319,internal_sporc_duration_sweep_20260320}] & 100 examples per preset in each run & Disabled embeddings, which is the shipped default, improved composite score from 0.502/0.505/0.471 to 0.551/0.627/0.630 at 30s/1m/5m while keeping \codepath{within_tol=1.000} in both conditions. \\
+Second disabled SPoRC sweep [\cite{internal_sporc_duration_sweep_disabled_20260320b}] & 100 examples per preset & Composite scores were 0.583 / 0.620 / 0.638 at 30s / 1m / 5m, corroborating the default-disabled setting. \\
+Faithful judge sweep [\cite{internal_faithful_judge_sweep_20260313}] & 100 QMSum cases per model & Qwen3.5-27B achieved candidate win rate 0.9800 and mean overall score 0.6021, ahead of the 9B and 4B variants. \\
+QA supervisor summary [\cite{internal_qa_supervisor_vllm_20260312}] & 3 monitored runs & Scores were 25/100 and 21/100 on completed runs, while RAM and GPU usage stayed well below thresholds, indicating output-quality limitations rather than infrastructure failure. \\
+Interjector timing experiments [\cite{internal_interjector_timing_20260325}] & multiple focused validations & Stage-4 validations reported accepted/rejected counts 11/2 and 13/1, and onset cleanup reduced residual onset from 126.5 ms average / 245 ms max to 0 / 0 ms. \\
+DeepSeek end-to-end bundle [\cite{internal_deepseek_batch_report_20260324,internal_deepseek_bundle_20260324}] & 15 final outputs & All 15 outputs completed; 6 of 15 required recovery; final durations were recorded for every 30s, 1m, and 5m output. \\
+Granite tuning note [\cite{internal_granite_tuning_20260318}] & fixed-vocals tuning pass & Seam candidates dropped from 32 to 7 and adjacent-repeat segments from 34 to 14 under the promoted defaults. \\
+NeMo tuning note [\cite{internal_nemo_tuning_20260318}] & episode-specific diarization tuning pass & Transcript sandwich candidates dropped from 103 to 33 and short-turn fragmentation improved relative to earlier runs. \\
+\bottomrule
+\end{tabularx}
+\caption{Repository-local benchmark and validation evidence.}
+\label{tab:internal-summary}
+\end{table}

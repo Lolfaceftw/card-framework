@@ -1,0 +1,107 @@
+\chapter{Configured Model Profiles and Public Benchmark Positioning}
+
+This chapter covers all configured model selections, not only the currently selected defaults. Mutable aliases and provider-only profiles are marked explicitly.
+
+\section{Configured defaults versus selectable profiles}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{3.0cm}L{3.2cm}Y}
+\toprule
+Runtime role & Configured default & Notes \\
+\midrule
+main LLM profile & \codepath{vllm_local} & Provider-only profile; benchmark claims depend on the backend model served behind vLLM. \\
+embedding profile & \codepath{disabled} & Full-transcript mode by default. \\
+stage-specific LLM overrides & \codepath{default/default/default} & Summarizer, critic, and interjector inherit the main LLM profile unless explicitly overridden. \\
+\bottomrule
+\end{tabularx}
+\caption{Configured default profile selections from \codepath{conf/config.yaml}.}
+\label{tab:profile-defaults}
+\end{table}
+
+\section{LLM profile benchmark table}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{1.6cm}L{2.2cm}L{1.7cm}L{0.9cm}L{1.9cm}L{0.9cm}L{1.1cm}}
+\toprule
+Profile & Public model / alias & Benchmark & Score & Base & Base score & Status \\
+\midrule
+\codepath{anthropic_claude_opus} & \codepath{claude-opus-4-6} & Terminal-Bench 2.0 & 65.4\% & Gemini 3.1 Pro & 68.5\% & exact \\
+\codepath{transformers_local} & public repo \codepath{Salesforce/xLAM-2-3b-fc-r} & BFCL v4 overall & 41.22 & Nanbeige4-3B-Thinking-2511 & 51.40 & exact public row \\
+\codepath{glm_46} & \codepath{glm-4.6} & BFCL v4 overall & 72.38 & Gemini 3 Pro Preview & 72.51 & exact \\
+\codepath{nanbeige_thinking} & \codepath{Nanbeige4-3B-Thinking-2511} & BFCL v4 overall & 51.40 & xLAM-2-3b-fc-r & 41.22 & exact \\
+\bottomrule
+\end{tabularx}
+\caption{Configured LLM profiles with exact or directly benchmarkable public rows. Proxy-only or unresolved rows are moved to a separate table.}
+\label{tab:llm-public}
+\end{table}
+
+Profiles that do not currently have a matched exact public benchmark row are summarized separately in Table~\ref{tab:llm-proxy}. They are still documented, but not presented as apples-to-apples numeric ranking rows.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{1.9cm}L{2.8cm}L{2.3cm}L{1.2cm}Y}
+\toprule
+Profile & Exact issue & Nearest public evidence & Score & Safe interpretation \\
+\midrule
+\codepath{vllm_local} & provider-only profile & none & n/a & The profile is transport configuration, not a model. \\
+\codepath{deepseek_chat} & mutable alias & DeepSeek-V3.2-Exp public row & 54.12 on BFCL v4 (proxy) & Use only as nearby family evidence for the current API alias. \\
+\codepath{deepseek_reasoner} & mutable alias & DeepSeek-V3.2-Exp prompt+thinking row & 56.73 on BFCL v4 (proxy) & Use only as nearby family evidence for the current reasoning alias. \\
+\codepath{google_gemini} & no exact public row found for \codepath{gemini-2.5-pro} & Gemini 3.1 Pro public page & 68.5\% Terminal-Bench 2.0 & Different model generation; do not treat as exact 2.5 Pro evidence. \\
+\codepath{huggingface_toolace} & exact public row not cleanly exposed for \codepath{ToolACE-8B} & ToolACE-2-8B successor row & 42.44 on BFCL v4 & Family-level evidence only. \\
+\bottomrule
+\end{tabularx}
+\caption{Configured LLM profiles without a matched exact public benchmark row.}
+\label{tab:llm-proxy}
+\end{table}
+
+For exact models with richer public disclosure, the following additional numbers are relevant:
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{2.7cm}YYY}
+\toprule
+Model & Additional benchmark 1 & Additional benchmark 2 & Additional benchmark 3 \\
+\midrule
+Claude Opus 4.6 & OSWorld 72.7\% & MRCR v2 (8-needle, 1M) 76\% & HLE with tools 53.0\% \\
+\bottomrule
+\end{tabularx}
+\caption{Additional public benchmark numbers for an exact configured LLM profile with richer public disclosure.}
+\label{tab:llm-additional}
+\end{table}
+
+\section{Embedding profile benchmark table}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{1.8cm}L{2.1cm}L{1.8cm}L{1.0cm}L{2.0cm}L{1.0cm}}
+\toprule
+Profile & Model & Benchmark & Score & Base & Base score \\
+\midrule
+\codepath{qwen3_4b} & \codepath{Qwen/Qwen3-Embedding-4B} & MTEB multilingual & 69.45 & Gemini Embedding EXP 03-07 & 68.37 \\
+\codepath{qwen3_4b} & \codepath{Qwen/Qwen3-Embedding-4B} & MTEB English v2 & 74.60 & Gemini Embedding EXP 03-07 & 73.3 \\
+\bottomrule
+\end{tabularx}
+\caption{Configured embedding profiles with matched exact public benchmark rows.}
+\label{tab:embedding-public}
+\end{table}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{2.0cm}L{2.5cm}Y}
+\toprule
+Profile & Exact issue & Safe interpretation \\
+\midrule
+\codepath{minilm_cpu} & no current exact public row located in the retrieved official sources & Keep as a lightweight legacy baseline in the config, but do not present it as a ranked quantitative benchmark row without an exact matched source. \\
+\bottomrule
+\end{tabularx}
+\caption{Configured embedding profiles without a matched exact public benchmark row.}
+\label{tab:embedding-proxy}
+\end{table}

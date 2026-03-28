@@ -1,0 +1,20 @@
+\chapter{Limitations, Reproducibility, and Interpretation}
+
+\section{Public benchmark limitations}
+
+Several configured models cannot be described with clean apples-to-apples public benchmark claims:
+
+\begin{itemize}
+  \item \codepath{deepseek-chat} and \codepath{deepseek-reasoner} are mutable API aliases; the closest stable evidence comes from nearby public checkpoints rather than the aliases themselves [\cite{deepseek_api_docs,deepseek_v32exp_modelcard}].
+  \item \codepath{gemini-2.5-pro} is publicly documented, but a current exact official benchmark table for that exact model string was not located in the retrieved sources [\cite{google_gemini_api_models}].
+  \item \codepath{ToolACE-8B} is backed by a strong paper and model card, but an exact accessible public numeric row for the exact checkpoint was not available in the sources used here [\cite{toolace8b_card,toolace_paper}].
+  \item \codepath{emotion2vec_plus_large} and the audEERING MSP-dimensional checkpoint are best described with family-level or partial-checkpoint evidence rather than a complete exact benchmark table [\cite{emotion2vec_plus_large_modelcard,emotion2vec_paper,audeering_modelcard,wagner2023ser}].
+\end{itemize}
+
+\section{Internal benchmark limitations}
+
+The repository-local markdown reports are strong evidence for implementation behavior, but they remain internal technical reports. They vary in dataset size, hardware context, and evaluation scope. Some are controlled tuning notes on a fixed artifact, while others are broader sweeps. Accordingly, this document uses them as empirical support for design choices and runtime behavior rather than as substitutes for external benchmark literature.
+
+\section{Reproducibility notes}
+
+The document is organized as a modular LaTeX project under \codepath{research_doc/sections/} and is intended to compile with MiKTeX using \codepath{biber} and the \codepath{ieee} \codepath{biblatex} style. Fira Sans is loaded through the TeX package \codepath{FiraSans}, which avoids relying on a separate desktop font installation. Reproducibility of the runtime itself still depends on the external models, checkpoints, hardware availability, and environment variables expected by \codepath{conf/config.yaml}.

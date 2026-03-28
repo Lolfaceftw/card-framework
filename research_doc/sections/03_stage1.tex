@@ -1,0 +1,248 @@
+\chapter{Stage-1: Audio Front-End and Affect Analysis}
+
+\section{Operational decomposition}
+
+Stage-1 is implemented by \codepath{src/card_framework/audio_pipeline/orchestrator.py}. Its core sequence is deterministic: source separation, speech recognition, diarization, alignment, optional affect analysis, then atomic transcript emission.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{3.2cm}L{3.3cm}Y}
+\toprule
+Subsystem & Default setting(s) & Role in the pipeline \\
+\midrule
+Source separation & \codepath{provider=demucs}, \codepath{model=htdemucs}, window \(600\) s, context \(5\) s & Removes accompaniment and bounds memory use by separating long audio in windows. \\
+ASR & \codepath{granite_speech}, chunk length \(25\) s, overlap \(1\) s, \codepath{max_new_tokens=96}, repetition penalty \(1.25\) & Produces segment text and, when available, word timestamps for word-level speaker alignment. \\
+Diarization & \codepath{diar_msdd_telephonic}, \codepath{titanet_large}, \codepath{vad_multilingual_marblenet}, \codepath{max_speakers=10} & Produces speaker turns with overlap-aware behavior retained for downstream metadata. \\
+Affect analysis & categorical: \codepath{emotion2vec_plus_large}; dimensional: \codepath{audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim} & Enriches transcript segments with affect hints, preset suggestions, and direct 8D emotion vectors. \\
+\bottomrule
+\end{tabularx}
+\caption{Default stage-1 front-end configuration.}
+\label{tab:stage1-defaults}
+\end{table}
+
+\section{Stage-1 timing model}
+
+Stage-1 ETA starts from configured per-stage throughput multipliers and is then refined online. If an audio file has duration \(D\) seconds and the configured stage multiplier is \(m_{s,d}\) for stage \(s\) and device \(d\), the initial estimate is
+
+\begin{equation}
+\hat{T}_{s,0} = D \cdot m_{s,d}.
+\end{equation}
+
+Observed throughput then updates the stored multiplier with exponential smoothing,
+
+\begin{equation}
+m_{k+1} = (1 - \alpha)m_k + \alpha m_{\mathrm{obs}},
+\end{equation}
+
+where \(\alpha\) is the configured learning rate in \codepath{conf/config.yaml}. This is a runtime control heuristic, not a benchmark metric.
+
+\section{ASR, diarization, and alignment}
+
+If Granite returns word timestamps, stage-1 performs word-level speaker alignment first; otherwise it falls back to segment-level alignment.
+
+\begin{lstlisting}[style=cfpython,caption={Condensed stage-1 orchestration flow adapted from \codepath{src/card_framework/audio_pipeline/orchestrator.py}.},label={lst:stage1flow}]
+vocals_path = separator.separate_vocals(...)
+asr_result = transcriber.transcribe(vocals_path, ...)
+diarization_turns = diarizer.diarize(vocals_path, ...)
+
+if asr_result.word_timestamps:
+    aligned_segments = build_word_speaker_segments(
+        word_timestamps=asr_result.word_timestamps,
+        diarization_turns=diarization_turns,
+        default_speaker=default_speaker,
+        merge_gap_ms=merge_gap_ms,
+    )
+else:
+    aligned_segments = align_segments_with_speakers(
+        asr_segments=asr_result.segments,
+        diarization_turns=diarization_turns,
+        default_speaker=default_speaker,
+        merge_gap_ms=merge_gap_ms,
+    )
+
+write_transcript_atomic(payload, output_transcript_path)
+\end{lstlisting}
+
+\section{Default affect-analysis algorithm}
+
+Affect analysis is enabled by default and runs after transcript availability. The implementation is centered on \codepath{src/card_framework/audio_pipeline/affect_analysis.py}. It prepares one audio clip per transcript segment, runs a categorical provider (emotion2vec+) and a dimensional provider (audEERING MSP-dim), merges their outputs, derives both a prompt-facing preset hint and a direct 8D IndexTTS emotion vector, and writes the resulting metadata back onto the transcript under keys such as \codepath{affect}, \codepath{affect_hint}, \codepath{suggested_emo_preset}, \codepath{emotion_vector}, \codepath{emotion_vector_source}, and \codepath{emotion_vector_confidence}.
+
+For a segment with categorical labels \((\ell_k, s_k)\), arousal \(a\), dominance \(d\), and valence \(v\), the mapper first accumulates categorical evidence into the IndexTTS basis with categorical weight \(w_c = 0.65\):
+
+\begin{equation}
+u_j = \sum_{k : m(\ell_k)=j} w_c s_k,
+\end{equation}
+
+where \(m(\cdot)\) is the repository alias map from provider labels onto the IndexTTS emotion basis.
+
+The dimensional provider then contributes with weight \(w_d = 0.35\). Let \(d' = d\) when dominance is present and \(d'=0.5\) otherwise. The implemented updates are
+
+\begin{align}
+q_{\text{happy}} &= v (0.45 + 0.55 a) w_d, \\
+q_{\text{surprised}} &= v a \beta_{\text{surprise}} w_d, \\
+q_{\text{calm}} &= (1-a)(0.3 + 0.7 v) w_d, \\
+q_{\text{melancholic}} &= (1-v)(1-a) \beta_{\text{mel}} w_d, \\
+q_{\text{sad}} &= (1-v)(1-a)(0.45 + 0.35(1-d')) w_d, \\
+q_{\text{angry}} &= (1-v) a d' \beta_{\text{ang}} w_d, \\
+q_{\text{afraid}} &= (1-v) a (1-d') \beta_{\text{fear}} w_d, \\
+q_{\text{disgusted}} &= (1-v)(0.25 + 0.75 d') \beta_{\text{disg}} w_d.
+\end{align}
+
+With shipped defaults,
+\(\beta_{\text{surprise}}=0.35\),
+\(\beta_{\text{ang}}=0.85\),
+\(\beta_{\text{fear}}=0.9\),
+\(\beta_{\text{mel}}=0.7\), and
+\(\beta_{\text{disg}}=0.35\).
+
+After adding a calm floor \(\gamma = 0.12\), the vector is capped and normalized in two stages. First, if any component exceeds the dominant-emotion cap \(\kappa = 0.38\), the full vector is rescaled by \(\kappa / \max_j x_j\). Second, the IndexTTS bias vector \(\mathbf{b}\) from \codepath{src/card_framework/shared/emotion_vector.py} is applied and the total intensity is clamped to \(M = 0.8\):
+
+\begin{equation}
+x_j = \max(0, u_j + q_j + \delta_j), \qquad
+\tilde{x}_j = b_j x_j, \qquad
+e_j = \tilde{x}_j \cdot \min\left(1, \frac{M}{\sum_i \tilde{x}_i}\right),
+\end{equation}
+
+where \(\delta_{\text{calm}}=\gamma\) and \(\delta_j=0\) otherwise.
+
+The confidence score stored with the vector is likewise heuristic and conservative:
+
+\begin{equation}
+c = \max\left(c_{\min}, \min\left(1, \max\left(\max_k s_k, 0.5 + 0.5|0.5-v|\right)\right)\right),
+\end{equation}
+
+with confidence floor \(c_{\min}=0.15\).
+
+The preset hint is computed separately through threshold rules. With allowed presets \(\{\text{urgent}, \text{upbeat}, \text{warm}, \text{engaged}, \text{neutral}\}\), the shipped decision rules are
+
+\begin{equation}
+\text{preset} =
+\begin{cases}
+\text{urgent}, & \ell_1 \in \mathcal{U} \; \text{or} \; a \ge 0.65, \\
+\text{upbeat}, & \ell_1 \in \mathcal{B} \; \text{or} \; v \ge 0.60, \\
+\text{warm}, & v \ge 0.48 \; \wedge \; a \le 0.45, \\
+\text{engaged}, & a \ge 0.45, \\
+\text{neutral}, & \text{otherwise.}
+\end{cases}
+\end{equation}
+
+Here \(\mathcal{U}=\{\text{angry},\text{fearful}\}\) and \(\mathcal{B}=\{\text{happy},\text{surprised}\}\). The preset is therefore a prompt-facing abstraction, whereas the voice-clone path itself uses the explicit vector when present.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Coefficient & Symbol & Default value \\
+\midrule
+categorical weight & \(w_c\) & 0.65 \\
+dimensional weight & \(w_d\) & 0.35 \\
+calm floor & \(\gamma\) & 0.12 \\
+surprise boost & \(\beta_{\text{surprise}}\) & 0.35 \\
+anger bias & \(\beta_{\text{ang}}\) & 0.85 \\
+fear bias & \(\beta_{\text{fear}}\) & 0.90 \\
+melancholic bias & \(\beta_{\text{mel}}\) & 0.70 \\
+disgust bias & \(\beta_{\text{disg}}\) & 0.35 \\
+confidence floor & \(c_{\min}\) & 0.15 \\
+dominant-emotion cap & \(\kappa\) & 0.38 \\
+vector max sum & \(M\) & 0.80 \\
+\bottomrule
+\end{tabular}
+\caption{Default affect-to-vector mapping coefficients from \codepath{conf/config.yaml}.}
+\label{tab:affect-coeffs}
+\end{table}
+
+\begin{lstlisting}[style=cfpython,caption={Condensed affect-analysis merge path adapted from \codepath{src/card_framework/audio_pipeline/affect_analysis.py}.},label={lst:affectmerge}]
+suggested_emo_preset = _suggest_emo_preset(...)
+emotion_vector_result = self.emotion_vector_mapping.map(
+    emotion_scores=top_scores,
+    arousal=arousal,
+    dominance=dominance,
+    valence=valence,
+)
+extras["affect"] = record.to_payload()
+extras["affect_hint"] = record.hint
+extras["suggested_emo_preset"] = record.suggested_emo_preset
+extras["emotion_vector"] = record.emotion_vector.to_list()
+extras["emotion_vector_source"] = record.emotion_vector_source
+extras["emotion_vector_confidence"] = record.emotion_vector_confidence
+\end{lstlisting}
+
+\heuristicnote
+
+\section{Public benchmark positioning of default stage-1 models}
+
+\subsection{Exact or directly accessible checkpoint evidence}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{2.0cm}L{2.5cm}L{1.2cm}L{1.5cm}L{2.1cm}L{1.3cm}}
+\toprule
+Component & Benchmark & Metric & Score & Base & Base score \\
+\midrule
+Granite Speech & vendor aggregate & Average WER / RTFx & 5.52 / 280.02 & Parakeet TDT 0.6B v2 & 6.05 / 3380 \\
+MSDD telephonic & CH109 fair & DER & 3.52\% & n/a & n/a \\
+TitaNet Large & VoxCeleb1 & EER & 0.66\% & n/a & n/a \\
+MarbleNet multilingual VAD & AVA Speech ALL & AUROC / TPR & 0.9112 / 0.9093 & n/a & n/a \\
+\bottomrule
+\end{tabularx}
+\caption{Public benchmark positioning for the main default stage-1 speech front-end components. Where no matched external baseline on the same accessible benchmark was located for the exact default component, the baseline fields are left blank rather than filled with a cross-dataset proxy.}
+\label{tab:stage1-public}
+\end{table}
+
+For the VAD row in Table~\ref{tab:stage1-public}, the reported true-positive rate is measured at a fixed false-positive rate of 0.315 on AVA Speech [\cite{marblenet_vad_modelcard}].
+
+\subsection{Family-level or partial public evidence}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{2.8cm}L{1.8cm}L{1.4cm}L{1.2cm}L{2.6cm}L{1.2cm}}
+\toprule
+Affect model & Benchmark & Metric & Score & Base & Base score \\
+\midrule
+emotion2vec+ family & MELD & WA & 51.88 & data2vec 2.0 & 48.92 \\
+emotion2vec+ family & RAVDESS & WA & 82.43 & data2vec 2.0 & 81.04 \\
+audEERING MSP-dim family & MSP-Podcast & Valence CCC & 0.638 & Wav2Small teacher & 0.676 \\
+\bottomrule
+\end{tabularx}
+\caption{Public benchmark positioning for the default affect-analysis models. The emotion2vec row is family-level because the exact plus-large checkpoint table was not publicly enumerated; the audEERING row is tied to the released MSP-dimensional checkpoint family.}
+\label{tab:affect-public}
+\end{table}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{L{2.3cm}L{2.4cm}L{1.4cm}L{1.5cm}Y}
+\toprule
+Model family & Benchmark & Metric & Reported score & Why it remains family-level or partial evidence \\
+\midrule
+Demucs \codepath{htdemucs} family & MUSDB-HQ test & SDR & 9.0 dB; baseline Hybrid Demucs v3 7.7 dB & The accessible public comparison is reported at the Hybrid Transformer Demucs family level rather than as a separately benchmarked literal \codepath{htdemucs} artifact row. \\
+emotion2vec+ family & MELD / RAVDESS & WA & 51.88 / 82.43 & The public exact numeric table is for the \codepath{emotion2vec} family paper, not the exact \codepath{emotion2vec_plus_large} checkpoint. \\
+audEERING MSP-dim family & MSP-Podcast & Valence CCC & 0.638 & Public evidence is tied to the released MSP-dimensional system family; the exact checkpoint card does not expose a full matched benchmark table in the retrieved sources. \\
+\bottomrule
+\end{tabularx}
+\caption{Family-level or partial public evidence used by default stage-1 and affect-analysis components.}
+\label{tab:stage1-family-evidence}
+\end{table}
+
+\section{Repository-local tuning evidence}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{2.4cm}L{2.7cm}L{2.2cm}L{2.2cm}Y}
+\toprule
+Area & Metric & Baseline & Promoted / improved & Internal source \\
+\midrule
+Granite tuning & adjacent-repeat segments & 34 & 14 & \cite{internal_granite_tuning_20260318} \\
+Granite tuning & boundary seam candidates & 32 & 7 & \cite{internal_granite_tuning_20260318} \\
+NeMo tuning & transcript sandwich candidates & 103 & 33 & \cite{internal_nemo_tuning_20260318} \\
+NeMo tuning & short RTTM turns (\(\le 0.5\) s) & 69 in exact-7 oracle trial & 45 in promoted rerun & \cite{internal_nemo_tuning_20260318} \\
+\bottomrule
+\end{tabularx}
+\caption{Repository-local empirical tuning evidence for stage-1 defaults.}
+\label{tab:stage1-internal}
+\end{table}
