@@ -7,7 +7,10 @@ from typing import Any
 
 from card_framework.audio_pipeline.contracts import WordTimestamp
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
-from card_framework.audio_pipeline.runtime import ensure_module_available
+from card_framework.audio_pipeline.runtime import (
+    ensure_module_available,
+    release_torch_device_memory_with_reporting,
+)
 
 _LANGS_TO_ISO: dict[str, str] = {
     "en": "eng",
@@ -99,8 +102,10 @@ class CtcForcedAlignerGateway:
                 batch_size=max(1, batch_size),
             )
             del alignment_model
-            if device == "cuda" and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            release_torch_device_memory_with_reporting(
+                device=device,
+                description="CTC forced-alignment model",
+            )
 
             tokens_starred, text_starred = preprocess_text(
                 normalized_text,

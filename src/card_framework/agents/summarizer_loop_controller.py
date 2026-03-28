@@ -95,6 +95,7 @@ class SummarizerLoopController:
         target_seconds: int,
         duration_tolerance_ratio: float,
         loop_guardrails: dict[str, Any],
+        context_data_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the summarizer loop and return final loop context data."""
         context_data = self.build_context_data(
@@ -103,6 +104,8 @@ class SummarizerLoopController:
             duration_tolerance_ratio=duration_tolerance_ratio,
             loop_guardrails=loop_guardrails,
         )
+        if context_data_overrides:
+            context_data.update(context_data_overrides)
         if context_data["enable_staged_discovery"]:
             max_discovery_queries = int(context_data["max_discovery_queries"])
             max_info = (

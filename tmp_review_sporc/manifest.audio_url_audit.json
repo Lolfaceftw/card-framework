@@ -1,0 +1,9 @@
+{
+  "created_at_utc": "2026-03-20T17:55:25.387390+00:00",
+  "source_manifest_path": "C:\\Users\\chris\\card-framework\\tmp_review_sporc\\manifest.json",
+  "output_manifest_path": "C:\\Users\\chris\\card-framework\\tmp_review_sporc\\manifest.json",
+  "original_sample_count": 40,
+  "kept_sample_count": 40,
+  "removed_sample_count": 0,
+  "removed_samples": []
+}

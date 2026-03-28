@@ -109,6 +109,31 @@ def test_resolve_provider_config_prefers_vllm_url_env(monkeypatch) -> None:
     assert resolved["base_url"] == "http://vllm.example.test:8000/v1"
 
 
+def test_resolve_provider_config_supports_card_framework_vllm_base_url(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VLLM_URL", raising=False)
+    monkeypatch.delenv("CARD_FRAMEWORK_VLLM_URL", raising=False)
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    monkeypatch.setenv(
+        "CARD_FRAMEWORK_VLLM_BASE_URL",
+        "http://prefixed-vllm.example.test:8000/v1",
+    )
+    profile = ProviderProfile(
+        provider_id="vllm_default",
+        description="Provider 1",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+        },
+    )
+
+    resolved = resolve_provider_config(profile)
+
+    assert resolved["base_url"] == "http://prefixed-vllm.example.test:8000/v1"
+
+
 def test_resolve_provider_config_supports_oc_env_placeholders(monkeypatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-secret")
     profile = ProviderProfile(

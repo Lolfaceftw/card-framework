@@ -19,7 +19,10 @@ from card_framework.audio_pipeline.gateways.diarization_common import (
 from card_framework.audio_pipeline.runtime import (
     ensure_module_available,
     probe_audio_duration_ms,
+    release_torch_device_memory_with_reporting,
 )
+from card_framework.shared.events import event_bus
+from card_framework.shared.perf import report_loading_duration
 
 
 class NemoSpeakerDiarizer(SpeakerDiarizer):
@@ -36,16 +39,40 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         msdd_model: str = "diar_msdd_telephonic",
         vad_model: str = "vad_multilingual_marblenet",
         speaker_embedding_model: str = "titanet_large",
-        max_speakers: int | None = None,
+        max_speakers: int | None = 10,
         min_speakers: int | None = None,
         allow_single_speaker_fallback: bool = False,
+        vad_onset: float = 0.8,
+        vad_offset: float = 0.6,
+        vad_pad_onset: float = 0.1,
+        vad_pad_offset: float = 0.0,
+        vad_min_duration_on: float = 0.2,
+        vad_min_duration_off: float = 0.6,
+        clustering_max_rp_threshold: float = 0.4,
+        clustering_sparse_search_volume: int = 60,
+        clustering_maj_vote_spk_count: bool = True,
     ) -> None:
         self.msdd_model = msdd_model
         self.vad_model = vad_model
         self.speaker_embedding_model = speaker_embedding_model
+        if (
+            min_speakers is not None
+            and max_speakers is not None
+            and int(min_speakers) > int(max_speakers)
+        ):
+            raise ValueError("min_speakers must be <= max_speakers.")
         self.max_speakers = max_speakers
         self.min_speakers = min_speakers
         self.allow_single_speaker_fallback = allow_single_speaker_fallback
+        self.vad_onset = vad_onset
+        self.vad_offset = vad_offset
+        self.vad_pad_onset = vad_pad_onset
+        self.vad_pad_offset = vad_pad_offset
+        self.vad_min_duration_on = vad_min_duration_on
+        self.vad_min_duration_off = vad_min_duration_off
+        self.clustering_max_rp_threshold = clustering_max_rp_threshold
+        self.clustering_sparse_search_volume = clustering_sparse_search_volume
+        self.clustering_maj_vote_spk_count = clustering_maj_vote_spk_count
 
     def diarize(
         self,
@@ -83,11 +110,15 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
 
         completed = False
         try:
-            turns = self._run_nemo_msdd(
-                audio_path=audio_path,
-                output_dir=output_dir,
-                device=device,
-            )
+            with report_loading_duration(
+                f"NeMo diarization model '{self.msdd_model}'",
+                reporter=self._report_system_message,
+            ):
+                turns = self._run_nemo_msdd(
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    device=device,
+                )
             if turns:
                 completed = True
                 return turns
@@ -150,16 +181,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             output_dir=output_dir,
         )
         manifest_path = output_dir / "diarization_manifest.json"
-        manifest_payload = {
-            "audio_filepath": str(diarization_audio_path),
-            "offset": 0,
-            "duration": None,
-            "label": "infer",
-            "text": "-",
-            "num_speakers": None,
-            "rttm_filepath": None,
-            "uem_filepath": None,
-        }
+        manifest_payload = self._build_manifest_payload(diarization_audio_path)
         manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
 
         cfg = self._build_msdd_config(
@@ -170,10 +192,11 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         )
 
         diarizer = NeuralDiarizer(cfg=cfg).to("cuda" if device == "cuda" else "cpu")
+        exact_speaker_count = self._exact_speaker_count()
         diarizer._initialize_configs(
             manifest_path=str(manifest_path),
             max_speakers=int(self.max_speakers or 8),
-            num_speakers=int(self.min_speakers) if self.min_speakers is not None else None,
+            num_speakers=exact_speaker_count,
             tmpdir=str(output_dir),
             batch_size=24,
             num_workers=0,
@@ -212,6 +235,27 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             return turns
         return normalize_speaker_labels(parse_rttm_file(rttm_path))
 
+    def _exact_speaker_count(self) -> int | None:
+        """Return an exact speaker count only when both bounds match."""
+        if self.min_speakers is None or self.max_speakers is None:
+            return None
+        if int(self.min_speakers) != int(self.max_speakers):
+            return None
+        return int(self.min_speakers)
+
+    def _build_manifest_payload(self, diarization_audio_path: Path) -> dict[str, Any]:
+        """Build the NeMo manifest payload for one diarization audio artifact."""
+        return {
+            "audio_filepath": str(diarization_audio_path),
+            "offset": 0,
+            "duration": None,
+            "label": "infer",
+            "text": "-",
+            "num_speakers": self._exact_speaker_count(),
+            "rttm_filepath": None,
+            "uem_filepath": None,
+        }
+
     def _build_msdd_config(
         self,
         *,
@@ -237,18 +281,26 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         cfg.diarizer.manifest_filepath = str(manifest_path)
         cfg.diarizer.out_dir = str(output_dir)
         cfg.diarizer.oracle_vad = False
+        cfg.diarizer.ignore_overlap = False
 
         cfg.diarizer.vad.model_path = self.vad_model
         cfg.diarizer.vad.external_vad_manifest = None
-        cfg.diarizer.vad.parameters.onset = 0.8
-        cfg.diarizer.vad.parameters.offset = 0.6
-        cfg.diarizer.vad.parameters.pad_offset = -0.05
+        vad_parameters = cfg.diarizer.vad.parameters
+        vad_parameters.onset = float(self.vad_onset)
+        vad_parameters.offset = float(self.vad_offset)
+        vad_parameters.pad_onset = float(self.vad_pad_onset)
+        vad_parameters.pad_offset = float(self.vad_pad_offset)
+        vad_parameters.min_duration_on = float(self.vad_min_duration_on)
+        vad_parameters.min_duration_off = float(self.vad_min_duration_off)
 
         cfg.diarizer.speaker_embeddings.model_path = self.speaker_embedding_model
         cfg.diarizer.msdd_model.model_path = self.msdd_model
 
         clustering_parameters = cfg.diarizer.clustering.parameters
-        clustering_parameters.oracle_num_speakers = False
+        clustering_parameters.oracle_num_speakers = self._exact_speaker_count() is not None
+        clustering_parameters.max_rp_threshold = float(self.clustering_max_rp_threshold)
+        clustering_parameters.sparse_search_volume = int(self.clustering_sparse_search_volume)
+        clustering_parameters.maj_vote_spk_count = bool(self.clustering_maj_vote_spk_count)
         if self.max_speakers is not None:
             clustering_parameters.max_num_speakers = int(self.max_speakers)
         if self.min_speakers is not None and "min_num_speakers" in clustering_parameters:
@@ -281,4 +333,15 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         if duration_ms is None:
             return 24 * 60 * 60 * 1000
         return max(1, duration_ms)
+
+    def release_cached_resources(self, *, device: str) -> None:
+        """Release any process-local CUDA allocator slack after diarization."""
+        release_torch_device_memory_with_reporting(
+            device=device,
+            description=f"NeMo diarization model '{self.msdd_model}'",
+        )
+
+    def _report_system_message(self, message: str) -> None:
+        """Publish one operator-facing loading message through the event bus."""
+        event_bus.publish("system_message", message)
 

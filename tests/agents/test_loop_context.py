@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
-from card_framework.agents.loop_context import SummarizerLoopMemory
+from card_framework.agents.loop_context import (
+    LoopIssue,
+    SummarizerLoopMemory,
+    UnresolvedIssueState,
+)
 
 
 def test_issue_extraction_dedupes_duplicate_feedback_fragments() -> None:
@@ -41,6 +45,27 @@ def test_compact_prompt_serializer_respects_length_cap() -> None:
     assert compact.startswith("Unresolved issues from prior critic passes:")
     assert "Strategy shift" not in compact
     assert len(compact) <= 220
+
+
+def test_compact_prompt_serializer_is_unbounded_by_default() -> None:
+    memory = SummarizerLoopMemory(target_seconds=74)
+    memory._unresolved = {
+        "coverage:long_issue": UnresolvedIssueState(
+            issue=LoopIssue(
+                signature="coverage:long_issue",
+                bucket="coverage",
+                description="Missing long-form detail " + ("detail " * 220),
+            ),
+            first_seen_iteration=1,
+            last_seen_iteration=1,
+            recurrence_count=1,
+        )
+    }
+
+    compact = memory.to_compact_prompt_block()
+
+    assert len(compact) > 1024
+    assert "[truncated" not in compact
 
 
 def test_stale_issue_resolution_and_reopen_across_iterations() -> None:

@@ -278,13 +278,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=256,
         help="Source chunk size in words for alignscore fallback backend.",
     )
-    execute.add_argument(
-        "--judge-source-char-limit",
-        type=int,
-        default=30000,
-        help="Maximum source transcript characters sent to judge prompts.",
-    )
-
     prepare = subparsers.add_parser(
         "prepare-manifest", help="Build a frozen benchmark manifest"
     )
@@ -359,7 +352,6 @@ async def _run_cell(
     enable_order_swap: bool,
     alignscore_model: str,
     alignscore_source_chunk_words: int,
-    judge_source_char_limit: int,
 ) -> CellRunResult:
     """Execute one matrix cell against all selected samples."""
     servers: list[ManagedServer] = []
@@ -404,7 +396,7 @@ async def _run_cell(
         judge_runner = LLMJudgeRunner(
             judge_llm=judge_llm,
             rubric=judge_rubric,
-            config=LLMJudgeRunnerConfig(source_char_limit=judge_source_char_limit),
+            config=LLMJudgeRunnerConfig(),
         )
         reference_free_pipeline = ReferenceFreePipeline(
             alignscore_runner=alignscore_runner,
@@ -855,7 +847,6 @@ def execute_command(args: argparse.Namespace) -> int:
                     alignscore_source_chunk_words=int(
                         args.alignscore_source_chunk_words
                     ),
-                    judge_source_char_limit=int(args.judge_source_char_limit),
                 )
             )
             results.append(result)

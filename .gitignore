@@ -23,14 +23,16 @@ wheels/
 # Outputs and Reports
 outputs/
 artifacts/
+/artifacts?*/
 neo4j_data/
 summary.json
 summary.xml
 eval_report.json
-
+episode_assets/
 # Local benchmark output and backup copies
 summary_matrix/
 summary.xml.old.*
+/compare_*/
 
 # Cache
 .pytest_cache/
@@ -41,4 +43,6 @@ checkpoints/hf_cache/
 checkpoints/index_tts/
 
 audio.wav
+*.wav
+*.mp3
 third_party/index_tts/

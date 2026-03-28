@@ -6,6 +6,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from card_framework.audio_pipeline.affect_analysis import (
+    AffectPresetMappingConfig,
+    AffectProfilingConfig,
+    EmotionVectorMappingConfig,
+    IndexTtsEmotionVectorMapper,
+    TranscriptAffectAnalyzer,
+)
+from card_framework.audio_pipeline.audio_normalization import AudioNormalizationPolicy
 from card_framework.audio_pipeline.contracts import SourceSeparator, SpeakerDiarizer, SpeechTranscriber
 from card_framework.audio_pipeline.eta import (
     EtaUnitStageName,
@@ -14,7 +22,13 @@ from card_framework.audio_pipeline.eta import (
     StageSpeedProfile,
     default_stage_eta_strategy,
 )
+from card_framework.audio_pipeline.gateways.audeering_affect_gateway import (
+    AudeeringMspDimAffectGateway,
+)
 from card_framework.audio_pipeline.gateways.demucs_gateway import DemucsSourceSeparator
+from card_framework.audio_pipeline.gateways.emotion2vec_affect_gateway import (
+    Emotion2VecPlusAffectGateway,
+)
 from card_framework.audio_pipeline.gateways.fallback_gateways import (
     PassthroughSourceSeparator,
     SingleSpeakerDiarizer,
@@ -29,6 +43,10 @@ from card_framework.audio_pipeline.interjector import (
     InterjectorOrchestrator,
     LLMInterjectionPlanner,
 )
+from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+    SummaryTurnEmotionLinker,
+    SummaryTurnEmotionLinkingConfig,
+)
 from card_framework.audio_pipeline.gateways.fallback_voice_clone_gateway import (
     PassthroughVoiceCloneGateway,
 )
@@ -38,6 +56,10 @@ from card_framework.audio_pipeline.gateways.indextts_voice_clone_gateway import 
 from card_framework.audio_pipeline.orchestrator import AudioToScriptOrchestrator
 from card_framework.audio_pipeline.runtime import resolve_device, resolve_path
 from card_framework.audio_pipeline.speaker_samples import SpeakerSampleGenerator
+from card_framework.audio_pipeline.turn_emotion_resolution import (
+    SourceLinkedTurnEmotionResolutionStrategy,
+    TurnEmotionResolutionConfig,
+)
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneProvider
 from card_framework.audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
 from card_framework.shared.llm_provider import LLMProvider
@@ -89,6 +111,24 @@ def build_audio_to_script_orchestrator(
         eta_progress_smoothing=eta_progress_smoothing,
         eta_overrun_factor=eta_overrun_factor,
         eta_headroom_seconds=eta_headroom_seconds,
+    )
+
+
+def build_source_separator(audio_cfg: Mapping[str, Any]) -> SourceSeparator:
+    """
+    Build source separator from config mapping.
+
+    Args:
+        audio_cfg: ``audio`` config section.
+
+    Returns:
+        Wired ``SourceSeparator`` instance.
+    """
+    separation_cfg = _as_mapping(audio_cfg.get("separation", {}))
+    retry_cfg = _as_mapping(audio_cfg.get("retry", {}))
+    return _build_separator(
+        separation_cfg=separation_cfg,
+        retry_cfg=retry_cfg,
     )
 
 
@@ -185,6 +225,116 @@ def build_speaker_diarizer(audio_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
     return _build_diarizer(diarization_cfg=diarization_cfg)
 
 
+def build_transcript_affect_analyzer(
+    audio_cfg: Mapping[str, Any],
+    *,
+    project_root: Path,
+) -> TranscriptAffectAnalyzer | None:
+    """Build post-transcript affect analyzer from audio config mapping."""
+    affect_cfg = _as_mapping(audio_cfg.get("affect_analysis", {}))
+    if not bool(affect_cfg.get("enabled", False)):
+        return None
+
+    work_dir = resolve_path(
+        str(audio_cfg.get("work_dir", "artifacts/audio_stage")),
+        base_dir=project_root,
+    )
+    output_dir_name = str(affect_cfg.get("output_dir_name", "affect_analysis")).strip()
+    if not output_dir_name:
+        raise ValueError("audio.affect_analysis.output_dir_name must be non-empty.")
+    output_dir = resolve_path(output_dir_name, base_dir=work_dir)
+
+    categorical_cfg = _as_mapping(affect_cfg.get("categorical", {}))
+    dimensional_cfg = _as_mapping(affect_cfg.get("dimensional", {}))
+    categorical_provider = _build_categorical_affect_provider(categorical_cfg)
+    dimensional_provider = _build_dimensional_affect_provider(dimensional_cfg)
+    if categorical_provider is None and dimensional_provider is None:
+        raise ValueError(
+            "audio.affect_analysis.enabled=true requires at least one enabled provider."
+        )
+
+    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
+    mapping_cfg = _as_mapping(affect_cfg.get("mapping", {}))
+    profiling_cfg = _as_mapping(affect_cfg.get("profiling", {}))
+    return TranscriptAffectAnalyzer(
+        output_dir=output_dir,
+        configured_audio_path=str(audio_cfg.get("audio_path", "")),
+        source_audio_mode=str(affect_cfg.get("source_audio", "auto")),
+        target_sample_rate_hz=int(affect_cfg.get("target_sample_rate_hz", 16000)),
+        context_padding_ms=int(affect_cfg.get("context_padding_ms", 150)),
+        min_segment_duration_ms=int(affect_cfg.get("min_segment_duration_ms", 1200)),
+        prompt_max_hint_chars=int(affect_cfg.get("prompt_max_hint_chars", 160)),
+        top_emotions_for_hint=int(affect_cfg.get("top_emotions_for_hint", 2)),
+        verbose_logging=bool(affect_cfg.get("verbose_logging", True)),
+        mapping=AffectPresetMappingConfig(
+            allowed_presets=_resolve_emo_preset_names(voice_clone_cfg),
+            default_preset=str(mapping_cfg.get("default_preset", "neutral")).strip()
+            or "neutral",
+            urgent_emotions=tuple(
+                str(value).strip().lower()
+                for value in list(mapping_cfg.get("urgent_emotions", ["angry", "fearful"]))
+                if str(value).strip()
+            ),
+            upbeat_emotions=tuple(
+                str(value).strip().lower()
+                for value in list(mapping_cfg.get("upbeat_emotions", ["happy", "surprised"]))
+                if str(value).strip()
+            ),
+            urgent_arousal_threshold=float(
+                mapping_cfg.get("urgent_arousal_threshold", 0.65)
+            ),
+            upbeat_valence_threshold=float(
+                mapping_cfg.get("upbeat_valence_threshold", 0.60)
+            ),
+            warm_valence_threshold=float(
+                mapping_cfg.get("warm_valence_threshold", 0.48)
+            ),
+            low_arousal_threshold=float(mapping_cfg.get("low_arousal_threshold", 0.45)),
+            engaged_arousal_threshold=float(
+                mapping_cfg.get("engaged_arousal_threshold", 0.45)
+            ),
+        ),
+        emotion_vector_mapping=IndexTtsEmotionVectorMapper(
+            EmotionVectorMappingConfig(
+                enabled=bool(mapping_cfg.get("emotion_vectors_enabled", True)),
+                categorical_weight=float(mapping_cfg.get("categorical_weight", 0.65)),
+                dimensional_weight=float(mapping_cfg.get("dimensional_weight", 0.35)),
+                calm_floor=float(mapping_cfg.get("calm_floor", 0.12)),
+                positive_surprise_boost=float(
+                    mapping_cfg.get("positive_surprise_boost", 0.35)
+                ),
+                negative_anger_bias=float(
+                    mapping_cfg.get("negative_anger_bias", 0.85)
+                ),
+                negative_fear_bias=float(mapping_cfg.get("negative_fear_bias", 0.9)),
+                melancholic_bias=float(mapping_cfg.get("melancholic_bias", 0.7)),
+                disgust_bias=float(mapping_cfg.get("disgust_bias", 0.35)),
+                confidence_floor=float(mapping_cfg.get("confidence_floor", 0.15)),
+                dominant_emotion_cap=float(
+                    mapping_cfg.get("dominant_emotion_cap", 0.38)
+                ),
+                max_sum=float(mapping_cfg.get("emotion_vector_max_sum", 0.8)),
+                apply_indextts_bias=bool(
+                    mapping_cfg.get("apply_indextts_emotion_bias", True)
+                ),
+            )
+        ),
+        profiling=AffectProfilingConfig(
+            enabled=bool(profiling_cfg.get("enabled", False)),
+            sample_interval_seconds=float(
+                profiling_cfg.get("sample_interval_seconds", 0.2)
+            ),
+            command_timeout_seconds=float(
+                profiling_cfg.get("command_timeout_seconds", 3.0)
+            ),
+            profile_filename=str(profiling_cfg.get("profile_filename", "profile.json")),
+        ),
+        categorical_provider=categorical_provider,
+        dimensional_provider=dimensional_provider,
+        manifest_filename=str(affect_cfg.get("manifest_filename", "manifest.json")),
+    )
+
+
 def build_voice_clone_orchestrator(
     audio_cfg: Mapping[str, Any],
     *,
@@ -223,11 +373,103 @@ def build_voice_clone_orchestrator(
             voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav")
         ),
         merge_timeout_seconds=int(voice_clone_cfg.get("merge_timeout_seconds", 300)),
-        emo_preset_catalog={
-            str(name).strip(): str(emo_text).strip()
-            for name, emo_text in _as_mapping(voice_clone_cfg.get("emo_presets", {})).items()
-            if str(name).strip() and str(emo_text).strip()
-        },
+        merged_output_normalization=_build_audio_normalization_policy(
+            _as_mapping(voice_clone_cfg.get("normalization", {}))
+        ),
+    )
+
+
+def build_summary_turn_emotion_linker(
+    audio_cfg: Mapping[str, Any],
+) -> SummaryTurnEmotionLinker | None:
+    """Build the optional source-grounded summary-turn emotion linker."""
+    linking_cfg = _as_mapping(audio_cfg.get("summary_turn_linking", {}))
+    if not bool(linking_cfg.get("enabled", False)):
+        return None
+
+    voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
+    return SummaryTurnEmotionLinker(
+        SummaryTurnEmotionLinkingConfig(
+            enabled=True,
+            top_k=int(linking_cfg.get("top_k", 3)),
+            min_support_score=float(linking_cfg.get("min_support_score", 0.08)),
+            same_speaker_bonus=float(linking_cfg.get("same_speaker_bonus", 1.2)),
+            default_emotion_confidence=float(
+                linking_cfg.get("default_emotion_confidence", 0.5)
+            ),
+            min_emotion_confidence=float(
+                linking_cfg.get("min_emotion_confidence", 0.15)
+            ),
+            lexical_similarity_weight=float(
+                linking_cfg.get("lexical_similarity_weight", 0.45)
+            ),
+            coverage_similarity_weight=float(
+                linking_cfg.get("coverage_similarity_weight", 0.25)
+            ),
+            sequence_similarity_weight=float(
+                linking_cfg.get("sequence_similarity_weight", 0.15)
+            ),
+            position_similarity_weight=float(
+                linking_cfg.get("position_similarity_weight", 0.15)
+            ),
+            min_sequence_similarity_without_overlap=float(
+                linking_cfg.get("min_sequence_similarity_without_overlap", 0.6)
+            ),
+            require_emotion_vector=bool(
+                linking_cfg.get("require_emotion_vector", True)
+            ),
+            apply_indextts_bias=bool(
+                linking_cfg.get("apply_indextts_bias", False)
+            ),
+            max_sum=float(
+                linking_cfg.get(
+                    "max_sum",
+                    voice_clone_cfg.get("emotion_vector_max_sum", 0.8),
+                )
+            ),
+            preserve_existing_explicit_vectors=bool(
+                linking_cfg.get("preserve_existing_explicit_vectors", True)
+            ),
+            force_live_draft_rerender=bool(
+                linking_cfg.get("force_live_draft_rerender", False)
+            ),
+        )
+    )
+
+
+def build_turn_emotion_resolution_strategy(
+    audio_cfg: Mapping[str, Any],
+) -> SourceLinkedTurnEmotionResolutionStrategy:
+    """Build the live-draft turn-emotion resolution strategy from config."""
+    summary_turn_emotion_cfg = _as_mapping(audio_cfg.get("summary_turn_emotion", {}))
+    raw_fallback_order = summary_turn_emotion_cfg.get(
+        "fallback_order",
+        ["source_linked", "explicit"],
+    )
+    if isinstance(raw_fallback_order, str):
+        fallback_order = tuple(
+            step.strip()
+            for step in raw_fallback_order.split(",")
+            if step.strip()
+        )
+    else:
+        fallback_order = tuple(
+            str(step).strip()
+            for step in list(raw_fallback_order)
+            if str(step).strip()
+        )
+    return SourceLinkedTurnEmotionResolutionStrategy(
+        config=TurnEmotionResolutionConfig(
+            prelink_enabled=bool(
+                summary_turn_emotion_cfg.get("prelink_enabled", True)
+            ),
+            strategy_name=str(
+                summary_turn_emotion_cfg.get("prelink_strategy", "source_linked")
+            ).strip()
+            or "source_linked",
+            fallback_order=fallback_order,
+        ),
+        linker=build_summary_turn_emotion_linker(audio_cfg),
     )
 
 
@@ -264,16 +506,30 @@ def build_interjector_orchestrator(
     min_host_progress_ratio = float(
         interjector_cfg.get("min_host_progress_ratio", 0.35)
     )
+    echo_min_host_progress_ratio = float(
+        interjector_cfg.get("echo_min_host_progress_ratio", 0.05)
+    )
     max_host_progress_ratio = float(
         interjector_cfg.get("max_host_progress_ratio", 0.90)
     )
+    timing_refinement_cfg = _as_mapping(interjector_cfg.get("timing_refinement", {}))
+    repair_cfg = _as_mapping(interjector_cfg.get("repair", {}))
+    leading_silence_trim_cfg = _as_mapping(
+        interjector_cfg.get("leading_silence_trim", {})
+    )
+    echo_pacing_fit_cfg = _as_mapping(interjector_cfg.get("echo_pacing_fit", {}))
     return InterjectorOrchestrator(
         planner=LLMInterjectionPlanner(
             llm=llm,
             max_tokens=int(interjector_cfg.get("analysis_max_tokens", 900)),
+            repair_max_tokens=int(repair_cfg.get("prompt_max_tokens", 220)),
             max_interjection_words=max_interjection_words,
             min_host_progress_ratio=min_host_progress_ratio,
+            echo_min_host_progress_ratio=echo_min_host_progress_ratio,
             max_host_progress_ratio=max_host_progress_ratio,
+            prefer_tool_call_planning=bool(
+                interjector_cfg.get("tool_call_planning_enabled", True)
+            ),
         ),
         provider=build_voice_clone_provider(audio_cfg, project_root=project_root),
         output_dir=output_dir,
@@ -294,15 +550,81 @@ def build_interjector_orchestrator(
             interjector_cfg.get("backchannel_reaction_latency_ms", 120)
         ),
         echo_alignment_offset_ms=int(
-            interjector_cfg.get("echo_alignment_offset_ms", 20)
+            interjector_cfg.get("echo_alignment_offset_ms", 0)
         ),
         min_host_progress_ratio=min_host_progress_ratio,
+        echo_min_host_progress_ratio=echo_min_host_progress_ratio,
         max_host_progress_ratio=max_host_progress_ratio,
-        min_available_overlap_ms=int(
-            interjector_cfg.get("min_available_overlap_ms", 120)
-        ),
         turn_end_guard_ms=int(interjector_cfg.get("turn_end_guard_ms", 180)),
         mix_timeout_seconds=int(interjector_cfg.get("mix_timeout_seconds", 300)),
+        merged_output_normalization=_build_audio_normalization_policy(
+            _as_mapping(interjector_cfg.get("normalization", {}))
+        ),
+        timing_refinement_enabled=bool(
+            timing_refinement_cfg.get("enabled", True)
+        ),
+        fallback_anchor_realignment_enabled=bool(
+            timing_refinement_cfg.get("fallback_anchor_realignment_enabled", True)
+        ),
+        repair_enabled=bool(repair_cfg.get("enabled", True)),
+        repair_max_attempts=_optional_int(repair_cfg.get("max_attempts")),
+        trim_leading_silence_enabled=bool(
+            leading_silence_trim_cfg.get("enabled", True)
+        ),
+        trim_leading_silence_threshold_db=float(
+            leading_silence_trim_cfg.get("threshold_db", -50.0)
+        ),
+        trim_leading_silence_min_duration_ms=int(
+            leading_silence_trim_cfg.get("min_duration_ms", 0)
+        ),
+        trim_leading_silence_preserve_ms=int(
+            leading_silence_trim_cfg.get("preserve_ms", 5)
+        ),
+        echo_pacing_fit_enabled=bool(
+            echo_pacing_fit_cfg.get("enabled", True)
+        ),
+        echo_pacing_timing_backend=str(
+            echo_pacing_fit_cfg.get("timing_backend", "faster_whisper_native")
+        ),
+        echo_pacing_model_name=str(
+            echo_pacing_fit_cfg.get("model_name", "tiny.en")
+        ),
+        echo_pacing_device=str(
+            echo_pacing_fit_cfg.get("device", "cpu")
+        ),
+        echo_pacing_compute_type_cpu=str(
+            echo_pacing_fit_cfg.get("compute_type_cpu", "int8")
+        ),
+        echo_pacing_compute_type_cuda=str(
+            echo_pacing_fit_cfg.get("compute_type_cuda", "int8_float16")
+        ),
+        echo_pacing_beam_size=int(
+            echo_pacing_fit_cfg.get("beam_size", 1)
+        ),
+        echo_pacing_target_host_fill_ratio=float(
+            echo_pacing_fit_cfg.get("target_host_fill_ratio", 0.95)
+        ),
+        echo_pacing_min_overflow_ratio=float(
+            echo_pacing_fit_cfg.get("min_overflow_ratio", 1.05)
+        ),
+        echo_pacing_max_tempo=float(
+            echo_pacing_fit_cfg.get("max_tempo", 1.75)
+        ),
+        echo_pacing_min_phrase_match_similarity=float(
+            echo_pacing_fit_cfg.get("min_phrase_match_similarity", 0.75)
+        ),
+        echo_pacing_max_window_delta=int(
+            echo_pacing_fit_cfg.get("max_window_delta", 1)
+        ),
+        echo_pacing_word_level_enabled=bool(
+            echo_pacing_fit_cfg.get("word_level_enabled", True)
+        ),
+        echo_pacing_word_level_min_segment_ms=int(
+            echo_pacing_fit_cfg.get("word_level_min_segment_ms", 80)
+        ),
+        echo_pacing_word_level_max_tempo=float(
+            echo_pacing_fit_cfg.get("word_level_max_tempo", 1.75)
+        ),
     )
 
 
@@ -320,6 +642,23 @@ def _optional_int(value: Any) -> int | None:
     if isinstance(value, str) and not value.strip():
         return None
     return int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    """Return float when configured, otherwise None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return float(value)
+
+
+def _configured_float(value: Any, *, default: float) -> float:
+    """Return configured float or a supplied default when omitted."""
+    parsed = _optional_float(value)
+    if parsed is None:
+        return default
+    return parsed
 
 
 def _build_separator(
@@ -357,9 +696,13 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
                 asr_cfg.get("model", "ibm-granite/granite-4.0-1b-speech")
             ),
             language=(str(asr_cfg.get("language", "en")).strip() or "en"),
-            chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 30)),
-            chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 5)),
-            max_new_tokens=int(asr_cfg.get("max_new_tokens", 200)),
+            chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 25)),
+            chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 1)),
+            max_new_tokens=int(asr_cfg.get("max_new_tokens", 96)),
+            repetition_penalty=_configured_float(
+                asr_cfg.get("repetition_penalty"),
+                default=1.25,
+            ),
             enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
             require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),
             forced_alignment_batch_size=int(forced_alignment_cfg.get("batch_size", 8)),
@@ -407,9 +750,37 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
                 diarization_cfg.get("speaker_embedding_model", "titanet_large")
             ),
             min_speakers=_optional_int(diarization_cfg.get("min_speakers")),
-            max_speakers=_optional_int(diarization_cfg.get("max_speakers")),
+            max_speakers=_optional_int(diarization_cfg.get("max_speakers", 10)),
             allow_single_speaker_fallback=bool(
                 diarization_cfg.get("allow_single_speaker_fallback", False)
+            ),
+            vad_onset=_configured_float(diarization_cfg.get("vad_onset"), default=0.8),
+            vad_offset=_configured_float(diarization_cfg.get("vad_offset"), default=0.6),
+            vad_pad_onset=_configured_float(
+                diarization_cfg.get("vad_pad_onset"),
+                default=0.1,
+            ),
+            vad_pad_offset=_configured_float(
+                diarization_cfg.get("vad_pad_offset"),
+                default=0.0,
+            ),
+            vad_min_duration_on=_configured_float(
+                diarization_cfg.get("vad_min_duration_on"),
+                default=0.2,
+            ),
+            vad_min_duration_off=_configured_float(
+                diarization_cfg.get("vad_min_duration_off"),
+                default=0.6,
+            ),
+            clustering_max_rp_threshold=_configured_float(
+                diarization_cfg.get("clustering_max_rp_threshold"),
+                default=0.4,
+            ),
+            clustering_sparse_search_volume=int(
+                diarization_cfg.get("clustering_sparse_search_volume", 60)
+            ),
+            clustering_maj_vote_spk_count=bool(
+                diarization_cfg.get("clustering_maj_vote_spk_count", True)
             ),
         )
     if provider in {"pyannote", "pyannote_community1"}:
@@ -519,6 +890,67 @@ def _build_eta_strategy(*, eta_cfg: Mapping[str, Any]) -> StageEtaStrategy:
         max_multiplier=max_multiplier,
         unit_stage_defaults=unit_defaults,
     )
+
+
+def _build_categorical_affect_provider(
+    affect_cfg: Mapping[str, Any],
+) -> Emotion2VecPlusAffectGateway | None:
+    """Build the configured categorical affect provider when enabled."""
+    if not bool(affect_cfg.get("enabled", True)):
+        return None
+    provider = str(affect_cfg.get("provider", "emotion2vec_plus")).strip().lower()
+    resolved_device = resolve_device(str(affect_cfg.get("device", "auto")))
+    if provider == "emotion2vec_plus":
+        return Emotion2VecPlusAffectGateway(
+            model_name=str(affect_cfg.get("model_name", "emotion2vec_plus_large")),
+            device=resolved_device,
+            batch_size=int(affect_cfg.get("batch_size", 4)),
+            hub=str(affect_cfg.get("hub", "hf")),
+            granularity=str(affect_cfg.get("granularity", "utterance")),
+            extract_embedding=bool(affect_cfg.get("extract_embedding", True)),
+            disable_update_check=bool(affect_cfg.get("disable_update_check", True)),
+        )
+    raise ValueError(
+        "audio.affect_analysis.categorical.provider must be 'emotion2vec_plus'."
+    )
+
+
+def _build_dimensional_affect_provider(
+    affect_cfg: Mapping[str, Any],
+) -> AudeeringMspDimAffectGateway | None:
+    """Build the configured dimensional affect provider when enabled."""
+    if not bool(affect_cfg.get("enabled", True)):
+        return None
+    provider = str(affect_cfg.get("provider", "audeering_msp_dim")).strip().lower()
+    resolved_device = resolve_device(str(affect_cfg.get("device", "auto")))
+    if provider == "audeering_msp_dim":
+        return AudeeringMspDimAffectGateway(
+            model_name=str(
+                affect_cfg.get(
+                    "model_name",
+                    "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim",
+                )
+            ),
+            device=resolved_device,
+            use_fp16=bool(affect_cfg.get("use_fp16", True)),
+            batch_size=int(affect_cfg.get("batch_size", 4)),
+        )
+    raise ValueError(
+        "audio.affect_analysis.dimensional.provider must be 'audeering_msp_dim'."
+    )
+
+
+def _resolve_emo_preset_names(voice_clone_cfg: Mapping[str, Any]) -> tuple[str, ...]:
+    """Resolve the configured voice-clone preset names for affect mapping."""
+    raw_catalog = _as_mapping(voice_clone_cfg.get("emo_presets", {}))
+    presets = tuple(
+        str(name).strip()
+        for name, emo_text in raw_catalog.items()
+        if str(name).strip() and str(emo_text).strip()
+    )
+    if presets:
+        return presets
+    return ("neutral", "warm", "engaged", "upbeat", "urgent")
 
 
 def _resolve_stage_profile(
@@ -647,10 +1079,36 @@ def build_voice_clone_provider(
             stream_subprocess_output=bool(
                 voice_clone_cfg.get("stream_subprocess_output", True)
             ),
+            normalize_emotion_vector=bool(
+                voice_clone_cfg.get("normalize_emotion_vector", True)
+            ),
+            emotion_vector_apply_bias=bool(
+                voice_clone_cfg.get("emotion_vector_apply_bias", True)
+            ),
+            emotion_vector_max_sum=float(
+                voice_clone_cfg.get("emotion_vector_max_sum", 0.8)
+            ),
         )
     if provider in {"passthrough", "none"}:
         return PassthroughVoiceCloneGateway()
     raise ValueError(f"Unsupported voice clone provider: {provider}")
+
+
+def _build_audio_normalization_policy(
+    normalization_cfg: Mapping[str, Any],
+) -> AudioNormalizationPolicy | None:
+    """Build one optional audio-normalization policy from config."""
+    if not normalization_cfg:
+        return None
+    return AudioNormalizationPolicy(
+        enabled=bool(normalization_cfg.get("enabled", False)),
+        target_lufs=float(normalization_cfg.get("target_lufs", -16.0)),
+        true_peak_db=float(normalization_cfg.get("true_peak_db", -1.5)),
+        loudness_range_lu=float(normalization_cfg.get("loudness_range_lu", 11.0)),
+        linear=bool(normalization_cfg.get("linear", True)),
+        dual_mono=bool(normalization_cfg.get("dual_mono", False)),
+        timeout_seconds=int(normalization_cfg.get("timeout_seconds", 300)),
+    )
 
 
 def _default_vendor_index_tts_dir(project_root: Path) -> Path:

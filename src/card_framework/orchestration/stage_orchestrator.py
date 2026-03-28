@@ -13,6 +13,10 @@ import time
 from card_framework.audio_pipeline.gpu_heartbeat import VoiceCloneGpuHeartbeatService
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
 from card_framework.audio_pipeline.interjector import InterjectorOrchestrator, InterjectorRunResult
+from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
+from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+    SummaryTurnEmotionLinker,
+)
 from card_framework.audio_pipeline.eta import (
     DynamicEtaTracker,
     EtaProfilePersistence,
@@ -30,9 +34,20 @@ from card_framework.audio_pipeline.voice_clone_orchestrator import (
 )
 from card_framework.shared.events import event_bus
 from card_framework.runtime.loop_orchestrator import Orchestrator
+from card_framework.runtime.pipeline_sessions import (
+    PipelineSessionStore,
+    PipelineStageName,
+)
 from card_framework.runtime.pipeline_plan import PipelineStagePlan
-from card_framework.shared.summary_xml import count_summary_turns, parse_summary_xml
-from card_framework.shared.summary_output import write_summary_xml_to_workspace
+from card_framework.shared.summary_xml import (
+    count_summary_turns,
+    parse_summary_xml,
+    serialize_summary_turns,
+)
+from card_framework.shared.summary_output import (
+    write_summary_xml,
+    write_summary_xml_to_workspace,
+)
 from card_framework.orchestration.transcript import Transcript, TranscriptLike, coerce_transcript
 
 
@@ -45,7 +60,7 @@ class StageOrchestrator:
     project_root: Path
     target_seconds: int
     duration_tolerance_ratio: float
-    max_iterations: int
+    max_iterations: int | None
     voice_clone_orchestrator: VoiceCloneOrchestrator | None = None
     interjector_orchestrator: InterjectorOrchestrator | None = None
     speaker_sample_preparer: Callable[[Transcript], Transcript] | None = None
@@ -59,6 +74,11 @@ class StageOrchestrator:
     voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
     loop_memory_artifact_path: Path | None = None
     live_draft_audio_enabled: bool = False
+    summary_turn_emotion_linker: SummaryTurnEmotionLinker | None = None
+    post_render_duration_verification_enabled: bool = False
+    session_store: PipelineSessionStore | None = None
+    session_id: str = ""
+    session_summary_output_path: Path | None = None
 
     async def run(
         self,
@@ -85,6 +105,7 @@ class StageOrchestrator:
 
     def _run_stage_three_only(self, *, transcript: Transcript) -> None:
         """Run stage-3 voice cloning using a pre-existing summary XML file."""
+        self._mark_stage_started("stage-3")
         if self.voice_clone_orchestrator is None:
             raise ValueError(
                 "audio.voice_clone.enabled must be true when "
@@ -107,7 +128,11 @@ class StageOrchestrator:
                 f"Final summary file is empty: {self.stage_plan.final_summary_path}"
             )
 
-        summary_path = write_summary_xml_to_workspace(final_summary, self.project_root)
+        final_summary = self._link_summary_turn_emotions(
+            summary_xml=final_summary,
+            transcript=transcript,
+        )
+        summary_path = self._write_summary_outputs(final_summary)
         event_bus.publish(
             "status_message",
             f"Saved summary to {summary_path}",
@@ -129,6 +154,11 @@ class StageOrchestrator:
                 summary_xml=final_summary,
                 transcript=transcript,
             )
+        self._verify_post_render_duration(voice_clone_result=voice_clone_result)
+        self._mark_stage_completed(
+            "stage-3",
+            detail={"manifest_path": str(voice_clone_result.manifest_path)},
+        )
         self._run_interjector_stage(
             summary_xml=final_summary,
             voice_clone_result=voice_clone_result,
@@ -136,6 +166,7 @@ class StageOrchestrator:
 
     def _run_stage_four_only(self) -> None:
         """Run stage-4 interjection mixing from existing stage-3 artifacts."""
+        self._mark_stage_started("stage-4")
         if self.interjector_orchestrator is None:
             raise ValueError(
                 "audio.interjector.enabled must be true when "
@@ -164,7 +195,7 @@ class StageOrchestrator:
                 f"Final summary file is empty: {self.stage_plan.final_summary_path}"
             )
 
-        summary_path = write_summary_xml_to_workspace(final_summary, self.project_root)
+        summary_path = self._write_summary_outputs(final_summary)
         event_bus.publish("status_message", f"Saved summary to {summary_path}")
         event_bus.publish(
             "status_message",
@@ -180,6 +211,7 @@ class StageOrchestrator:
 
     async def _run_full_loop(self, *, full_text: str, transcript: Transcript) -> None:
         """Run the full summarizer-critic loop until convergence or max iterations."""
+        self._mark_stage_started("stage-2")
         prepared_transcript = transcript
         speaker_samples_manifest_path: Path | None = None
         draft_audio_state_path: Path | None = None
@@ -201,6 +233,7 @@ class StageOrchestrator:
                 target_seconds=self.target_seconds,
                 duration_tolerance_ratio=self.duration_tolerance_ratio,
                 max_iterations=self.max_iterations,
+                transcript=prepared_transcript,
                 full_transcript_text=full_text,
                 loop_memory_artifact_path=self.loop_memory_artifact_path,
                 loop_memory_context=self._build_loop_memory_context(
@@ -214,6 +247,7 @@ class StageOrchestrator:
                 target_seconds=self.target_seconds,
                 duration_tolerance_ratio=self.duration_tolerance_ratio,
                 max_iterations=self.max_iterations,
+                transcript=prepared_transcript,
                 full_transcript_text=full_text,
                 loop_memory_artifact_path=self.loop_memory_artifact_path,
                 loop_memory_context=self._build_loop_memory_context(
@@ -226,52 +260,182 @@ class StageOrchestrator:
         result = diagnostics["draft"] if diagnostics["converged"] else ""
         if not result:
             return
+        final_summary = self._link_summary_turn_emotions(
+            summary_xml=result,
+            transcript=prepared_transcript,
+        )
 
         event_bus.publish(
             "agent_message",
             "Orchestrator",
-            f"Final Summary:\n```xml\n{result}\n```",
+            f"Final Summary:\n```xml\n{final_summary}\n```",
         )
-        summary_path = write_summary_xml_to_workspace(result, self.project_root)
+        summary_path = self._write_summary_outputs(final_summary)
         event_bus.publish(
             "status_message",
             f"Saved final summary to {summary_path}",
         )
-        if (
-            self.live_draft_audio_enabled
-            and self.voice_clone_orchestrator is not None
-            and draft_audio_state_path is not None
-            and speaker_samples_manifest_path is not None
-        ):
-            event_bus.publish(
-                "system_message",
-                (
-                    "Finalizing live draft voice-clone manifest from rendered turn "
-                    f"audio in {draft_audio_state_path}"
-                ),
+        self._mark_stage_completed(
+            "stage-2",
+            detail={"summary_path": str(summary_path)},
+        )
+        voice_clone_result: VoiceCloneRunResult | None = None
+        if self.voice_clone_orchestrator is not None:
+            self._mark_stage_started("stage-3")
+            if (
+                self.live_draft_audio_enabled
+                and draft_audio_state_path is not None
+                and speaker_samples_manifest_path is not None
+            ):
+                if self._should_rerender_live_draft_final_summary(
+                    original_summary_xml=result,
+                    enriched_summary_xml=final_summary,
+                ):
+                    voice_clone_result = self._run_live_batch_voice_clone_stage(
+                        summary_xml=final_summary,
+                        transcript=prepared_transcript,
+                    )
+                else:
+                    event_bus.publish(
+                        "system_message",
+                        (
+                            "Finalizing live draft voice-clone manifest from rendered turn "
+                            f"audio in {draft_audio_state_path}"
+                        ),
+                    )
+                    live_session = LiveDraftVoiceCloneSession.from_orchestrator(
+                        orchestrator=self.voice_clone_orchestrator,
+                        state_path=draft_audio_state_path,
+                        speaker_samples_manifest_path=speaker_samples_manifest_path,
+                    )
+                    voice_clone_result = live_session.finalize()
+                    event_bus.publish(
+                        "status_message",
+                        (
+                            f"Voice cloning complete: {len(voice_clone_result.artifacts)} artifacts "
+                            f"written to {voice_clone_result.output_dir}"
+                        ),
+                    )
+            else:
+                voice_clone_result = self._run_voice_clone_stage(
+                    summary_xml=final_summary,
+                    transcript=prepared_transcript,
+                )
+            self._verify_post_render_duration(voice_clone_result=voice_clone_result)
+            self._mark_stage_completed(
+                "stage-3",
+                detail={"manifest_path": str(voice_clone_result.manifest_path)},
             )
-            live_session = LiveDraftVoiceCloneSession.from_orchestrator(
-                orchestrator=self.voice_clone_orchestrator,
-                state_path=draft_audio_state_path,
-                speaker_samples_manifest_path=speaker_samples_manifest_path,
-            )
-            voice_clone_result = live_session.finalize()
+        self._run_interjector_stage(
+            summary_xml=final_summary,
+            voice_clone_result=voice_clone_result,
+        )
+
+    def _link_summary_turn_emotions(
+        self,
+        *,
+        summary_xml: str,
+        transcript: Transcript,
+    ) -> str:
+        """Attach source-grounded explicit vectors to the final summary turns."""
+        if self.summary_turn_emotion_linker is None:
+            return summary_xml
+        turns = parse_summary_xml(summary_xml)
+        if not turns:
+            return summary_xml
+        linking_result = self.summary_turn_emotion_linker.link_turns(
+            turns=turns,
+            transcript=transcript,
+        )
+        if linking_result.changed:
             event_bus.publish(
                 "status_message",
                 (
-                    f"Voice cloning complete: {len(voice_clone_result.artifacts)} artifacts "
-                    f"written to {voice_clone_result.output_dir}"
+                    "Summary-turn emotion linking attached explicit vectors to "
+                    f"{linking_result.linked_turn_count}/{len(turns)} turn(s)."
                 ),
             )
         else:
-            voice_clone_result = self._run_voice_clone_stage(
-                summary_xml=result,
-                transcript=prepared_transcript,
+            event_bus.publish(
+                "system_message",
+                (
+                    "Summary-turn emotion linking found no strong source-grounded "
+                    "matches; preserving fallback emotion behavior."
+                ),
             )
-        self._run_interjector_stage(
-            summary_xml=result,
-            voice_clone_result=voice_clone_result,
+            return summary_xml
+        return serialize_summary_turns(list(linking_result.turns))
+
+    def _should_rerender_live_draft_final_summary(
+        self,
+        *,
+        original_summary_xml: str,
+        enriched_summary_xml: str,
+    ) -> bool:
+        """Return whether stage-3 should rerender the final accepted summary."""
+        if self.summary_turn_emotion_linker is None:
+            return False
+        if self.summary_turn_emotion_linker.config.force_live_draft_rerender:
+            return True
+        return original_summary_xml.strip() != enriched_summary_xml.strip()
+
+    def _verify_post_render_duration(
+        self,
+        *,
+        voice_clone_result: VoiceCloneRunResult,
+    ) -> None:
+        """Fail fast when the final stage-3 audio misses the duration tolerance."""
+        if not self.post_render_duration_verification_enabled:
+            return
+        measured_seconds = self._measure_voice_clone_duration_seconds(
+            voice_clone_result=voice_clone_result
         )
+        if measured_seconds is None:
+            raise RuntimeError(
+                "Post-render duration verification is enabled, but stage-3 audio "
+                "duration could not be measured."
+            )
+        tolerance_seconds = self.target_seconds * self.duration_tolerance_ratio
+        min_seconds = self.target_seconds - tolerance_seconds
+        max_seconds = self.target_seconds + tolerance_seconds
+        if min_seconds <= measured_seconds <= max_seconds:
+            event_bus.publish(
+                "status_message",
+                (
+                    "Post-render duration verification passed: "
+                    f"{measured_seconds:.2f}s within [{min_seconds:.2f}s, "
+                    f"{max_seconds:.2f}s]."
+                ),
+            )
+            return
+        raise RuntimeError(
+            "Post-render duration out of tolerance after stage-3 export: "
+            f"measured {measured_seconds:.2f}s, expected within "
+            f"[{min_seconds:.2f}s, {max_seconds:.2f}s]."
+        )
+
+    @staticmethod
+    def _measure_voice_clone_duration_seconds(
+        *,
+        voice_clone_result: VoiceCloneRunResult,
+    ) -> float | None:
+        """Measure merged stage-3 audio duration or fall back to summed artifacts."""
+        merged_output_audio_path = voice_clone_result.merged_output_audio_path
+        if merged_output_audio_path is not None:
+            duration_ms = probe_audio_duration_ms(merged_output_audio_path)
+            if duration_ms is not None and duration_ms > 0:
+                return duration_ms / 1000.0
+        total_duration_ms = 0
+        measured_any = False
+        for artifact in voice_clone_result.artifacts:
+            duration_ms = probe_audio_duration_ms(artifact.output_audio_path)
+            if duration_ms is None or duration_ms <= 0:
+                continue
+            total_duration_ms += duration_ms
+            measured_any = True
+        if not measured_any:
+            return None
+        return total_duration_ms / 1000.0
 
     def _build_loop_memory_context(self, *, transcript: Transcript) -> dict[str, str]:
         """Build a stable persistence scope for summarizer loop memory artifacts."""
@@ -348,6 +512,14 @@ class StageOrchestrator:
                 "speaker_id": turn.speaker,
                 "content": turn.text,
                 "emo_preset": turn.emo_preset,
+                "emotion_vector": (
+                    turn.emotion_vector.to_list()
+                    if turn.emotion_vector is not None
+                    else None
+                ),
+                "emotion_vector_source": turn.emotion_vector_source,
+                "source_segment_indices": list(turn.source_segment_indices),
+                "source_segment_weights": list(turn.source_segment_weights),
             }
             for index, turn in enumerate(parse_summary_xml(summary_xml), start=1)
         ]
@@ -585,6 +757,7 @@ class StageOrchestrator:
         """Run Stage-4 interjection mixing when configured."""
         if self.interjector_orchestrator is None:
             return None
+        self._mark_stage_started("stage-4")
 
         manifest_path = voice_clone_manifest_path
         if manifest_path is None and voice_clone_result is not None:
@@ -606,6 +779,10 @@ class StageOrchestrator:
             summary_xml=summary_xml,
             voice_clone_manifest_path=manifest_path,
         )
+        self._mark_stage_completed(
+            "stage-4",
+            detail={"manifest_path": str(result.manifest_path)},
+        )
         event_bus.publish(
             "status_message",
             (
@@ -614,4 +791,35 @@ class StageOrchestrator:
             ),
         )
         return result
+
+    def _write_summary_outputs(self, summary_xml: str) -> Path:
+        """Persist summary XML to the workspace mirror and optional session checkpoint."""
+        summary_path = write_summary_xml_to_workspace(summary_xml, self.project_root)
+        if self.session_summary_output_path is not None:
+            write_summary_xml(summary_xml, self.session_summary_output_path)
+        return summary_path
+
+    def _mark_stage_started(self, stage_name: PipelineStageName) -> None:
+        """Record that one stage has started when session persistence is enabled."""
+        if self.session_store is None or not self.session_id:
+            return
+        self.session_store.mark_stage_started(
+            session_id=self.session_id,
+            stage_name=stage_name,
+        )
+
+    def _mark_stage_completed(
+        self,
+        stage_name: PipelineStageName,
+        *,
+        detail: dict[str, str] | None = None,
+    ) -> None:
+        """Record that one stage has completed when session persistence is enabled."""
+        if self.session_store is None or not self.session_id:
+            return
+        self.session_store.mark_stage_completed(
+            session_id=self.session_id,
+            stage_name=stage_name,
+            detail=detail,
+        )
 

@@ -51,6 +51,7 @@ from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.platform_support import apply_runtime_platform_fallbacks
 from card_framework.orchestration import StageOrchestrator
 from card_framework.runtime.loop_orchestrator import Orchestrator
+from card_framework.runtime.pipeline_sessions import PipelineSessionStore
 from card_framework.runtime.pipeline_plan import build_pipeline_stage_plan
 from card_framework.providers.logging_provider import LoggingLLMProvider
 from card_framework.providers.response_callbacks import RichConsoleResponseCallback
@@ -93,9 +94,12 @@ _STAGE_TWO_BOOTSTRAP_STOPWORDS = {
     "will",
     "with",
 }
-_AUDIO_PIPELINE_BUILDERS: tuple[object, object, object, object] | None = None
+_AUDIO_PIPELINE_BUILDERS: tuple[object, object, object, object, object, object] | None = None
 _A2A_SERVER_HELPERS: tuple[object, ...] | None = None
 _AGENT_RUNTIME_HELPERS: tuple[object, object, object, object, object, object] | None = None
+_LLM_PROFILE_RUNTIME_METADATA_KEYS = frozenset(
+    {"context_window_tokens", "compaction_target_ratio"}
+)
 
 
 def _suppress_chatty_logger_propagation() -> None:
@@ -112,7 +116,7 @@ def _emit_runtime_loading_status(message: str) -> None:
 def _load_audio_pipeline_builders(
     *,
     status_reporter: StatusReporter | None = None,
-) -> tuple[object, object, object, object]:
+) -> tuple[object, object, object, object, object, object]:
     """Load heavy audio-pipeline builder helpers only when runtime needs them."""
     global _AUDIO_PIPELINE_BUILDERS
     if _AUDIO_PIPELINE_BUILDERS is None:
@@ -123,14 +127,18 @@ def _load_audio_pipeline_builders(
             from card_framework.audio_pipeline import (
                 build_audio_to_script_orchestrator,
                 build_interjector_orchestrator,
+                build_summary_turn_emotion_linker,
                 build_speaker_sample_generator,
+                build_transcript_affect_analyzer,
                 build_voice_clone_orchestrator,
             )
 
         _AUDIO_PIPELINE_BUILDERS = (
             build_audio_to_script_orchestrator,
             build_interjector_orchestrator,
+            build_summary_turn_emotion_linker,
             build_speaker_sample_generator,
+            build_transcript_affect_analyzer,
             build_voice_clone_orchestrator,
         )
     return _AUDIO_PIPELINE_BUILDERS
@@ -287,11 +295,36 @@ def _instantiate_llm_provider(
     enable_logging: bool,
 ) -> LLMProvider:
     """Instantiate an LLM provider and apply logging wrapper when enabled."""
-    llm: LLMProvider = hydra.utils.instantiate(llm_cfg)
+    llm_payload = _strip_llm_runtime_metadata(llm_cfg)
+    llm: LLMProvider = hydra.utils.instantiate(llm_payload)
     _attach_stream_callback(llm)
     if enable_logging:
         return LoggingLLMProvider(inner_provider=llm)
     return llm
+
+
+def _strip_llm_runtime_metadata(llm_cfg: DictConfig | dict) -> DictConfig | dict:
+    """Remove repo-local profile metadata keys before provider instantiation."""
+    payload = _to_plain_dict(llm_cfg)
+    if not payload:
+        return llm_cfg
+    for key in _LLM_PROFILE_RUNTIME_METADATA_KEYS:
+        payload.pop(key, None)
+    if isinstance(llm_cfg, DictConfig):
+        return OmegaConf.create(payload)
+    return payload
+
+
+def _normalize_max_iterations(raw_value: object) -> int | None:
+    """Normalize one configured max-iteration value into a loop budget."""
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in {"", "none", "null"}:
+            return None
+        raw_value = normalized
+    return int(raw_value)
 
 
 def _attach_stream_callback(llm: LLMProvider) -> None:
@@ -359,6 +392,81 @@ def _save_eta_profile_if_supported(
         event_bus.publish("system_message", failure_message)
 
 
+def _resolve_eta_profile_path(
+    *,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    default_filename: str,
+) -> Path:
+    """Resolve the shared ETA persistence store path for the current runtime."""
+    eta_cfg = _to_plain_dict(audio_cfg_dict.get("eta", {}))
+    configured_store_path = str(eta_cfg.get("store_path", "")).strip()
+    if configured_store_path:
+        return resolve_path(configured_store_path, base_dir=project_root)
+    return (project_root / "artifacts" / "audio_stage" / default_filename).resolve()
+
+
+def _build_eta_profile_context(
+    *,
+    audio_orchestrator: Any,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    runtime_device: str,
+) -> dict[str, str]:
+    """Build the shared ETA context used to scope persisted history rows."""
+    context = audio_orchestrator._build_eta_profile_context(device=runtime_device)
+
+    speaker_samples_cfg = _to_plain_dict(audio_cfg_dict.get("speaker_samples", {}))
+    context.update(
+        {
+            "speaker_samples_source_audio": str(
+                speaker_samples_cfg.get("source_audio", "vocals")
+            ).strip(),
+            "speaker_samples_target_duration_seconds": str(
+                speaker_samples_cfg.get("target_duration_seconds", 30)
+            ).strip(),
+            "speaker_samples_selection_order": str(
+                speaker_samples_cfg.get("selection_order", "chronological")
+            ).strip(),
+            "speaker_samples_low_data_policy": str(
+                speaker_samples_cfg.get("low_data_policy", "quality_first_shorter")
+            ).strip(),
+        }
+    )
+
+    voice_clone_cfg = _to_plain_dict(audio_cfg_dict.get("voice_clone", {}))
+    cfg_path_value = str(voice_clone_cfg.get("cfg_path", "")).strip()
+    model_dir_value = str(voice_clone_cfg.get("model_dir", "")).strip()
+    context.update(
+        {
+            "voice_clone_provider": str(
+                voice_clone_cfg.get("provider", "indextts")
+            ).strip(),
+            "voice_clone_device": resolve_device(
+                str(voice_clone_cfg.get("device", "auto"))
+            ),
+            "voice_clone_execution_backend": str(
+                voice_clone_cfg.get("execution_backend", "subprocess")
+            ).strip(),
+            "voice_clone_cfg_path": (
+                str(resolve_path(cfg_path_value, base_dir=project_root))
+                if cfg_path_value
+                else ""
+            ),
+            "voice_clone_model_dir": (
+                str(resolve_path(model_dir_value, base_dir=project_root))
+                if model_dir_value
+                else ""
+            ),
+        }
+    )
+    return {
+        str(key): str(value).strip()
+        for key, value in context.items()
+        if str(key).strip() and str(value).strip()
+    }
+
+
 def _build_speaker_sample_preparer(
     *,
     stage_start: str,
@@ -392,6 +500,90 @@ def _build_speaker_sample_preparer(
         )
 
     return _prepare
+
+
+def _run_post_transcript_affect_analysis_step(
+    *,
+    stage_start: str,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    transcript_path: str,
+    transcript: Transcript,
+) -> Transcript:
+    """Run audio-grounded affect analysis after transcript availability."""
+    if stage_start not in {"stage-1", "stage-2"}:
+        return transcript
+
+    affect_cfg = _to_plain_dict(audio_cfg_dict.get("affect_analysis", {}))
+    if not bool(affect_cfg.get("enabled", False)):
+        return transcript
+
+    reuse_existing_manifest = bool(affect_cfg.get("reuse_existing_manifest", True))
+    existing_manifest_path = _resolve_existing_affect_analysis_manifest_path(
+        transcript=transcript,
+        project_root=project_root,
+    )
+    if reuse_existing_manifest and existing_manifest_path is not None:
+        event_bus.publish(
+            "system_message",
+            (
+                "Reusing affect analysis manifest from transcript metadata: "
+                f"{existing_manifest_path}"
+            ),
+        )
+        return transcript
+
+    fail_on_error = bool(affect_cfg.get("fail_on_error", False))
+    (_, _, _, _, build_transcript_affect_analyzer, _) = _load_audio_pipeline_builders(
+        status_reporter=_emit_runtime_loading_status
+    )
+    try:
+        analyzer = build_transcript_affect_analyzer(
+            audio_cfg_dict,
+            project_root=project_root,
+        )
+        if analyzer is None:
+            return transcript
+        event_bus.publish(
+            "system_message",
+            "Running post-transcript affect analysis before summarization...",
+        )
+        with report_loading_duration(
+            "post-transcript affect analysis",
+            reporter=_emit_runtime_loading_status,
+        ):
+            result = analyzer.analyze_transcript(
+                transcript=transcript,
+                base_dir=project_root,
+            )
+    except Exception as exc:
+        event_bus.publish("error_message", f"Affect analysis failed: {exc}")
+        if fail_on_error:
+            raise
+        event_bus.publish(
+            "system_message",
+            (
+                "Affect analysis failure tolerated by config; "
+                "continuing without affect metadata."
+            ),
+        )
+        return transcript
+
+    resolved_transcript_path = resolve_path(transcript_path, base_dir=project_root)
+    write_transcript_atomic(
+        cast(TranscriptPayload, result.transcript.to_payload()),
+        resolved_transcript_path,
+    )
+    event_bus.publish(
+        "status_message",
+        f"Affect analysis manifest written to {result.manifest_path}",
+    )
+    if result.profile_path is not None:
+        event_bus.publish(
+            "status_message",
+            f"Affect analysis resource profile written to {result.profile_path}",
+        )
+    return result.transcript
 
 
 def _run_post_transcript_speaker_sample_step(
@@ -472,7 +664,7 @@ def _run_post_transcript_speaker_sample_step(
         configured_audio_path=str(audio_cfg_dict.get("audio_path", "")),
         base_dir=project_root,
     )
-    (_, _, build_speaker_sample_generator, _) = _load_audio_pipeline_builders(
+    (_, _, _, build_speaker_sample_generator, _, _) = _load_audio_pipeline_builders(
         status_reporter=_emit_runtime_loading_status
     )
     sample_generator = build_speaker_sample_generator(audio_cfg_dict)
@@ -637,6 +829,23 @@ def _run_post_transcript_speaker_sample_step(
         f"Speaker sample manifest written to {sample_result.manifest_path}",
     )
     return updated_transcript
+
+
+def _resolve_existing_affect_analysis_manifest_path(
+    *,
+    transcript: Transcript,
+    project_root: Path,
+) -> Path | None:
+    """Resolve an existing transcript-linked affect-analysis manifest when present."""
+    manifest_value = str(
+        transcript.metadata.get("affect_analysis_manifest_path", "")
+    ).strip()
+    if not manifest_value:
+        return None
+    candidate = Path(manifest_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (project_root / candidate).resolve()
+    return candidate if candidate.is_file() else None
 
 
 def _resolve_existing_speaker_samples_manifest_path(
@@ -1222,15 +1431,51 @@ def main(cfg: DictConfig) -> None:
         str(audio_cfg_dict.get("work_dir", "artifacts/audio_stage")),
         base_dir=project_root,
     )
+    session_cfg_dict = _to_plain_dict(cfg.get("session", {}))
+    session_enabled = bool(session_cfg_dict.get("enabled", False))
+    session_id = str(session_cfg_dict.get("session_id", "")).strip()
+    session_store: PipelineSessionStore | None = None
+    session_summary_output_path: Path | None = None
+    if session_enabled:
+        if not session_id:
+            raise ValueError("session.session_id must be set when session.enabled=true.")
+        session_store_path_value = str(session_cfg_dict.get("store_path", "")).strip()
+        if not session_store_path_value:
+            raise ValueError(
+                "session.store_path must be set when session.enabled=true."
+            )
+        session_store = PipelineSessionStore(
+            resolve_path(session_store_path_value, base_dir=project_root)
+        )
+        session_summary_output_value = str(
+            session_cfg_dict.get("summary_output_path", "")
+        ).strip()
+        if session_summary_output_value:
+            session_summary_output_path = resolve_path(
+                session_summary_output_value,
+                base_dir=project_root,
+            )
     (
         build_audio_to_script_orchestrator,
         build_interjector_orchestrator,
+        build_summary_turn_emotion_linker,
+        _,
         _,
         build_voice_clone_orchestrator,
     ) = _load_audio_pipeline_builders(status_reporter=_emit_runtime_loading_status)
     audio_orchestrator = build_audio_to_script_orchestrator(audio_cfg_dict)
-    eta_profile_path = work_dir / audio_orchestrator.eta_profile_filename
-    eta_profile_context = audio_orchestrator._build_eta_profile_context(device=runtime_device)
+    eta_profile_path = _resolve_eta_profile_path(
+        audio_cfg_dict=audio_cfg_dict,
+        project_root=project_root,
+        default_filename=audio_orchestrator.eta_profile_filename,
+    )
+    audio_orchestrator.eta_profile_path = eta_profile_path
+    eta_profile_context = _build_eta_profile_context(
+        audio_orchestrator=audio_orchestrator,
+        audio_cfg_dict=audio_cfg_dict,
+        project_root=project_root,
+        runtime_device=runtime_device,
+    )
     if not stage_plan.run_audio_stage:
         audio_orchestrator._load_eta_profile(
             profile_path=eta_profile_path,
@@ -1257,6 +1502,11 @@ def main(cfg: DictConfig) -> None:
             input_audio_path = candidate_audio_path
 
     if stage_plan.run_audio_stage:
+        if session_store is not None and session_id:
+            session_store.mark_stage_started(
+                session_id=session_id,
+                stage_name="stage-1",
+            )
         audio_path_value = str(audio_cfg_dict.get("audio_path", "")).strip()
         if not audio_path_value:
             raise ValueError(
@@ -1295,6 +1545,12 @@ def main(cfg: DictConfig) -> None:
             },
         )
         transcript_path = str(audio_stage_output.transcript_path)
+        if session_store is not None and session_id:
+            session_store.mark_stage_completed(
+                session_id=session_id,
+                stage_name="stage-1",
+                detail={"transcript_path": transcript_path},
+            )
     else:
         event_bus.publish(
             "system_message",
@@ -1333,6 +1589,14 @@ def main(cfg: DictConfig) -> None:
         event_bus.publish(
             "system_message",
             f"Loaded {len(transcript.segments)} segments",
+        )
+    if stage_plan.start_stage != "stage-4":
+        transcript = _run_post_transcript_affect_analysis_step(
+            stage_start=stage_plan.start_stage,
+            audio_cfg_dict=audio_cfg_dict,
+            project_root=project_root,
+            transcript_path=transcript_path,
+            transcript=transcript,
         )
     speaker_sample_preparer: Callable[[Transcript], Transcript] | None = None
     if stage_plan.start_stage == "stage-4":
@@ -1449,6 +1713,15 @@ def main(cfg: DictConfig) -> None:
                 _suppress_chatty_logger_propagation()
 
     shared_agent_client: Any | None = None
+    from card_framework.agents.prompt_compaction import (
+        LLMDrivenPromptCompactionStrategy,
+        NoOpPromptCompactionStrategy,
+        build_context_budget_manager,
+    )
+    from card_framework.audio_pipeline.factory import (
+        build_turn_emotion_resolution_strategy,
+    )
+
     if (
         stage_plan.run_summarizer_stage
         or stage_plan.run_critic_stage
@@ -1614,6 +1887,36 @@ def main(cfg: DictConfig) -> None:
             ),
         )
 
+    selection_cfg = _to_plain_dict(cfg.get("selection", {}))
+    stage_llm_selection_cfg = _to_plain_dict(selection_cfg.get("stage_llm", {}))
+    summarizer_llm_profile_name = str(
+        stage_llm_selection_cfg.get("summarizer", "default")
+    ).strip()
+    if summarizer_llm_profile_name in {"", "default"}:
+        summarizer_llm_profile_name = str(selection_cfg.get("llm", "")).strip()
+
+    profiles_cfg_dict = _to_plain_dict(cfg.get("profiles", {}))
+    llm_profiles_cfg_dict = _to_plain_dict(profiles_cfg_dict.get("llm", {}))
+    context_budget_manager = build_context_budget_manager(
+        orchestrator_cfg=orchestrator_cfg_dict,
+        llm_profiles_cfg=llm_profiles_cfg_dict,
+    )
+    if (
+        context_budget_manager.config.enabled
+        and context_budget_manager.config.compress_with_same_provider
+    ):
+        prompt_compaction_strategy = LLMDrivenPromptCompactionStrategy(
+            llm=summarizer_llm,
+            token_estimator=context_budget_manager.token_estimator,
+        )
+    else:
+        prompt_compaction_strategy = NoOpPromptCompactionStrategy(
+            token_estimator=context_budget_manager.token_estimator
+        )
+    turn_emotion_resolution_strategy = build_turn_emotion_resolution_strategy(
+        audio_cfg_dict
+    )
+
     is_embedding_enabled = "NoOpEmbeddingProvider" not in cfg.embedding.get(
         "_target_", ""
     )
@@ -1720,6 +2023,10 @@ def main(cfg: DictConfig) -> None:
                     ).items()
                     if str(name).strip() and str(emo_text).strip()
                 },
+                llm_profile_name=summarizer_llm_profile_name,
+                context_budget_manager=context_budget_manager,
+                prompt_compaction_strategy=prompt_compaction_strategy,
+                turn_emotion_resolution_strategy=turn_emotion_resolution_strategy,
                 agent_client=shared_agent_client,
                 event_bus=event_bus,
             ),
@@ -1777,6 +2084,9 @@ def main(cfg: DictConfig) -> None:
         )
 
     loop_memory_cfg = _to_plain_dict(orchestrator_cfg_dict.get("loop_memory", {}))
+    post_render_duration_cfg = _to_plain_dict(
+        orchestrator_cfg_dict.get("post_render_duration_verification", {})
+    )
     loop_memory_artifact_path: Path | None = None
     loop_memory_artifact_value = str(loop_memory_cfg.get("artifact_path", "")).strip()
     if loop_memory_artifact_value:
@@ -1800,7 +2110,9 @@ def main(cfg: DictConfig) -> None:
         project_root=project_root,
         target_seconds=target_seconds,
         duration_tolerance_ratio=duration_tolerance_ratio,
-        max_iterations=int(orchestrator_cfg_dict.get("max_iterations", 60)),
+        max_iterations=_normalize_max_iterations(
+            orchestrator_cfg_dict.get("max_iterations", 60)
+        ),
         voice_clone_orchestrator=voice_clone_orchestrator,
         interjector_orchestrator=interjector_orchestrator,
         speaker_sample_preparer=speaker_sample_preparer,
@@ -1814,6 +2126,13 @@ def main(cfg: DictConfig) -> None:
         voice_clone_gpu_heartbeat=voice_clone_gpu_heartbeat,
         loop_memory_artifact_path=loop_memory_artifact_path,
         live_draft_audio_enabled=live_draft_audio_enabled,
+        summary_turn_emotion_linker=build_summary_turn_emotion_linker(audio_cfg_dict),
+        post_render_duration_verification_enabled=bool(
+            post_render_duration_cfg.get("enabled", False)
+        ),
+        session_store=session_store,
+        session_id=session_id,
+        session_summary_output_path=session_summary_output_path,
     )
     try:
         asyncio.run(
@@ -1822,6 +2141,37 @@ def main(cfg: DictConfig) -> None:
                 retrieval_enabled=transcript_index is not None,
             )
         )
+        if session_store is not None and session_id:
+            resume_plan = session_store.compute_resume_plan(session_id=session_id)
+            if resume_plan.is_completed:
+                session_store.mark_session_completed(session_id=session_id)
+            else:
+                failure_message = (
+                    "Pipeline exited without completing all required stages. "
+                    f"Resume from {resume_plan.resume_stage}."
+                )
+                session_store.mark_session_failed(
+                    session_id=session_id,
+                    current_stage=None,
+                    reason=failure_message,
+                )
+                raise RuntimeError(failure_message)
+    except KeyboardInterrupt:
+        if session_store is not None and session_id:
+            session_store.mark_session_paused(
+                session_id=session_id,
+                current_stage=None,
+                reason="Pipeline interrupted by user.",
+            )
+        raise SystemExit(130) from None
+    except Exception as exc:
+        if session_store is not None and session_id:
+            session_store.mark_session_failed(
+                session_id=session_id,
+                current_stage=None,
+                reason=str(exc),
+            )
+        raise
     finally:
         audio_orchestrator._save_eta_profile(
             profile_path=eta_profile_path,

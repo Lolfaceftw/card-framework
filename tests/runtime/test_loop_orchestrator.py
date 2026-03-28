@@ -18,13 +18,16 @@ class _FakeAgentClient:
 
 
 def test_run_summarizer_once_returns_agent_output() -> None:
+    sent_task_payloads = []
+
     async def _fake_send_task(
         port, task_data, timeout=120.0, max_retries=3, metadata=None
     ):
-        del task_data, timeout, max_retries
+        del timeout, max_retries
         assert port == 9010
         assert metadata is not None
         assert metadata.get("stage") == "summarizer_single_pass"
+        sent_task_payloads.append(task_data)
         return "<summary>ok</summary>"
 
     orchestrator = Orchestrator(
@@ -38,10 +41,31 @@ def test_run_summarizer_once_returns_agent_output() -> None:
         orchestrator.run_summarizer_once(
             target_seconds=300,
             duration_tolerance_ratio=0.05,
+            transcript={
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "hello world",
+                        "start_time": 0,
+                        "end_time": 1000,
+                        "emotion_vector": [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
+                    }
+                ]
+            },
             full_transcript_text="",
         )
     )
     assert result == "<summary>ok</summary>"
+    assert sent_task_payloads[0].transcript_payload["segments"][0]["emotion_vector"] == [
+        0.1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.2,
+    ]
 
 
 def test_run_critic_once_parses_valid_json() -> None:
@@ -125,6 +149,60 @@ def test_run_critic_once_raises_for_invalid_json() -> None:
                 full_transcript_text="",
             )
         )
+
+
+def test_index_and_clear_transcript_include_retrieval_namespace() -> None:
+    sent_tasks: list[tuple[int, object, dict | None]] = []
+
+    async def _fake_send_task(
+        port, task_data, timeout=120.0, max_retries=3, metadata=None
+    ):
+        del timeout, max_retries
+        sent_tasks.append((port, task_data, metadata))
+        if getattr(task_data, "action", "") == "index":
+            return '{"status":"ok","count":1}'
+        if getattr(task_data, "action", "") == "clear":
+            return '{"status":"ok"}'
+        raise AssertionError(f"Unexpected action: {getattr(task_data, 'action', '')}")
+
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        retrieval_namespace="worker-3",
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
+
+    indexed = asyncio.run(
+        orchestrator.index_transcript(
+            {
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "hello world",
+                        "start_time": 0,
+                        "end_time": 1200,
+                    }
+                ]
+            },
+            sample_id="sample-17",
+        )
+    )
+    asyncio.run(orchestrator.clear_transcript_index())
+
+    assert indexed == 1
+    assert sent_tasks[0][0] == 9012
+    assert getattr(sent_tasks[0][1], "action", "") == "index"
+    assert getattr(sent_tasks[0][1], "namespace", "") == "worker-3"
+    assert getattr(sent_tasks[0][1], "sample_id", None) == "sample-17"
+    assert sent_tasks[0][2] == {
+        "component": "orchestrator",
+        "stage": "index",
+        "sample_id": "sample-17",
+    }
+    assert getattr(sent_tasks[1][1], "action", "") == "clear"
+    assert getattr(sent_tasks[1][1], "namespace", "") == "worker-3"
+    assert sent_tasks[1][2] == {"component": "orchestrator", "stage": "clear"}
 
 
 def test_run_loop_sends_empty_loop_context_on_first_pass() -> None:

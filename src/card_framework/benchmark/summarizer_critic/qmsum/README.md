@@ -29,7 +29,8 @@ uv run python -m card_framework.benchmark.summarizer_critic.qmsum --help
 - The tracked `vllm_default` provider profile points at
   `http://127.0.0.1:8000/v1`.
 - To override that vLLM endpoint without editing YAML, set one of
-  `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`, or `VLLM_BASE_URL`.
+  `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`,
+  `CARD_FRAMEWORK_VLLM_BASE_URL`, or `VLLM_BASE_URL`.
 
 Example PowerShell override:
 
@@ -121,6 +122,15 @@ Useful execution flags:
 - `--retrieval-timeout-seconds <float>`
 - `--index-timeout-seconds <float>`
 
+The reference-free judge path now receives the full transcript by default
+instead of a capped `30,000`-character prefix.
+
+When `--embedding-mode enabled`, the benchmark now reuses a persistent
+transcript-embedding cache under
+`artifacts/summarizer_critic_benchmark/embedding_cache`. Cache hits are keyed
+by the sample ID, a stable transcript-content hash, and the active embedding
+provider identity, so reruns skip `encode(...)` when those inputs match.
+
 ## Concurrent Direct Runs
 
 When you launch multiple `execute` processes in parallel, give each process its
@@ -148,6 +158,7 @@ Each concurrent run must use a distinct trio of
 Main artifact roots:
 
 - prepared dataset: `artifacts/summarizer_critic_benchmark/datasets/qmsum_general_test`
+- shared embedding cache: `artifacts/summarizer_critic_benchmark/embedding_cache`
 - direct runs: `artifacts/summarizer_critic_benchmark/runs/<run_id>`
 - supervised sessions: `artifacts/summarizer_critic_benchmark/supervisor/<session_id>`
 

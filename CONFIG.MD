@@ -12,6 +12,95 @@ installs when the repo-root config is not available.
 4. Leave the concrete provider definitions in `profiles` alone unless you are
    intentionally changing a model, base URL, or local embedding choice.
 
+## Docker setup_and_run path
+
+The repository now ships a Docker workflow centered on
+`card_framework.cli.setup_and_run`.
+
+Prefer this Docker workflow for routine repo-local runs. If Docker can expose
+CUDA, prefer the `setup-and-run-gpu` service under the `gpu` profile.
+
+Build the image:
+
+```bash
+docker compose build setup-and-run
+```
+
+Run the wrapper from source audio on CPU-only or non-CUDA Docker hosts:
+
+```bash
+docker compose run --rm setup-and-run --audio-path audio.wav
+```
+
+Run the interactive menu-first launcher:
+
+```bash
+docker compose run --rm setup-and-run
+```
+
+Run a sequential multi-audio sweep:
+
+```bash
+docker compose run --rm setup-and-run --audio-path episode-a.mp3 --audio-path episode-b.mp3
+```
+
+Run the per-episode duration sweep:
+
+```bash
+docker compose run --rm setup-and-run --audio-path episode-a.mp3 --audio-path episode-b.mp3 --duration-sweep
+```
+
+Run the GPU profile for Windows or Linux NVIDIA hosts:
+
+```bash
+docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
+```
+
+Both runtime services inherit the same Compose resource cap: about `8 GB` RAM
+plus about `2 GB` swap through `mem_limit: 8g` and `memswap_limit: 10g`.
+
+The Compose services bind-mount the repository checkout, so the container sees
+the same `conf/config.yaml`, `.env`, `audio.wav`, `transcript.json`, and
+`summary.xml` files you use locally. The root `.venv` and vendored
+`src/card_framework/_vendor/index_tts/.venv` are redirected to Docker volumes
+so the host checkout does not receive Linux virtual environments.
+Repeated `--audio-path` flags now run sequentially and isolate each audio
+input under its own output folder, with a top-level `batch_manifest.json`
+written at the batch root.
+Adding `--duration-sweep` changes that wrapper flow into a per-episode preset
+sweep for `30s`, `1m`, and `5m`. Each episode boots once, later presets reuse
+the cached transcript from stage-2, and completed preset folders are reused on
+reruns. The sweep ledger is written to `duration_sweep_manifest.json`.
+When the wrapper starts without explicit run inputs, it now opens an
+interactive menu by default so operators can choose the run mode, select LLM
+and embedding profiles, and provide audio, transcript, summary, or resume
+inputs. Pass `--no-menu` to skip that menu. The shared runtime profiles now
+also include `selection.llm=anthropic_claude_opus`, which uses
+`ANTHROPIC_API_KEY` for `claude-opus-4-6`.
+
+For the full container workflow and Windows + NeMo guidance, see
+[`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md).
+
+## Session Resume
+
+`card_framework.cli.setup_and_run` now creates a UUID-backed pipeline session
+for each wrapper-managed run and persists it in
+`artifacts/pipeline_sessions/sessions.sqlite3`.
+
+- The wrapper prints the `session_id` at the end of the run.
+- Resume with `--resume-session <uuid>`.
+- Resume is stage-level only: if transcription, summarization, voice cloning, or
+  interjection was interrupted, the pipeline reruns that whole stage instead of
+  trying to continue from the middle of a chunk or synth call.
+- The wrapper checkpoints the final summary for resume under
+  `artifacts/pipeline_sessions/<session_id>/summary.xml` while still mirroring
+  the latest summary to workspace-root `summary.xml`.
+
+The `session.*` config keys in `conf/config.yaml` and
+`src/card_framework/config/config.yaml` are primarily wrapper-managed. Most
+operators should not set them by hand unless they are integrating the runtime
+outside `setup_and_run`.
+
 ## What To Edit
 
 Most day-to-day changes happen in this block:
@@ -60,9 +149,10 @@ audio:
   asr:
     provider: "granite_speech"
     model: "ibm-granite/granite-4.0-1b-speech"
-    chunk_length_seconds: 30
-    chunk_overlap_seconds: 5
-    max_new_tokens: 200
+    chunk_length_seconds: 25
+    chunk_overlap_seconds: 1
+    max_new_tokens: 96
+    repetition_penalty: 1.25
     language: "en"
     forced_alignment:
       enabled: true
@@ -71,13 +161,62 @@ audio:
 ```
 
 - `granite_speech` is the default ASR backend for new runs.
-- The runtime chunks preprocessed audio into `30s` windows with `5s` overlap.
+- The runtime chunks preprocessed audio into `25s` windows with `1s` overlap.
 - Stage-1 now emits timed Granite model loading messages and inline
   transcription progress such as `segment 2/9` plus an ETA on the first run
   from the configured/default audio ETA profile, then refines later runs with
   learned stage history.
 - `faster_whisper` is still supported, but it is now an explicit opt-in
   provider instead of the default.
+
+The current NeMo diarization defaults are:
+
+```yaml
+audio:
+  diarization:
+    provider: "nemo"
+    nemo_model: "diar_msdd_telephonic"
+    vad_model: "vad_multilingual_marblenet"
+    speaker_embedding_model: "titanet_large"
+    min_speakers:
+    max_speakers: 10
+    allow_single_speaker_fallback: false
+    vad_onset: 0.8
+    vad_offset: 0.6
+    vad_pad_onset: 0.1
+    vad_pad_offset: 0.0
+    vad_min_duration_on: 0.2
+    vad_min_duration_off: 0.6
+    clustering_max_rp_threshold: 0.4
+    clustering_sparse_search_volume: 60
+    clustering_maj_vote_spk_count: true
+```
+
+- Leave `min_speakers` blank for variable-guest episodes and raise
+  `max_speakers` above the default `10` only when a show can genuinely exceed
+  that many voices.
+- Set `min_speakers` and `max_speakers` to the same value only when you want
+  NeMo to use an exact known speaker count for the whole file.
+- The `vad_*` keys are NeMo-only tuning controls for boundary sensitivity and
+  micro-turn suppression.
+- The `clustering_*` keys are NeMo-only tuning controls for speaker-count
+  search. Raise `clustering_max_rp_threshold` and
+  `clustering_sparse_search_volume` when NeMo consistently undercounts
+  speakers, and consider `clustering_maj_vote_spk_count: true` when you want a
+  more conservative speaker-count estimate across scales.
+- The latest fixed-vocals Granite pass keeps `max_new_tokens: 96`, drops
+  Granite overlap to `1s`, and raises Granite `repetition_penalty` to `1.25`
+  because that combination cut seam-style duplicate candidates much more than
+  the old `25s/2s/96/1.15` default while preserving more words than the
+  tighter `80`-token cap.
+- The current NeMo pass keeps the better-behaving `vad_pad_offset: 0.0`,
+  `vad_min_duration_on: 0.2`, and `vad_min_duration_off: 0.6` values, then
+  broadens NeMo's clustering search with `max_speakers: 10`,
+  `clustering_max_rp_threshold: 0.4`,
+  `clustering_sparse_search_volume: 60`, and
+  `clustering_maj_vote_spk_count: true`, while keeping transcript-side
+  short-sandwich smoothing for tiny one-word speaker intrusions when both
+  neighboring segments agree.
 
 ## Built-In LLM Profiles
 
@@ -112,6 +251,10 @@ HF_TOKEN=
 The runtime also accepts older aliases and mirrors them automatically. That
 means existing values such as `VLLM_API_KEY`, `GOOGLE_API_KEY`, `GLM_API_KEY`,
 `HF_ACCESS_TOKEN`, and `HF_API_TOKEN` still work.
+
+The Docker Compose services load that same `.env` file through `env_file`, so
+you do not need a second container-specific secrets file for the standard
+`setup_and_run` workflow.
 
 The new SPoRC automatic sampler also reads `ANTHROPIC_API_KEY` from `.env` or
 the process environment when you run:

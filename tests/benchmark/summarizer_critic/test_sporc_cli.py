@@ -20,6 +20,7 @@ from card_framework.benchmark.summarizer_critic.sporc.cli import (
     _child_environment,
     _build_parser,
     _detect_duration_sweep_child_stall,
+    _finalize_duration_sweep_child,
     _parse_duration_preset_list,
     _render_duration_sweep_menu,
     _resolve_duration_sweep_examples,
@@ -32,6 +33,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_PREPARED_FULL_ROOT,
     DEFAULT_PREPARED_ROOT,
     DurationSweepPresetSummary,
+    PreparedBenchmarkSample,
     PreparedDatasetManifest,
 )
 from card_framework.shared.paths import REPO_ROOT
@@ -130,7 +132,7 @@ def test_render_duration_sweep_menu_lists_presets() -> None:
 
 
 def test_parse_duration_preset_list_splits_and_validates() -> None:
-    assert _parse_duration_preset_list("30s,1m,5m") == ["30s", "1m", "5m"]
+    assert _parse_duration_preset_list("30s,1m,5m,10m") == ["30s", "1m", "5m", "10m"]
 
 
 def test_resolve_prepare_root_defaults_by_dataset_variant() -> None:
@@ -187,10 +189,16 @@ def test_build_parser_accepts_llm_sample_command() -> None:
             "llm-sample",
             "--dataset-manifest",
             "manifest.json",
+            "--provider",
+            "vllm",
             "--duration-preset",
-            "30s",
+            "10m",
             "--samples",
             "20",
+            "--text-only",
+            "--transcribe-enabled",
+            "--audio-device",
+            "cpu",
             "--episodes",
             "5",
             "--select-episode",
@@ -204,8 +212,12 @@ def test_build_parser_accepts_llm_sample_command() -> None:
 
     assert args.command == "llm-sample"
     assert args.dataset_manifest == "manifest.json"
-    assert args.duration_preset == "30s"
+    assert args.provider == "vllm"
+    assert args.duration_preset == "10m"
     assert args.samples == 20
+    assert args.text_only is True
+    assert args.transcribe_enabled is True
+    assert args.audio_device == "cpu"
     assert args.episodes == 5
     assert args.select_episode == "[7,10]"
     assert args.model == "claude-opus-4-6"
@@ -227,6 +239,42 @@ def test_build_parser_accepts_dedupe_manifest_command() -> None:
     assert args.command == "dedupe-manifest"
     assert args.manifest_path == "manifest.json"
     assert args.audit_path == "audit.json"
+
+
+def test_build_parser_accepts_filter_audio_urls_command() -> None:
+    parser = _build_parser(target_command="filter-audio-urls")
+
+    args = parser.parse_args(
+        [
+            "filter-audio-urls",
+            "--manifest-path",
+            "manifest.json",
+            "--output-manifest",
+            "filtered.json",
+            "--audit-path",
+            "audit.json",
+            "--timeout-seconds",
+            "7.5",
+            "--max-workers",
+            "12",
+            "--max-workers-per-host",
+            "3",
+            "--max-retries",
+            "2",
+            "--retry-backoff-seconds",
+            "1.25",
+        ]
+    )
+
+    assert args.command == "filter-audio-urls"
+    assert args.manifest_path == "manifest.json"
+    assert args.output_manifest == "filtered.json"
+    assert args.audit_path == "audit.json"
+    assert args.timeout_seconds == 7.5
+    assert args.max_workers == 12
+    assert args.max_workers_per_host == 3
+    assert args.max_retries == 2
+    assert args.retry_backoff_seconds == 1.25
 
 
 def test_build_parser_accepts_export_transcripts_command() -> None:
@@ -252,6 +300,24 @@ def test_build_parser_accepts_export_transcripts_command() -> None:
     assert args.output_path == "combined.txt"
     assert args.backwards_compat is True
     assert args.raw is True
+
+
+def test_build_parser_accepts_curate_longform_max_speakers() -> None:
+    parser = _build_parser(target_command="curate-longform")
+
+    args = parser.parse_args(
+        [
+            "curate-longform",
+            "--source-manifest",
+            "manifest.json",
+            "--max-speakers",
+            "3",
+        ]
+    )
+
+    assert args.command == "curate-longform"
+    assert args.source_manifest == "manifest.json"
+    assert args.max_speakers == 3
 
 
 def test_build_execute_child_command_adds_sweep_specific_flags() -> None:
@@ -414,6 +480,84 @@ def test_launch_duration_sweep_child_uses_full_sample_scope_with_shared_queue(
         assert command[command.index("--sample-shard-count") + 1] == "1"
         assert state.shard_index == 7
         assert state.shard_count == 9
+    finally:
+        state.log_handle.close()
+
+
+def test_launch_duration_sweep_child_uses_shared_retrieval_port_and_namespace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    launched_commands: list[list[str]] = []
+
+    def _fake_popen(command, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        launched_commands.append(list(command))
+        return _PopenStub(pid=9002)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._reserve_distinct_ports",
+        lambda used_ports, count: [6202, 6203] if count == 2 else [6201],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._start_duration_sweep_reader",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli.subprocess.Popen",
+        _fake_popen,
+    )
+
+    args = argparse.Namespace(
+        dataset_manifest="manifest.json",
+        dataset_variant="full",
+        episode_data_path="",
+        turn_data_path="",
+        reference_wpm=150.0,
+        output_root=str(tmp_path / "runs"),
+        provider_profiles="profiles.yaml",
+        config="config.yaml",
+        summarizer_provider="vllm_default",
+        critic_provider="vllm_default",
+        judge_provider="vllm_default",
+        embedding_mode="enabled",
+        judge_source_char_limit=30000,
+        duration_preset="",
+        target_seconds_override=None,
+        max_samples=25,
+        sample_seed=41,
+        max_iterations=3,
+        summarizer_timeout_seconds=None,
+        critic_timeout_seconds=None,
+        retrieval_timeout_seconds=None,
+        index_timeout_seconds=None,
+        prepare_if_missing=True,
+        force_download_dataset=False,
+        force_download_audio=False,
+        transcript_only=False,
+        enable_voice_clone=False,
+        progress_heartbeat_seconds=30.0,
+    )
+
+    state = _launch_duration_sweep_child(
+        args=args,
+        sweep_root=tmp_path / "sweep",
+        duration_preset="5m",
+        shard_index=4,
+        shard_count=9,
+        max_samples=100,
+        used_ports=set(),
+        event_queue=queue.Queue(),
+        shared_retrieval_port=6201,
+    )
+
+    try:
+        command = launched_commands[0]
+        assert command[command.index("--retrieval-port") + 1] == "6201"
+        assert command[command.index("--shared-retrieval-port") + 1] == "6201"
+        assert command[command.index("--retrieval-namespace") + 1] == "sweep-worker-4"
+        assert state.retrieval_port == 6201
+        assert state.retrieval_namespace == "sweep-worker-4"
     finally:
         state.log_handle.close()
 
@@ -724,6 +868,7 @@ def test_run_duration_sweep_uses_auto_parallelism_and_max_samples(
 def test_aggregate_duration_sweep_preset_weights_multi_shard_summaries() -> None:
     aggregated = _aggregate_duration_sweep_preset(
         duration_preset="5m",
+        target_sample_count=6,
         child_summaries={
             1: DurationSweepPresetSummary(
                 duration_preset="5m",
@@ -795,6 +940,242 @@ def test_aggregate_duration_sweep_preset_weights_multi_shard_summaries() -> None
     assert aggregated.mean_composite_ci95_upper is None
     assert aggregated.restart_count == 3
     assert aggregated.recovered_stall_count == 1
+
+
+def test_aggregate_duration_sweep_preset_requires_full_target_fill_for_completed() -> None:
+    aggregated = _aggregate_duration_sweep_preset(
+        duration_preset="5m",
+        target_sample_count=10,
+        child_summaries={
+            1: DurationSweepPresetSummary(
+                duration_preset="5m",
+                target_seconds=300,
+                status="completed",
+                attempted_candidate_count=4,
+                replacement_count=0,
+                sample_count=4,
+                executed_count=4,
+                skipped_count=0,
+                success_count=4,
+                failure_count=0,
+                within_tolerance_count=4,
+                within_tolerance_rate=1.0,
+                mean_candidate_seconds=300.0,
+                mean_absolute_duration_delta_seconds=0.0,
+                mean_factualness=0.9,
+                mean_naturalness=0.8,
+                mean_speaker_grammar_similarity=0.7,
+                mean_composite=0.8,
+                report_path=None,
+                notes_path=None,
+                results_path=None,
+                mean_composite_ci95_lower=None,
+                mean_composite_ci95_upper=None,
+                error_message=None,
+                restart_count=0,
+                recovered_stall_count=0,
+            ),
+            2: DurationSweepPresetSummary(
+                duration_preset="5m",
+                target_seconds=300,
+                status="completed",
+                attempted_candidate_count=4,
+                replacement_count=0,
+                sample_count=4,
+                executed_count=4,
+                skipped_count=0,
+                success_count=4,
+                failure_count=0,
+                within_tolerance_count=4,
+                within_tolerance_rate=1.0,
+                mean_candidate_seconds=300.0,
+                mean_absolute_duration_delta_seconds=0.0,
+                mean_factualness=0.8,
+                mean_naturalness=0.7,
+                mean_speaker_grammar_similarity=0.6,
+                mean_composite=0.7,
+                report_path=None,
+                notes_path=None,
+                results_path=None,
+                mean_composite_ci95_lower=None,
+                mean_composite_ci95_upper=None,
+                error_message=None,
+                restart_count=0,
+                recovered_stall_count=0,
+            ),
+        },
+    )
+
+    assert aggregated.sample_count == 8
+    assert aggregated.status == "partial"
+
+
+def test_finalize_duration_sweep_child_ignores_stale_report_after_nonzero_exit(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "runs"
+    output_root.mkdir()
+    run_root = output_root / "stale-run"
+    run_root.mkdir()
+    report_path = run_root / "report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "run_id": "stale-run",
+                "status": "completed",
+                "duration_tolerance_ratio": 0.1,
+                "report_path": str(report_path),
+                "notes_path": "",
+                "results_path": "",
+                "resume_count": 0,
+                "summary": {
+                    "attempted_candidate_count": 1,
+                    "replacement_count": 0,
+                    "sample_count": 1,
+                    "executed_count": 1,
+                    "skipped_count": 0,
+                    "success_count": 1,
+                    "failure_count": 0,
+                    "mean_factualness": 0.9,
+                    "mean_naturalness": 0.9,
+                    "mean_speaker_grammar_similarity": 0.9,
+                    "mean_composite": 0.9,
+                },
+                "samples": [
+                    {
+                        "sample_id": "sample-1",
+                        "status": "completed",
+                        "counts_toward_target": True,
+                        "candidate_seconds": 300.0,
+                        "target_seconds": 300.0,
+                        "final_status": "completed",
+                        "metrics": {
+                            "factualness": 0.9,
+                            "naturalness": 0.9,
+                            "speaker_grammar_similarity": 0.9,
+                            "composite": 0.9,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_path = tmp_path / "5m.checkpoint.json"
+    checkpoint_path.write_text(json.dumps({"run_id": "stale-run"}), encoding="utf-8")
+    stale_mtime = time.time() - 60.0
+    os.utime(report_path, (stale_mtime, stale_mtime))
+    os.utime(checkpoint_path, (stale_mtime, stale_mtime))
+
+    log_path = tmp_path / "5m.log"
+    log_path.write_text(
+        json.dumps({"status": "completed", "report_path": str(report_path)}) + "\n",
+        encoding="utf-8",
+    )
+    log_handle = log_path.open("a", encoding="utf-8")
+    state = _DurationSweepChildState(
+        duration_preset="5m",
+        process=_MutableProcessStub(pid=5001, returncode=1),
+        log_path=log_path,
+        log_handle=log_handle,
+        reader_thread=None,
+        retrieval_port=5001,
+        summarizer_port=5002,
+        critic_port=5003,
+        max_samples=10,
+        checkpoint_path=checkpoint_path,
+        output_root=output_root,
+        launched_at_unix_seconds=time.time(),
+    )
+    try:
+        summary = _finalize_duration_sweep_child(
+            state=state,
+            fallback_sample_count=3,
+        )
+    finally:
+        if not log_handle.closed:
+            log_handle.close()
+
+    assert summary.status == "failed"
+    assert summary.report_path is None
+    assert summary.sample_count == 3
+    assert "without writing a report" in str(summary.error_message)
+
+
+def test_finalize_duration_sweep_child_downgrades_completed_report_on_nonzero_exit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    report_path = tmp_path / "fresh.report.json"
+    report_path.write_text("{}", encoding="utf-8")
+    log_path = tmp_path / "5m.log"
+    log_handle = log_path.open("w", encoding="utf-8")
+    state = _DurationSweepChildState(
+        duration_preset="5m",
+        process=_MutableProcessStub(pid=5002, returncode=1),
+        log_path=log_path,
+        log_handle=log_handle,
+        reader_thread=None,
+        retrieval_port=5001,
+        summarizer_port=5002,
+        critic_port=5003,
+        max_samples=10,
+        checkpoint_path=tmp_path / "5m.checkpoint.json",
+        output_root=tmp_path / "runs",
+        launched_at_unix_seconds=time.time() - 1.0,
+    )
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._discover_terminal_payload",
+        lambda path: {"report_path": str(report_path)},
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_execution_report",
+        lambda path: object(),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._summarize_duration_report",
+        lambda *args, **kwargs: DurationSweepPresetSummary(
+            duration_preset="5m",
+            target_seconds=300,
+            status="completed",
+            attempted_candidate_count=4,
+            replacement_count=0,
+            sample_count=4,
+            executed_count=4,
+            skipped_count=0,
+            success_count=4,
+            failure_count=0,
+            within_tolerance_count=4,
+            within_tolerance_rate=1.0,
+            mean_candidate_seconds=300.0,
+            mean_absolute_duration_delta_seconds=0.0,
+            mean_factualness=0.9,
+            mean_naturalness=0.8,
+            mean_speaker_grammar_similarity=0.7,
+            mean_composite=0.8,
+            report_path=str(report_path),
+            notes_path=None,
+            results_path=None,
+            mean_composite_ci95_lower=None,
+            mean_composite_ci95_upper=None,
+            error_message=None,
+            restart_count=0,
+            recovered_stall_count=0,
+        ),
+    )
+    try:
+        summary = _finalize_duration_sweep_child(
+            state=state,
+            fallback_sample_count=4,
+        )
+    finally:
+        if not log_handle.closed:
+            log_handle.close()
+
+    assert summary.status == "partial"
+    assert summary.report_path == str(report_path)
+    assert "exited with code 1" in str(summary.error_message)
 
 
 def test_run_duration_sweep_fans_out_each_preset_by_requested_concurrency(
@@ -1104,10 +1485,10 @@ def test_run_duration_sweep_restarts_stalled_child_and_records_recovery(
             sample_count=100,
             executed_count=8,
             skipped_count=0,
-            success_count=7,
-            failure_count=1,
-            within_tolerance_count=7,
-            within_tolerance_rate=0.875,
+            success_count=8,
+            failure_count=0,
+            within_tolerance_count=8,
+            within_tolerance_rate=1.0,
             mean_candidate_seconds=300.0,
             mean_absolute_duration_delta_seconds=0.0,
             mean_factualness=0.9,
@@ -1289,10 +1670,10 @@ def test_run_duration_sweep_continues_after_multiple_stalled_samples(
             sample_count=100,
             executed_count=9,
             skipped_count=0,
-            success_count=7,
-            failure_count=2,
-            within_tolerance_count=7,
-            within_tolerance_rate=0.7778,
+            success_count=9,
+            failure_count=0,
+            within_tolerance_count=9,
+            within_tolerance_rate=1.0,
             mean_candidate_seconds=300.0,
             mean_absolute_duration_delta_seconds=0.0,
             mean_factualness=0.9,
@@ -1511,7 +1892,10 @@ def test_main_curate_longform_reports_progress_to_stderr(
 
     monkeypatch.setattr(
         "card_framework.benchmark.summarizer_critic.sporc.cli._load_dataset_helpers",
-        lambda **kwargs: (_fake_curate_longform_sporc_manifest, lambda **inner_kwargs: manifest),
+        lambda **kwargs: (
+            _fake_curate_longform_sporc_manifest,
+            lambda **inner_kwargs: manifest,
+        ),
     )
 
     exit_code = main(
@@ -1538,3 +1922,150 @@ def test_main_curate_longform_reports_progress_to_stderr(
     payload = json.loads(captured.out)
     assert payload["status"] == "completed"
     assert payload["sample_count"] == 2
+
+
+def test_main_curate_longform_passes_max_speakers(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    manifest = PreparedDatasetManifest(
+        manifest_path=(
+            tmp_path / "prepared_full" / "benchmark_longform_15k_manifest.json"
+        ).resolve(),
+        dataset_id="sporc_full_longform_15k",
+        sporc_dataset_id="blitt/SPoRC",
+        dataset_variant="full",
+        episode_data_path=(tmp_path / "episodeLevelData.jsonl.gz").resolve(),
+        turn_data_path=(tmp_path / "speakerTurnData.jsonl.gz").resolve(),
+        sample_count=1,
+        samples=(
+            PreparedBenchmarkSample(
+                sample_id="allowed",
+                dataset="sporc_full",
+                episode_key="episode://allowed",
+                transcript_path=str(tmp_path / "transcripts" / "allowed.transcript.json"),
+                reference_summary="Allowed long-form summary.",
+                target_seconds=45,
+                metadata={
+                    "longform_curation": {
+                        "unique_speaker_count": 2,
+                    }
+                },
+            ),
+        ),
+        samples_path=None,
+    )
+    audit_path = (
+        tmp_path / "prepared_full" / "benchmark_longform_15k_audit.json"
+    ).resolve()
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_curate_longform_sporc_manifest(**kwargs):  # type: ignore[no-untyped-def]
+        captured_kwargs.update(kwargs)
+        return manifest, audit_path
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.cli._load_dataset_helpers",
+        lambda **kwargs: (
+            _fake_curate_longform_sporc_manifest,
+            lambda **inner_kwargs: manifest,
+        ),
+    )
+
+    exit_code = main(
+        [
+            "curate-longform",
+            "--source-manifest",
+            str(tmp_path / "prepared_full" / "manifest.json"),
+            "--output-manifest",
+            str(manifest.manifest_path),
+            "--audit-path",
+            str(audit_path),
+            "--max-speakers",
+            "3",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    assert captured_kwargs["max_unique_speaker_count"] == 3
+    assert payload["requested_max_unique_speaker_count"] == 3
+    assert payload["selected_max_unique_speaker_count"] == 2
+
+
+def test_main_filter_audio_urls_reports_summary(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    from card_framework.benchmark.summarizer_critic.sporc.filter_manifest_audio_urls import (
+        ManifestAudioUrlFilterResult,
+    )
+
+    manifest_path = (tmp_path / "prepared_full" / "filtered_manifest.json").resolve()
+    audit_path = (tmp_path / "prepared_full" / "filtered_manifest.audio_url_audit.json").resolve()
+
+    def _fake_run_filter_manifest_audio_urls_cli(*args, **kwargs):  # type: ignore[no-untyped-def]
+        assert args == (str(tmp_path / "prepared_full" / "manifest.json"),)
+        assert kwargs["output_manifest_path"] == str(manifest_path)
+        assert kwargs["audit_path"] == str(audit_path)
+        assert kwargs["timeout_seconds"] == 7.5
+        assert kwargs["max_workers"] == 12
+        assert kwargs["max_workers_per_host"] == 3
+        assert kwargs["max_retries"] == 2
+        assert kwargs["retry_backoff_seconds"] == 1.25
+        reporter = kwargs["status_reporter"]
+        reporter(
+            "Loading SPoRC source-audio URL validation... validated 10 / 20 rows "
+            "[##########----------]  50.0%; kept 8; removed 2; "
+            "rolling_avg=120.00 rows/min; eta=5s."
+        )
+        reporter("Loaded SPoRC source-audio URL validation in 0.10 seconds.")
+        return ManifestAudioUrlFilterResult(
+            manifest_path=manifest_path,
+            audit_path=audit_path,
+            original_sample_count=4,
+            kept_sample_count=3,
+            removed_sample_count=1,
+        )
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.filter_manifest_audio_urls.run_filter_manifest_audio_urls_cli",
+        _fake_run_filter_manifest_audio_urls_cli,
+    )
+
+    exit_code = main(
+        [
+            "filter-audio-urls",
+            "--manifest-path",
+            str(tmp_path / "prepared_full" / "manifest.json"),
+            "--output-manifest",
+            str(manifest_path),
+            "--audit-path",
+            str(audit_path),
+            "--timeout-seconds",
+            "7.5",
+            "--max-workers",
+            "12",
+            "--max-workers-per-host",
+            "3",
+            "--max-retries",
+            "2",
+            "--retry-backoff-seconds",
+            "1.25",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    assert payload["manifest_path"] == str(manifest_path)
+    assert payload["audit_path"] == str(audit_path)
+    assert payload["original_sample_count"] == 4
+    assert payload["kept_sample_count"] == 3
+    assert payload["removed_sample_count"] == 1
+    assert "validated 10 / 20 rows" in captured.err
+    assert "eta=5s." in captured.err

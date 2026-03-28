@@ -68,7 +68,8 @@ class AudioToScriptOrchestrator:
     eta_progress_smoothing: float = 0.25
     eta_overrun_factor: float = 1.15
     eta_headroom_seconds: float = 1.0
-    eta_profile_filename: str = "eta_profile.json"
+    eta_profile_filename: str = "eta_history.sqlite3"
+    eta_profile_path: Path | None = None
 
     def run(
         self,
@@ -94,7 +95,7 @@ class AudioToScriptOrchestrator:
         """
         warnings: list[str] = []
         eta_profile_context = self._build_eta_profile_context(device=device)
-        eta_profile_path = work_dir / self.eta_profile_filename
+        eta_profile_path = self.eta_profile_path or (work_dir / self.eta_profile_filename)
         self._load_eta_profile(
             profile_path=eta_profile_path,
             context=eta_profile_context,
@@ -135,6 +136,11 @@ class AudioToScriptOrchestrator:
                     progress_callback=progress_callback,
                 ),
             )
+            self._release_stage_component_resources(
+                component=self.transcriber,
+                stage="transcription",
+                device=device,
+            )
 
             diarization_turns = self._run_stage_with_eta(
                 stage="diarization",
@@ -149,6 +155,11 @@ class AudioToScriptOrchestrator:
                     device=device,
                     progress_callback=progress_callback,
                 ),
+            )
+            self._release_stage_component_resources(
+                component=self.diarizer,
+                stage="diarization",
+                device=device,
             )
             if len(diarization_turns) <= 1:
                 warnings.append(
@@ -171,6 +182,14 @@ class AudioToScriptOrchestrator:
                 "forced_alignment_enabled": True,
                 "forced_alignment_satisfied": forced_alignment_satisfied,
                 "transcription_language": asr_result.language,
+                "diarization_turns": [
+                    {
+                        "speaker": turn.speaker,
+                        "start_time": turn.start_time_ms,
+                        "end_time": turn.end_time_ms,
+                    }
+                    for turn in diarization_turns
+                ],
             }
             if metadata_overrides:
                 metadata = cast(
@@ -195,6 +214,16 @@ class AudioToScriptOrchestrator:
                 warnings=warnings,
             )
         finally:
+            self._release_stage_component_resources(
+                component=self.transcriber,
+                stage="transcription",
+                device=device,
+            )
+            self._release_stage_component_resources(
+                component=self.diarizer,
+                stage="diarization",
+                device=device,
+            )
             self._save_eta_profile(
                 profile_path=eta_profile_path,
                 context=eta_profile_context,
@@ -555,4 +584,23 @@ class AudioToScriptOrchestrator:
                 )
             ),
         }
+
+    def _release_stage_component_resources(
+        self,
+        *,
+        component: object,
+        stage: AudioStageName,
+        device: str,
+    ) -> None:
+        """Best-effort release for cached stage resources that are no longer needed."""
+        release_cached_resources = getattr(component, "release_cached_resources", None)
+        if not callable(release_cached_resources):
+            return
+        try:
+            release_cached_resources(device=device)
+        except Exception:
+            event_bus.publish(
+                "system_message",
+                f"Audio stage: {stage} resource release skipped.",
+            )
 

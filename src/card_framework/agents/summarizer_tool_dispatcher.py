@@ -44,17 +44,15 @@ def build_mutation_fingerprint(name: str, arguments: dict[str, Any]) -> str:
         line = arguments.get("line", "unknown")
         content = str(arguments.get("new_content", ""))
         digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
-        emo_preset = str(arguments.get("emo_preset", ""))
-        return f"edit:{line}:{emo_preset}:{digest}"
+        return f"edit:{line}:{digest}"
     if name == "remove_message":
         line = arguments.get("line", "unknown")
         return f"remove:{line}"
     if name == "add_speaker_message":
         speaker_id = str(arguments.get("speaker_id", "UNKNOWN"))
         content = str(arguments.get("content", ""))
-        emo_preset = str(arguments.get("emo_preset", ""))
         digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
-        return f"add:{speaker_id}:{emo_preset}:{digest}"
+        return f"add:{speaker_id}:{digest}"
     return name
 
 

@@ -8,6 +8,7 @@ from dataclasses import asdict
 import gzip
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
@@ -40,6 +41,7 @@ from card_framework.benchmark.summarizer_critic.sporc.runner import (
     _select_samples,
     _select_sample_shard,
     _summarize_results,
+    _write_checkpoint_payload,
     build_execute_parser,
     execute_benchmark,
 )
@@ -243,8 +245,23 @@ class _StubEventCapture:
 class _StubOrchestrator:
     """Minimal orchestrator stub for `_execute_sample` coverage."""
 
-    async def index_transcript(self, transcript_payload: dict[str, object]) -> None:
+    def __init__(self) -> None:
+        self.index_calls = 0
+        self.clear_calls = 0
+        self.indexed_sample_ids: list[str | None] = []
+
+    async def index_transcript(
+        self,
+        transcript_payload: dict[str, object],
+        *,
+        sample_id: str | None = None,
+    ) -> None:
         del transcript_payload
+        self.index_calls += 1
+        self.indexed_sample_ids.append(sample_id)
+
+    async def clear_transcript_index(self) -> None:
+        self.clear_calls += 1
 
     async def run_loop_with_diagnostics(
         self,
@@ -272,6 +289,30 @@ class _StubOrchestrator:
             "final_status": "pass",
             "final_feedback": "critic accepted the draft",
         }
+
+
+class _FailingStubOrchestrator(_StubOrchestrator):
+    """Orchestrator stub that raises after indexing to exercise cleanup paths."""
+
+    async def run_loop_with_diagnostics(
+        self,
+        *,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
+        max_iterations: int | None,
+        full_transcript_text: str,
+        speaker_samples_manifest_path: Path | None,
+        draft_audio_state_path: Path | None,
+    ) -> dict[str, object]:
+        del (
+            target_seconds,
+            duration_tolerance_ratio,
+            max_iterations,
+            full_transcript_text,
+            speaker_samples_manifest_path,
+            draft_audio_state_path,
+        )
+        raise RuntimeError("retrieval cleanup retry")
 
 
 def test_sample_artifact_recorder_writes_hierarchical_llm_traces(
@@ -500,6 +541,86 @@ def test_execute_sample_persists_artifact_paths_in_result(tmp_path: Path) -> Non
     assert Path(result.final_critic_feedback_path or "").read_text(
         encoding="utf-8"
     ) == "critic accepted the draft"
+
+
+def test_execute_sample_clears_retrieval_namespace_after_success(tmp_path: Path) -> None:
+    transcript_path = tmp_path / "sample.transcript.json"
+    _write_transcript(transcript_path, text="apple banana cherry")
+    run_root = tmp_path / "run"
+    sample = _sample("sample-a", transcript_path=str(transcript_path))
+    recorder = _SampleArtifactRecorder(run_root=run_root)
+    judge = SimpleNamespace(
+        evaluate=lambda **kwargs: SPoRCJudgeResult(
+            status="ok",
+            scores={
+                "Factualness": 0.8,
+                "Naturalness": 0.7,
+                "Speaker Grammar Similarity": 0.6,
+            },
+        )
+    )
+    orchestrator = _StubOrchestrator()
+
+    result = asyncio.run(
+        _execute_sample(
+            sample=sample,
+            target_seconds=30,
+            preloaded_transcript=None,
+            orchestrator=orchestrator,
+            event_capture=_StubEventCapture(),
+            retrieval_enabled=True,
+            duration_tolerance_ratio=0.25,
+            max_iterations=3,
+            judge=judge,
+            calibration=SimpleNamespace(),
+            run_root=run_root,
+            artifact_recorder=recorder,
+            audio_cfg={},
+            transcript_only=True,
+            voice_clone_orchestrator=None,
+            force_download_audio=False,
+        )
+    )
+
+    assert result.status == "completed"
+    assert orchestrator.index_calls == 1
+    assert orchestrator.indexed_sample_ids == ["sample-a"]
+    assert orchestrator.clear_calls == 1
+
+
+def test_execute_sample_clears_retrieval_namespace_after_failure(tmp_path: Path) -> None:
+    transcript_path = tmp_path / "sample.transcript.json"
+    _write_transcript(transcript_path, text="apple banana cherry")
+    run_root = tmp_path / "run"
+    sample = _sample("sample-a", transcript_path=str(transcript_path))
+    recorder = _SampleArtifactRecorder(run_root=run_root)
+    orchestrator = _FailingStubOrchestrator()
+
+    result = asyncio.run(
+        _execute_sample(
+            sample=sample,
+            target_seconds=30,
+            preloaded_transcript=None,
+            orchestrator=orchestrator,
+            event_capture=_StubEventCapture(),
+            retrieval_enabled=True,
+            duration_tolerance_ratio=0.25,
+            max_iterations=3,
+            judge=SimpleNamespace(),
+            calibration=SimpleNamespace(),
+            run_root=run_root,
+            artifact_recorder=recorder,
+            audio_cfg={},
+            transcript_only=True,
+            voice_clone_orchestrator=None,
+            force_download_audio=False,
+        )
+    )
+
+    assert result.status == "failed"
+    assert orchestrator.index_calls == 1
+    assert orchestrator.indexed_sample_ids == ["sample-a"]
+    assert orchestrator.clear_calls == 1
 
 
 def test_copy_sample_transcript_keeps_raw_speakers_and_marks_uncertainty(
@@ -1054,6 +1175,37 @@ def test_classify_sample_failure_maps_timeout_messages_to_stage_timeout() -> Non
     assert "timed out" in error_message
 
 
+@pytest.mark.parametrize(
+    ("message", "expected_fragment"),
+    [
+        (
+            "[WinError 10061] No connection could be made because the target machine actively refused it",
+            "actively refused",
+        ),
+        (
+            "[WinError 10054] An existing connection was forcibly closed by the remote host",
+            "forcibly closed by the remote host",
+        ),
+        (
+            "httpx.ReadError: [Errno 104] Connection reset by peer",
+            "Connection reset by peer",
+        ),
+        (
+            "Connection aborted.",
+            "Connection aborted",
+        ),
+    ],
+)
+def test_classify_sample_failure_maps_connection_reset_and_refused_messages_to_connection_unavailable(
+    message: str,
+    expected_fragment: str,
+) -> None:
+    final_status, error_message = _classify_sample_failure(RuntimeError(message))
+
+    assert final_status == "connection_unavailable"
+    assert expected_fragment in error_message
+
+
 def test_compute_composite_score_uses_only_three_judge_dimensions() -> None:
     assert (
         _compute_composite_score(
@@ -1570,6 +1722,62 @@ def test_execute_benchmark_resumes_checkpoint_and_marks_orphaned_sample_failed(
     assert checkpoint_payload["resume_count"] == 1
     assert checkpoint_payload["active_sample"] is None
     assert len(checkpoint_payload["completed_results"]) == 3
+
+
+def test_write_checkpoint_payload_retries_transient_permission_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint.json"
+    payload = {"checkpoint_version": 1, "run_id": "retry-run"}
+    original_replace = Path.replace
+    replace_attempts = {"count": 0}
+
+    def _flaky_replace(self: Path, target: Path) -> Path:
+        if Path(target) == checkpoint_path and replace_attempts["count"] < 2:
+            replace_attempts["count"] += 1
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _flaky_replace)
+
+    _write_checkpoint_payload(checkpoint_path, payload)
+
+    persisted = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert persisted["run_id"] == "retry-run"
+    assert replace_attempts["count"] == 2
+
+
+def test_write_checkpoint_payload_serializes_concurrent_writers(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint.json"
+    failures: list[Exception] = []
+    start_event = threading.Event()
+
+    def _writer(run_id: str) -> None:
+        start_event.wait()
+        try:
+            _write_checkpoint_payload(
+                checkpoint_path,
+                {"checkpoint_version": 1, "run_id": run_id},
+            )
+        except Exception as exc:  # pragma: no cover - failure surfaced below
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=_writer, args=("run-a",)),
+        threading.Thread(target=_writer, args=("run-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    start_event.set()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    persisted = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert persisted["run_id"] in {"run-a", "run-b"}
 
 
 def test_execute_benchmark_continues_after_failed_sample_and_rebuilds_runtime(

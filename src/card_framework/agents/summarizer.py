@@ -14,6 +14,12 @@ from card_framework.agents.client import AgentTaskClient, get_default_agent_clie
 from card_framework.agents.dtos import RetrieveTaskRequest
 from card_framework.agents.loop_context import build_loop_context_prompt_block
 from card_framework.agents.message_registry import MessageRegistry
+from card_framework.agents.prompt_compaction import (
+    ContextBudgetManager,
+    ContextBudgetSnapshot,
+    PromptCompactionRequest,
+    PromptCompactionStrategy,
+)
 from card_framework.agents.summarizer_loop_controller import SummarizerLoopController
 from card_framework.agents.summarizer_tool_dispatcher import (
     SummarizerToolDispatcher,
@@ -24,13 +30,18 @@ from card_framework.agents.tool_handlers import (
     build_summarizer_tools,
 )
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
+from card_framework.audio_pipeline.emotion_vectors import serialize_emotion_vector
 from card_framework.audio_pipeline.live_draft_voice_clone import (
     LiveDraftVoiceCloneSession,
+)
+from card_framework.audio_pipeline.turn_emotion_resolution import (
+    TurnEmotionResolutionStrategy,
 )
 from card_framework.audio_pipeline.voice_clone_orchestrator import (
     VoiceCloneOrchestrator,
     load_speaker_sample_references,
 )
+from card_framework.orchestration.transcript import Transcript, coerce_transcript
 from card_framework.shared.events import EventBus, get_event_bus
 from card_framework.shared.llm_provider import LLMProvider
 from card_framework.shared.prompt_manager import PromptManager
@@ -72,6 +83,11 @@ class SummarizerExecutor(BaseA2AExecutor):
         voice_clone_orchestrator: VoiceCloneOrchestrator | None = None,
         live_draft_audio_enabled: bool = False,
         emo_preset_catalog: dict[str, str] | None = None,
+        retrieval_namespace: str = "default",
+        llm_profile_name: str = "",
+        context_budget_manager: ContextBudgetManager | None = None,
+        prompt_compaction_strategy: PromptCompactionStrategy | None = None,
+        turn_emotion_resolution_strategy: TurnEmotionResolutionStrategy | None = None,
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
     ) -> None:
@@ -79,6 +95,10 @@ class SummarizerExecutor(BaseA2AExecutor):
         super().__init__("Summarizer")
         self.llm = llm
         self.retrieval_port = retrieval_port
+        self.retrieval_namespace = (
+            str(retrieval_namespace or "").strip() or "default"
+        )
+        self.llm_profile_name = str(llm_profile_name).strip()
         self.max_tool_turns = max_tool_turns
         self.calibration = calibration
         self.is_embedding_enabled = is_embedding_enabled
@@ -95,6 +115,9 @@ class SummarizerExecutor(BaseA2AExecutor):
             self.emo_preset_catalog = {
                 DEFAULT_EMO_PRESET: "calm, neutral, steady conversational tone."
             }
+        self.context_budget_manager = context_budget_manager
+        self.prompt_compaction_strategy = prompt_compaction_strategy
+        self.turn_emotion_resolution_strategy = turn_emotion_resolution_strategy
         self.agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
         )
@@ -138,8 +161,8 @@ class SummarizerExecutor(BaseA2AExecutor):
 
     @staticmethod
     def _build_loop_context_prompt_block(raw_loop_context: Any) -> str:
-        """Build a bounded loop-context payload for prompt injection."""
-        return build_loop_context_prompt_block(raw_loop_context, char_cap=1024)
+        """Build the loop-context payload for prompt injection."""
+        return build_loop_context_prompt_block(raw_loop_context, char_cap=None)
 
     @staticmethod
     def _build_full_transcript_prompt_text(full_transcript: str) -> str:
@@ -265,6 +288,93 @@ class SummarizerExecutor(BaseA2AExecutor):
             for name, emo_text in self.emo_preset_catalog.items()
         )
 
+    @staticmethod
+    def _merge_loop_context_with_compaction(
+        *,
+        loop_context_block: str,
+        compacted_history_context: str,
+    ) -> str:
+        """Append compacted prior-loop context without losing current loop memory."""
+        compacted_text = str(compacted_history_context).strip()
+        if not compacted_text:
+            return loop_context_block
+        prefix = str(loop_context_block).strip()
+        if not prefix:
+            return (
+                "Compacted prior summarizer context:\n"
+                f"{compacted_text}"
+            )
+        return (
+            f"{prefix}\n\nCompacted prior summarizer context:\n"
+            f"{compacted_text}"
+        )
+
+    def _build_prompt_messages(
+        self,
+        *,
+        revise_mode: bool,
+        previous_draft: str,
+        feedback: str,
+        registry: MessageRegistry,
+        prompt_kwargs: dict[str, Any],
+        loop_context_block: str,
+        transcript_excerpt: str,
+        num_segments: int,
+        total_words: int,
+    ) -> list[dict[str, str]]:
+        """Render the summarizer system/user prompt pair for one loop run."""
+        if revise_mode:
+            system_prompt = PromptManager.get_prompt(
+                "summarizer_revise",
+                previous_draft=previous_draft,
+                draft_line_map=json.dumps(registry.snapshot(), indent=2),
+                feedback=feedback,
+                loop_context_block=loop_context_block,
+                **prompt_kwargs,
+            )
+        else:
+            system_prompt = PromptManager.get_prompt(
+                "summarizer_system",
+                **prompt_kwargs,
+            )
+        return [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": PromptManager.get_prompt(
+                    "summarizer_user",
+                    num_segments=num_segments,
+                    total_words=total_words,
+                    transcript_excerpt=transcript_excerpt,
+                    loop_context_block=loop_context_block,
+                    feedback_block=f"\n\n--- CRITIC FEEDBACK ---\n{feedback}"
+                    if feedback
+                    else "",
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _format_transcript_excerpt_segment(segment: dict[str, Any]) -> str:
+        """Render one retrieval segment into prompt-friendly transcript text."""
+        speaker = str(segment.get("speaker", "UNKNOWN")).strip() or "UNKNOWN"
+        text = str(segment.get("text", ""))
+        affect_hint = str(segment.get("affect_hint", "")).strip()
+        emotion_vector = serialize_emotion_vector(segment.get("emotion_vector"))
+        emotion_vector_text = (
+            ", ".join(f"{value:.3f}" for value in emotion_vector)
+            if emotion_vector is not None
+            else ""
+        )
+        if affect_hint:
+            prefix = f"[{speaker}] [affect: {affect_hint}]"
+            if emotion_vector_text:
+                prefix += f" [emotion_vector: {emotion_vector_text}]"
+            return f"{prefix}: {text}\n"
+        if emotion_vector_text:
+            return f"[{speaker}] [emotion_vector: {emotion_vector_text}]: {text}\n"
+        return f"[{speaker}]: {text}\n"
+
     async def handle_task(
         self,
         task_data: dict[str, Any],
@@ -278,6 +388,7 @@ class SummarizerExecutor(BaseA2AExecutor):
         retrieval_port = req.retrieval_port
         previous_draft = req.previous_draft
         full_transcript = req.full_transcript
+        transcript_payload = getattr(req, "transcript_payload", {})
         speaker_samples_manifest_path = str(
             getattr(req, "speaker_samples_manifest_path", "")
         ).strip()
@@ -296,6 +407,9 @@ class SummarizerExecutor(BaseA2AExecutor):
 
         revise_mode = bool(previous_draft and feedback)
         live_draft_session: LiveDraftVoiceCloneSession | None = None
+        transcript_dto: Transcript | None = None
+        if transcript_payload:
+            transcript_dto = coerce_transcript(transcript_payload)
         allowed_speaker_ids: tuple[str, ...] = ()
         if self.live_draft_audio_enabled:
             if not speaker_samples_manifest_path:
@@ -373,6 +487,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             tool_registry = build_revise_tools(
                 registry,
                 retrieval_port,
+                self.retrieval_namespace,
                 self.calibration,
                 target_seconds,
                 duration_tolerance_ratio,
@@ -380,6 +495,8 @@ class SummarizerExecutor(BaseA2AExecutor):
                 agent_client=self.agent_client,
                 live_draft_session=live_draft_session,
                 allowed_speaker_ids=allowed_speaker_ids,
+                turn_emotion_resolution_strategy=self.turn_emotion_resolution_strategy,
+                transcript=transcript_dto,
             )
             if restored_live_snapshot is None:
                 self.event_bus.publish(
@@ -392,6 +509,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             tool_registry = build_summarizer_tools(
                 registry,
                 retrieval_port,
+                self.retrieval_namespace,
                 self.calibration,
                 target_seconds,
                 duration_tolerance_ratio,
@@ -399,6 +517,8 @@ class SummarizerExecutor(BaseA2AExecutor):
                 agent_client=self.agent_client,
                 live_draft_session=live_draft_session,
                 allowed_speaker_ids=allowed_speaker_ids,
+                turn_emotion_resolution_strategy=self.turn_emotion_resolution_strategy,
+                transcript=transcript_dto,
             )
 
         transcript_excerpt = ""
@@ -425,7 +545,10 @@ class SummarizerExecutor(BaseA2AExecutor):
             )
 
             retrieve_task = RetrieveTaskRequest(
-                action="retrieve", query=retrieve_query, top_k=20
+                action="retrieve",
+                query=retrieve_query,
+                top_k=20,
+                namespace=self.retrieval_namespace,
             )
 
             self.event_bus.publish(
@@ -453,9 +576,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             )
 
             for seg in segments:
-                speaker = seg.get("speaker", "UNKNOWN")
-                text = seg.get("text", "")
-                transcript_excerpt += f"[{speaker}]: {text}\n"
+                transcript_excerpt += self._format_transcript_excerpt_segment(seg)
         else:
             transcript_excerpt = self._build_full_transcript_prompt_text(
                 full_transcript
@@ -490,37 +611,138 @@ class SummarizerExecutor(BaseA2AExecutor):
                 "require_unique_discovery_queries"
             ],
         }
-        if revise_mode:
-            system_prompt = PromptManager.get_prompt(
-                "summarizer_revise",
-                previous_draft=previous_draft,
-                draft_line_map=json.dumps(registry.snapshot(), indent=2),
-                feedback=feedback,
-                loop_context_block=loop_context_block,
-                **prompt_kwargs,
+        messages = self._build_prompt_messages(
+            revise_mode=revise_mode,
+            previous_draft=previous_draft,
+            feedback=feedback,
+            registry=registry,
+            prompt_kwargs=prompt_kwargs,
+            loop_context_block=loop_context_block,
+            transcript_excerpt=transcript_excerpt,
+            num_segments=num_segments,
+            total_words=total_words,
+        )
+        prompt_compaction_transcript_context = transcript_excerpt
+        prompt_compaction_loop_context_block = loop_context_block
+        prompt_compaction_target_token_budget = 0
+        if self.context_budget_manager is not None and self.llm_profile_name:
+            prompt_compaction_target_token_budget = (
+                self.context_budget_manager.target_token_budget(
+                    profile_name=self.llm_profile_name
+                )
             )
-        else:
-            system_prompt = PromptManager.get_prompt(
-                "summarizer_system",
-                **prompt_kwargs,
+        if (
+            self.context_budget_manager is not None
+            and self.llm_profile_name
+        ):
+            prompt_budget = self.context_budget_manager.snapshot_for_messages(
+                profile_name=self.llm_profile_name,
+                messages=messages,
             )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": PromptManager.get_prompt(
-                    "summarizer_user",
+            self.event_bus.publish(
+                "system_message",
+                (
+                    "Summarizer prompt budget estimate: "
+                    f"{prompt_budget.estimated_tokens}/"
+                    f"{prompt_budget.context_window_tokens} tokens "
+                    f"({prompt_budget.usage_ratio:.1%} used; "
+                    f"compact={prompt_budget.should_compact})."
+                ),
+            )
+            if (
+                prompt_budget.should_compact
+                and self.prompt_compaction_strategy is not None
+            ):
+                compaction = self.prompt_compaction_strategy.compact(
+                    request=PromptCompactionRequest(
+                        profile_name=self.llm_profile_name,
+                        current_draft=previous_draft,
+                        latest_feedback=feedback,
+                        loop_context=loop_context_block,
+                        transcript_context=transcript_excerpt,
+                        target_token_budget=prompt_compaction_target_token_budget,
+                        messages=tuple(messages),
+                    )
+                )
+                prompt_compaction_transcript_context = (
+                    compaction.compressed_transcript_context or transcript_excerpt
+                )
+                prompt_compaction_loop_context_block = (
+                    self._merge_loop_context_with_compaction(
+                        loop_context_block=loop_context_block,
+                        compacted_history_context=(
+                            compaction.compressed_history_context
+                        ),
+                    )
+                )
+                messages = self._build_prompt_messages(
+                    revise_mode=revise_mode,
+                    previous_draft=previous_draft,
+                    feedback=feedback,
+                    registry=registry,
+                    prompt_kwargs=prompt_kwargs,
+                    loop_context_block=prompt_compaction_loop_context_block,
+                    transcript_excerpt=prompt_compaction_transcript_context,
                     num_segments=num_segments,
                     total_words=total_words,
-                    transcript_excerpt=transcript_excerpt,
-                    loop_context_block=loop_context_block,
-                    feedback_block=f"\n\n--- CRITIC FEEDBACK ---\n{feedback}"
-                    if feedback
-                    else "",
+                )
+                self.event_bus.publish(
+                    "system_message",
+                    (
+                        "Prompt compaction preflight applied structured context "
+                        f"(reason={compaction.compression_reason}, "
+                        f"estimated_tokens_before={compaction.estimated_tokens_before}, "
+                        f"estimated_tokens_after={compaction.estimated_tokens_after})."
+                    ),
+                )
+
+        prompt_compaction_context_overrides: dict[str, Any] = {}
+        if (
+            self.context_budget_manager is not None
+            and self.prompt_compaction_strategy is not None
+            and self.llm_profile_name
+        ):
+            def _build_runtime_prompt_compaction_request(
+                *,
+                messages: tuple[dict[str, Any], ...],
+                forced: bool,
+                turn_index: int,
+                snapshot: ContextBudgetSnapshot,
+            ) -> PromptCompactionRequest:
+                del forced, snapshot
+                current_draft = serialize_summary_turns(registry.get_all()).strip()
+                if not current_draft:
+                    current_draft = previous_draft
+                source_iteration_span = None
+                if turn_index > 0:
+                    source_iteration_span = (
+                        max(
+                            0,
+                            turn_index
+                            - self.context_budget_manager.config.keep_latest_iterations,
+                        ),
+                        turn_index,
+                    )
+                return PromptCompactionRequest(
+                    profile_name=self.llm_profile_name,
+                    current_draft=current_draft,
+                    latest_feedback=feedback,
+                    loop_context=prompt_compaction_loop_context_block,
+                    transcript_context=prompt_compaction_transcript_context,
+                    target_token_budget=prompt_compaction_target_token_budget,
+                    source_iteration_span=source_iteration_span,
+                    messages=messages,
+                )
+
+            prompt_compaction_context_overrides = {
+                "context_budget_manager": self.context_budget_manager,
+                "prompt_compaction_profile_name": self.llm_profile_name,
+                "prompt_compaction_strategy": self.prompt_compaction_strategy,
+                "prompt_compaction_request_builder": _build_runtime_prompt_compaction_request,
+                "prompt_compaction_keep_latest_iterations": (
+                    self.context_budget_manager.config.keep_latest_iterations
                 ),
-            },
-        ]
+            }
 
         mode_label = "revise" if revise_mode else "incremental"
         self.event_bus.publish(
@@ -533,6 +755,7 @@ class SummarizerExecutor(BaseA2AExecutor):
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
             loop_guardrails=loop_guardrails,
+            context_data_overrides=prompt_compaction_context_overrides,
         )
 
         result_xml = serialize_summary_turns(registry.get_all()).strip()
@@ -552,7 +775,15 @@ class SummarizerExecutor(BaseA2AExecutor):
         except ValueError:
             return
         for turn in turns:
-            registry.add(turn.speaker, turn.text, turn.emo_preset)
+            registry.add(
+                turn.speaker,
+                turn.text,
+                turn.emo_preset,
+                turn.emotion_vector.to_list() if turn.emotion_vector is not None else None,
+                emotion_vector_source=turn.emotion_vector_source,
+                source_segment_indices=turn.source_segment_indices,
+                source_segment_weights=turn.source_segment_weights,
+            )
 
     async def process_tool_calls(
         self, tool_calls: list[dict[str, Any]], messages: list, context_data: dict

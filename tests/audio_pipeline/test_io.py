@@ -12,6 +12,7 @@ def test_write_transcript_atomic_persists_payload(tmp_path) -> None:
                 start_time=0,
                 end_time=500,
                 text="hello",
+                extras={"overlap_speakers": ["SPEAKER_01"]},
             )
         ],
         metadata={"source_audio_path": "input.wav"},
@@ -24,4 +25,5 @@ def test_write_transcript_atomic_persists_payload(tmp_path) -> None:
     loaded = json.loads(output_path.read_text(encoding="utf-8"))
     assert loaded["segments"][0]["speaker"] == "SPEAKER_00"
     assert loaded["segments"][0]["start_time"] == 0
+    assert loaded["segments"][0]["overlap_speakers"] == ["SPEAKER_01"]
 

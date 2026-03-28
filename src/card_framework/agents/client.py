@@ -44,7 +44,7 @@ class AgentClient:
     )
     _SUCCESS_TASK_STATES = frozenset({"completed"})
     _POLL_INTERVAL_SECONDS = 2.0
-    _MAX_HTTP_REQUEST_TIMEOUT_SECONDS = 30.0
+    _DEFAULT_HTTP_REQUEST_TIMEOUT_SECONDS = 30.0
 
     def __init__(
         self,
@@ -110,8 +110,8 @@ class AgentClient:
     def _resolve_http_timeout_seconds(cls, timeout: float | None) -> float:
         """Resolve a per-request timeout budget in seconds."""
         if timeout is None:
-            return cls._MAX_HTTP_REQUEST_TIMEOUT_SECONDS
-        return max(0.1, min(float(timeout), cls._MAX_HTTP_REQUEST_TIMEOUT_SECONDS))
+            return cls._DEFAULT_HTTP_REQUEST_TIMEOUT_SECONDS
+        return max(0.1, float(timeout))
 
     def _build_http_timeout(self, timeout: float | None) -> httpx.Timeout:
         """Build an explicit timeout with a bounded connection-pool wait."""

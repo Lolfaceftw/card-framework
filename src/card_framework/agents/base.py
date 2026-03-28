@@ -14,6 +14,13 @@ from a2a.types import Task, TaskState, TaskStatus
 from a2a.utils import new_agent_text_message
 
 from card_framework.agents.tool_call_utils import build_tool_signature
+from card_framework.agents.prompt_compaction import (
+    ContextBudgetManager,
+    PromptCompactionRequest,
+    PromptCompactionResult,
+    apply_compaction_to_messages,
+    is_context_window_overflow_error,
+)
 from card_framework.shared.logger_utils import logger
 from card_framework.shared.llm_provider import (
     LLMProvider,
@@ -493,6 +500,130 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         )
         return False
 
+    def _maybe_compact_prompt_messages(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+        force: bool,
+        turn_index: int,
+    ) -> bool:
+        """Compact message history when the configured budget policy requires it."""
+        budget_manager = runtime_context.get("context_budget_manager")
+        if not isinstance(budget_manager, ContextBudgetManager):
+            return False
+        profile_name = str(
+            runtime_context.get("prompt_compaction_profile_name", "")
+        ).strip()
+        strategy = runtime_context.get("prompt_compaction_strategy")
+        request_builder = runtime_context.get("prompt_compaction_request_builder")
+        if not profile_name or not callable(request_builder) or not hasattr(
+            strategy, "compact"
+        ):
+            return False
+
+        snapshot = budget_manager.snapshot_for_messages(
+            profile_name=profile_name,
+            messages=messages,
+        )
+        if not force and not snapshot.should_compact:
+            return False
+
+        try:
+            request = request_builder(
+                messages=tuple(messages),
+                forced=force,
+                turn_index=turn_index,
+                snapshot=snapshot,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Prompt compaction request build failed: %s",
+                self.name,
+                exc,
+            )
+            return False
+        if not isinstance(request, PromptCompactionRequest):
+            return False
+
+        try:
+            compaction = strategy.compact(request=request)
+        except Exception as exc:
+            logger.warning("[%s] Prompt compaction failed: %s", self.name, exc)
+            return False
+        if not isinstance(compaction, PromptCompactionResult):
+            return False
+
+        keep_latest_iterations = runtime_context.get(
+            "prompt_compaction_keep_latest_iterations",
+            budget_manager.config.keep_latest_iterations,
+        )
+        try:
+            keep_latest_iterations_int = max(0, int(keep_latest_iterations))
+        except (TypeError, ValueError):
+            keep_latest_iterations_int = budget_manager.config.keep_latest_iterations
+
+        compacted_messages = apply_compaction_to_messages(
+            messages=messages,
+            compaction=compaction,
+            keep_latest_iterations=keep_latest_iterations_int,
+        )
+        if not compacted_messages:
+            return False
+        messages[:] = compacted_messages
+        runtime_context["prompt_compaction_count"] = (
+            int(runtime_context.get("prompt_compaction_count", 0)) + 1
+        )
+        runtime_context["prompt_compaction_last_reason"] = compaction.compression_reason
+        logger.info(
+            "[%s] Prompt compaction applied at turn=%s force=%s reason=%s before=%s after=%s",
+            self.name,
+            turn_index,
+            force,
+            compaction.compression_reason,
+            compaction.estimated_tokens_before,
+            compaction.estimated_tokens_after,
+        )
+        return True
+
+    def _handle_context_window_overflow(
+        self,
+        *,
+        error: Exception,
+        messages: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+        turn_index: int,
+    ) -> bool:
+        """Compact and retry once when a provider rejects the prompt for size."""
+        budget_manager = runtime_context.get("context_budget_manager")
+        if not isinstance(budget_manager, ContextBudgetManager):
+            return False
+        if not budget_manager.config.retry_on_overflow:
+            return False
+        if not is_context_window_overflow_error(error):
+            return False
+
+        retry_count = int(runtime_context.get("prompt_compaction_overflow_retries", 0))
+        if retry_count >= budget_manager.config.max_overflow_retries:
+            return False
+        runtime_context["prompt_compaction_overflow_retries"] = retry_count + 1
+        compacted = self._maybe_compact_prompt_messages(
+            messages=messages,
+            runtime_context=runtime_context,
+            force=True,
+            turn_index=turn_index,
+        )
+        if not compacted:
+            return False
+        logger.warning(
+            "[%s] Context-window overflow at turn=%s; compacted prompt and retrying (%s/%s).",
+            self.name,
+            turn_index,
+            retry_count + 1,
+            budget_manager.config.max_overflow_retries,
+        )
+        return True
+
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         raw_input = context.get_user_input()
         logger.info(
@@ -513,8 +644,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             await asyncio.sleep(0)
             await self.handle_task(task_data, context, event_queue)
         except Exception as e:
-            logger.error(f"[{self.name}] Error handling task: {e}")
-            raise
+            logger.exception("[%s] Error handling task: %s", self.name, e)
+            await self.send_failure(str(e), context, event_queue)
 
     @abstractmethod
     async def handle_task(
@@ -557,6 +688,39 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             return
 
         await event_queue.enqueue_event(response_message)
+
+    async def send_failure(
+        self,
+        error_text: str,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        """Publish one terminal failed-task update with a human-readable error."""
+        failure_message = new_agent_text_message(
+            error_text,
+            context_id=getattr(context, "context_id", None),
+            task_id=getattr(context, "task_id", None),
+        )
+        task_id = getattr(context, "task_id", None)
+        context_id = getattr(context, "context_id", None)
+
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and isinstance(context_id, str)
+            and context_id
+        ):
+            from a2a.server.tasks import TaskUpdater
+
+            task_updater = TaskUpdater(
+                event_queue=event_queue,
+                task_id=task_id,
+                context_id=context_id,
+            )
+            await task_updater.failed(message=failure_message)
+            return
+
+        await event_queue.enqueue_event(failure_message)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         pass
@@ -623,6 +787,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         )
 
         for turn in range(max_turns):
+            turn_index = turn + 1
             tool_choice_raw = runtime_context.get("tool_choice")
             tool_choice: str | dict[str, Any] | None
             if isinstance(tool_choice_raw, str):
@@ -662,20 +827,43 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                 chat_kwargs["tool_choice"] = tool_choice
             if chat_max_tokens is not None:
                 chat_kwargs["max_tokens"] = chat_max_tokens
-            try:
-                response_message = await self._chat_with_runtime_stream_callback(
-                    chat_kwargs=chat_kwargs,
-                    runtime_context=runtime_context,
-                )
-            except StreamingResponseAbort as abort_error:
-                if self._handle_streaming_response_abort(
-                    abort_error=abort_error,
+            response_message = None
+            while True:
+                self._maybe_compact_prompt_messages(
                     messages=messages,
                     runtime_context=runtime_context,
-                ):
-                    continue
+                    force=False,
+                    turn_index=turn_index,
+                )
+                typed_messages = [Message.from_mapping(message) for message in messages]
+                chat_kwargs["messages"] = typed_messages
+                try:
+                    response_message = await self._chat_with_runtime_stream_callback(
+                        chat_kwargs=chat_kwargs,
+                        runtime_context=runtime_context,
+                    )
+                except StreamingResponseAbort as abort_error:
+                    if self._handle_streaming_response_abort(
+                        abort_error=abort_error,
+                        messages=messages,
+                        runtime_context=runtime_context,
+                    ):
+                        continue
+                    break
+                except Exception as exc:
+                    if self._handle_context_window_overflow(
+                        error=exc,
+                        messages=messages,
+                        runtime_context=runtime_context,
+                        turn_index=turn_index,
+                    ):
+                        continue
+                    raise
+                runtime_context["stream_abort_retry_count"] = 0
+                runtime_context["prompt_compaction_overflow_retries"] = 0
                 break
-            runtime_context["stream_abort_retry_count"] = 0
+            if response_message is None:
+                break
             reasoning_content = ""
             if hasattr(response_message, "model_dump"):
                 raw_response_payload = response_message.model_dump()

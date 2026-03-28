@@ -328,3 +328,11 @@ class EmbeddingProvider(ABC):
     ) -> np.ndarray:
         """Encode a list of texts into an (N, D) embedding matrix."""
         ...
+
+    def close(self) -> None:
+        """Release provider-owned resources when the runtime is finished."""
+        return None
+
+    def cache_identity(self) -> str:
+        """Return a stable cache fingerprint for persisted embedding payloads."""
+        return f"{self.__class__.__module__}.{self.__class__.__qualname__}"

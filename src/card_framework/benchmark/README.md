@@ -20,6 +20,13 @@ separate from the older matrix benchmark. It:
 - scores duration control, factualness, naturalness, and speaker attribution
 - writes machine-readable reports plus `notes.md` and `results.md` under `artifacts/summarizer_critic_benchmark`
 
+The reusable multi-speaker LLM-as-a-judge prompt wording now lives under
+`src/card_framework/prompts/templates/conversation_summary_judge_system.jinja2`
+and `src/card_framework/prompts/templates/conversation_summary_judge_user.jinja2`.
+That shared prompt now uses equal-count Likert-friendly guide items per
+dimension so the same rubric wording can support both human participant surveys
+and LLM-as-a-judge runs.
+
 See `src/card_framework/benchmark/summarizer_critic/README.md` for the full
 package overview and benchmark-family split.
 
@@ -49,6 +56,9 @@ Common options:
 - `--disable-order-swap`
 - `--alignscore-model <model name>`
 - `--output-dir artifacts/benchmark`
+
+The reference-free judge now receives the full source transcript by default
+instead of a capped prefix.
 
 Outputs:
 - `artifacts/benchmark/<run_id>/benchmark_report.json`

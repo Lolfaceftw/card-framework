@@ -18,16 +18,25 @@ This repository expects topic branches plus pull requests for shared history. Ke
 
 - Branch from the integration branch you intend to merge into. In most cases this is the repository default branch or another agreed shared branch for the task.
 - Keep one topic or bug fix per branch.
-- For PyPI releases, create a dedicated release-preparation branch named `release/vX.Y.Z` from the target integration branch before changing version metadata, running release preflight, or attempting publication.
+- For PyPI releases, create and switch to a dedicated release-preparation branch whose semantic-version suffix matches the intended release, such as `release/vX.Y.Z`, before changing version metadata, running release preflight, or attempting publication. If the active agent runtime requires a branch prefix, preserve the same suffix, for example `codex/release/vX.Y.Z`.
 - Prefer several small coherent commits over one large mixed commit.
 - Do not push directly to shared protected branches.
 - Do not rewrite published shared history. If a shared branch needs undoing, prefer `git revert`.
 - Never add files or staged content that contain API keys, access tokens, secrets, private URLs such as vLLM endpoints, customer data, or other private information.
 
+## Semantic Versioning Policy
+
+- Use semantic versioning `MAJOR.MINOR.PATCH` for every published repository version.
+- Bump `MAJOR` for backward-incompatible public changes such as API, CLI, config, contract, workflow, or output changes that require downstream users or operators to adapt.
+- Bump `MINOR` for backward-compatible new features, new optional capabilities, or materially expanded behavior.
+- Bump `PATCH` for backward-compatible bug fixes, release-process fixes, packaging corrections, and internal or docs changes that do not introduce a new public capability or break compatibility.
+- When one release includes multiple change types, choose the highest-impact required bump.
+- Before editing release versions, release docs, or release tags, create or switch to the branch whose `vX.Y.Z` suffix matches the intended semantic version.
+
 ## Local Workflow
 
 1. Sync the target integration branch before creating or refreshing your topic branch.
-2. Create or switch to your topic branch.
+2. Create or switch to your topic branch. For release work, this means the checked-out semver-aligned release branch before version metadata is edited.
 3. Review local changes with:
 
    ```bash
@@ -75,7 +84,7 @@ This repository expects topic branches plus pull requests for shared history. Ke
 
 - Use `coder_docs/github_actions_release_spec.md` as the release source of
   truth for `.github/workflows/publish-pypi.yml`.
-- Start every release from a dedicated branch named `release/vX.Y.Z`.
+- Start every release from a dedicated checked-out branch named `release/vX.Y.Z`, or a runtime-prefixed equivalent such as `codex/release/vX.Y.Z` when the tooling requires that prefix.
 - Run the version bump, release preflight, and pull request workflow on that
   release branch.
 - Merge the reviewed release branch back into the integration branch before

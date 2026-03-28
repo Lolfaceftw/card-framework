@@ -30,7 +30,7 @@ _REMEDY_ACTION_VALUES: frozenset[str] = frozenset(RemedyAction.__args__)
 
 
 def build_loop_context_prompt_block(
-    raw_loop_context: str | None, *, char_cap: int = 1024
+    raw_loop_context: str | None, *, char_cap: int | None = None
 ) -> str:
     """Return bounded loop-context text for safe prompt injection."""
     if raw_loop_context is None:
@@ -38,6 +38,8 @@ def build_loop_context_prompt_block(
     text = str(raw_loop_context).strip()
     if not text:
         return ""
+    if char_cap is None or char_cap <= 0:
+        return text
     if len(text) <= char_cap:
         return text
     available = char_cap
@@ -123,7 +125,7 @@ class SummarizerLoopMemory:
 
     target_seconds: int
     duration_tolerance_ratio: float = 0.05
-    prompt_char_limit: int = 1024
+    prompt_char_limit: int | None = None
     max_unresolved_issues: int = 5
     max_attempted_remedies: int = 6
     stagnation_seconds_delta_threshold: float = 4.0

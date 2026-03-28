@@ -14,6 +14,7 @@ class PromptManager:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(PromptManager, cls).__new__(cls)
+        if cls._env is None:
             cls._env = Environment(
                 loader=FileSystemLoader(str(PROMPTS_DIR)),
                 autoescape=select_autoescape(),

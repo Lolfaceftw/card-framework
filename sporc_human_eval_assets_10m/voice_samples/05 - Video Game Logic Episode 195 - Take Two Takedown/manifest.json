@@ -1,0 +1,83 @@
+{
+  "generated_at_utc": "2026-03-21T03:33:50+00:00",
+  "source_audio_path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_02314_https_mcdn_podbean_com_mf_web_g2k25x_VGL_Podcast_Ep_195_Take_Two_Tak__Video_Game_Logic_Episode_195_Take_Two_Takedown/source_audio/sporc_02314_https_mcdn_podbean_com_mf_web_g2k25x_VGL_Podcast_Ep_195_Take_Two_Takedown_b7bne_.mp3",
+  "target_duration_ms": 30000,
+  "clip_method": "concat_turns",
+  "short_speaker_policy": "export_shorter",
+  "sample_rate_hz": 44100,
+  "channels": 1,
+  "codec": "pcm_s24le",
+  "edge_fade_ms": 20,
+  "min_slice_duration_ms": 1200,
+  "max_slices": 6,
+  "selection_order": "chronological",
+  "low_data_policy": "quality_first_shorter",
+  "samples": [
+    {
+      "speaker": "SPEAKER_00",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_02314_https_mcdn_podbean_com_mf_web_g2k25x_VGL_Podcast_Ep_195_Take_Two_Tak__Video_Game_Logic_Episode_195_Take_Two_Takedown/speaker_samples/SPEAKER_00.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 30000,
+      "status": "ok",
+      "selected_slice_count": 5,
+      "dropped_slice_count": 547,
+      "ranges_ms": [
+        {
+          "start_time_ms": 12060,
+          "end_time_ms": 23935
+        },
+        {
+          "start_time_ms": 24935,
+          "end_time_ms": 29210
+        },
+        {
+          "start_time_ms": 29980,
+          "end_time_ms": 34730
+        },
+        {
+          "start_time_ms": 35420,
+          "end_time_ms": 38570
+        },
+        {
+          "start_time_ms": 39340,
+          "end_time_ms": 45290
+        }
+      ]
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_02314_https_mcdn_podbean_com_mf_web_g2k25x_VGL_Podcast_Ep_195_Take_Two_Tak__Video_Game_Logic_Episode_195_Take_Two_Takedown/speaker_samples/SPEAKER_01.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 26095,
+      "status": "shorter_than_requested",
+      "selected_slice_count": 6,
+      "dropped_slice_count": 612,
+      "ranges_ms": [
+        {
+          "start_time_ms": 64620,
+          "end_time_ms": 65850
+        },
+        {
+          "start_time_ms": 81015,
+          "end_time_ms": 82515
+        },
+        {
+          "start_time_ms": 93775,
+          "end_time_ms": 95050
+        },
+        {
+          "start_time_ms": 107660,
+          "end_time_ms": 109770
+        },
+        {
+          "start_time_ms": 115900,
+          "end_time_ms": 124010
+        },
+        {
+          "start_time_ms": 124620,
+          "end_time_ms": 136490
+        }
+      ]
+    }
+  ]
+}

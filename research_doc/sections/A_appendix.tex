@@ -1,0 +1,60 @@
+\chapter{Selected Implementation Excerpts}
+
+\section{MMR retrieval excerpt}
+
+\begin{lstlisting}[style=cfpython,caption={Condensed MMR retrieval logic adapted from \codepath{src/card_framework/retrieval/embeddings.py}.},label={lst:mmr}]
+for idx in remaining:
+    relevance = sim_to_query[idx]
+    if selected_indices:
+        sim_to_selected = embeddings[idx] @ embeddings[selected_indices].T
+        max_sim = np.max(sim_to_selected)
+    else:
+        max_sim = 0.0
+
+    mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+\end{lstlisting}
+
+\section{Summarizer tool registry excerpt}
+
+\begin{lstlisting}[style=cfpython,caption={Condensed summarizer tool-registry construction adapted from \codepath{src/card_framework/agents/tool_handlers.py}.},label={lst:tools}]
+tool_registry.register(AddSpeakerMessageHandler(...))
+tool_registry.register(EstimateDurationHandler(...))
+tool_registry.register(CountWordsHandler(...))
+tool_registry.register(EditMessageHandler(...))
+tool_registry.register(RemoveMessageHandler(...))
+if is_embedding_enabled:
+    tool_registry.register(QueryTranscriptHandler(...))
+tool_registry.register(SaveDraftHandler(...))
+tool_registry.register(FinalizeDraftHandler(...))
+\end{lstlisting}
+
+\section{Affect merge excerpt}
+
+\begin{lstlisting}[style=cfpython,caption={Condensed affect-analysis merge path adapted from \codepath{src/card_framework/audio_pipeline/affect_analysis.py}.},label={lst:affect-appendix}]
+suggested_emo_preset = _suggest_emo_preset(...)
+emotion_vector_result = self.emotion_vector_mapping.map(...)
+extras["affect"] = record.to_payload()
+extras["affect_hint"] = record.hint
+extras["suggested_emo_preset"] = record.suggested_emo_preset
+extras["emotion_vector"] = record.emotion_vector.to_list()
+extras["emotion_vector_source"] = record.emotion_vector_source
+extras["emotion_vector_confidence"] = record.emotion_vector_confidence
+\end{lstlisting}
+
+\section{Interjector repair excerpt}
+
+\begin{lstlisting}[style=cfpython,caption={Condensed stage-4 repair logic adapted from \codepath{src/card_framework/audio_pipeline/interjector.py}.},label={lst:repair}]
+while True:
+    overlay_window = compute_overlay_timing_window(...)
+    rendered_path = provider.synthesize(...)
+    prepared_audio = prepare_interjection_attempt_audio(rendered_path, ...)
+    prepared_audio = maybe_apply_echo_pacing_fit(prepared_audio, ...)
+
+    fits_window = prepared_audio.duration_ms <= overlay_window.available_overlap_ms
+    if fits_window:
+        return accept_overlay(prepared_audio, overlay_window)
+
+    next_state = next_repair_state(...)
+    if next_state is None:
+        return reject_overlay(...)
+\end{lstlisting}

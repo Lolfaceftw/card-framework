@@ -2,11 +2,15 @@
 
 import pytest
 
+from card_framework.audio_pipeline.affect_analysis import TranscriptAffectAnalyzer
 from card_framework.audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
     build_interjector_orchestrator,
     build_speaker_diarizer,
     build_speaker_sample_generator,
+    build_summary_turn_emotion_linker,
+    build_turn_emotion_resolution_strategy,
+    build_transcript_affect_analyzer,
     build_voice_clone_orchestrator,
 )
 from card_framework.audio_pipeline.eta import LinearStageEtaStrategy
@@ -27,6 +31,9 @@ from card_framework.audio_pipeline.gateways.granite_speech_gateway import Granit
 from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
 from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
 from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
+from card_framework.audio_pipeline.turn_emotion_resolution import (
+    SourceLinkedTurnEmotionResolutionStrategy,
+)
 from card_framework.shared.llm_provider import LLMProvider
 
 
@@ -71,7 +78,104 @@ def test_factory_builds_default_strategies() -> None:
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is False
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.25)
+    assert orchestrator.diarizer.max_speakers == 10
+    assert orchestrator.diarizer.vad_onset == pytest.approx(0.8)
+    assert orchestrator.diarizer.vad_offset == pytest.approx(0.6)
+    assert orchestrator.diarizer.vad_pad_onset == pytest.approx(0.1)
+    assert orchestrator.diarizer.vad_pad_offset == pytest.approx(0.0)
+    assert orchestrator.diarizer.vad_min_duration_on == pytest.approx(0.2)
+    assert orchestrator.diarizer.vad_min_duration_off == pytest.approx(0.6)
+    assert orchestrator.diarizer.clustering_max_rp_threshold == pytest.approx(0.4)
+    assert orchestrator.diarizer.clustering_sparse_search_volume == 60
+    assert orchestrator.diarizer.clustering_maj_vote_spk_count is True
     assert isinstance(orchestrator.eta_strategy, LinearStageEtaStrategy)
+
+
+def test_factory_builds_transcript_affect_analyzer(tmp_path: Path) -> None:
+    analyzer = build_transcript_affect_analyzer(
+        {
+            "work_dir": str(tmp_path / "audio_stage"),
+            "voice_clone": {
+                "emo_presets": {
+                    "neutral": "calm",
+                    "warm": "warm",
+                    "engaged": "engaged",
+                    "upbeat": "upbeat",
+                    "urgent": "urgent",
+                }
+            },
+            "affect_analysis": {
+                "enabled": True,
+                "output_dir_name": "affect_analysis",
+                "categorical": {
+                    "enabled": True,
+                    "provider": "emotion2vec_plus",
+                    "device": "cpu",
+                },
+                "dimensional": {
+                    "enabled": True,
+                    "provider": "audeering_msp_dim",
+                    "device": "cpu",
+                },
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    assert isinstance(analyzer, TranscriptAffectAnalyzer)
+
+
+def test_factory_builds_turn_emotion_resolution_strategy() -> None:
+    strategy = build_turn_emotion_resolution_strategy(
+        {
+            "summary_turn_emotion": {
+                "prelink_enabled": True,
+                "prelink_strategy": "source_linked",
+                "fallback_order": [
+                    "source_linked",
+                    "explicit",
+                ],
+            },
+            "summary_turn_linking": {
+                "enabled": True,
+            },
+        }
+    )
+
+    assert isinstance(strategy, SourceLinkedTurnEmotionResolutionStrategy)
+    assert strategy.config.prelink_enabled is True
+    assert strategy.config.fallback_order == (
+        "source_linked",
+        "explicit",
+    )
+
+
+def test_factory_defaults_turn_emotion_resolution_to_vector_only_path() -> None:
+    strategy = build_turn_emotion_resolution_strategy(
+        {
+            "summary_turn_emotion": {},
+            "voice_clone": {},
+        }
+    )
+
+    assert strategy.config.fallback_order == (
+        "source_linked",
+        "explicit",
+    )
+
+
+def test_factory_defaults_summary_turn_linker_to_no_forced_rerender() -> None:
+    linker = build_summary_turn_emotion_linker(
+        {
+            "summary_turn_linking": {
+                "enabled": True,
+            }
+        }
+    )
+
+    assert linker is not None
+    assert linker.config.force_live_draft_rerender is False
 
 
 def test_factory_builds_eta_strategy_from_config() -> None:
@@ -151,6 +255,62 @@ def test_factory_allows_explicit_single_speaker_fallback_opt_in() -> None:
 
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is True
+
+
+def test_factory_builds_nemo_vad_postprocessing_overrides() -> None:
+    diarizer = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo",
+                "vad_onset": 0.75,
+                "vad_offset": 0.55,
+                "vad_pad_onset": 0.05,
+                "vad_pad_offset": 0.0,
+                "vad_min_duration_on": 0.3,
+                "vad_min_duration_off": 0.7,
+            }
+        }
+    )
+
+    assert isinstance(diarizer, NemoSpeakerDiarizer)
+    assert diarizer.vad_onset == pytest.approx(0.75)
+    assert diarizer.vad_offset == pytest.approx(0.55)
+    assert diarizer.vad_pad_onset == pytest.approx(0.05)
+    assert diarizer.vad_pad_offset == pytest.approx(0.0)
+    assert diarizer.vad_min_duration_on == pytest.approx(0.3)
+    assert diarizer.vad_min_duration_off == pytest.approx(0.7)
+
+
+def test_factory_builds_nemo_clustering_search_overrides() -> None:
+    diarizer = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo",
+                "clustering_max_rp_threshold": 0.4,
+                "clustering_sparse_search_volume": 60,
+                "clustering_maj_vote_spk_count": True,
+            }
+        }
+    )
+
+    assert isinstance(diarizer, NemoSpeakerDiarizer)
+    assert diarizer.clustering_max_rp_threshold == pytest.approx(0.4)
+    assert diarizer.clustering_sparse_search_volume == 60
+    assert diarizer.clustering_maj_vote_spk_count is True
+
+
+def test_factory_builds_granite_repetition_penalty_override() -> None:
+    orchestrator = build_audio_to_script_orchestrator(
+        {
+            "asr": {
+                "provider": "granite_speech",
+                "repetition_penalty": 1.2,
+            },
+        }
+    )
+
+    assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.2)
 
 
 def test_factory_builds_pyannote_community1_diarizer() -> None:
@@ -274,9 +434,10 @@ def test_factory_builds_granite_transcriber_defaults() -> None:
 
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert orchestrator.transcriber.model_name == "ibm-granite/granite-4.0-1b-speech"
-    assert orchestrator.transcriber.chunk_length_seconds == 30
-    assert orchestrator.transcriber.chunk_overlap_seconds == 5
-    assert orchestrator.transcriber.max_new_tokens == 200
+    assert orchestrator.transcriber.chunk_length_seconds == 25
+    assert orchestrator.transcriber.chunk_overlap_seconds == 1
+    assert orchestrator.transcriber.max_new_tokens == 96
+    assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.25)
     assert orchestrator.transcriber.language == "en"
 
 
@@ -348,6 +509,15 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
             "interjector": {
                 "enabled": True,
                 "output_dir_name": "interjector",
+                "timing_refinement": {
+                    "enabled": True,
+                    "fallback_anchor_realignment_enabled": False,
+                },
+                "repair": {
+                    "enabled": True,
+                    "prompt_max_tokens": 180,
+                    "max_attempts": 3,
+                },
             },
         },
         llm=_FakeLLMProvider(),
@@ -360,6 +530,22 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
         tmp_path / "artifacts" / "audio_stage" / "interjector"
     ).resolve()
     assert orchestrator.merged_output_filename == "voice_cloned_interjected.wav"
+    assert orchestrator.timing_refinement_enabled is True
+    assert orchestrator.fallback_anchor_realignment_enabled is False
+    assert orchestrator.repair_enabled is True
+    assert orchestrator.repair_max_attempts == 3
+    assert orchestrator.trim_leading_silence_enabled is True
+    assert orchestrator.trim_leading_silence_threshold_db == pytest.approx(-50.0)
+    assert orchestrator.trim_leading_silence_min_duration_ms == 0
+    assert orchestrator.trim_leading_silence_preserve_ms == 5
+    assert orchestrator.echo_pacing_fit_enabled is True
+    assert orchestrator.echo_pacing_timing_backend == "faster_whisper_native"
+    assert orchestrator.echo_pacing_model_name == "tiny.en"
+    assert orchestrator.echo_pacing_target_host_fill_ratio == pytest.approx(0.95)
+    assert orchestrator.echo_pacing_max_tempo == pytest.approx(1.75)
+    assert orchestrator.echo_pacing_word_level_enabled is True
+    assert orchestrator.echo_pacing_word_level_min_segment_ms == 80
+    assert orchestrator.echo_pacing_word_level_max_tempo == pytest.approx(1.75)
 
 
 def test_factory_disables_interjector_orchestrator_by_default(tmp_path: Path) -> None:

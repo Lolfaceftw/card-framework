@@ -35,6 +35,7 @@ def test_load_repo_dotenv_loads_root_file_without_overriding(
     monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
     monkeypatch.delenv("VLLM_URL", raising=False)
     monkeypatch.delenv("CARD_FRAMEWORK_VLLM_URL", raising=False)
+    monkeypatch.delenv("CARD_FRAMEWORK_VLLM_BASE_URL", raising=False)
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
     monkeypatch.delenv("VLLM_API_KEY", raising=False)
     monkeypatch.delenv("CARD_FRAMEWORK_VLLM_API_KEY", raising=False)
@@ -53,10 +54,42 @@ def test_load_repo_dotenv_loads_root_file_without_overriding(
     assert os.environ["HF_API_TOKEN"] == "hf_from_dotenv"
     assert os.environ["HUGGINGFACE_HUB_TOKEN"] == "hf_from_dotenv"
     assert os.environ["CARD_FRAMEWORK_VLLM_URL"] == "http://127.0.0.1:8000/v1"
+    assert (
+        os.environ["CARD_FRAMEWORK_VLLM_BASE_URL"] == "http://127.0.0.1:8000/v1"
+    )
     assert os.environ["VLLM_BASE_URL"] == "http://127.0.0.1:8000/v1"
     assert os.environ["CARD_FRAMEWORK_VLLM_API_KEY"] == "vllm_from_dotenv"
     assert os.environ["GEMINI_API_KEY"] == "gemini_from_dotenv"
     assert os.environ["ZAI_API_KEY"] == "zai_from_dotenv"
+
+
+def test_load_repo_dotenv_propagates_prefixed_vllm_base_url_aliases(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Propagate the repo's prefixed vLLM base URL to benchmark-friendly aliases."""
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "CARD_FRAMEWORK_VLLM_BASE_URL=http://prefixed-vllm.example.test:8000/v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("VLLM_URL", raising=False)
+    monkeypatch.delenv("CARD_FRAMEWORK_VLLM_URL", raising=False)
+    monkeypatch.delenv("CARD_FRAMEWORK_VLLM_BASE_URL", raising=False)
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
+    loaded_path = load_repo_dotenv(repo_root=tmp_path, override=True)
+
+    assert loaded_path == env_path.resolve()
+    assert os.environ["CARD_FRAMEWORK_VLLM_BASE_URL"] == (
+        "http://prefixed-vllm.example.test:8000/v1"
+    )
+    assert os.environ["CARD_FRAMEWORK_VLLM_URL"] == (
+        "http://prefixed-vllm.example.test:8000/v1"
+    )
+    assert os.environ["VLLM_URL"] == "http://prefixed-vllm.example.test:8000/v1"
+    assert os.environ["VLLM_BASE_URL"] == "http://prefixed-vllm.example.test:8000/v1"
 
 
 def test_load_repo_dotenv_returns_none_when_file_missing(tmp_path) -> None:

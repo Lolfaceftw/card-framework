@@ -11,8 +11,11 @@ __all__ = [
     "VoiceCloneOrchestrator",
     "build_audio_to_script_orchestrator",
     "build_interjector_orchestrator",
+    "build_summary_turn_emotion_linker",
+    "build_turn_emotion_resolution_strategy",
     "build_speaker_diarizer",
     "build_speaker_sample_generator",
+    "build_transcript_affect_analyzer",
     "build_voice_clone_orchestrator",
     "should_use_audio_stage",
 ]
@@ -27,23 +30,34 @@ def __getattr__(name: str) -> Any:
     if name in {
         "build_audio_to_script_orchestrator",
         "build_interjector_orchestrator",
+        "build_summary_turn_emotion_linker",
+        "build_turn_emotion_resolution_strategy",
         "build_speaker_diarizer",
         "build_speaker_sample_generator",
+        "build_transcript_affect_analyzer",
         "build_voice_clone_orchestrator",
     }:
         from card_framework.audio_pipeline.factory import (
             build_audio_to_script_orchestrator,
-            build_interjector_orchestrator,
-            build_speaker_diarizer,
+                build_interjector_orchestrator,
+                build_summary_turn_emotion_linker,
+                build_turn_emotion_resolution_strategy,
+                build_speaker_diarizer,
             build_speaker_sample_generator,
+            build_transcript_affect_analyzer,
             build_voice_clone_orchestrator,
         )
 
         exported = {
             "build_audio_to_script_orchestrator": build_audio_to_script_orchestrator,
             "build_interjector_orchestrator": build_interjector_orchestrator,
+            "build_summary_turn_emotion_linker": build_summary_turn_emotion_linker,
+            "build_turn_emotion_resolution_strategy": (
+                build_turn_emotion_resolution_strategy
+            ),
             "build_speaker_diarizer": build_speaker_diarizer,
             "build_speaker_sample_generator": build_speaker_sample_generator,
+            "build_transcript_affect_analyzer": build_transcript_affect_analyzer,
             "build_voice_clone_orchestrator": build_voice_clone_orchestrator,
         }
         return exported[name]

@@ -20,6 +20,7 @@ import threading
 import time
 from typing import Any, Callable
 from urllib.parse import urlparse
+import uuid
 
 import hydra
 import httpx
@@ -44,6 +45,7 @@ from card_framework.benchmark.summarizer_critic.qmsum.runner import (
     BenchmarkExecutionError,
     ManagedServer,
     _build_stub_calibration,
+    _close_embedding_provider,
     _coerce_mapping,
     _configure_benchmark_logging,
     _find_provider_profile,
@@ -137,6 +139,7 @@ _SOURCE_AUDIO_HEADERS = {
     "Referer": "https://www.buzzsprout.com/",
 }
 _SHARED_SAMPLE_QUEUE_DB_NAME = "sample_queue.sqlite3"
+_EMBEDDING_CACHE_ROOT = (DEFAULT_RUNS_ROOT.parent / "embedding_cache").resolve()
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
@@ -147,6 +150,8 @@ _CONNECTION_UNAVAILABLE_FINAL_STATUS = "connection_unavailable"
 _RESUME_FAILURE_DEFAULT_STATUS = "resume_interrupted_sample"
 _SWEEP_STALL_FINAL_STATUS = "sweep_watchdog_stalled"
 _CHECKPOINT_VERSION = 1
+_CHECKPOINT_REPLACE_ATTEMPTS = 10
+_CHECKPOINT_REPLACE_BACKOFF_SECONDS = 0.1
 _TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS = 250
 _TRANSCRIPT_ONLY_ALNUM_PATTERN = re.compile(r"[A-Za-z0-9]")
 _TRANSCRIPT_ONLY_SPEAKER_LABEL_PATTERN = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
@@ -160,6 +165,7 @@ _REPLACEMENT_ELIGIBLE_FINAL_STATUSES = frozenset(
         _SWEEP_STALL_FINAL_STATUS,
     }
 )
+_CHECKPOINT_WRITE_LOCKS: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 _RETRYABLE_INFRA_FINAL_STATUSES = frozenset(
     {
         _STARTUP_UNAVAILABLE_FINAL_STATUS,
@@ -182,11 +188,13 @@ class _ManagedBenchmarkRuntime:
     event_capture: EventCapture
     artifact_recorder: "_SampleArtifactRecorder"
     retrieval_enabled: bool
+    retrieval_namespace: str
     shared_agent_client: AgentClient
     servers: list[ManagedServer]
     retrieval_port: int
     summarizer_port: int
     critic_port: int
+    embedding_provider: EmbeddingProvider | None = None
 
 
 @dataclass(slots=True)
@@ -965,12 +973,34 @@ def _write_checkpoint_payload(
 ) -> None:
     """Atomically persist one execute checkpoint payload."""
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = checkpoint_path.with_suffix(f"{checkpoint_path.suffix}.tmp")
-    temp_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    temp_path.replace(checkpoint_path)
+    lock = _CHECKPOINT_WRITE_LOCKS[str(checkpoint_path.resolve())]
+    serialized_payload = json.dumps(payload, indent=2, ensure_ascii=False)
+    last_error: PermissionError | OSError | None = None
+
+    with lock:
+        for attempt_index in range(_CHECKPOINT_REPLACE_ATTEMPTS):
+            temp_path = checkpoint_path.with_name(
+                f"{checkpoint_path.name}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                temp_path.write_text(
+                    serialized_payload,
+                    encoding="utf-8",
+                )
+                temp_path.replace(checkpoint_path)
+                return
+            except (PermissionError, OSError) as exc:
+                last_error = exc
+                try:
+                    if temp_path.exists():
+                        temp_path.unlink()
+                except OSError:
+                    pass
+                if attempt_index + 1 >= _CHECKPOINT_REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(_CHECKPOINT_REPLACE_BACKOFF_SECONDS * (attempt_index + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
@@ -988,6 +1018,13 @@ def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
         or "connecterror" in lowered
         or "connecttimeout" in lowered
         or "connection refused" in lowered
+        or "actively refused" in lowered
+        or "forcibly closed by the remote host" in lowered
+        or "connection reset by peer" in lowered
+        or "connection aborted" in lowered
+        or "software caused connection abort" in lowered
+        or "winerror 10054" in lowered
+        or "winerror 10061" in lowered
         or "all connection attempts failed" in lowered
         or "nodename nor servname provided" in lowered
     ):
@@ -1974,7 +2011,8 @@ def _build_runtime_port_args(
     if not force_dynamic_ports:
         return args
     runtime_args = argparse.Namespace(**vars(args))
-    runtime_args.retrieval_port = None
+    if getattr(runtime_args, "shared_retrieval_port", None) is None:
+        runtime_args.retrieval_port = None
     runtime_args.summarizer_port = None
     runtime_args.critic_port = None
     return runtime_args
@@ -1996,6 +2034,10 @@ async def _start_managed_runtime(
     force_dynamic_ports: bool,
 ) -> _ManagedBenchmarkRuntime:
     """Instantiate providers, local agents, and the orchestrator for one run phase."""
+    retrieval_namespace = (
+        str(getattr(args, "retrieval_namespace", "") or "").strip() or "default"
+    )
+    shared_retrieval_port = getattr(args, "shared_retrieval_port", None)
     llm_summarizer: LLMProvider = hydra.utils.instantiate(
         OmegaConf.create(summarizer_provider_config)
     )
@@ -2054,14 +2096,21 @@ async def _start_managed_runtime(
         role="judge",
     )
 
-    embedding: EmbeddingProvider = hydra.utils.instantiate(
-        OmegaConf.create(embedding_profile.embedding_config)
-    )
     retrieval_enabled = embedding_profile.embedding_id != "disabled"
-    transcript_index = TranscriptIndex(embedding_provider=embedding)
+    using_shared_retrieval = retrieval_enabled and shared_retrieval_port is not None
+    embedding: EmbeddingProvider | None = None
+    transcript_index: TranscriptIndex | None = None
+    if retrieval_enabled and not using_shared_retrieval:
+        embedding = hydra.utils.instantiate(
+            OmegaConf.create(embedding_profile.embedding_config)
+        )
+        transcript_index = TranscriptIndex(
+            embedding_provider=embedding,
+            cache_dir=_EMBEDDING_CACHE_ROOT,
+        )
     judge = SPoRCJudge(
         judge_llm=llm_judge,
-        config=SPoRCJudgeConfig(source_char_limit=int(args.judge_source_char_limit)),
+        config=SPoRCJudgeConfig(),
     )
     event_capture = EventCapture(
         ["tool_invocation", "retrieval_stats", "orchestrator_iteration_completed"]
@@ -2078,7 +2127,7 @@ async def _start_managed_runtime(
         trust_env=False,
     )
     servers: list[ManagedServer] = []
-    reserved_ports: tuple[int, int, int] | None = None
+    reserved_ports: tuple[int, ...] | None = None
     try:
         runtime_args = _build_runtime_port_args(
             args,
@@ -2087,12 +2136,12 @@ async def _start_managed_runtime(
         retrieval_port, summarizer_port, critic_port = _resolve_benchmark_ports(
             runtime_args
         )
-        reserved_ports = (retrieval_port, summarizer_port, critic_port)
+        if using_shared_retrieval or not retrieval_enabled:
+            reserved_ports = (summarizer_port, critic_port)
+        else:
+            reserved_ports = (retrieval_port, summarizer_port, critic_port)
 
-        if not retrieval_enabled:
-            _release_reserved_port(retrieval_port)
-
-        if retrieval_enabled:
+        if retrieval_enabled and not using_shared_retrieval:
             retrieval_app = _build_a2a_app(
                 name="InfoRetrieval",
                 description="Indexes transcript segments and retrieves relevant ones.",
@@ -2110,6 +2159,7 @@ async def _start_managed_runtime(
             executor=SummarizerExecutor(
                 llm=llm_summarizer,
                 retrieval_port=retrieval_port,
+                retrieval_namespace=retrieval_namespace,
                 max_tool_turns=int(base_cfg.agents.summarizer.max_tool_turns),
                 calibration=calibration,
                 is_embedding_enabled=retrieval_enabled,
@@ -2138,6 +2188,7 @@ async def _start_managed_runtime(
                 calibration=calibration,
                 max_tool_turns=int(base_cfg.agents.critic.max_tool_turns),
                 retrieval_port=retrieval_port,
+                retrieval_namespace=retrieval_namespace,
                 is_embedding_enabled=retrieval_enabled,
                 reasoning_loop_guard=_coerce_mapping(
                     OmegaConf.to_container(
@@ -2163,6 +2214,7 @@ async def _start_managed_runtime(
             retrieval_port=retrieval_port,
             summarizer_port=summarizer_port,
             critic_port=critic_port,
+            retrieval_namespace=retrieval_namespace,
             timeouts=_resolve_orchestrator_timeouts(args),
             agent_client=shared_agent_client,
             event_bus=event_bus,
@@ -2173,11 +2225,13 @@ async def _start_managed_runtime(
             event_capture=event_capture,
             artifact_recorder=artifact_recorder,
             retrieval_enabled=retrieval_enabled,
+            retrieval_namespace=retrieval_namespace,
             shared_agent_client=shared_agent_client,
             servers=servers,
             retrieval_port=retrieval_port,
             summarizer_port=summarizer_port,
             critic_port=critic_port,
+            embedding_provider=embedding,
         )
     except Exception:
         event_capture.stop()
@@ -2187,6 +2241,7 @@ async def _start_managed_runtime(
             for port in reserved_ports:
                 _release_reserved_port(port)
         await shared_agent_client.close()
+        _close_embedding_provider(embedding)
         raise
 
 
@@ -2198,6 +2253,7 @@ async def _stop_managed_runtime(runtime: _ManagedBenchmarkRuntime | None) -> Non
     for server in reversed(runtime.servers):
         _stop_server(server)
     await runtime.shared_agent_client.close()
+    _close_embedding_provider(runtime.embedding_provider)
 
 
 def _format_transcript(transcript: dict[str, Any]) -> str:
@@ -2932,6 +2988,11 @@ async def _execute_sample(
     diagnostics: dict[str, Any] | None = None
     candidate_summary = ""
     artifact_recorder.activate_sample(sample=sample, target_seconds=target_seconds)
+
+    async def _clear_retrieval_namespace() -> None:
+        if retrieval_enabled:
+            await orchestrator.clear_transcript_index()
+
     try:
         transcript, working_transcript_path = _copy_sample_transcript(
             sample=sample,
@@ -2965,7 +3026,10 @@ async def _execute_sample(
                 sample=sample,
             )
         if retrieval_enabled:
-            await orchestrator.index_transcript(transcript_payload)
+            await orchestrator.index_transcript(
+                transcript_payload,
+                sample_id=sample.sample_id,
+            )
         diagnostics = await orchestrator.run_loop_with_diagnostics(
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
@@ -3114,7 +3178,12 @@ async def _execute_sample(
             if judge_result is not None
             else None,
         )
+        await _clear_retrieval_namespace()
     except Exception as exc:
+        try:
+            await _clear_retrieval_namespace()
+        except Exception:
+            pass
         final_status, error_message = _classify_sample_failure(exc)
         duration_seconds = round(time.perf_counter() - sample_started, 3)
         retrieval_after = event_capture.count("retrieval_stats")
@@ -3947,6 +4016,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     benchmark_audio_cfg=benchmark_audio_cfg,
                 )
             results_by_sample_id[sample.sample_id] = result
+            preloaded_transcripts.pop(sample.sample_id, None)
             if shared_sample_queue_connection is not None:
                 _mark_shared_sample_completed(
                     shared_sample_queue_connection,
@@ -4075,7 +4145,6 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--embedding-mode", choices=("disabled", "enabled"), default="disabled"
     )
-    parser.add_argument("--judge-source-char-limit", type=int, default=30000)
     parser.add_argument(
         "--duration-preset",
         choices=tuple(DURATION_PRESET_SECONDS.keys()),
@@ -4147,6 +4216,17 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--retrieval-port", type=int, default=None)
     parser.add_argument("--summarizer-port", type=int, default=None)
     parser.add_argument("--critic-port", type=int, default=None)
+    parser.add_argument(
+        "--shared-retrieval-port",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--retrieval-namespace",
+        default="default",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--disable-stream-output",
         action="store_true",

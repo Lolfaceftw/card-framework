@@ -39,3 +39,16 @@ def test_edit_returns_structured_error_for_missing_line() -> None:
     assert result["error_code"] == "line_not_found"
     assert result["line"] == 2
 
+
+def test_registry_preserves_emotion_vector_in_snapshot() -> None:
+    registry = MessageRegistry()
+    registry.add(
+        "SPEAKER_00",
+        "alpha beta",
+        emotion_vector=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
+    )
+
+    snapshot = registry.snapshot()
+
+    assert snapshot[0]["emotion_vector"] == [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2]
+

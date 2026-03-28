@@ -1,0 +1,93 @@
+{
+  "generated_at_utc": "2026-03-21T02:45:40+00:00",
+  "source_audio_path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_01637_https_feeds_soundcloud_com_stream_837089506_stephen_smith_609604594___079_The_United_State_of_St_Kitts_and_Nevis_ft_Nekirah_Nicholls/source_audio/sporc_01637_https_feeds_soundcloud_com_stream_837089506_stephen_smith_609604594_079_the_unit.mp3",
+  "target_duration_ms": 30000,
+  "clip_method": "concat_turns",
+  "short_speaker_policy": "export_shorter",
+  "sample_rate_hz": 44100,
+  "channels": 1,
+  "codec": "pcm_s24le",
+  "edge_fade_ms": 20,
+  "min_slice_duration_ms": 1200,
+  "max_slices": 6,
+  "selection_order": "chronological",
+  "low_data_policy": "quality_first_shorter",
+  "samples": [
+    {
+      "speaker": "SPEAKER_00",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_01637_https_feeds_soundcloud_com_stream_837089506_stephen_smith_609604594___079_The_United_State_of_St_Kitts_and_Nevis_ft_Nekirah_Nicholls/speaker_samples/SPEAKER_01.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 15895,
+      "status": "shorter_than_requested",
+      "selected_slice_count": 6,
+      "dropped_slice_count": 349,
+      "ranges_ms": [
+        {
+          "start_time_ms": 38145,
+          "end_time_ms": 40645
+        },
+        {
+          "start_time_ms": 70780,
+          "end_time_ms": 74155
+        },
+        {
+          "start_time_ms": 112155,
+          "end_time_ms": 114405
+        },
+        {
+          "start_time_ms": 143980,
+          "end_time_ms": 145610
+        },
+        {
+          "start_time_ms": 146220,
+          "end_time_ms": 147770
+        },
+        {
+          "start_time_ms": 149260,
+          "end_time_ms": 153850
+        }
+      ],
+      "bootstrap_speaker": "SPEAKER_01"
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "path": "/workspace/card-framework/src/card_framework/benchmark/summarizer_critic/sporc/sampled_segments/episode_assets/sporc_01637_https_feeds_soundcloud_com_stream_837089506_stephen_smith_609604594___079_The_United_State_of_St_Kitts_and_Nevis_ft_Nekirah_Nicholls/speaker_samples/SPEAKER_00.wav",
+      "requested_duration_ms": 30000,
+      "duration_ms": 30000,
+      "status": "ok",
+      "selected_slice_count": 6,
+      "dropped_slice_count": 588,
+      "ranges_ms": [
+        {
+          "start_time_ms": 1825,
+          "end_time_ms": 12410
+        },
+        {
+          "start_time_ms": 15900,
+          "end_time_ms": 25370
+        },
+        {
+          "start_time_ms": 28380,
+          "end_time_ms": 30255
+        },
+        {
+          "start_time_ms": 30505,
+          "end_time_ms": 32010
+        },
+        {
+          "start_time_ms": 35020,
+          "end_time_ms": 37395
+        },
+        {
+          "start_time_ms": 45900,
+          "end_time_ms": 50090
+        }
+      ],
+      "bootstrap_speaker": "SPEAKER_00"
+    }
+  ],
+  "bootstrap_speaker_mapping": {
+    "SPEAKER_00": "SPEAKER_02",
+    "SPEAKER_01": "SPEAKER_00"
+  }
+}

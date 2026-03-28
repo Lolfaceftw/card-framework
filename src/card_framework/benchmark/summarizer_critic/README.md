@@ -20,7 +20,8 @@ tracks with different datasets and operator workflows.
   `src/card_framework/benchmark/provider_profiles.yaml`.
 - The tracked `vllm_default` profile points at `http://127.0.0.1:8000/v1`.
 - To override that tracked vLLM base URL at runtime without editing YAML, set
-  one of `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`, or `VLLM_BASE_URL`.
+  one of `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`,
+  `CARD_FRAMEWORK_VLLM_BASE_URL`, or `VLLM_BASE_URL`.
 - `--sample-seed <int>` enables deterministic seeded-random sample selection.
   Omitting the flag preserves manifest order.
 - `--max-samples 0` means "all prepared samples" for both benchmark families.
@@ -35,6 +36,7 @@ Common subtrees:
 - `datasets/qmsum_general_test`: prepared QMSum manifest and transcript files
 - `runs`: direct QMSum benchmark runs
 - `supervisor`: QMSum supervised sessions
+- `embedding_cache`: persistent transcript-embedding cache reused across embedding-enabled benchmark runs when the sample ID, transcript content, and embedding provider identity match
 - `datasets/sporc/prepared_sample`: prepared SPoRC sample split
 - `datasets/sporc/prepared_full`: prepared SPoRC full split and curated manifests
 - `sporc_runs`: direct SPoRC execute runs

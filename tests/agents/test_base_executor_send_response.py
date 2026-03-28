@@ -26,6 +26,15 @@ class _TestExecutor(BaseA2AExecutor):
         del task_data, context, event_queue
 
 
+class _FailingExecutor(BaseA2AExecutor):
+    def __init__(self) -> None:
+        super().__init__("FailingTest")
+
+    async def handle_task(self, task_data, context, event_queue) -> None:  # noqa: ANN001
+        del task_data, context, event_queue
+        raise RuntimeError("boom")
+
+
 def test_send_response_completes_a2a_tasks_with_message() -> None:
     executor = _TestExecutor()
     queue = _RecordingQueue()
@@ -53,3 +62,25 @@ def test_send_response_falls_back_to_plain_message_without_task_context() -> Non
     event = queue.events[0]
     assert isinstance(event, Message)
     assert event.parts[0].root.text == "hello world"
+
+
+def test_execute_marks_a2a_task_failed_when_handle_task_raises() -> None:
+    executor = _FailingExecutor()
+    queue = _RecordingQueue()
+    context = SimpleNamespace(
+        task_id="task-2",
+        context_id="ctx-2",
+        message=None,
+        current_task=None,
+        get_user_input=lambda: "{}",
+    )
+
+    asyncio.run(executor.execute(context, queue))
+
+    assert len(queue.events) == 1
+    event = queue.events[0]
+    assert isinstance(event, TaskStatusUpdateEvent)
+    assert event.final is True
+    assert event.status.state == TaskState.failed
+    assert event.status.message is not None
+    assert event.status.message.parts[0].root.text == "boom"

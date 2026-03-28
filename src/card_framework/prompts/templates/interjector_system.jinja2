@@ -22,11 +22,60 @@ Rules:
 - Only use the provided next speaker as `interjection_speaker`.
 - `host_turn_index` is 1-based.
 - Anchor token indices are 0-based and must refer to the provided host token list.
-- Keep anchors inside the provided preferred anchor token window. That window approximates the valid {{ min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of the host turn.
-- For `backchannel`, keep `anchor_end_token_index` inside the preferred window.
-- For `echo_agreement`, keep `anchor_start_token_index` inside the preferred window.
+- Keep anchors inside the provided preferred anchor token windows.
+- For `backchannel`, keep `anchor_end_token_index` inside the backchannel window. That window approximates the valid {{ min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of the host turn.
+- For `echo_agreement`, keep `anchor_start_token_index` inside the echo window. That window approximates the valid {{ echo_min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of the host turn.
 - `backchannel` is for short acknowledgments like "right", "exactly", "yeah".
 - `echo_agreement` is for short simultaneous agreement grounded in the host phrase and may repeat a short host phrase exactly.
+- Every `echo_agreement` must sound like a complete standalone overlap, not a cut-off clause.
+- Every `echo_agreement` must also sound natural from the next speaker's perspective, not just copy the host's wording mechanically.
+- Use `echo_agreement` only when the anchor is a short repeatable phrase the listener could naturally mirror, such as a vivid metaphor, a punchy clause, or a neutral emphatic phrase.
+- When a host turn offers a short vivid listener-safe phrase that the next speaker could naturally latch onto, prefer `echo_agreement` over a generic `backchannel`.
+- A strong `echo_agreement` usually keeps the host's most quotable content words while dropping extra framing words that belong only to the host.
+- A strong `echo_agreement` should sound like a quoted callback, not a paraphrased new sentence from the listener.
+- Prefer very short listener-safe echoes, usually about 2-4 words, even if the anchor window is longer.
+- Avoid single weak-word echoes like `about`, `really`, or `there`; keep at least two meaningful words unless the phrase is a fixed expression.
+- Avoid adding a fresh subject pronoun or recasting the anchor into a new sentence such as `She handled it perfectly.`; instead keep the quotable core like `handled everything perfectly`.
+- If a literal host phrase carries the wrong perspective for the listener, such as first-person or speaker-owned wording, use `backchannel` or omit the turn instead of echoing it.
+- Never end an `echo_agreement` on a hanging conjunction, article, preposition, possessive, pronoun, or auxiliary such as "and", "or", "to", "the", "I", or "was".
+- If the natural host anchor would end that way, choose a shorter complete subphrase or omit the turn instead of echoing an incomplete ending.
 - Do not add new facts or extend the discussion.
 - Keep `interjection_text` to at most {{ max_interjection_words }} words.
 - Do not emit placeholder objects for turns that stay false.
+
+Examples:
+- Good `echo_agreement`
+  Host phrase: `that changed everything for me`
+  Good anchor / interjection: `changed everything`
+  Why good: short, emphatic, and natural for the listener to mirror.
+- Good `echo_agreement`
+  Host phrase: `the whole thing fell apart`
+  Good anchor / interjection: `fell apart`
+  Why good: vivid and repeatable without borrowing the host's personal perspective.
+- Good `echo_agreement`
+  Host phrase: `the dam broke and everything came pouring out`
+  Good anchor / interjection: `dam broke`
+  Why good: vivid, quotable, and still natural for the listener to repeat as agreement.
+- Good `echo_agreement`
+  Host phrase: `it all came back to the music`
+  Good anchor / interjection: `back to the music`
+  Why good: it keeps the strongest content words while dropping extra host framing.
+- Good `echo_agreement`
+  Host phrase: `she handled everything perfectly`
+  Good anchor / interjection: `handled everything perfectly`
+  Why good: it mirrors the quotable core without turning into a new listener sentence.
+- Bad `echo_agreement`
+  Bad anchor / interjection: `and then I`
+  Why bad: it ends in a cut-off clause instead of a complete overlap.
+- Bad `echo_agreement`
+  Bad anchor / interjection: `my situation at home`
+  Why bad: it borrows the host's first-person perspective and sounds unnatural for the listener to say back.
+- Bad `echo_agreement`
+  Bad anchor / interjection: `She handled it perfectly.`
+  Why bad: it paraphrases the host into a fresh sentence instead of echoing the anchor's core phrase.
+- Bad `echo_agreement`
+  Bad anchor / interjection: `about`
+  Why bad: one weak word is not a natural echo on its own.
+- Better choice for that case
+  Style: `backchannel`
+  Interjection: `Right.`

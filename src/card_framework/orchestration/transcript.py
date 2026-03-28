@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, TypeAlias
 
+from card_framework.audio_pipeline.emotion_vectors import serialize_emotion_vector
+
 
 @dataclass(slots=True, frozen=True)
 class TranscriptSegment:
@@ -83,16 +85,54 @@ class Transcript:
 
     def to_full_text(self) -> str:
         """Render the transcript in prompt-friendly speaker/text form."""
-        return "".join(
-            f"[{segment.speaker}]: {segment.text}\n" for segment in self.segments
-        )
+        lines: list[str] = []
+        for segment in self.segments:
+            affect_hint = str(segment.extras.get("affect_hint", "")).strip()
+            emotion_vector = serialize_emotion_vector(segment.extras.get("emotion_vector"))
+            emotion_vector_text = (
+                ", ".join(f"{value:.3f}" for value in emotion_vector)
+                if emotion_vector is not None
+                else ""
+            )
+            if affect_hint:
+                prefix = f"[{segment.speaker}] [affect: {affect_hint}]"
+                if emotion_vector_text:
+                    prefix += f" [emotion_vector: {emotion_vector_text}]"
+                lines.append(
+                    f"{prefix}: {segment.text}\n"
+                )
+                continue
+            if emotion_vector_text:
+                lines.append(
+                    f"[{segment.speaker}] [emotion_vector: {emotion_vector_text}]: {segment.text}\n"
+                )
+                continue
+            lines.append(f"[{segment.speaker}]: {segment.text}\n")
+        return "".join(lines)
 
-    def retrieval_segments(self) -> list[dict[str, str]]:
+    def retrieval_segments(self) -> list[dict[str, Any]]:
         """Build retrieval DTO payload segments used for indexing."""
-        return [
-            {"speaker": segment.speaker, "text": segment.text}
-            for segment in self.segments
-        ]
+        payloads: list[dict[str, Any]] = []
+        for segment in self.segments:
+            payload = {"speaker": segment.speaker, "text": segment.text}
+            affect_hint = str(segment.extras.get("affect_hint", "")).strip()
+            if affect_hint:
+                payload["affect_hint"] = affect_hint
+            suggested_emo_preset = str(
+                segment.extras.get("suggested_emo_preset", "")
+            ).strip()
+            if suggested_emo_preset:
+                payload["suggested_emo_preset"] = suggested_emo_preset
+            emotion_vector = serialize_emotion_vector(segment.extras.get("emotion_vector"))
+            if emotion_vector is not None:
+                payload["emotion_vector"] = emotion_vector
+            emotion_vector_source = str(
+                segment.extras.get("emotion_vector_source", "")
+            ).strip()
+            if emotion_vector_source:
+                payload["emotion_vector_source"] = emotion_vector_source
+            payloads.append(payload)
+        return payloads
 
     def with_metadata(self, metadata: Mapping[str, Any]) -> "Transcript":
         """Return a copy with replaced metadata."""

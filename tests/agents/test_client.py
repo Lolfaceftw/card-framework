@@ -322,3 +322,13 @@ def test_agent_client_allows_explicit_sporc_pool_timeout_override() -> None:
     assert client._pool_timeout_seconds == 5.0
     assert timeout.connect == 5.0
     assert timeout.pool == 5.0
+
+
+def test_agent_client_honors_explicit_long_request_timeout() -> None:
+    """Allow benchmark timeout flags above the default request timeout."""
+    client = AgentClient()
+
+    timeout = client._build_http_timeout(300.0)
+
+    assert timeout.connect == 5.0
+    assert timeout.pool == 300.0

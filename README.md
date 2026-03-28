@@ -135,6 +135,8 @@ Other important locations:
 - `artifacts/`: generated transcripts, cloned audio, benchmark outputs, and
   other runtime artifacts
 - `checkpoints/`: local model/runtime checkpoints
+- `compose.yml`: Docker Compose operator workflow centered on `setup_and_run`
+- `Dockerfile`: base container runtime used by the Compose services
 - `conf/config.yaml`: canonical human-edited runtime config for source checkouts
 - `src/card_framework/config/config.yaml`: packaged fallback config bundled into
   the installed distribution
@@ -146,6 +148,8 @@ Other important locations:
 
 ```bash
 uv sync --dev
+docker compose build setup-and-run
+docker compose run --rm setup-and-run --help
 uv run python -m card_framework.cli.main --help
 uv run python -m card_framework.cli.setup_and_run --help
 uv run python -m card_framework.cli.calibrate --help
@@ -164,9 +168,48 @@ uv run pytest
 Common execution entrypoints:
 
 ```bash
+docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path <path-to-audio>
+docker compose run --rm setup-and-run --audio-path <path-to-audio>
 uv run python -m card_framework.cli.setup_and_run --audio-path <path-to-audio>
+uv run python -m card_framework.cli.setup_and_run --override selection.llm=anthropic_claude_opus --audio-path <path-to-audio>
+uv run python -m card_framework.cli.setup_and_run --audio-path <episode-a.mp3> --audio-path <episode-b.mp3>
+uv run python -m card_framework.cli.setup_and_run --audio-path <episode-a.mp3> --audio-path <episode-b.mp3> --duration-sweep
 uv run python -m card_framework.cli.main
 uv run python -m card_framework.cli.calibrate
+```
+
+Prefer the Docker Compose path for repo-local runtime launches. If Docker can
+expose CUDA, use `docker compose --profile gpu run --rm setup-and-run-gpu ...`;
+otherwise use `setup-and-run`. Both runtime services are capped in
+`compose.yml` at about `8 GB` RAM plus `2 GB` swap.
+
+Running `uv run python -m card_framework.cli.setup_and_run` with no explicit
+run inputs now opens an interactive menu by default. Use that menu to choose
+the run mode, pick the LLM/embedding profiles, toggle voice clone/interjector
+stages, and provide audio, transcript, summary, or resume inputs. Pass
+`--no-menu` when you want the old flag-only behavior directly.
+
+Repeating `--audio-path` now runs a sequential stage-1 batch sweep. By
+default each input writes its own isolated artifacts under
+`artifacts/pipeline_batches/<timestamp>/`, and the wrapper records the overall
+ledger in `batch_manifest.json` at that batch root.
+
+`--duration-sweep` adds a faster multi-duration mode on top of those audio
+inputs. The wrapper now boots each episode once, reuses the cached transcript
+for later targets, and fans out `30s`, `1m`, and `5m` summaries under
+`artifacts/pipeline_duration_sweeps/<timestamp>/` unless you pass an explicit
+`--output-root`. Completed preset folders are reused on reruns instead of being
+regenerated.
+
+The main pipeline can now use Anthropic directly through the shared runtime
+profiles with `selection.llm=anthropic_claude_opus`. That profile targets
+`claude-opus-4-6` and reads `ANTHROPIC_API_KEY` from `.env` or the shell.
+
+Interrupted wrapper runs now print a UUID `session_id` and can be resumed from
+the next incomplete stage with:
+
+```bash
+uv run python -m card_framework.cli.setup_and_run --resume-session <session-id>
 ```
 
 These runtime entrypoints now emit timed `Loading ...` and
@@ -181,6 +224,27 @@ also emits timed Demucs loading/status lines and the same first-run ETA
 behavior, while long source files are separated in bounded outer windows so RAM
 does not scale with the full recording length.
 
+## Docker Workflow
+
+The repository now includes a Docker operator path centered on
+`card_framework.cli.setup_and_run`.
+
+- Prefer the Compose workflow for repo-local runtime launches.
+- Use `docker compose --profile gpu run --rm setup-and-run-gpu ...` when
+  Docker can expose CUDA or NVIDIA devices.
+- Use `docker compose run --rm setup-and-run ...` when the host is CPU-only or
+  Docker cannot expose CUDA.
+- The Compose services bind-mount the repo checkout, reuse `conf/config.yaml`
+  and `.env`, and isolate the Linux `.venv` directories into Docker volumes so
+  the host checkout does not get container-built virtual environments.
+- The Compose services are capped at about `8 GB` RAM plus `2 GB` swap through
+  `mem_limit: 8g` and `memswap_limit: 10g`.
+- For real run validation, do not rely only on the terminal stream; inspect
+  persisted logs and sample RAM plus GPU telemetry too.
+
+For the full command set, host caveats, and Windows + NeMo guidance, see
+[`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md).
+
 ## Configuration
 
 The repository now uses a small selector-based config instead of a long
@@ -190,6 +254,8 @@ comment-and-uncomment provider block.
 - Keep real secrets in `.env`, not in tracked YAML files.
 - Copy `.env.example` to `.env` and fill only the provider keys you actually
   use.
+- The Docker Compose workflow also loads that same `.env` file and uses the
+  repo-root `conf/config.yaml` from the bind-mounted checkout.
 - Long stage-1 separations now default to `audio.separation.window_length_seconds=600`
   with `audio.separation.window_context_seconds=5` so Demucs works on bounded
   outer windows before stitching the vocals stem back together.
@@ -284,9 +350,10 @@ a SQLite session database under
 `artifacts/summarizer_critic_benchmark/sporc_human_sampling`, and resumes a
 paused session by UUID after `Ctrl+C`.
 The new `llm-sample` subcommand runs an Anthropic-backed automatic sampler over
-that same curated manifest prefix: it keeps the same per-episode word-budget
-formula, sends the whole transcript in one pass, streams summarized thinking
-plus the structured sample payload through the Rich callback path, and persists
+that same curated manifest prefix: it uses the duration preset as the primary
+local selection budget, sends the whole transcript in one pass, streams
+summarized thinking plus the structured sample payload through the Rich callback
+path, and persists
 run-level JSONL, CSV, and per-episode request/stream/response traces under
 `artifacts/summarizer_critic_benchmark/sporc_llm_sampling`. It currently reads
 `ANTHROPIC_API_KEY` from `.env` and defaults to `claude-opus-4-6` with adaptive
@@ -298,9 +365,14 @@ selection output. The prompt now explicitly favors readable reviewer-facing
 segments: it asks the model to preserve what the speaker said, including
 disfluencies, while lightly cleaning up only transcript formatting noise such
 as fragmentation, spacing, and punctuation so the result stays understandable
-to a human reviewer. It no longer rejects runs just because Anthropic chooses
-to skip or include extra prose around that tool call. If you pass
-`--disable-thinking`, it disables Anthropic thinking and sends `temperature=0.0`.
+to a human reviewer. The local duration tool now returns the measured total plus
+remaining seconds to target and a budget recommendation after each proposed span
+set. It no longer rejects runs just because Anthropic chooses to skip or include
+extra prose around that tool call. If you pass `--disable-thinking`, it disables
+Anthropic thinking and sends `temperature=0.0`. If you point `--dataset-manifest`
+at an `episode_assets/prepared_episodes_manifest.json` summary, the sampler now
+reads those prepared transcript paths directly instead of re-entering stage-1
+unless you explicitly add `--transcribe-enabled`.
 If you pass `--select-episode "[7,10]"`, `llm-sample` runs only manifest
 episodes `7` through `10` inclusive instead of the default manifest prefix.
 The new `duration-sweep` subcommand exposes a non-interactive menu plus
@@ -472,6 +544,8 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
   manuscript
 - [`CONFIG.MD`](./CONFIG.MD): runtime config, `.env`, provider profiles, and
   common configuration examples
+- [`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md):
+  containerized `setup_and_run` workflow and Docker commands
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current
   architecture, runtime flow, commands, and maintenance expectations
 - [`AGENTS.md`](./AGENTS.md): compact agent entrypoint that routes developers to

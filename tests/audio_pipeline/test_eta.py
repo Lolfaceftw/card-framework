@@ -1,5 +1,6 @@
 ﻿from pathlib import Path
 import json
+import sqlite3
 
 import pytest
 
@@ -9,6 +10,12 @@ from card_framework.audio_pipeline.eta import (
     StageSpeedProfile,
     StageProgressUpdate,
     format_eta_seconds,
+)
+from card_framework.audio_pipeline.contracts import (
+    DiarizationTurn,
+    TimedTextSegment,
+    TranscriptSegment,
+    TranscriptionResult,
 )
 from card_framework.audio_pipeline.orchestrator import AudioToScriptOrchestrator
 
@@ -127,7 +134,7 @@ def test_linear_eta_strategy_profile_round_trip(tmp_path: Path) -> None:
         elapsed_seconds=21.0,
     )
 
-    profile_path = tmp_path / "eta_profile.json"
+    profile_path = tmp_path / "eta_history.sqlite3"
     strategy.save_profile(profile_path)
 
     reloaded = LinearStageEtaStrategy(
@@ -148,6 +155,126 @@ def test_linear_eta_strategy_profile_round_trip(tmp_path: Path) -> None:
     )
     assert estimate == 15.0
     assert unit_estimate == 21.0
+
+
+def test_linear_eta_strategy_sqlite_round_trip_replays_history(tmp_path: Path) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+    context = {
+        "device": "cuda",
+        "separator": "DemucsSourceSeparator",
+        "separator_model": "htdemucs",
+        "transcriber": "GraniteSpeechTranscriber",
+        "transcriber_model": "ibm-granite/granite-4.0-1b-speech",
+        "diarizer": "NemoSpeakerDiarizer",
+        "diarizer_model": "diar_msdd_telephonic",
+    }
+
+    strategy.observe_stage_duration(
+        stage="separation",
+        audio_duration_ms=5_000,
+        elapsed_seconds=10.0,
+        device="cuda",
+    )
+    strategy.observe_unit_stage_duration(
+        stage="voice_clone",
+        total_units=2,
+        elapsed_seconds=6.0,
+    )
+    strategy.save_profile(profile_path, context=context)
+
+    reloaded = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    reloaded.load_profile(profile_path, context=context)
+    assert reloaded.estimate_total_seconds(
+        stage="separation",
+        audio_duration_ms=5_000,
+        device="cuda",
+    ) == 10.0
+    assert reloaded.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    ) == 6.0
+
+    reloaded.observe_stage_duration(
+        stage="separation",
+        audio_duration_ms=5_000,
+        elapsed_seconds=20.0,
+        device="cuda",
+    )
+    reloaded.observe_unit_stage_duration(
+        stage="voice_clone",
+        total_units=2,
+        elapsed_seconds=10.0,
+    )
+    reloaded.save_profile(profile_path, context=context)
+
+    replayed = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    replayed.load_profile(profile_path, context=context)
+
+    assert replayed.estimate_total_seconds(
+        stage="separation",
+        audio_duration_ms=5_000,
+        device="cuda",
+    ) == 15.0
+    assert replayed.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    ) == 8.0
+    assert replayed.observed_throughput[("separation", "cuda")].samples == 2
+    assert replayed.observed_unit_throughput["voice_clone"].samples == 2
+
+
+def test_linear_eta_strategy_sqlite_records_timestamped_observations(tmp_path: Path) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=12.5,
+        device="cpu",
+    )
+    strategy.save_profile(profile_path, context={"transcriber_model": "granite"})
+
+    connection = sqlite3.connect(str(profile_path))
+    try:
+        row = connection.execute(
+            """
+            SELECT stage_type, stage_name, device, elapsed_seconds, observed_value, observed_at_utc
+            FROM eta_observations
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert row is not None
+    assert row[0] == "audio"
+    assert row[1] == "transcription"
+    assert row[2] == "cpu"
+    assert row[3] == pytest.approx(12.5)
+    assert row[4] == pytest.approx(1.25)
+    assert isinstance(row[5], str)
+    assert "T" in row[5]
+    assert row[5].endswith("+00:00")
 
 
 def test_linear_eta_strategy_ignores_context_mismatch(tmp_path: Path) -> None:
@@ -183,6 +310,115 @@ def test_linear_eta_strategy_ignores_context_mismatch(tmp_path: Path) -> None:
         device="cuda",
     )
     assert estimate == 1.0
+
+
+def test_linear_eta_strategy_replays_multiple_sqlite_observations_with_ema(
+    tmp_path: Path,
+) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=20.0,
+        device="cuda",
+    )
+    strategy.save_profile(profile_path, context={"transcriber_model": "granite"})
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=10.0,
+        device="cuda",
+    )
+    strategy.save_profile(profile_path, context={"transcriber_model": "granite"})
+
+    reloaded = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        learning_rate=0.5,
+    )
+    reloaded.load_profile(profile_path, context={"transcriber_model": "granite"})
+
+    estimate = reloaded.estimate_total_seconds(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        device="cuda",
+    )
+    assert estimate == 15.0
+    assert reloaded.observed_throughput[("transcription", "cuda")].samples == 2
+
+
+def test_linear_eta_strategy_scopes_unit_stage_history_independently_from_audio_stack(
+    tmp_path: Path,
+) -> None:
+    strategy = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+    profile_path = tmp_path / "eta_history.sqlite3"
+
+    strategy.observe_stage_duration(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        elapsed_seconds=20.0,
+        device="cuda",
+    )
+    strategy.save_profile(
+        profile_path,
+        context={
+            "transcriber_model": "granite",
+            "voice_clone_provider": "indextts",
+            "voice_clone_device": "cuda",
+            "voice_clone_execution_backend": "subprocess",
+        },
+    )
+    strategy.observe_unit_stage_duration(
+        stage="voice_clone",
+        total_units=2,
+        elapsed_seconds=60.0,
+    )
+    strategy.save_profile(
+        profile_path,
+        context={
+            "transcriber_model": "granite",
+            "voice_clone_provider": "indextts",
+            "voice_clone_device": "cuda",
+            "voice_clone_execution_backend": "subprocess",
+        },
+    )
+
+    reloaded = LinearStageEtaStrategy(
+        separation=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        transcription=StageSpeedProfile(cpu=1.0, cuda=1.0),
+        diarization=StageSpeedProfile(cpu=1.0, cuda=1.0),
+    )
+    reloaded.load_profile(
+        profile_path,
+        context={
+            "transcriber_model": "different-model",
+            "voice_clone_provider": "indextts",
+            "voice_clone_device": "cuda",
+            "voice_clone_execution_backend": "subprocess",
+        },
+    )
+
+    assert reloaded.estimate_total_seconds(
+        stage="transcription",
+        audio_duration_ms=10_000,
+        device="cuda",
+    ) == 10.0
+    assert reloaded.estimate_unit_stage_total_seconds(
+        stage="voice_clone",
+        total_units=2,
+    ) == 60.0
 
 
 def test_linear_eta_strategy_validates_learning_bounds() -> None:
@@ -446,4 +682,129 @@ def test_audio_orchestrator_uses_default_eta_without_history(
         message.startswith(f"Audio stage: {stage} {note}; estimated time left ")
         for message in status_messages
     )
+
+
+def test_audio_orchestrator_releases_stage_models_between_transcription_and_diarization(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Release transcriber resources before diarization and diarizer resources after use."""
+
+    class _FakeSeparator:
+        def __init__(self, vocals_path: Path) -> None:
+            self.vocals_path = vocals_path
+
+        def separate_vocals(
+            self,
+            *,
+            input_audio_path: Path,
+            output_dir: Path,
+            device: str,
+            progress_callback=None,
+        ) -> Path:
+            del input_audio_path, output_dir, device, progress_callback
+            self.vocals_path.parent.mkdir(parents=True, exist_ok=True)
+            self.vocals_path.write_bytes(b"vocals")
+            return self.vocals_path
+
+    class _FakeTranscriber:
+        def __init__(self, release_order: list[str]) -> None:
+            self.release_order = release_order
+
+        def transcribe(
+            self,
+            audio_path: Path,
+            *,
+            device: str,
+            progress_callback=None,
+        ) -> TranscriptionResult:
+            del audio_path, device, progress_callback
+            return TranscriptionResult(
+                segments=[
+                    TimedTextSegment(
+                        start_time_ms=0,
+                        end_time_ms=1000,
+                        text="hello world",
+                    )
+                ],
+                word_timestamps=[],
+                language="en",
+            )
+
+        def release_cached_resources(self, *, device: str) -> None:
+            self.release_order.append(f"transcriber:{device}")
+
+    class _FakeDiarizer:
+        def __init__(self, release_order: list[str]) -> None:
+            self.release_order = release_order
+
+        def diarize(
+            self,
+            audio_path: Path,
+            output_dir: Path,
+            *,
+            device: str,
+            progress_callback=None,
+        ) -> list[DiarizationTurn]:
+            del audio_path, output_dir, device, progress_callback
+            assert self.release_order == ["transcriber:cuda"]
+            return [
+                DiarizationTurn(
+                    speaker="SPEAKER_00",
+                    start_time_ms=0,
+                    end_time_ms=1000,
+                )
+            ]
+
+        def release_cached_resources(self, *, device: str) -> None:
+            self.release_order.append(f"diarizer:{device}")
+
+    release_order: list[str] = []
+    input_audio_path = tmp_path / "input.wav"
+    input_audio_path.write_bytes(b"RIFF")
+    output_transcript_path = tmp_path / "transcript.json"
+    vocals_path = tmp_path / "work" / "separation" / "vocals.wav"
+    orchestrator = AudioToScriptOrchestrator(
+        separator=_FakeSeparator(vocals_path),
+        transcriber=_FakeTranscriber(release_order),
+        diarizer=_FakeDiarizer(release_order),
+        eta_update_interval_seconds=0.0,
+    )
+
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.orchestrator.probe_audio_duration_ms",
+        lambda path: 1000,
+    )
+    monkeypatch.setattr(
+        AudioToScriptOrchestrator,
+        "_align_transcript_segments",
+        lambda self, *, asr_result, diarization_turns, warnings: (
+            [
+                TranscriptSegment(
+                    speaker="SPEAKER_00",
+                    start_time=0,
+                    end_time=1000,
+                    text="hello world",
+                )
+            ],
+            True,
+        ),
+    )
+
+    result = orchestrator.run(
+        input_audio_path=input_audio_path,
+        output_transcript_path=output_transcript_path,
+        work_dir=tmp_path / "work",
+        device="cuda",
+    )
+
+    assert result.segment_count == 1
+    assert release_order[:2] == ["transcriber:cuda", "diarizer:cuda"]
+    assert result.transcript_payload["metadata"]["diarization_turns"] == [
+        {
+            "speaker": "SPEAKER_00",
+            "start_time": 0,
+            "end_time": 1000,
+        }
+    ]
 

@@ -3,7 +3,9 @@ Decide which eligible host turns below should receive an overlap.
 Use `echo_agreement` when the next speaker would naturally agree while the host phrase is still being spoken.
 Use `backchannel` when a short response should land just after the anchor phrase.
 If neither is natural, omit that turn entirely.
-The preferred anchor token window for each turn approximates the valid {{ min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of that host turn. Stay inside it.
+The preferred backchannel anchor window for each turn approximates the valid {{ min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of that host turn.
+The preferred echo anchor window for each turn approximates the valid {{ echo_min_host_progress_percent }}%-{{ max_host_progress_percent }}% portion of that host turn.
+Stay inside the correct window for the style you choose.
 
 Eligible turns:
 {{ eligible_turns_block }}

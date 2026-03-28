@@ -27,7 +27,12 @@ _ENV_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
         "HUGGINGFACE_TOKEN",
         "HUGGINGFACEHUB_API_TOKEN",
     ),
-    ("VLLM_URL", "CARD_FRAMEWORK_VLLM_URL", "VLLM_BASE_URL"),
+    (
+        "VLLM_URL",
+        "CARD_FRAMEWORK_VLLM_URL",
+        "CARD_FRAMEWORK_VLLM_BASE_URL",
+        "VLLM_BASE_URL",
+    ),
     ("VLLM_API_KEY", "CARD_FRAMEWORK_VLLM_API_KEY"),
     ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     ("ZAI_API_KEY", "GLM_API_KEY"),

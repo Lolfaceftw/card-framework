@@ -128,6 +128,16 @@ class SpeakerSampleManifest(TypedDict):
     samples: list[SpeakerSampleManifestEntry]
 
 
+@dataclass(slots=True, frozen=True)
+class _NormalizedTranscriptSegment:
+    """Internal normalized transcript segment used during slice planning."""
+
+    speaker: str
+    start_time_ms: int
+    end_time_ms: int
+    overlap_marked: bool
+
+
 @runtime_checkable
 class SpeakerSampleExporter(Protocol):
     """Port interface for rendering speaker-sample audio files."""
@@ -360,6 +370,15 @@ def build_speaker_sample_plans(
     """
     Build per-speaker concatenation plans from transcript segment timings.
 
+    When raw diarization turns are available, they are preferred over transcript
+    segments so speaker samples come from direct speaker timing rather than text
+    alignment. In that mode, only solo speech is kept by subtracting all
+    cross-speaker overlap and allowing shorter-than-requested outputs. Without
+    diarization turns, SPoRC and other transcripts that explicitly carry overlap
+    uncertainty still get overlap-aware trimming, while standard stage-one
+    transcripts keep the legacy behavior unless they include explicit overlap
+    markers.
+
     Args:
         transcript_payload: Transcript payload with `segments`.
         target_duration_ms: Requested duration per speaker sample.
@@ -400,30 +419,63 @@ def build_speaker_sample_plans(
             "Transcript payload is invalid: 'segments' must be a list."
         )
 
-    speaker_slices: dict[str, list[AudioSlice]] = {}
-    normalized_segments = sorted(
-        (
-            _extract_segment_bounds(segment)
-            for segment in segments
-            if isinstance(segment, Mapping)
-        ),
-        key=lambda item: item[1],
+    raw_segments = [segment for segment in segments if isinstance(segment, Mapping)]
+    raw_diarization_turns = _extract_diarization_turns(transcript_payload)
+    use_diarization_turns = bool(raw_diarization_turns)
+    overlap_isolation_enabled = use_diarization_turns or _should_apply_overlap_isolation(
+        transcript_payload=transcript_payload,
+        segments=raw_segments,
     )
+    speaker_slices: dict[str, list[AudioSlice]] = {}
+    overlap_fallback_slices: dict[str, list[AudioSlice]] = {}
+    normalized_segments = sorted(
+        [
+            _extract_diarization_turn_record(turn)
+            for turn in raw_diarization_turns
+        ]
+        if use_diarization_turns
+        else [_extract_segment_record(segment) for segment in raw_segments],
+        key=lambda item: item.start_time_ms,
+    )
+    speaker_order: list[str] = []
+    seen_speakers: set[str] = set()
 
-    for speaker, start_time, end_time in normalized_segments:
-        if end_time <= start_time:
+    for segment in normalized_segments:
+        if segment.speaker not in seen_speakers:
+            speaker_order.append(segment.speaker)
+            seen_speakers.add(segment.speaker)
+        if segment.end_time_ms <= segment.start_time_ms:
             continue
-        speaker_slices.setdefault(speaker, []).append(
-            AudioSlice(start_time_ms=start_time, end_time_ms=end_time)
+        clean_slices = _build_clean_slices_for_segment(
+            segment=segment,
+            all_segments=normalized_segments,
+            subtract_cross_speaker_overlap=overlap_isolation_enabled,
         )
+        if not clean_slices:
+            continue
+        target_pool = (
+            overlap_fallback_slices
+            if (
+                not use_diarization_turns
+                and overlap_isolation_enabled
+                and segment.overlap_marked
+            )
+            else speaker_slices
+        )
+        target_pool.setdefault(segment.speaker, []).extend(clean_slices)
 
-    if not speaker_slices:
+    if not speaker_slices and not overlap_fallback_slices:
         raise NonRetryableAudioStageError(
             "Speaker sample generation requires transcript segments with valid timings."
         )
 
     plans: list[SpeakerSamplePlan] = []
-    for speaker, slices in speaker_slices.items():
+    for speaker in speaker_order:
+        slices = speaker_slices.get(speaker)
+        if not slices:
+            slices = overlap_fallback_slices.get(speaker, [])
+        if not slices:
+            continue
         compacted = _compact_slices(slices)
         pool = _resolve_speaker_slice_pool(
             speaker=speaker,
@@ -471,7 +523,83 @@ def build_speaker_sample_plans(
                 slices=tuple(selected_slices),
             )
         )
+    if not plans:
+        raise NonRetryableAudioStageError(
+            "Speaker sample generation could not find any clean per-speaker slices."
+        )
     return plans
+
+
+def _build_clean_slices_for_segment(
+    *,
+    segment: _NormalizedTranscriptSegment,
+    all_segments: Sequence[_NormalizedTranscriptSegment],
+    subtract_cross_speaker_overlap: bool,
+) -> tuple[AudioSlice, ...]:
+    """Return contamination-trimmed slices for one speaker segment."""
+    base_slice = AudioSlice(
+        start_time_ms=segment.start_time_ms,
+        end_time_ms=segment.end_time_ms,
+    )
+    if not subtract_cross_speaker_overlap:
+        return (base_slice,)
+    blocked: list[AudioSlice] = []
+    for other in all_segments:
+        if other.start_time_ms >= segment.end_time_ms:
+            break
+        if other.speaker == segment.speaker:
+            continue
+        overlap_start_ms = max(segment.start_time_ms, other.start_time_ms)
+        overlap_end_ms = min(segment.end_time_ms, other.end_time_ms)
+        if overlap_end_ms <= overlap_start_ms:
+            continue
+        blocked.append(
+            AudioSlice(
+                start_time_ms=overlap_start_ms,
+                end_time_ms=overlap_end_ms,
+            )
+        )
+    return _subtract_intervals(base_slice=base_slice, blocked_slices=blocked)
+
+
+def _subtract_intervals(
+    *,
+    base_slice: AudioSlice,
+    blocked_slices: Sequence[AudioSlice],
+) -> tuple[AudioSlice, ...]:
+    """Subtract blocked intervals from one candidate slice."""
+    if not blocked_slices:
+        return (base_slice,)
+    blocked = _compact_slices(blocked_slices)
+    remaining: list[AudioSlice] = []
+    cursor_ms = base_slice.start_time_ms
+    for blocked_slice in blocked:
+        if blocked_slice.end_time_ms <= cursor_ms:
+            continue
+        if blocked_slice.start_time_ms >= base_slice.end_time_ms:
+            break
+        interval_start_ms = max(cursor_ms, base_slice.start_time_ms)
+        interval_end_ms = min(blocked_slice.start_time_ms, base_slice.end_time_ms)
+        if interval_end_ms > interval_start_ms:
+            remaining.append(
+                AudioSlice(
+                    start_time_ms=interval_start_ms,
+                    end_time_ms=interval_end_ms,
+                )
+            )
+        cursor_ms = max(cursor_ms, blocked_slice.end_time_ms)
+        if cursor_ms >= base_slice.end_time_ms:
+            break
+    if cursor_ms < base_slice.end_time_ms:
+        remaining.append(
+            AudioSlice(
+                start_time_ms=max(cursor_ms, base_slice.start_time_ms),
+                end_time_ms=base_slice.end_time_ms,
+            )
+        )
+    return tuple(
+        time_slice for time_slice in remaining if time_slice.duration_ms > 0
+    )
 
 
 def _resolve_speaker_slice_pool(
@@ -656,6 +784,108 @@ def _extract_segment_bounds(segment: Mapping[str, Any]) -> tuple[str, int, int]:
     start_time = _coerce_milliseconds(segment.get("start_time"), field_name="start_time")
     end_time = _coerce_milliseconds(segment.get("end_time"), field_name="end_time")
     return speaker, start_time, end_time
+
+
+def _extract_segment_record(
+    segment: Mapping[str, Any],
+) -> _NormalizedTranscriptSegment:
+    """Extract speaker, timings, and overlap flags from one transcript segment."""
+    speaker, start_time, end_time = _extract_segment_bounds(segment)
+    overlap_marked = _segment_has_marked_overlap(segment)
+    return _NormalizedTranscriptSegment(
+        speaker=speaker,
+        start_time_ms=start_time,
+        end_time_ms=end_time,
+        overlap_marked=overlap_marked,
+    )
+
+
+def _extract_diarization_turns(
+    transcript_payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Return persisted diarization turns when the transcript carries them."""
+    for raw_value in (
+        transcript_payload.get("diarization_turns"),
+        transcript_payload.get("metadata", {}).get("diarization_turns")
+        if isinstance(transcript_payload.get("metadata"), Mapping)
+        else None,
+    ):
+        if not isinstance(raw_value, Sequence) or isinstance(raw_value, (str, bytes)):
+            continue
+        turns = tuple(
+            item for item in raw_value if isinstance(item, Mapping)
+        )
+        if turns:
+            return turns
+    return ()
+
+
+def _extract_diarization_turn_record(
+    turn: Mapping[str, Any],
+) -> _NormalizedTranscriptSegment:
+    """Extract speaker and timings from one persisted diarization turn."""
+    speaker = str(turn.get("speaker", "")).strip()
+    if not speaker:
+        raise NonRetryableAudioStageError(
+            "Persisted diarization turn is missing a non-empty speaker label."
+        )
+    start_time = _coerce_milliseconds(turn.get("start_time"), field_name="start_time")
+    end_time = _coerce_milliseconds(turn.get("end_time"), field_name="end_time")
+    return _NormalizedTranscriptSegment(
+        speaker=speaker,
+        start_time_ms=start_time,
+        end_time_ms=end_time,
+        overlap_marked=False,
+    )
+
+
+def _should_apply_overlap_isolation(
+    *,
+    transcript_payload: Mapping[str, Any],
+    segments: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Return whether overlap-aware sample trimming should be enabled."""
+    metadata = transcript_payload.get("metadata")
+    if isinstance(metadata, Mapping):
+        dataset = str(metadata.get("dataset", "")).strip().lower()
+        if dataset == "sporc" or dataset.startswith("sporc_"):
+            return True
+        speaker_normalization = metadata.get("speaker_normalization")
+        if isinstance(speaker_normalization, Mapping):
+            mode = str(speaker_normalization.get("mode", "")).strip().lower()
+            assignment_mode = str(
+                speaker_normalization.get("speaker_assignment_mode", "")
+            ).strip().lower()
+            if (
+                mode == "transcript_only_benchmark"
+                or assignment_mode == "raw_with_uncertainty"
+            ):
+                return True
+    return any(_segment_has_marked_overlap(segment) for segment in segments)
+
+
+def _segment_has_marked_overlap(segment: Mapping[str, Any]) -> bool:
+    """Return whether the segment already carries overlap or uncertainty markers."""
+    for key in ("raw_overlap_speakers", "overlap_speakers"):
+        value = segment.get(key)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            if any(str(item).strip() for item in value):
+                return True
+    speaker_candidates = segment.get("speaker_candidates")
+    if isinstance(speaker_candidates, Sequence) and not isinstance(
+        speaker_candidates, (str, bytes)
+    ):
+        distinct_candidates = {
+            str(candidate).strip()
+            for candidate in speaker_candidates
+            if str(candidate).strip()
+        }
+        if len(distinct_candidates) > 1:
+            return True
+    speaker_uncertain = segment.get("speaker_uncertain")
+    if isinstance(speaker_uncertain, bool):
+        return speaker_uncertain
+    return False
 
 
 def _coerce_milliseconds(value: Any, *, field_name: str) -> int:

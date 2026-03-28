@@ -33,6 +33,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     DEFAULT_PREPARED_ROOT,
     DEFAULT_RAM_THRESHOLD_PERCENT,
     DEFAULT_REFERENCE_WPM,
+    DEFAULT_RUNS_ROOT,
     DEFAULT_SUPERVISOR_ROOT,
     DEFAULT_SWEEP_ROOT,
     BenchmarkExecutionReport,
@@ -53,7 +54,7 @@ from card_framework.shared.perf import (
     measure_elapsed_time,
     report_loading_duration,
 )
-from card_framework.shared.paths import REPO_ROOT
+from card_framework.shared.paths import DEFAULT_CONFIG_PATH, REPO_ROOT
 
 
 _DATASET_HELPERS: tuple[object, object] | None = None
@@ -92,6 +93,7 @@ class _DurationSweepChildState:
     checkpoint_path: Path
     output_root: Path
     shared_sample_queue_root: Path | None = None
+    retrieval_namespace: str = "default"
     shard_index: int = 1
     shard_count: int = 1
     sample_count: int | None = None
@@ -105,6 +107,7 @@ class _DurationSweepChildState:
     last_activity_age_seconds: float | None = None
     restart_count: int = 0
     recovered_stall_count: int = 0
+    launched_at_unix_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -120,6 +123,15 @@ class _DurationSweepPresetState:
     completed_child_summaries: dict[int, DurationSweepPresetSummary] = field(
         default_factory=dict
     )
+
+
+@dataclass(slots=True)
+class _SharedSweepRetrievalService:
+    """Track one parent-owned retrieval service shared across sweep workers."""
+
+    port: int
+    server: object
+    registry: object
 
 
 @dataclass(slots=True, frozen=True)
@@ -410,6 +422,16 @@ def _build_parser(
         "--audit-path",
         default=str(DEFAULT_LONGFORM_AUDIT_PATH),
     )
+    curate_longform.add_argument(
+        "--max-speakers",
+        type=int,
+        default=0,
+        help=(
+            "Optional inclusive upper bound for unique speaker count in the "
+            "filtered manifest. Uses precomputed manifest stats when available "
+            "and reuses an unchanged filtered output when possible."
+        ),
+    )
 
     dedupe_manifest = subparsers.add_parser(
         "dedupe-manifest",
@@ -423,6 +445,55 @@ def _build_parser(
         "--audit-path",
         default="",
         help="Optional audit JSON path. Defaults to a sibling *.dedupe_audit.json file.",
+    )
+
+    filter_audio_urls = subparsers.add_parser(
+        "filter-audio-urls",
+        help="Filter a prepared SPoRC manifest down to reachable source-audio URLs",
+    )
+    filter_audio_urls.add_argument(
+        "--manifest-path",
+        default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
+    )
+    filter_audio_urls.add_argument(
+        "--output-manifest",
+        default="",
+        help="Optional output manifest path. Defaults to rewriting the input in place.",
+    )
+    filter_audio_urls.add_argument(
+        "--audit-path",
+        default="",
+        help="Optional audit JSON path. Defaults to a sibling *.audio_url_audit.json file.",
+    )
+    filter_audio_urls.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=10.0,
+        help="Per-request timeout in seconds for remote URL probes.",
+    )
+    filter_audio_urls.add_argument(
+        "--max-workers",
+        type=int,
+        default=8,
+        help="Maximum concurrent URL probes. Defaults to 8.",
+    )
+    filter_audio_urls.add_argument(
+        "--max-workers-per-host",
+        type=int,
+        default=2,
+        help="Maximum concurrent URL probes against the same host. Defaults to 2.",
+    )
+    filter_audio_urls.add_argument(
+        "--max-retries",
+        type=int,
+        default=1,
+        help="Additional retries for transient remote probe failures. Defaults to 1.",
+    )
+    filter_audio_urls.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=0.5,
+        help="Base backoff in seconds between transient probe retries. Defaults to 0.5.",
     )
 
     export_transcripts = subparsers.add_parser(
@@ -479,7 +550,7 @@ def _build_parser(
     human_sample.add_argument("--resume-session", default="")
     human_sample.add_argument(
         "--duration-preset",
-        choices=("30s", "1m", "5m"),
+        choices=("30s", "1m", "5m", "10m"),
         default="",
     )
     human_sample.add_argument("--episodes", type=int, default=0)
@@ -496,12 +567,18 @@ def _build_parser(
         default=str(DEFAULT_LONGFORM_MANIFEST_PATH),
     )
     llm_sample.add_argument(
+        "--provider",
+        choices=("anthropic", "vllm"),
+        default="anthropic",
+        help="LLM provider to use for llm-sample.",
+    )
+    llm_sample.add_argument(
         "--sampling-root",
         default=str(DEFAULT_LLM_SAMPLING_ROOT),
     )
     llm_sample.add_argument(
         "--duration-preset",
-        choices=("30s", "1m", "5m"),
+        choices=("30s", "1m", "5m", "10m", "15m"),
         default="30s",
     )
     llm_sample.add_argument(
@@ -509,6 +586,40 @@ def _build_parser(
         type=int,
         default=0,
         help="Optional fixed number of samples to request per transcript. Overrides the WPM-based budget mode when greater than zero.",
+    )
+    llm_sample.add_argument(
+        "--text-only",
+        action="store_true",
+        help=(
+            "Select exact raw-transcript spans only and write combined text "
+            "artifacts instead of using reconstructed transcript snippets. "
+            "Requires --samples > 0 and ignores the duration preset for selection."
+        ),
+    )
+    llm_sample.add_argument(
+        "--transcribe-enabled",
+        action="store_true",
+        help=(
+            "Use the source episode audio as the sampler input by running the "
+            "stage-1 pipeline first: source separation, Granite ASR by default, "
+            "and the configured diarizer (NeMo by default)."
+        ),
+    )
+    llm_sample.add_argument(
+        "--audio-config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help=(
+            "Runtime config used for stage-1 source generation when "
+            "--transcribe-enabled is set."
+        ),
+    )
+    llm_sample.add_argument(
+        "--audio-device",
+        default="",
+        help=(
+            "Optional device override for the stage-1 source generation path "
+            "when --transcribe-enabled is set, for example cpu or cuda."
+        ),
     )
     llm_sample.add_argument("--episodes", type=int, default=20)
     llm_sample.add_argument(
@@ -971,16 +1082,117 @@ def _reserve_port() -> int:
         return int(handle.getsockname()[1])
 
 
-def _reserve_distinct_port_triplet(used_ports: set[int]) -> tuple[int, int, int]:
-    """Reserve three distinct localhost ports not yet used in this sweep."""
+def _reserve_distinct_ports(used_ports: set[int], count: int) -> list[int]:
+    """Reserve ``count`` distinct localhost ports not yet used in this sweep."""
     ports: list[int] = []
-    while len(ports) < 3:
+    while len(ports) < count:
         port = _reserve_port()
         if port in used_ports:
             continue
         used_ports.add(port)
         ports.append(port)
+    return ports
+
+
+def _reserve_distinct_port_triplet(used_ports: set[int]) -> tuple[int, int, int]:
+    """Reserve three distinct localhost ports not yet used in this sweep."""
+    ports = _reserve_distinct_ports(used_ports, 3)
     return ports[0], ports[1], ports[2]
+
+
+def _start_duration_sweep_shared_retrieval_service(
+    *,
+    args: argparse.Namespace,
+    used_ports: set[int],
+) -> _SharedSweepRetrievalService | None:
+    """Start one parent-owned retrieval service when embeddings are enabled."""
+    if str(getattr(args, "embedding_mode", "disabled")) != "enabled":
+        return None
+
+    from card_framework.agents.health import AgentHealthChecker
+    from card_framework.agents.retrieval import InfoRetrievalExecutor
+    from card_framework.benchmark.matrix import build_embedding_profiles
+    from card_framework.benchmark.summarizer_critic.qmsum.runner import (
+        _run_server_in_thread,
+        _stop_server,
+    )
+    from card_framework.cli.main import _build_a2a_app
+    from card_framework.retrieval.embeddings import NamespacedTranscriptIndexRegistry
+    from card_framework.shared.config_loading import load_runtime_config
+    import hydra
+    from omegaconf import OmegaConf
+
+    server: object | None = None
+    registry: object | None = None
+    port = _reserve_distinct_ports(used_ports, 1)[0]
+    try:
+        with report_loading_duration(
+            "shared duration-sweep retrieval service",
+            reporter=_emit_cli_status,
+        ):
+            base_cfg = load_runtime_config(Path(args.config).resolve())
+            embedding_profile = build_embedding_profiles(base_cfg)["enabled"]
+            embedding_provider = hydra.utils.instantiate(
+                OmegaConf.create(embedding_profile.embedding_config)
+            )
+            registry = NamespacedTranscriptIndexRegistry(
+                embedding_provider,
+                serialize_requests=True,
+                cache_dir=(DEFAULT_RUNS_ROOT.parent / "embedding_cache").resolve(),
+            )
+            retrieval_app = _build_a2a_app(
+                name="InfoRetrieval",
+                description=(
+                    "Shared duration-sweep retrieval service with one embedding model "
+                    "and namespaced transcript indices."
+                ),
+                port=port,
+                executor=InfoRetrievalExecutor(registry),
+            )
+            server = _run_server_in_thread(
+                "sporc-shared-retrieval",
+                retrieval_app,
+                port,
+            )
+            checker = AgentHealthChecker(max_retries=5, base_delay=1.0)
+            if not checker.check("InfoRetrieval", port):
+                raise RuntimeError(
+                    f"Health check failed for shared retrieval service:{port}"
+                )
+        _emit_cli_status(
+            (
+                f"Started shared retrieval service on port {port}; "
+                "embedding requests are serialized across workers."
+            )
+        )
+        return _SharedSweepRetrievalService(
+            port=port,
+            server=server,
+            registry=registry,
+        )
+    except Exception:
+        if server is not None:
+            _stop_server(server)
+        close_registry = getattr(registry, "close", None)
+        if callable(close_registry):
+            close_registry()
+        raise
+
+
+def _stop_duration_sweep_shared_retrieval_service(
+    service: _SharedSweepRetrievalService | None,
+) -> None:
+    """Stop the parent-owned shared retrieval service and release its model."""
+    if service is None:
+        return
+    from card_framework.benchmark.summarizer_critic.qmsum.runner import _stop_server
+
+    try:
+        _stop_server(service.server)
+    finally:
+        close_registry = getattr(service.registry, "close", None)
+        if callable(close_registry):
+            close_registry()
 
 
 def _build_failed_preset_summary(
@@ -1405,6 +1617,7 @@ def _launch_duration_sweep_child(
     used_ports: set[int],
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
     shared_sample_queue_root: Path | None = None,
+    shared_retrieval_port: int | None = None,
     checkpoint_path: Path | None = None,
     resume_from_checkpoint: bool = False,
     resume_failure_reason: str | None = None,
@@ -1439,9 +1652,14 @@ def _launch_duration_sweep_child(
         "a" if resume_from_checkpoint and log_path.exists() else "w",
         encoding="utf-8",
     )
-    retrieval_port, summarizer_port, critic_port = _reserve_distinct_port_triplet(
-        used_ports
-    )
+    retrieval_namespace = f"sweep-worker-{shard_index}"
+    if shared_retrieval_port is None:
+        retrieval_port, summarizer_port, critic_port = _reserve_distinct_port_triplet(
+            used_ports
+        )
+    else:
+        summarizer_port, critic_port = _reserve_distinct_ports(used_ports, 2)
+        retrieval_port = shared_retrieval_port
     child_command = _build_execute_child_command(
         args,
         duration_preset=duration_preset,
@@ -1462,6 +1680,8 @@ def _launch_duration_sweep_child(
         shared_sample_queue_root=shared_sample_queue_root,
         sample_shard_index=(1 if shared_sample_queue_root is not None else shard_index),
         sample_shard_count=(1 if shared_sample_queue_root is not None else shard_count),
+        shared_retrieval_port=shared_retrieval_port,
+        retrieval_namespace=retrieval_namespace,
     )
     log_handle.write(
         (
@@ -1473,6 +1693,7 @@ def _launch_duration_sweep_child(
         )
     )
     log_handle.flush()
+    launched_at_unix_seconds = time.time()
     try:
         process = subprocess.Popen(
             child_command,
@@ -1506,8 +1727,10 @@ def _launch_duration_sweep_child(
             getattr(args, "output_root", REPO_ROOT / "artifacts" / "sporc_runs")
         ).resolve(),
         shared_sample_queue_root=shared_sample_queue_root,
+        retrieval_namespace=retrieval_namespace,
         restart_count=restart_count,
         recovered_stall_count=recovered_stall_count,
+        launched_at_unix_seconds=launched_at_unix_seconds,
     )
     state.reader_thread = _start_duration_sweep_reader(
         state=state,
@@ -1523,6 +1746,12 @@ def _discover_report_path_from_checkpoint(
     if not state.checkpoint_path.exists():
         return None
     try:
+        checkpoint_mtime = state.checkpoint_path.stat().st_mtime
+    except OSError:
+        return None
+    if checkpoint_mtime + 1.0 < state.launched_at_unix_seconds:
+        return None
+    try:
         checkpoint_payload = json.loads(
             state.checkpoint_path.read_text(encoding="utf-8")
         )
@@ -1534,7 +1763,13 @@ def _discover_report_path_from_checkpoint(
     if not run_id:
         return None
     report_path = (state.output_root / run_id / "report.json").resolve()
-    return report_path if report_path.exists() else None
+    if not report_path.exists():
+        return None
+    try:
+        report_mtime = report_path.stat().st_mtime
+    except OSError:
+        return None
+    return report_path if report_mtime + 1.0 >= state.launched_at_unix_seconds else None
 
 
 def _stop_duration_sweep_child(
@@ -1612,6 +1847,7 @@ def _restart_duration_sweep_child(
     sweep_root: Path,
     used_ports: set[int],
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
+    shared_retrieval_port: int | None,
     reason: str,
 ) -> _DurationSweepChildState:
     """Restart one stalled preset child from its execute checkpoint."""
@@ -1633,6 +1869,7 @@ def _restart_duration_sweep_child(
         used_ports=used_ports,
         event_queue=event_queue,
         shared_sample_queue_root=state.shared_sample_queue_root,
+        shared_retrieval_port=shared_retrieval_port,
         checkpoint_path=state.checkpoint_path,
         resume_from_checkpoint=True,
         resume_failure_reason=_SWEEP_STALL_FINAL_STATUS,
@@ -1654,6 +1891,7 @@ def _launch_duration_sweep_preset(
     worker_budget: int,
     used_ports: set[int],
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]],
+    shared_retrieval_port: int | None,
     preset_state: _DurationSweepPresetState | None = None,
 ) -> _DurationSweepPresetState:
     """Launch one or more worker-slot children for a duration preset."""
@@ -1677,6 +1915,7 @@ def _launch_duration_sweep_preset(
                 used_ports=used_ports,
                 event_queue=event_queue,
                 shared_sample_queue_root=resolved_preset_state.queue_root,
+                shared_retrieval_port=shared_retrieval_port,
             )
     except Exception:
         for child_state in resolved_preset_state.child_states.values():
@@ -1694,13 +1933,12 @@ def _aggregate_duration_sweep_preset(
     *,
     duration_preset: str,
     child_summaries: dict[int, DurationSweepPresetSummary],
+    target_sample_count: int | None = None,
 ) -> DurationSweepPresetSummary:
     """Combine shard child summaries into one preset-level sweep summary."""
     ordered_children = [
         child_summaries[shard_index] for shard_index in sorted(child_summaries)
     ]
-    if len(ordered_children) == 1:
-        return ordered_children[0]
 
     sample_count = 0
     attempted_candidate_count = 0
@@ -1767,7 +2005,11 @@ def _aggregate_duration_sweep_preset(
         if not child_report_path:
             ci_available = False
             continue
-        child_report = _load_execution_report(Path(child_report_path))
+        resolved_child_report_path = Path(child_report_path)
+        if not resolved_child_report_path.exists():
+            ci_available = False
+            continue
+        child_report = _load_execution_report(resolved_child_report_path)
         composite_values.extend(
             sample.metrics.composite
             for sample in child_report.samples
@@ -1776,7 +2018,14 @@ def _aggregate_duration_sweep_preset(
 
     if executed_count == 0:
         status = "failed"
-    elif failure_count == 0 and skipped_count == 0:
+    elif (
+        failure_count == 0
+        and skipped_count == 0
+        and (
+            target_sample_count is None
+            or sample_count >= int(target_sample_count)
+        )
+    ):
         status = "completed"
     else:
         status = "partial"
@@ -1787,7 +2036,7 @@ def _aggregate_duration_sweep_preset(
         else None
     )
 
-    return DurationSweepPresetSummary(
+    summary = DurationSweepPresetSummary(
         duration_preset=duration_preset,
         target_seconds=int(DURATION_PRESET_SECONDS[duration_preset]),
         status=status,
@@ -1844,6 +2093,14 @@ def _aggregate_duration_sweep_preset(
         restart_count=restart_count,
         recovered_stall_count=recovered_stall_count,
     )
+    if len(ordered_children) == 1:
+        child_summary = ordered_children[0]
+        return replace(
+            child_summary,
+            status=summary.status,
+            error_message=summary.error_message,
+        )
+    return summary
 
 
 def _finalize_duration_sweep_child(
@@ -1871,8 +2128,13 @@ def _finalize_duration_sweep_child(
     if isinstance(report_path_value, str) and report_path_value.strip():
         candidate_report_path = Path(report_path_value).resolve()
         if candidate_report_path.exists():
-            report_path = candidate_report_path
-    if report_path is None:
+            try:
+                candidate_report_mtime = candidate_report_path.stat().st_mtime
+            except OSError:
+                candidate_report_mtime = 0.0
+            if candidate_report_mtime + 1.0 >= state.launched_at_unix_seconds:
+                report_path = candidate_report_path
+    if report_path is None and exit_code == 0:
         report_path = _discover_report_path_from_checkpoint(state)
     if report_path is not None:
         report_summary = _summarize_duration_report(
@@ -1881,6 +2143,19 @@ def _finalize_duration_sweep_child(
             restart_count=state.restart_count,
             recovered_stall_count=state.recovered_stall_count,
         )
+        if exit_code != 0 and report_summary.status == "completed":
+            fallback_status = "partial" if report_summary.executed_count > 0 else "failed"
+            return replace(
+                report_summary,
+                status=forced_status or fallback_status,
+                error_message=(
+                    forced_error_message
+                    or (
+                        f"Preset {state.duration_preset} exited with code {exit_code} "
+                        "after writing a report."
+                    )
+                ),
+            )
         if forced_status is None and forced_error_message is None:
             return report_summary
         return replace(
@@ -1964,6 +2239,10 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
     active_presets: dict[str, _DurationSweepPresetState] = {}
     preset_summaries_by_preset: dict[str, DurationSweepPresetSummary] = {}
     used_ports: set[int] = set()
+    shared_retrieval_service = _start_duration_sweep_shared_retrieval_service(
+        args=args,
+        used_ports=used_ports,
+    )
     event_queue: queue.Queue[tuple[str, int, int, dict[str, object]]] = queue.Queue()
     last_progress: str | None = None
     next_heartbeat_at = 0.0
@@ -2003,6 +2282,11 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                     worker_budget=total_worker_budget,
                     used_ports=used_ports,
                     event_queue=event_queue,
+                    shared_retrieval_port=(
+                        shared_retrieval_service.port
+                        if shared_retrieval_service is not None
+                        else None
+                    ),
                 )
                 active_presets[duration_preset] = preset_state
                 for child_state in sorted(
@@ -2101,6 +2385,11 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                                 sweep_root=sweep_root,
                                 used_ports=used_ports,
                                 event_queue=event_queue,
+                                shared_retrieval_port=(
+                                    shared_retrieval_service.port
+                                    if shared_retrieval_service is not None
+                                    else None
+                                ),
                                 reason=stall_reason,
                             )
                             preset_state.child_states[shard_index] = restarted_state
@@ -2147,6 +2436,7 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                         _aggregate_duration_sweep_preset(
                             duration_preset=duration_preset,
                             child_summaries=preset_state.completed_child_summaries,
+                            target_sample_count=examples,
                         )
                     )
                     donated_worker_ids = sorted(
@@ -2178,6 +2468,11 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
                             worker_budget=total_worker_budget,
                             used_ports=used_ports,
                             event_queue=event_queue,
+                            shared_retrieval_port=(
+                                shared_retrieval_service.port
+                                if shared_retrieval_service is not None
+                                else None
+                            ),
                             preset_state=target_state,
                         )
                         active_presets[donation_target] = target_state
@@ -2234,6 +2529,7 @@ def _run_duration_sweep(args: argparse.Namespace) -> int:
             active_presets,
             reason="Sweep cleanup closing active child resources.",
         )
+        _stop_duration_sweep_shared_retrieval_service(shared_retrieval_service)
         sweep_progress_bar.close()
         _ACTIVE_SWEEP_PROGRESS_BAR = previous_progress_bar
 
@@ -2382,6 +2678,8 @@ def _build_execute_child_command(
     shared_sample_queue_root: Path | None = None,
     sample_shard_index: int | None = None,
     sample_shard_count: int | None = None,
+    shared_retrieval_port: int | None = None,
+    retrieval_namespace: str | None = None,
 ) -> list[str]:
     """Build a child execute command with optional sweep-specific overrides."""
     command = [
@@ -2417,7 +2715,6 @@ def _build_execute_child_command(
         "--critic-provider": args.critic_provider,
         "--judge-provider": args.judge_provider,
         "--embedding-mode": args.embedding_mode,
-        "--judge-source-char-limit": args.judge_source_char_limit,
         "--duration-preset": (
             duration_preset if duration_preset is not None else args.duration_preset
         ),
@@ -2436,6 +2733,8 @@ def _build_execute_child_command(
         "--retrieval-port": retrieval_port,
         "--summarizer-port": summarizer_port,
         "--critic-port": critic_port,
+        "--shared-retrieval-port": shared_retrieval_port,
+        "--retrieval-namespace": retrieval_namespace,
         "--checkpoint-path": str(checkpoint_path) if checkpoint_path is not None else "",
         "--progress-heartbeat-seconds": progress_heartbeat_seconds,
         "--resume-failure-reason": resume_failure_reason,
@@ -2676,6 +2975,8 @@ def main(argv: list[str] | None = None) -> int:
         status_reporter=_emit_cli_status,
     )
     args = parser.parse_args(argv)
+    if getattr(args, "command", "") == "curate-longform" and int(args.max_speakers) < 0:
+        parser.error("--max-speakers must be zero or greater.")
     try:
         if args.command == "prepare-dataset":
             _, prepare_sporc_benchmark = _load_dataset_helpers(
@@ -2712,12 +3013,35 @@ def main(argv: list[str] | None = None) -> int:
             curate_longform_sporc_manifest, _ = _load_dataset_helpers(
                 status_reporter=_emit_cli_status,
             )
+            requested_max_unique_speaker_count = (
+                int(args.max_speakers) if int(args.max_speakers) > 0 else None
+            )
             manifest, audit_path = curate_longform_sporc_manifest(
                 source_manifest_path=Path(args.source_manifest).resolve(),
                 output_manifest_path=Path(args.output_manifest).resolve(),
                 audit_path=Path(args.audit_path).resolve(),
+                max_unique_speaker_count=requested_max_unique_speaker_count,
                 status_reporter=_emit_cli_status,
             )
+            selected_max_unique_speaker_count: int | None = None
+            for sample in manifest.samples:
+                raw_stats = sample.metadata.get("longform_curation")
+                if not isinstance(raw_stats, dict):
+                    raw_stats = sample.metadata.get("longform_curation_candidate")
+                if not isinstance(raw_stats, dict):
+                    continue
+                unique_speaker_count = raw_stats.get("unique_speaker_count")
+                if not isinstance(unique_speaker_count, (int, float)):
+                    continue
+                resolved_unique_speaker_count = int(unique_speaker_count)
+                if (
+                    selected_max_unique_speaker_count is None
+                    or resolved_unique_speaker_count
+                    > selected_max_unique_speaker_count
+                ):
+                    selected_max_unique_speaker_count = (
+                        resolved_unique_speaker_count
+                    )
             print(
                 json.dumps(
                     {
@@ -2727,6 +3051,8 @@ def main(argv: list[str] | None = None) -> int:
                         "audit_path": str(audit_path),
                         "sample_count": manifest.sample_count,
                         "dataset_variant": manifest.dataset_variant,
+                        "requested_max_unique_speaker_count": requested_max_unique_speaker_count,
+                        "selected_max_unique_speaker_count": selected_max_unique_speaker_count,
                     }
                 )
             )
@@ -2752,6 +3078,35 @@ def main(argv: list[str] | None = None) -> int:
                         "removed_sample_count": result.removed_sample_count,
                         "candidate_group_count": result.candidate_group_count,
                         "transcript_signature_reads": result.transcript_signature_reads,
+                    }
+                )
+            )
+            return 0
+        if args.command == "filter-audio-urls":
+            from card_framework.benchmark.summarizer_critic.sporc.filter_manifest_audio_urls import (
+                run_filter_manifest_audio_urls_cli,
+            )
+
+            result = run_filter_manifest_audio_urls_cli(
+                str(args.manifest_path),
+                output_manifest_path=str(args.output_manifest),
+                audit_path=str(args.audit_path),
+                timeout_seconds=float(args.timeout_seconds),
+                max_workers=int(args.max_workers),
+                max_workers_per_host=int(args.max_workers_per_host),
+                max_retries=int(args.max_retries),
+                retry_backoff_seconds=float(args.retry_backoff_seconds),
+                status_reporter=_emit_cli_status,
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "manifest_path": str(result.manifest_path),
+                        "audit_path": str(result.audit_path),
+                        "original_sample_count": result.original_sample_count,
+                        "kept_sample_count": result.kept_sample_count,
+                        "removed_sample_count": result.removed_sample_count,
                     }
                 )
             )

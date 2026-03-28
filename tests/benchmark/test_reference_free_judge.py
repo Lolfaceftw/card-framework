@@ -6,7 +6,6 @@ from card_framework.benchmark.reference_free.contracts import (
 )
 from card_framework.benchmark.reference_free.judge_runner import (
     LLMJudgeRunner,
-    LLMJudgeRunnerConfig,
 )
 
 
@@ -14,6 +13,7 @@ class FakeJudgeProvider:
     def __init__(self, responses: list[str]) -> None:
         self._responses = responses
         self.max_tokens_seen: list[int | None] = []
+        self.user_prompts: list[str] = []
 
     def generate(
         self,
@@ -21,7 +21,9 @@ class FakeJudgeProvider:
         user_prompt: str,
         max_tokens: int | None = None,
     ) -> str:
+        del system_prompt
         self.max_tokens_seen.append(max_tokens)
+        self.user_prompts.append(user_prompt)
         if not self._responses:
             raise RuntimeError("No fake responses left")
         return self._responses.pop(0)
@@ -117,17 +119,15 @@ def test_judge_runner_can_use_full_source_without_char_limit() -> None:
             '{"factuality": 0.8, "relevance": 0.7, "coherence": 0.6, "overall": 0.65, "confidence": 0.8, "rationale": "ok"}'
         ]
     )
-    runner = LLMJudgeRunner(
-        judge_llm=provider,
-        rubric=_rubric(),
-        config=LLMJudgeRunnerConfig(source_char_limit=None, max_tokens=None),
-    )
+    runner = LLMJudgeRunner(judge_llm=provider, rubric=_rubric())
+    source_text = f"{'source text ' * 4000}TAIL_MARKER"
 
     result = runner.evaluate(
-        source_text="source text " * 4000,
+        source_text=source_text,
         summary_text="summary text",
         enable_order_swap=False,
         repeats=1,
     )
 
     assert result.status == "ok"
+    assert "TAIL_MARKER" in provider.user_prompts[0]

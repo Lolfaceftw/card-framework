@@ -15,10 +15,15 @@ Markdown files under `coder_docs/`.
 
 ## Capability Gates
 
-- If your environment supports delegated agents or sub-agents, follow
-  `coder_docs/research_agents.md` for delegation rules.
-- If your environment does not support delegated agents, do the equivalent work
-  in the main thread and keep the same scoping and integration discipline.
+- If your environment exposes delegated agents or sub-agents with a discoverable
+  local role inventory, follow `coder_docs/research_agents.md` for delegation
+  rules, including the required post-edit critic-review loop.
+- Delegate only when that inventory is non-empty and roles can be invoked.
+  If no usable delegated roles are available, do the equivalent work in the
+  main thread using the same scoping and integration discipline.
+- If your environment does not support delegated agents, keep the same
+  equivalent work in the main thread and keep the same scoping and integration
+  discipline.
 - If your environment exposes Scrapling MCP, follow `coder_docs/scrapling.md`
   for external web retrieval.
 - If Scrapling is unavailable, use the closest equivalent browsing or retrieval
@@ -34,6 +39,8 @@ Markdown files under `coder_docs/`.
   `coder_docs/research_agents.md`
 - External web retrieval workflow and Scrapling usage:
   `coder_docs/scrapling.md`
+- Agent communication tone and response-style expectations:
+  `coder_docs/agent_communication_standards.md`
 - Python coding style, docstrings, typing, design, and core do-nots:
   `coder_docs/python_engineering_standards.md`
 - Security expectations:
@@ -42,6 +49,8 @@ Markdown files under `coder_docs/`.
   `coder_docs/logging_standards.md`
 - Testing expectations:
   `coder_docs/testing_standards.md`
+- Docker and containerized runtime workflow:
+  `coder_docs/docker_workflow.md`
 - Methodology-sensitive or academically grounded implementations:
   `coder_docs/academic_standards.md`
 - Bug triage and failing-test workflow:
@@ -61,6 +70,22 @@ Markdown files under `coder_docs/`.
 - Assume configuration exists; do not hardcode deploy-varying values,
   credentials, or environment-specific endpoints.
 - Use `uv` as the package manager for this repository and `ruff` as the linter.
+- For repo-local runtime execution, prefer the Docker Compose workflow in
+  `coder_docs/docker_workflow.md`; if CUDA is available to Docker, use the
+  `gpu` profile and the bounded container limits from `compose.yml`.
+- When asked to run a repo entrypoint or script, actually execute it and
+  validate the run by probing logs plus RAM and GPU telemetry instead of
+  relying only on the live terminal stream.
+- For code edits, treat the task as incomplete until the critic-review loop in
+  `coder_docs/research_agents.md` reports no material flaws or an external
+  blocker remains.
+- Follow `coder_docs/agent_communication_standards.md` for agent tone; keep
+  responses direct, non-sycophantic, and free of praise or apologies.
+- Any change that affects the next published version must follow semantic
+  versioning (`MAJOR.MINOR.PATCH`) and start from a checked-out release branch
+  whose version suffix matches the intended release; see
+  `coder_docs/git_github_workflow.md` and
+  `coder_docs/github_actions_release_spec.md`.
 - When implementation changes affect behavior, interfaces, contracts, outputs,
   workflows, or operator expectations, update the relevant tests and Markdown
   docs in the same change.

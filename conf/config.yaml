@@ -13,8 +13,14 @@ profiles:
   llm:
     vllm_local:
       _target_: card_framework.providers.vllm_provider.VLLMProvider
-      base_url: "http://localhost:8000/v1"
+      base_url: ${oc.env:CARD_FRAMEWORK_VLLM_BASE_URL}
       api_key: ${oc.env:CARD_FRAMEWORK_VLLM_API_KEY,EMPTY}
+      context_window_tokens: 32768
+      compaction_target_ratio: 0.65
+    anthropic_claude_opus:
+      _target_: card_framework.providers.anthropic_provider.AnthropicProvider
+      api_key: ${oc.env:ANTHROPIC_API_KEY,""}
+      model: "claude-opus-4-6"
     transformers_local:
       _target_: card_framework.providers.transformers_provider.TransformersProvider
       model: "Salesforce/Llama-xLAM-2-3b-fc-r"
@@ -25,15 +31,21 @@ profiles:
       api_key: ${oc.env:DEEPSEEK_API_KEY,""}
       model: "deepseek-chat"
       base_url: "https://api.deepseek.com"
+      context_window_tokens: 131072
+      compaction_target_ratio: 0.65
     deepseek_reasoner:
       _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
       api_key: ${oc.env:DEEPSEEK_API_KEY,""}
       model: "deepseek-reasoner"
       base_url: "https://api.deepseek.com"
+      context_window_tokens: 131072
+      compaction_target_ratio: 0.65
     google_gemini:
       _target_: card_framework.providers.google_genai_provider.GoogleGenAIProvider
       api_key: ${oc.env:GEMINI_API_KEY,""}
       model: "gemini-2.5-pro"
+      context_window_tokens: 131072
+      compaction_target_ratio: 0.65
     glm_46:
       _target_: card_framework.providers.glm_provider.GLMProvider
       api_key: ${oc.env:ZAI_API_KEY,""}
@@ -56,7 +68,9 @@ profiles:
       model_name: "Qwen/Qwen3-Embedding-4B"
       device: "cuda"
       torch_dtype: "float16"
-      batch_size: 4
+      batch_size: 1
+      max_seq_length: 384
+      attention_implementation: "eager"
     minilm_cpu:
       _target_: card_framework.providers.sentence_transformer_provider.SentenceTransformerEmbeddingProvider
       model_name: "sentence-transformers/all-MiniLM-L6-v2"
@@ -71,6 +85,12 @@ pipeline:
   final_summary_path: ""
   voice_clone_manifest_path: ""
 
+session:
+  enabled: true
+  session_id: ""
+  store_path: "artifacts/pipeline_sessions/sessions.sqlite3"
+  summary_output_path: ""
+
 audio:
   audio_path: ""
   output_transcript_path: "artifacts/transcripts/latest.transcript.json"
@@ -82,6 +102,7 @@ audio:
     attempts: 2
     base_delay_seconds: 1.0
   eta:
+    store_path: "artifacts/audio_stage/eta_history.sqlite3"
     update_interval_seconds: 10
     dynamic:
       progress_smoothing: 0.25
@@ -113,9 +134,10 @@ audio:
   asr:
     provider: "granite_speech"
     model: "ibm-granite/granite-4.0-1b-speech"
-    chunk_length_seconds: 30
-    chunk_overlap_seconds: 5
-    max_new_tokens: 200
+    chunk_length_seconds: 25
+    chunk_overlap_seconds: 1
+    max_new_tokens: 96
+    repetition_penalty: 1.25
     language: "en"
     suppress_numerals: false
     forced_alignment:
@@ -128,8 +150,17 @@ audio:
     vad_model: "vad_multilingual_marblenet"
     speaker_embedding_model: "titanet_large"
     min_speakers:
-    max_speakers:
+    max_speakers: 10
     allow_single_speaker_fallback: false
+    vad_onset: 0.8
+    vad_offset: 0.6
+    vad_pad_onset: 0.1
+    vad_pad_offset: 0.0
+    vad_min_duration_on: 0.2
+    vad_min_duration_off: 0.6
+    clustering_max_rp_threshold: 0.4
+    clustering_sparse_search_volume: 60
+    clustering_maj_vote_spk_count: true
     pyannote:
       pipeline_name: "pyannote/speaker-diarization-community-1"
       auth_token: ${oc.env:HF_TOKEN,""}
@@ -165,6 +196,90 @@ audio:
     low_data_policy: "quality_first_shorter"
     audio_codec: "pcm_s24le"
     manifest_filename: "manifest.json"
+  affect_analysis:
+    enabled: true
+    fail_on_error: false
+    reuse_existing_manifest: true
+    verbose_logging: true
+    output_dir_name: "affect_analysis"
+    manifest_filename: "manifest.json"
+    source_audio: "auto"
+    target_sample_rate_hz: 16000
+    context_padding_ms: 150
+    min_segment_duration_ms: 1200
+    prompt_max_hint_chars: 160
+    top_emotions_for_hint: 2
+    mapping:
+      default_preset: "neutral"
+      emotion_vectors_enabled: true
+      urgent_emotions:
+      - "angry"
+      - "fearful"
+      upbeat_emotions:
+      - "happy"
+      - "surprised"
+      urgent_arousal_threshold: 0.65
+      upbeat_valence_threshold: 0.60
+      warm_valence_threshold: 0.48
+      low_arousal_threshold: 0.45
+      engaged_arousal_threshold: 0.45
+      categorical_weight: 0.65
+      dimensional_weight: 0.35
+      calm_floor: 0.12
+      positive_surprise_boost: 0.35
+      negative_anger_bias: 0.85
+      negative_fear_bias: 0.90
+      melancholic_bias: 0.70
+      disgust_bias: 0.35
+      confidence_floor: 0.15
+      dominant_emotion_cap: 0.38
+      emotion_vector_max_sum: 0.8
+      apply_indextts_emotion_bias: true
+    profiling:
+      enabled: true
+      sample_interval_seconds: 0.2
+      command_timeout_seconds: 3.0
+      profile_filename: "resource_profile.json"
+    categorical:
+      enabled: true
+      provider: "emotion2vec_plus"
+      model_name: "emotion2vec_plus_large"
+      device: "auto"
+      batch_size: 4
+      hub: "hf"
+      granularity: "utterance"
+      extract_embedding: true
+      disable_update_check: true
+    dimensional:
+      enabled: true
+      provider: "audeering_msp_dim"
+      model_name: "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"
+      device: "auto"
+      use_fp16: true
+      batch_size: 4
+  summary_turn_linking:
+    enabled: true
+    top_k: 3
+    min_support_score: 0.08
+    same_speaker_bonus: 1.2
+    default_emotion_confidence: 0.5
+    min_emotion_confidence: 0.15
+    lexical_similarity_weight: 0.45
+    coverage_similarity_weight: 0.25
+    sequence_similarity_weight: 0.15
+    position_similarity_weight: 0.15
+    min_sequence_similarity_without_overlap: 0.6
+    require_emotion_vector: true
+    apply_indextts_bias: false
+    max_sum: 0.8
+    preserve_existing_explicit_vectors: true
+    force_live_draft_rerender: false
+  summary_turn_emotion:
+    prelink_enabled: true
+    prelink_strategy: "source_linked"
+    fallback_order:
+      - "source_linked"
+      - "explicit"
   voice_clone:
     enabled: true
     live_drafting:
@@ -172,6 +287,9 @@ audio:
     provider: "indextts"
     execution_backend: "subprocess"
     stream_subprocess_output: true
+    normalize_emotion_vector: true
+    emotion_vector_apply_bias: true
+    emotion_vector_max_sum: 0.8
     runner_project_dir: "src/card_framework/_vendor/index_tts"
     uv_executable: "uv"
     fail_on_error: true
@@ -200,6 +318,14 @@ audio:
     max_mel_tokens: 1500
     calibration:
       artifact_path: "artifacts/calibration/voice_clone_calibration.json"
+    normalization:
+      enabled: true
+      target_lufs: -16.0
+      true_peak_db: -1.5
+      loudness_range_lu: 11.0
+      linear: true
+      dual_mono: false
+      timeout_seconds: 300
     emo_presets:
       neutral: "calm, neutral, steady conversational tone."
       warm: "warmly, gently, and supportively, like an empathetic co-host."
@@ -221,18 +347,63 @@ audio:
     max_interjection_words: 5
     max_interjections_per_host_turn: 1
     backchannel_reaction_latency_ms: 120
-    echo_alignment_offset_ms: 20
+    echo_alignment_offset_ms: 0
     min_host_progress_ratio: 0.35
+    echo_min_host_progress_ratio: 0.05
     max_host_progress_ratio: 0.90
-    min_available_overlap_ms: 120
     turn_end_guard_ms: 180
     mix_timeout_seconds: 300
+    timing_refinement:
+      enabled: true
+      fallback_anchor_realignment_enabled: true
+    leading_silence_trim:
+      enabled: true
+      threshold_db: -50.0
+      min_duration_ms: 0
+      preserve_ms: 5
+    echo_pacing_fit:
+      enabled: true
+      timing_backend: "faster_whisper_native"
+      model_name: "tiny.en"
+      device: "cpu"
+      compute_type_cpu: "int8"
+      compute_type_cuda: "int8_float16"
+      beam_size: 1
+      target_host_fill_ratio: 0.95
+      min_overflow_ratio: 1.05
+      max_tempo: 1.75
+      min_phrase_match_similarity: 0.75
+      max_window_delta: 1
+      word_level_enabled: true
+      word_level_min_segment_ms: 80
+      word_level_max_tempo: 1.75
+    repair:
+      enabled: true
+      prompt_max_tokens: 220
+      max_attempts:
+    normalization:
+      enabled: true
+      target_lufs: -16.0
+      true_peak_db: -1.5
+      loudness_range_lu: 11.0
+      linear: true
+      dual_mono: false
+      timeout_seconds: 300
 
 orchestrator:
   target_seconds:
   target_minutes: 5
   duration_tolerance_ratio: 0.05
   max_iterations: 60
+  post_render_duration_verification:
+    enabled: true
+  prompt_compaction:
+    enabled: true
+    trigger_ratio: 0.80
+    retry_on_overflow: true
+    max_overflow_retries: 1
+    compress_with_same_provider: true
+    keep_latest_iterations: 1
   loop_memory:
     artifact_path: "artifacts/audio_stage/summarizer_loop_memory.json"
   timeouts:
@@ -252,11 +423,11 @@ agents:
     loop_guardrails:
       enabled: true
       target_models:
-        - "qwen"
+      - "qwen"
       target_providers:
-        - "vllmprovider"
-        - "transformersprovider"
-        - "huggingfaceprovider"
+      - "vllmprovider"
+      - "transformersprovider"
+      - "huggingfaceprovider"
       enable_stall_guidance: true
       enable_noop_edit_detection: true
       enable_extended_text_tool_parser: true
@@ -281,5 +452,5 @@ logging:
   enabled: true
   log_file: "agent_interactions.log"
   level: "INFO"
-  print_to_terminal: false
+  print_to_terminal: true
   summarizer_critic_print_to_terminal: ${logging.print_to_terminal}

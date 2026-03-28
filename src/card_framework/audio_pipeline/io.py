@@ -34,6 +34,7 @@ def build_transcript_payload(
                 "start_time": segment.start_time,
                 "end_time": segment.end_time,
                 "text": segment.text,
+                **dict(segment.extras),
             }
             for segment in segments
         ]

@@ -11,13 +11,18 @@ import shutil
 from typing import Any
 
 from card_framework.agents.utils import count_words
+from card_framework.audio_pipeline.audio_normalization import (
+    AudioNormalizationPolicy,
+    normalize_audio_file,
+)
+from card_framework.audio_pipeline.emotion_vectors import EmotionVector, serialize_emotion_vector
 from card_framework.audio_pipeline.errors import NonRetryableAudioStageError
 from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneArtifact, VoiceCloneProvider
 from card_framework.audio_pipeline.voice_clone_orchestrator import (
     VoiceCloneOrchestrator,
     VoiceCloneRunResult,
-    _resolve_emo_text,
+    _resolve_voice_clone_emotion,
     _write_json_atomic,
     load_speaker_sample_references,
     merge_audio_artifacts_to_wav,
@@ -32,10 +37,27 @@ class LiveDraftVoiceCloneTurn:
     speaker: str
     text: str
     emo_preset: str
+    emotion_vector: EmotionVector | None
+    emotion_vector_source: str
+    source_segment_indices: tuple[int, ...]
+    source_segment_weights: tuple[float, ...]
     output_audio_path: Path
     duration_ms: int
     word_count: int
     actual_wpm: float
+
+    def __post_init__(self) -> None:
+        """Validate persisted support-metadata invariants for one turn record."""
+        if self.source_segment_weights and not self.source_segment_indices:
+            raise ValueError(
+                "source_segment_weights require source_segment_indices."
+            )
+        if self.source_segment_weights and (
+            len(self.source_segment_indices) != len(self.source_segment_weights)
+        ):
+            raise ValueError(
+                "source_segment_weights must match source_segment_indices length."
+            )
 
     @classmethod
     def from_payload(
@@ -52,6 +74,18 @@ class LiveDraftVoiceCloneTurn:
             speaker=str(payload.get("speaker", "")).strip(),
             text=str(payload.get("text", "")),
             emo_preset=str(payload.get("emo_preset", "")).strip(),
+            emotion_vector=EmotionVector.from_raw(payload.get("emotion_vector")),
+            emotion_vector_source=str(
+                payload.get("emotion_vector_source", "")
+            ).strip(),
+            source_segment_indices=tuple(
+                int(value)
+                for value in list(payload.get("source_segment_indices", []))
+            ),
+            source_segment_weights=tuple(
+                float(value)
+                for value in list(payload.get("source_segment_weights", []))
+            ),
             output_audio_path=Path(str(payload.get("output_audio_path", ""))).resolve(),
             duration_ms=duration_ms,
             word_count=int(payload.get("word_count", 0)),
@@ -65,6 +99,10 @@ class LiveDraftVoiceCloneTurn:
             "speaker": self.speaker,
             "text": self.text,
             "emo_preset": self.emo_preset,
+            "emotion_vector": serialize_emotion_vector(self.emotion_vector),
+            "emotion_vector_source": self.emotion_vector_source,
+            "source_segment_indices": [int(value) for value in self.source_segment_indices],
+            "source_segment_weights": [float(value) for value in self.source_segment_weights],
             "output_audio_path": str(self.output_audio_path),
             "duration_ms": self.duration_ms,
             "word_count": self.word_count,
@@ -106,6 +144,18 @@ class LiveDraftVoiceCloneState:
                 "speaker_id": str(item.get("speaker_id", "")).strip(),
                 "content": str(item.get("content", "")),
                 "emo_preset": str(item.get("emo_preset", "")).strip(),
+                "emotion_vector": serialize_emotion_vector(item.get("emotion_vector")),
+                "emotion_vector_source": str(
+                    item.get("emotion_vector_source", "")
+                ).strip(),
+                "source_segment_indices": [
+                    int(value)
+                    for value in list(item.get("source_segment_indices", []))
+                ],
+                "source_segment_weights": [
+                    float(value)
+                    for value in list(item.get("source_segment_weights", []))
+                ],
             }
             for index, item in enumerate(raw_snapshot, start=1)
             if isinstance(item, Mapping)
@@ -154,12 +204,12 @@ class LiveDraftVoiceCloneSession:
     state_path: Path
     output_dir: Path
     speaker_samples_manifest_path: Path
-    emo_preset_catalog: dict[str, str] | None = None
     manifest_filename: str = "manifest.json"
     merge_segments: bool = True
     merged_output_filename: str = "voice_cloned.wav"
     merge_audio_codec: str = "pcm_s24le"
     merge_timeout_seconds: int = 300
+    merged_output_normalization: AudioNormalizationPolicy | None = None
     _state: LiveDraftVoiceCloneState | None = field(default=None, init=False, repr=False)
     _sample_refs: dict[str, Any] | None = field(default=None, init=False, repr=False)
 
@@ -177,16 +227,12 @@ class LiveDraftVoiceCloneSession:
             state_path=state_path,
             output_dir=orchestrator.output_dir,
             speaker_samples_manifest_path=speaker_samples_manifest_path.resolve(),
-            emo_preset_catalog=(
-                dict(orchestrator.emo_preset_catalog)
-                if orchestrator.emo_preset_catalog
-                else None
-            ),
             manifest_filename=orchestrator.manifest_filename,
             merge_segments=orchestrator.merge_segments,
             merged_output_filename=orchestrator.merged_output_filename,
             merge_audio_codec=orchestrator.merge_audio_codec,
             merge_timeout_seconds=orchestrator.merge_timeout_seconds,
+            merged_output_normalization=orchestrator.merged_output_normalization,
         )
 
     def clear(self) -> None:
@@ -232,6 +278,18 @@ class LiveDraftVoiceCloneSession:
                 speaker=str(item.get("speaker_id", "")),
                 text=str(item.get("content", "")),
                 emo_preset=str(item.get("emo_preset", "")),
+                emotion_vector=EmotionVector.from_raw(item.get("emotion_vector")),
+                emotion_vector_source=str(
+                    item.get("emotion_vector_source", "")
+                ).strip(),
+                source_segment_indices=tuple(
+                    int(value)
+                    for value in list(item.get("source_segment_indices", []))
+                ),
+                source_segment_weights=tuple(
+                    float(value)
+                    for value in list(item.get("source_segment_weights", []))
+                ),
             )
             self._state = self._replace_turn_record(record)
         self.sync_snapshot(snapshot)
@@ -243,6 +301,10 @@ class LiveDraftVoiceCloneSession:
         speaker: str,
         text: str,
         emo_preset: str,
+        emotion_vector: EmotionVector | None = None,
+        emotion_vector_source: str = "",
+        source_segment_indices: Sequence[int] = (),
+        source_segment_weights: Sequence[float] = (),
     ) -> LiveDraftVoiceCloneTurn:
         """Synthesize or replace one turn-level audio artifact and return its metadata."""
         reference = self._speaker_sample_refs().get(speaker)
@@ -253,15 +315,16 @@ class LiveDraftVoiceCloneSession:
             )
         output_audio_path = self._turn_output_path(turn_id=turn_id)
         temp_output_path = output_audio_path.with_name(f"{output_audio_path.stem}.tmp.wav")
-        emo_text = _resolve_emo_text(
-            emo_preset=emo_preset,
-            emo_preset_catalog=self.emo_preset_catalog,
+        resolved_emotion = _resolve_voice_clone_emotion(
+            explicit_emotion_vector=emotion_vector,
+            explicit_emotion_vector_source=emotion_vector_source,
         )
         rendered_path = self.provider.synthesize(
             reference_audio_path=reference.path,
             text=text,
             output_audio_path=temp_output_path,
-            emo_text=emo_text,
+            emo_text=resolved_emotion.emo_text,
+            emotion_vector=resolved_emotion.emotion_vector,
         )
         duration_ms = probe_audio_duration_ms(rendered_path)
         if duration_ms is None or duration_ms <= 0:
@@ -283,12 +346,21 @@ class LiveDraftVoiceCloneSession:
             speaker=speaker,
             text=text,
             emo_preset=emo_preset.strip() or "neutral",
+            emotion_vector=resolved_emotion.emotion_vector,
+            emotion_vector_source=resolved_emotion.emotion_vector_source,
+            source_segment_indices=tuple(int(value) for value in source_segment_indices),
+            source_segment_weights=tuple(
+                float(value) for value in source_segment_weights
+            ),
             output_audio_path=output_audio_path.resolve(),
             duration_ms=int(duration_ms),
             word_count=word_count,
             actual_wpm=actual_wpm,
         )
         self._state = self._replace_turn_record(record)
+        # Keep the sidecar present after each render so downstream duration checks
+        # can recover turn metadata even before the next explicit snapshot sync.
+        self._persist_state()
         return record
 
     def remove_turn(self, turn_id: str) -> None:
@@ -307,6 +379,7 @@ class LiveDraftVoiceCloneSession:
             current_snapshot=state.current_snapshot,
             turn_audio=updated_turn_audio,
         )
+        self._persist_state()
 
     def sync_snapshot(self, snapshot: Sequence[Mapping[str, Any]]) -> None:
         """Persist the ordered registry snapshot that defines the current draft."""
@@ -330,6 +403,20 @@ class LiveDraftVoiceCloneSession:
                     "speaker_id": str(item.get("speaker_id", "")),
                     "content": str(item.get("content", "")),
                     "emo_preset": str(item.get("emo_preset", "")).strip() or "neutral",
+                    "emotion_vector": serialize_emotion_vector(
+                        EmotionVector.from_raw(item.get("emotion_vector"))
+                    ),
+                    "emotion_vector_source": str(
+                        item.get("emotion_vector_source", "")
+                    ).strip(),
+                    "source_segment_indices": [
+                        int(value)
+                        for value in list(item.get("source_segment_indices", []))
+                    ],
+                    "source_segment_weights": [
+                        float(value)
+                        for value in list(item.get("source_segment_weights", []))
+                    ],
                 }
             )
         self._state = LiveDraftVoiceCloneState(
@@ -417,6 +504,10 @@ class LiveDraftVoiceCloneSession:
                     reference_audio_path=reference.path,
                     output_audio_path=record.output_audio_path,
                     emo_preset=record.emo_preset,
+                    emotion_vector=record.emotion_vector,
+                    emotion_vector_source=record.emotion_vector_source,
+                    source_segment_indices=record.source_segment_indices,
+                    source_segment_weights=record.source_segment_weights,
                 )
             )
             manifest_artifacts.append(
@@ -426,6 +517,14 @@ class LiveDraftVoiceCloneSession:
                     "speaker": record.speaker,
                     "text": record.text,
                     "emo_preset": record.emo_preset,
+                    "emotion_vector": serialize_emotion_vector(record.emotion_vector),
+                    "emotion_vector_source": record.emotion_vector_source,
+                    "source_segment_indices": [
+                        int(value) for value in record.source_segment_indices
+                    ],
+                    "source_segment_weights": [
+                        float(value) for value in record.source_segment_weights
+                    ],
                     "reference_audio_path": str(reference.path),
                     "output_audio_path": str(record.output_audio_path),
                     "duration_ms": record.duration_ms,
@@ -441,6 +540,10 @@ class LiveDraftVoiceCloneSession:
                 output_path=merged_output_audio_path,
                 audio_codec=self.merge_audio_codec,
                 timeout_seconds=self.merge_timeout_seconds,
+            )
+            normalize_audio_file(
+                audio_path=merged_output_audio_path,
+                policy=self.merged_output_normalization,
             )
         generated_at_utc = _utc_now_iso()
         manifest_path = self.output_dir / self.manifest_filename
@@ -564,11 +667,24 @@ def _snapshot_matches_summary_xml(
     for item, turn in zip(snapshot, turns, strict=True):
         speaker_id = str(item.get("speaker_id", "")).strip()
         content = str(item.get("content", ""))
-        emo_preset = str(item.get("emo_preset", "")).strip() or "neutral"
+        emotion_vector = serialize_emotion_vector(item.get("emotion_vector"))
+        source_segment_indices = [
+            int(value) for value in list(item.get("source_segment_indices", []))
+        ]
+        source_segment_weights = [
+            float(value) for value in list(item.get("source_segment_weights", []))
+        ]
+        emotion_vector_source = str(item.get("emotion_vector_source", "")).strip()
         if (
             speaker_id != turn.speaker
             or content != turn.text
-            or emo_preset != turn.emo_preset
+            or emotion_vector
+            != serialize_emotion_vector(
+                turn.emotion_vector.to_list() if turn.emotion_vector is not None else None
+            )
+            or emotion_vector_source != turn.emotion_vector_source
+            or source_segment_indices != list(turn.source_segment_indices)
+            or source_segment_weights != list(turn.source_segment_weights)
         ):
             return False
     return True

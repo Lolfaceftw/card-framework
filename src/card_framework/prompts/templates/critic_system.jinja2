@@ -13,7 +13,13 @@ The draft MUST meet ALL of the following criteria to pass:
 3. SEMANTIC ALIGNMENT: Whichever speaker you assign, the speaker MUST have said it on the original transcript.
 4. NATURAL FLOW: Preserve how many times a speaker spoke in the original transcript and translate that to the summary. For example, if Speaker_01 spoke more than Speaker_02, then Speaker_01 should have more words in the summary than Speaker_02. The sequence must be preserved naturally as well.
 5. COHESIVE STRUCTURE: Ensure the summary is a complete arc. It must not feel like a collection of fragments; it must have a beginning, middle, and end.
-6. TRANSCRIPT COVERAGE AND PROGRESSION: The draft MUST represent the full chronological scope of the provided transcript. It MUST NOT skip major thematic sections or jump from the introduction directly to a conclusion if there is substantial intervening content. If the summary ends abruptly while the source transcript still has major topics, it is a FAIL.
+{% if target_seconds <= 45 %}
+6. SHORT-FORM COVERAGE AND PROGRESSION: This is a short-form summary. The draft MUST preserve a representative beginning, core middle, and ending arc of the transcript, but it does NOT need to mention every major theme. Omitting secondary subtopics or supporting analysis is acceptable if the summary still covers the main progression and does not collapse to a single section.
+{% elif target_seconds <= 90 %}
+6. MEDIUM-FORM COVERAGE AND PROGRESSION: The draft MUST cover the beginning, major middle beats, and ending arc of the transcript. It should represent the main conversation progression, but it MAY omit secondary subtopics when needed to stay within duration.
+{% else %}
+6. LONG-FORM TRANSCRIPT COVERAGE AND PROGRESSION: The draft MUST represent the full chronological scope of the provided transcript. It MUST NOT skip major thematic sections or jump from the introduction directly to a conclusion if there is substantial intervening content. If the summary ends abruptly while the source transcript still has major topics, it is a FAIL.
+{% endif %}
 
 <tool_usage_rules>
 You CANNOT estimate spoken duration or count words accurately yourself. You MUST use your tools in the following strict order:
@@ -60,9 +66,15 @@ Ensure that the draft is natural and flows well. When you read the draft, from t
 - Does the summary flow naturally from beginning to end without jarring jumps?
 - Does it sound like a real conversation between the speakers?
 - Are there any awkward transitions or abrupt changes in topic, such as jumping from intro to conclusion?
-- Does the summary capture the essence of the original transcript and cover its full timeline?
+- Does the summary capture the essence of the original transcript and cover the required scope for this target length?
 - Is the summary cohesive and represent a complete, logical arc of the conversation?
-- CHRONOLOGICAL CHECK: Does the draft represent content from the beginning, middle, and end of the transcript? If it only covers the first section then jumps to a final takeaway, it is a FAIL.
+{% if target_seconds <= 45 %}
+- SHORT-FORM CHRONOLOGICAL CHECK: Does the draft preserve a recognizable beginning, core middle, and ending arc? Do NOT fail only because some secondary themes are omitted. Fail only if the draft skips the core progression or collapses to a single slice of the transcript.
+{% elif target_seconds <= 90 %}
+- MEDIUM-FORM CHRONOLOGICAL CHECK: Does the draft cover the beginning, major middle beats, and ending arc? Do NOT fail only because some secondary themes or supporting examples are omitted.
+{% else %}
+- LONG-FORM CHRONOLOGICAL CHECK: Does the draft represent content from the beginning, middle, and end of the transcript? If it only covers the first section then jumps to a final takeaway, it is a FAIL.
+{% endif %}
 
 {% if is_embedding_enabled %}
 Strictly use `verify_against_transcript` to find specific details to add or remove.

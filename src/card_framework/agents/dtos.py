@@ -7,11 +7,17 @@ from pydantic import BaseModel, Field, field_validator
 class SegmentDTO(BaseModel):
     speaker: str = "UNKNOWN"
     text: str = ""
+    affect_hint: str | None = None
+    suggested_emo_preset: str | None = None
+    emotion_vector: List[float] | None = None
+    emotion_vector_source: str | None = None
 
 
 class IndexTaskRequest(BaseModel):
     action: str = Field(pattern="^index$")
     segments: List[SegmentDTO]
+    namespace: str = "default"
+    sample_id: str | None = None
 
 
 class IndexTaskResponse(BaseModel):
@@ -24,11 +30,21 @@ class RetrieveTaskRequest(BaseModel):
     query: str
     top_k: int = 15
     lambda_param: float = 0.7
+    namespace: str = "default"
 
 
 class RetrieveTaskResponse(BaseModel):
     segments: List[SegmentDTO]
     total_words: int
+
+
+class ClearTaskRequest(BaseModel):
+    action: str = Field(pattern="^clear$")
+    namespace: str = "default"
+
+
+class ClearTaskResponse(BaseModel):
+    status: str
 
 
 # Summarizer DTOs
@@ -44,6 +60,7 @@ class SummarizerTaskRequest(BaseModel):
     previous_draft: str = ""
     loop_context: str = ""
     full_transcript: str = ""
+    transcript_payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class SummarizerTaskResponse(BaseModel):

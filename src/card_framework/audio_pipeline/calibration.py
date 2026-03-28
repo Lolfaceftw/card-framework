@@ -6,26 +6,57 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+from pathlib import PurePosixPath
+import subprocess
 import tempfile
 from typing import Any
 
 from card_framework.agents.utils import count_words
 from card_framework.audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
+    build_source_separator,
+    build_speaker_diarizer,
     build_speaker_sample_generator,
     build_voice_clone_provider,
 )
-from card_framework.audio_pipeline.runtime import probe_audio_duration_ms, resolve_device, resolve_path
+from card_framework.audio_pipeline.contracts import DiarizationTurn
+from card_framework.audio_pipeline.errors import NonRetryableAudioStageError
+from card_framework.audio_pipeline.io import write_transcript_atomic
+from card_framework.audio_pipeline.runtime import (
+    ensure_module_available,
+    ensure_command_available,
+    probe_audio_duration_ms,
+    resolve_device,
+    resolve_path,
+)
 from card_framework.audio_pipeline.speaker_samples import (
+    AudioSlice,
+    SpeakerSampleArtifact,
     SpeakerSampleGenerationResult,
     resolve_sample_source_audio_path,
 )
-from card_framework.orchestration.transcript import Transcript
+from card_framework.orchestration.transcript import Transcript, TranscriptSegment
+from card_framework.shared.platform_support import (
+    detect_runtime_platform,
+    supports_nemo_backend,
+)
+from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, SummaryTurn
 
 DEFAULT_DURATION_TOLERANCE_RATIO = 0.05
 DEFAULT_CALIBRATION_ARTIFACT = "artifacts/calibration/voice_clone_calibration.json"
+_DOCKER_REPO_ROOT = PurePosixPath("/workspace/card-framework")
+_NEMO_DERIVED_DIARIZATION_PROVIDERS = frozenset(
+    {
+        "nemo",
+        "nemo_sortformer_offline",
+        "sortformer_offline",
+        "nemo_sortformer_streaming",
+        "sortformer_streaming",
+    }
+)
 DEFAULT_CALIBRATION_PHRASES: tuple[str, ...] = (
     "So, here is the quick setup: we slow down a little, pause at the comma, and land cleanly at the end.",
     "Right, the point is simple. We keep the pacing conversational, with brief pauses, steady emphasis, and a natural finish.",
@@ -359,10 +390,12 @@ def bootstrap_speaker_samples_from_audio(
     )
     transcript = Transcript.from_mapping(transcript_payload)
     generator = build_speaker_sample_generator(audio_cfg)
+    speaker_samples_cfg = _as_mapping(audio_cfg.get("speaker_samples", {}))
+    source_mode = str(speaker_samples_cfg.get("source_audio", "vocals"))
     generation_result = generator.generate(
         transcript_payload=transcript.to_payload(),
         source_audio_path=resolve_sample_source_audio_path(
-            source_mode="vocals",
+            source_mode=source_mode,
             transcript_metadata=transcript.metadata,
             configured_audio_path=str(audio_path),
             base_dir=project_root,
@@ -374,6 +407,439 @@ def bootstrap_speaker_samples_from_audio(
         transcript_path=bootstrap_transcript_path.resolve(),
         generation_result=generation_result,
     )
+
+
+def bootstrap_speaker_samples_from_diarization(
+    *,
+    project_root: Path,
+    audio_cfg: Mapping[str, Any],
+    audio_path: Path,
+    bootstrap_transcript_path: Path,
+    bootstrap_audio_work_dir: Path,
+    speaker_samples_output_dir: Path,
+    status_reporter: StatusReporter | None = None,
+) -> SpeakerSampleBootstrapResult:
+    """
+    Run separation and diarization only before generating speaker samples.
+
+    This path exists for workflows that need clean speaker reference audio but
+    do not need transcript text. It persists a lightweight bootstrap transcript
+    whose segments mirror diarization turns and whose metadata carries the raw
+    ``diarization_turns`` payload consumed by the overlap-safe sampler.
+    """
+    if _should_delegate_diarization_bootstrap_to_docker(audio_cfg=audio_cfg):
+        return _bootstrap_speaker_samples_from_diarization_via_docker(
+            project_root=project_root,
+            audio_cfg=audio_cfg,
+            audio_path=audio_path,
+            bootstrap_transcript_path=bootstrap_transcript_path,
+            bootstrap_audio_work_dir=bootstrap_audio_work_dir,
+            speaker_samples_output_dir=speaker_samples_output_dir,
+            status_reporter=status_reporter,
+        )
+    return _bootstrap_speaker_samples_from_diarization_local(
+        project_root=project_root,
+        audio_cfg=audio_cfg,
+        audio_path=audio_path,
+        bootstrap_transcript_path=bootstrap_transcript_path,
+        bootstrap_audio_work_dir=bootstrap_audio_work_dir,
+        speaker_samples_output_dir=speaker_samples_output_dir,
+        status_reporter=status_reporter,
+    )
+
+
+def _bootstrap_speaker_samples_from_diarization_local(
+    *,
+    project_root: Path,
+    audio_cfg: Mapping[str, Any],
+    audio_path: Path,
+    bootstrap_transcript_path: Path,
+    bootstrap_audio_work_dir: Path,
+    speaker_samples_output_dir: Path,
+    status_reporter: StatusReporter | None = None,
+) -> SpeakerSampleBootstrapResult:
+    """Run the diarization-only speaker-sample bootstrap in the local runtime."""
+    device = resolve_device(str(audio_cfg.get("device", "auto")))
+    bootstrap_audio_work_dir.mkdir(parents=True, exist_ok=True)
+    source_audio_path = audio_path.resolve()
+    _ensure_diarization_runtime_available(audio_cfg)
+    separator = build_source_separator(audio_cfg)
+    diarizer = build_speaker_diarizer(audio_cfg)
+    try:
+        with report_loading_duration(
+            "speaker-sample source separation",
+            reporter=status_reporter,
+        ):
+            vocals_path = separator.separate_vocals(
+                input_audio_path=source_audio_path,
+                output_dir=bootstrap_audio_work_dir / "separation",
+                device=device,
+                progress_callback=None,
+            )
+        with report_loading_duration(
+            "speaker-sample diarization",
+            reporter=status_reporter,
+        ):
+            diarization_turns = diarizer.diarize(
+                audio_path=vocals_path,
+                output_dir=bootstrap_audio_work_dir / "diarization",
+                device=device,
+                progress_callback=None,
+            )
+        warnings: list[str] = []
+        if len(diarization_turns) <= 1:
+            warnings.append(
+                "Diarization produced a single speaker timeline; verify the "
+                "diarizer setup for multi-speaker audio."
+            )
+        usable_turns = [
+            turn for turn in diarization_turns if turn.end_time_ms > turn.start_time_ms
+        ]
+        if not usable_turns:
+            raise NonRetryableAudioStageError(
+                "Speaker-sample bootstrap diarization produced no usable speaker "
+                "turns."
+            )
+        bootstrap_transcript = _build_diarization_only_bootstrap_transcript(
+            audio_cfg=audio_cfg,
+            source_audio_path=source_audio_path,
+            vocals_path=vocals_path,
+            device=device,
+            diarization_turns=usable_turns,
+            warnings=warnings,
+        )
+    finally:
+        _release_cached_stage_resources(
+            component=separator,
+            device=device,
+        )
+        _release_cached_stage_resources(
+            component=diarizer,
+            device=device,
+        )
+    bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    write_transcript_atomic(
+        bootstrap_transcript.to_payload(),
+        bootstrap_transcript_path,
+    )
+    generator = build_speaker_sample_generator(audio_cfg)
+    speaker_samples_cfg = _as_mapping(audio_cfg.get("speaker_samples", {}))
+    source_mode = str(speaker_samples_cfg.get("source_audio", "vocals"))
+    with report_loading_duration(
+        "speaker-sample clipping",
+        reporter=status_reporter,
+    ):
+        generation_result = generator.generate(
+            transcript_payload=bootstrap_transcript.to_payload(),
+            source_audio_path=resolve_sample_source_audio_path(
+                source_mode=source_mode,
+                transcript_metadata=bootstrap_transcript.metadata,
+                configured_audio_path=str(source_audio_path),
+                base_dir=project_root,
+            ),
+            output_dir=speaker_samples_output_dir,
+            progress_callback=None,
+        )
+
+    return SpeakerSampleBootstrapResult(
+        transcript_path=bootstrap_transcript_path.resolve(),
+        generation_result=generation_result,
+    )
+
+
+def _build_diarization_only_bootstrap_transcript(
+    *,
+    audio_cfg: Mapping[str, Any],
+    source_audio_path: Path,
+    vocals_path: Path,
+    device: str,
+    diarization_turns: list[DiarizationTurn],
+    warnings: list[str],
+) -> Transcript:
+    """Build one minimal bootstrap transcript from diarization turns only."""
+    return Transcript(
+        segments=tuple(
+            TranscriptSegment(
+                speaker=turn.speaker,
+                text="",
+                start_time=turn.start_time_ms,
+                end_time=turn.end_time_ms,
+                extras={"bootstrap_source": "diarization_only"},
+            )
+            for turn in diarization_turns
+            if turn.end_time_ms > turn.start_time_ms
+        ),
+        metadata={
+            "source_audio_path": str(source_audio_path),
+            "vocals_audio_path": str(vocals_path),
+            "device": device,
+            "generated_at_utc": _utc_now_iso(),
+            "warnings": list(warnings),
+            "separator_model": str(
+                _as_mapping(audio_cfg.get("separation", {})).get("model", "htdemucs")
+            ),
+            "diarizer_backend": str(
+                _as_mapping(audio_cfg.get("diarization", {})).get("provider", "nemo")
+            ),
+            "speaker_sample_bootstrap_mode": "diarization_only",
+            "diarization_turns": [
+                {
+                    "speaker": turn.speaker,
+                    "start_time": turn.start_time_ms,
+                    "end_time": turn.end_time_ms,
+                }
+                for turn in diarization_turns
+            ],
+        },
+    )
+
+
+def _should_delegate_diarization_bootstrap_to_docker(
+    *,
+    audio_cfg: Mapping[str, Any],
+) -> bool:
+    """Return whether diarization-only bootstrap should run inside Docker."""
+    disable_override = str(
+        os.environ.get("CARD_FRAMEWORK_DISABLE_DOCKER_SPEAKER_BOOTSTRAP", "")
+    ).strip()
+    if disable_override:
+        return False
+
+    diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
+    provider = str(diarization_cfg.get("provider", "nemo")).strip().lower()
+    if provider not in _NEMO_DERIVED_DIARIZATION_PROVIDERS:
+        return False
+
+    runtime_platform = detect_runtime_platform()
+    if not supports_nemo_backend(runtime_platform):
+        return True
+
+    try:
+        _ensure_diarization_runtime_available(audio_cfg)
+    except (ModuleNotFoundError, NonRetryableAudioStageError):
+        return True
+    return False
+
+
+def _bootstrap_speaker_samples_from_diarization_via_docker(
+    *,
+    project_root: Path,
+    audio_cfg: Mapping[str, Any],
+    audio_path: Path,
+    bootstrap_transcript_path: Path,
+    bootstrap_audio_work_dir: Path,
+    speaker_samples_output_dir: Path,
+    status_reporter: StatusReporter | None = None,
+) -> SpeakerSampleBootstrapResult:
+    """Run the diarization-only speaker-sample bootstrap in Docker Compose."""
+    ensure_command_available("docker")
+
+    resolved_project_root = project_root.resolve()
+    resolved_audio_path = audio_path.resolve()
+    resolved_bootstrap_transcript_path = bootstrap_transcript_path.resolve()
+    resolved_bootstrap_audio_work_dir = bootstrap_audio_work_dir.resolve()
+    resolved_speaker_samples_output_dir = speaker_samples_output_dir.resolve()
+
+    resolved_bootstrap_audio_work_dir.mkdir(parents=True, exist_ok=True)
+    resolved_bootstrap_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_speaker_samples_output_dir.mkdir(parents=True, exist_ok=True)
+
+    audio_cfg_snapshot_path = (
+        resolved_bootstrap_audio_work_dir / "docker_audio_cfg.json"
+    ).resolve()
+    audio_cfg_snapshot_path.write_text(
+        json.dumps(dict(audio_cfg), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        container_audio_cfg_path = _host_repo_path_to_container_path(
+            host_path=audio_cfg_snapshot_path,
+            project_root=resolved_project_root,
+        )
+        container_audio_path = _host_repo_path_to_container_path(
+            host_path=resolved_audio_path,
+            project_root=resolved_project_root,
+        )
+        container_bootstrap_transcript_path = _host_repo_path_to_container_path(
+            host_path=resolved_bootstrap_transcript_path,
+            project_root=resolved_project_root,
+        )
+        container_bootstrap_audio_work_dir = _host_repo_path_to_container_path(
+            host_path=resolved_bootstrap_audio_work_dir,
+            project_root=resolved_project_root,
+        )
+        container_speaker_samples_output_dir = _host_repo_path_to_container_path(
+            host_path=resolved_speaker_samples_output_dir,
+            project_root=resolved_project_root,
+        )
+    except ValueError as exc:
+        raise NonRetryableAudioStageError(
+            "Docker speaker-sample bootstrap requires all working paths to live "
+            f"under the repository root: {resolved_project_root}"
+        ) from exc
+
+    service_name = _resolve_docker_speaker_bootstrap_service_name(audio_cfg=audio_cfg)
+    command: list[str] = ["docker", "compose"]
+    if service_name == "setup-and-run-gpu":
+        command.extend(["--profile", "gpu"])
+    command.extend(
+        [
+            "run",
+            "--rm",
+            "-T",
+            "-e",
+            "CARD_FRAMEWORK_DISABLE_DOCKER_SPEAKER_BOOTSTRAP=1",
+            "--entrypoint",
+            "uv",
+            service_name,
+            "run",
+            "python",
+            "-m",
+            "card_framework.audio_pipeline.bootstrap_speaker_samples_cli",
+            "--audio-cfg-json",
+            str(container_audio_cfg_path),
+            "--audio-path",
+            str(container_audio_path),
+            "--bootstrap-transcript-path",
+            str(container_bootstrap_transcript_path),
+            "--bootstrap-audio-work-dir",
+            str(container_bootstrap_audio_work_dir),
+            "--speaker-samples-output-dir",
+            str(container_speaker_samples_output_dir),
+        ]
+    )
+
+    if status_reporter is not None:
+        status_reporter(
+            "Delegating diarization-only speaker-sample bootstrap to Docker "
+            f"Compose service '{service_name}'."
+        )
+
+    with report_loading_duration(
+        "speaker-sample Docker bootstrap",
+        reporter=status_reporter,
+    ):
+        completed = subprocess.run(
+            command,
+            cwd=str(resolved_project_root),
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise NonRetryableAudioStageError(
+            "Docker speaker-sample bootstrap failed with exit code "
+            f"{completed.returncode}."
+        )
+    if not resolved_bootstrap_transcript_path.exists():
+        raise NonRetryableAudioStageError(
+            "Docker speaker-sample bootstrap completed without writing the "
+            f"expected bootstrap transcript: {resolved_bootstrap_transcript_path}"
+        )
+    manifest_path = (resolved_speaker_samples_output_dir / "manifest.json").resolve()
+    if not manifest_path.exists():
+        raise NonRetryableAudioStageError(
+            "Docker speaker-sample bootstrap completed without writing the "
+            f"expected speaker-sample manifest: {manifest_path}"
+        )
+    generation_result = _load_speaker_sample_generation_result_from_manifest(
+        output_dir=resolved_speaker_samples_output_dir,
+        manifest_path=manifest_path,
+    )
+    return SpeakerSampleBootstrapResult(
+        transcript_path=resolved_bootstrap_transcript_path,
+        generation_result=generation_result,
+    )
+
+
+def _host_repo_path_to_container_path(
+    *,
+    host_path: Path,
+    project_root: Path,
+) -> PurePosixPath:
+    """Translate one repo-local host path into the mounted Docker path."""
+    resolved_host_path = host_path.resolve()
+    resolved_project_root = project_root.resolve()
+    relative_path = resolved_host_path.relative_to(resolved_project_root)
+    return _DOCKER_REPO_ROOT.joinpath(*relative_path.parts)
+
+
+def _load_speaker_sample_generation_result_from_manifest(
+    *,
+    output_dir: Path,
+    manifest_path: Path,
+) -> SpeakerSampleGenerationResult:
+    """Rebuild generation-result metadata from an existing speaker manifest."""
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts: list[SpeakerSampleArtifact] = []
+    for raw_sample in payload.get("samples", []):
+        sample_path = Path(str(raw_sample.get("path", "")).strip())
+        if not sample_path.is_absolute():
+            sample_path = (output_dir / sample_path).resolve()
+        raw_ranges = raw_sample.get("ranges_ms", [])
+        ranges_ms = tuple(
+            AudioSlice(
+                start_time_ms=int(raw_range.get("start_time_ms", 0)),
+                end_time_ms=int(raw_range.get("end_time_ms", 0)),
+            )
+            for raw_range in raw_ranges
+            if int(raw_range.get("end_time_ms", 0))
+            > int(raw_range.get("start_time_ms", 0))
+        )
+        status_value = str(raw_sample.get("status", "ok")).strip().lower()
+        if status_value not in {"ok", "shorter_than_requested"}:
+            status_value = "ok"
+        artifacts.append(
+            SpeakerSampleArtifact(
+                speaker=str(raw_sample.get("speaker", "")).strip(),
+                path=sample_path,
+                requested_duration_ms=int(
+                    raw_sample.get(
+                        "requested_duration_ms",
+                        raw_sample.get("duration_ms", 0),
+                    )
+                ),
+                actual_duration_ms=int(raw_sample.get("duration_ms", 0)),
+                status=status_value,
+                dropped_slice_count=int(raw_sample.get("dropped_slice_count", 0)),
+                ranges_ms=ranges_ms,
+            )
+        )
+    generated_at_utc = str(payload.get("generated_at_utc", "")).strip() or _utc_now_iso()
+    return SpeakerSampleGenerationResult(
+        output_dir=output_dir.resolve(),
+        manifest_path=manifest_path.resolve(),
+        generated_at_utc=generated_at_utc,
+        artifacts=tuple(artifacts),
+    )
+
+
+def _resolve_docker_speaker_bootstrap_service_name(
+    *,
+    audio_cfg: Mapping[str, Any],
+) -> str:
+    """Choose the Docker Compose service used for speaker-sample bootstrap."""
+    preferred_device = str(audio_cfg.get("device", "auto")).strip().lower()
+    if preferred_device == "cuda":
+        return "setup-and-run-gpu"
+    if preferred_device == "cpu":
+        return "setup-and-run"
+    runtime_platform = detect_runtime_platform()
+    if runtime_platform.system_key == "windows":
+        return "setup-and-run-gpu"
+    resolved_device = resolve_device(preferred_device)
+    return "setup-and-run-gpu" if resolved_device == "cuda" else "setup-and-run"
+
+
+def _ensure_diarization_runtime_available(audio_cfg: Mapping[str, Any]) -> None:
+    """Fail fast when the configured diarizer runtime is unavailable."""
+    diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
+    provider = str(diarization_cfg.get("provider", "nemo")).strip().lower()
+    if provider in _NEMO_DERIVED_DIARIZATION_PROVIDERS:
+        ensure_module_available("nemo")
+        return
+    if provider == "pyannote_community1":
+        ensure_module_available("pyannote.audio")
+        return
 
 
 def _calibration_matches_current_inputs(
@@ -683,6 +1149,17 @@ def _build_preset_default_wpm(
 def _utc_now_iso() -> str:
     """Return a compact UTC timestamp for persisted calibration artifacts."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _release_cached_stage_resources(*, component: object, device: str) -> None:
+    """Best-effort release for cached stage resources used by bootstrap helpers."""
+    release_cached_resources = getattr(component, "release_cached_resources", None)
+    if not callable(release_cached_resources):
+        return
+    try:
+        release_cached_resources(device=device)
+    except Exception:
+        pass
 
 
 def _as_mapping(raw_value: Any) -> Mapping[str, Any]:

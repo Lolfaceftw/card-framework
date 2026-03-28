@@ -85,6 +85,14 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.utils"] = utils_module
 
 from card_framework.agents.base import BaseA2AExecutor
+from card_framework.agents.prompt_compaction import (
+    ContextBudgetManager,
+    ContextWindowProfile,
+    PromptCompactionConfig,
+    PromptCompactionRequest,
+    PromptCompactionResult,
+)
+import card_framework.agents.critic as critic_module
 from card_framework.agents.critic import CriticExecutor
 from card_framework.agents.utils import count_words
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
@@ -180,6 +188,61 @@ class _LoopLLM:
         response = self._responses[self._index]
         self._index += 1
         return response
+
+
+class _OverflowThenSuccessLLM:
+    """Raise one context overflow first, then return one empty assistant response."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.chat_messages: list[list[dict[str, Any]]] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | str | None = None,
+        max_tokens: int | None = None,
+    ) -> _LoopResponse:
+        del tools, tool_choice, max_tokens
+        self.calls += 1
+        self.chat_messages.append(
+            [
+                message.to_openai_dict()
+                if hasattr(message, "to_openai_dict")
+                else dict(message)
+                for message in messages
+            ]
+        )
+        if self.calls == 1:
+            raise RuntimeError(
+                "This model's maximum context length is 131072 tokens. "
+                "However, you requested 133783 tokens."
+            )
+        return _LoopResponse(content="")
+
+
+class _StaticPromptCompactionStrategy:
+    """Return a deterministic compacted context payload for overflow retries."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def compact(
+        self,
+        *,
+        request: PromptCompactionRequest,
+    ) -> PromptCompactionResult:
+        self.calls += 1
+        del request
+        return PromptCompactionResult(
+            compressed_transcript_context="short transcript grounding",
+            compressed_history_context="short history context",
+            compression_reason="test_compaction",
+            source_iteration_span=(0, 1),
+            estimated_tokens_before=100,
+            estimated_tokens_after=20,
+        )
 
 
 class _NullResponseCallback:
@@ -586,6 +649,179 @@ def test_run_deterministic_checks_prefers_live_draft_audio_state(
     assert payload["status"] == "pass"
 
 
+def test_run_deterministic_checks_falls_back_to_live_draft_turn_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Use rendered turn WAVs when the live-draft sidecar is unavailable."""
+    turn_dir = tmp_path / "voice_clone" / "live_draft_turns"
+    turn_dir.mkdir(parents=True)
+    first_turn = turn_dir / "turn-001.wav"
+    second_turn = turn_dir / "turn-002.wav"
+    first_turn.write_bytes(b"wav1")
+    second_turn.write_bytes(b"wav2")
+    state_path = tmp_path / "voice_clone" / "live_draft.state.json"
+    draft = (
+        "<SPEAKER_00>Short finalized draft.</SPEAKER_00>\n"
+        "<SPEAKER_01>Second short reply.</SPEAKER_01>"
+    )
+
+    durations = {
+        first_turn.resolve(): 2_400,
+        second_turn.resolve(): 3_600,
+    }
+
+    def _fake_probe_audio_duration_ms(audio_path: Path) -> int | None:
+        return durations.get(audio_path.resolve())
+
+    monkeypatch.setattr(
+        critic_module,
+        "probe_audio_duration_ms",
+        _fake_probe_audio_duration_ms,
+    )
+
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
+
+    payload = executor._run_deterministic_checks(
+        draft=draft,
+        target_seconds=5,
+        duration_tolerance_ratio=0.25,
+        draft_audio_state_path=state_path,
+    )
+
+    assert payload["duration_source"] == "actual_audio_dir"
+    assert payload["actual_estimated_seconds"] == 6.0
+    assert payload["status"] == "pass"
+
+
+def test_run_deterministic_checks_accepts_terminal_quoted_sentence() -> None:
+    """Treat closing quotes after terminal punctuation as a valid sentence end."""
+    draft = '<SPEAKER_00>Edward says it is "tolerable."</SPEAKER_00>'
+    executor = CriticExecutor(
+        llm=_FakeLLM(),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+    )
+    messages: list[dict[str, Any]] = []
+
+    asyncio.run(
+        executor.process_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call_quoted",
+                    "name": "run_deterministic_checks",
+                    "arguments": {"draft_text": draft},
+                }
+            ],
+            messages=messages,
+            context_data={
+                "draft": draft,
+                "target_seconds": 2,
+                "duration_tolerance_ratio": 0.8,
+            },
+        )
+    )
+    tool_msg = next(m for m in messages if m.get("name") == "run_deterministic_checks")
+    payload = json.loads(tool_msg["content"])
+
+    assert payload["status"] == "pass"
+    assert payload["failures"] == []
+
+
+def test_critic_system_prompt_relaxes_short_form_coverage_requirements() -> None:
+    """Use representative-arc coverage rules for 30-second targets."""
+    prompt = PromptManager.get_prompt(
+        "critic_system",
+        target_seconds=30,
+        target_minutes=0.5,
+        duration_tolerance_ratio=0.05,
+        duration_tolerance_percent=5.0,
+        min_seconds=28.5,
+        max_seconds=31.5,
+        is_embedding_enabled=False,
+    )
+
+    assert "SHORT-FORM COVERAGE AND PROGRESSION" in prompt
+    assert "representative beginning, core middle, and ending arc" in prompt
+    assert "Omitting secondary subtopics or supporting analysis is acceptable" in prompt
+    assert "LONG-FORM TRANSCRIPT COVERAGE AND PROGRESSION" not in prompt
+
+
+def test_critic_system_prompt_uses_medium_form_coverage_for_one_minute_targets() -> None:
+    """Require major-arc coverage, not exhaustive coverage, for 1-minute targets."""
+    prompt = PromptManager.get_prompt(
+        "critic_system",
+        target_seconds=60,
+        target_minutes=1.0,
+        duration_tolerance_ratio=0.05,
+        duration_tolerance_percent=5.0,
+        min_seconds=57.0,
+        max_seconds=63.0,
+        is_embedding_enabled=False,
+    )
+
+    assert "MEDIUM-FORM COVERAGE AND PROGRESSION" in prompt
+    assert "major middle beats" in prompt
+    assert "MAY omit secondary subtopics" in prompt
+    assert "LONG-FORM TRANSCRIPT COVERAGE AND PROGRESSION" not in prompt
+
+
+def test_critic_system_prompt_uses_short_form_boundary_at_forty_five_seconds() -> None:
+    """Keep exact 45-second targets in the short-form rubric bucket."""
+    prompt = PromptManager.get_prompt(
+        "critic_system",
+        target_seconds=45,
+        target_minutes=0.75,
+        duration_tolerance_ratio=0.05,
+        duration_tolerance_percent=5.0,
+        min_seconds=42.75,
+        max_seconds=47.25,
+        is_embedding_enabled=False,
+    )
+
+    assert "SHORT-FORM COVERAGE AND PROGRESSION" in prompt
+    assert "MEDIUM-FORM COVERAGE AND PROGRESSION" not in prompt
+
+
+def test_critic_system_prompt_uses_medium_form_boundary_at_ninety_seconds() -> None:
+    """Keep exact 90-second targets in the medium-form rubric bucket."""
+    prompt = PromptManager.get_prompt(
+        "critic_system",
+        target_seconds=90,
+        target_minutes=1.5,
+        duration_tolerance_ratio=0.05,
+        duration_tolerance_percent=5.0,
+        min_seconds=85.5,
+        max_seconds=94.5,
+        is_embedding_enabled=False,
+    )
+
+    assert "MEDIUM-FORM COVERAGE AND PROGRESSION" in prompt
+    assert "LONG-FORM TRANSCRIPT COVERAGE AND PROGRESSION" not in prompt
+
+
+def test_critic_system_prompt_keeps_full_scope_for_long_form_targets() -> None:
+    """Keep the strict full-scope requirement for long-form targets."""
+    prompt = PromptManager.get_prompt(
+        "critic_system",
+        target_seconds=300,
+        target_minutes=5.0,
+        duration_tolerance_ratio=0.05,
+        duration_tolerance_percent=5.0,
+        min_seconds=285.0,
+        max_seconds=315.0,
+        is_embedding_enabled=False,
+    )
+
+    assert "LONG-FORM TRANSCRIPT COVERAGE AND PROGRESSION" in prompt
+    assert "full chronological scope of the provided transcript" in prompt
+    assert "Omitting secondary subtopics or supporting analysis is acceptable" not in prompt
+
+
 def test_run_agent_loop_stops_on_repeated_no_tool_span() -> None:
     """Trip the shared loop guard when one assistant turn repeats itself."""
     repeated_text = (
@@ -659,6 +895,64 @@ def test_run_agent_loop_stops_on_repeated_no_tool_turns() -> None:
     assert llm.calls == 2
     assert runtime_context["loop_stop_category"] == "reasoning_loop_guard"
     assert "cross-turn repetition" in runtime_context["loop_stop_reason"]
+
+
+def test_run_agent_loop_retries_after_context_overflow_with_prompt_compaction() -> None:
+    """Compact and retry the same turn once when the provider rejects prompt size."""
+    llm = _OverflowThenSuccessLLM()
+    executor = _LoopGuardExecutor(llm)
+    compaction_strategy = _StaticPromptCompactionStrategy()
+    runtime_context = {
+        "context_budget_manager": ContextBudgetManager(
+            config=PromptCompactionConfig(
+                enabled=True,
+                trigger_ratio=0.8,
+                retry_on_overflow=True,
+                max_overflow_retries=1,
+                keep_latest_iterations=1,
+            ),
+            profiles={
+                "deepseek_chat": ContextWindowProfile(
+                    profile_name="deepseek_chat",
+                    context_window_tokens=100,
+                )
+            },
+            token_estimator=lambda _blocks: 10,
+        ),
+        "prompt_compaction_profile_name": "deepseek_chat",
+        "prompt_compaction_strategy": compaction_strategy,
+        "prompt_compaction_keep_latest_iterations": 1,
+        "prompt_compaction_request_builder": (
+            lambda **kwargs: PromptCompactionRequest(
+                profile_name="deepseek_chat",
+                current_draft="draft",
+                latest_feedback="feedback",
+                loop_context="loop",
+                transcript_context="transcript",
+                messages=kwargs["messages"],
+            )
+        ),
+    }
+
+    result = asyncio.run(
+        executor.run_agent_loop(
+            messages=[
+                {"role": "system", "content": "Critic"},
+                {"role": "user", "content": "Large prompt context"},
+            ],
+            tools=[],
+            max_turns=1,
+            context_data=runtime_context,
+        )
+    )
+
+    assert result is None
+    assert llm.calls == 2
+    assert compaction_strategy.calls == 1
+    assert any(
+        "Compacted prior summarizer context" in str(message.get("content", ""))
+        for message in llm.chat_messages[1]
+    )
 
 
 def test_handle_task_falls_back_with_loop_guard_prefix() -> None:

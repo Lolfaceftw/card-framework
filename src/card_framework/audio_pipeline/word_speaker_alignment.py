@@ -55,7 +55,8 @@ def build_word_speaker_segments(
     )
     realigned = realign_speakers_with_punctuation(punctuated)
     segmented = group_sentence_segments(realigned)
-    return merge_adjacent_segments(segmented, merge_gap_ms=merge_gap_ms)
+    smoothed = smooth_short_sandwich_segments(segmented)
+    return merge_adjacent_segments(smoothed, merge_gap_ms=merge_gap_ms)
 
 
 def map_words_to_speakers(
@@ -90,6 +91,7 @@ def map_words_to_speakers(
 
         best_overlap_ms = -1
         best_speaker = ""
+        overlapping_speakers: list[str] = []
         candidate_index = turn_index
         while candidate_index < len(turns):
             candidate = turns[candidate_index]
@@ -101,6 +103,8 @@ def map_words_to_speakers(
                 start_b=candidate.start_time_ms,
                 end_b=candidate.end_time_ms,
             )
+            if overlap_ms > 0 and candidate.speaker.strip():
+                overlapping_speakers.append(candidate.speaker)
             if overlap_ms > best_overlap_ms:
                 best_overlap_ms = overlap_ms
                 best_speaker = candidate.speaker
@@ -130,6 +134,11 @@ def map_words_to_speakers(
                 speaker=resolved_speaker,
                 start_time_ms=word.start_time_ms,
                 end_time_ms=word.end_time_ms,
+                overlap_speakers=tuple(
+                    speaker
+                    for speaker in dict.fromkeys(overlapping_speakers)
+                    if speaker.strip() and speaker != resolved_speaker
+                ),
             )
         )
         previous_speaker = resolved_speaker
@@ -180,9 +189,9 @@ def realign_speakers_with_punctuation(
     word_tokens: list[WordSpeakerToken],
     *,
     max_words_in_sentence: int = 50,
-    max_relabel_window_words: int = 14,
-    max_flip_span_words: int = 2,
-    min_dominant_ratio: float = 0.75,
+    max_relabel_window_words: int = 18,
+    max_flip_span_words: int = 3,
+    min_dominant_ratio: float = 0.7,
 ) -> list[WordSpeakerToken]:
     """Realign short speaker flips that split single sentence spans."""
     if not word_tokens:
@@ -267,35 +276,50 @@ def group_sentence_segments(word_tokens: list[WordSpeakerToken]) -> list[Transcr
     current_start = word_tokens[0].start_time_ms
     current_end = word_tokens[0].end_time_ms
     current_words: list[str] = [word_tokens[0].word]
+    current_overlap = tuple(word_tokens[0].overlap_speakers)
 
     for token in word_tokens[1:]:
         candidate_text = f"{' '.join(current_words)} {token.word}".strip()
         speaker_changed = token.speaker != current_speaker
+        overlap_changed = tuple(token.overlap_speakers) != current_overlap
         split_sentence = sentence_break(candidate_text)
-        if speaker_changed or split_sentence:
+        if speaker_changed or overlap_changed or split_sentence:
+            extras = (
+                {"overlap_speakers": list(current_overlap)}
+                if current_overlap
+                else {}
+            )
             segments.append(
                 TranscriptSegment(
                     speaker=current_speaker,
                     start_time=current_start,
                     end_time=current_end,
                     text=" ".join(current_words).strip(),
+                    extras=extras,
                 )
             )
             current_speaker = token.speaker
             current_start = token.start_time_ms
             current_words = [token.word]
             current_end = token.end_time_ms
+            current_overlap = tuple(token.overlap_speakers)
             continue
 
         current_words.append(token.word)
         current_end = token.end_time_ms
 
+    extras = (
+        {"overlap_speakers": list(current_overlap)}
+        if current_overlap
+        else {}
+    )
     segments.append(
         TranscriptSegment(
             speaker=current_speaker,
             start_time=current_start,
             end_time=current_end,
             text=" ".join(current_words).strip(),
+            extras=extras,
         )
     )
     return segments
@@ -314,17 +338,68 @@ def merge_adjacent_segments(
     for current in segments[1:]:
         previous = merged[-1]
         same_speaker = previous.speaker == current.speaker
+        same_overlap = _segment_overlap_key(previous) == _segment_overlap_key(current)
         gap_ms = current.start_time - previous.end_time
-        if same_speaker and gap_ms <= merge_gap_ms:
+        if same_speaker and same_overlap and gap_ms <= merge_gap_ms:
             merged[-1] = TranscriptSegment(
                 speaker=previous.speaker,
                 start_time=previous.start_time,
                 end_time=current.end_time,
                 text=f"{previous.text} {current.text}".strip(),
+                extras=dict(previous.extras),
             )
             continue
         merged.append(current)
     return merged
+
+
+def smooth_short_sandwich_segments(
+    segments: list[TranscriptSegment],
+    *,
+    max_duration_ms: int = 500,
+    max_word_count: int = 3,
+) -> list[TranscriptSegment]:
+    """Relabel tiny sandwiched segments when both neighbors agree on speaker."""
+    if len(segments) < 3:
+        return segments
+
+    smoothed = list(segments)
+    for index in range(1, len(smoothed) - 1):
+        previous = smoothed[index - 1]
+        current = smoothed[index]
+        following = smoothed[index + 1]
+        if previous.speaker != following.speaker:
+            continue
+        if current.speaker == previous.speaker:
+            continue
+        if _segment_overlap_key(previous) or _segment_overlap_key(current) or _segment_overlap_key(
+            following
+        ):
+            continue
+        duration_ms = current.end_time - current.start_time
+        if duration_ms > max_duration_ms:
+            continue
+        if len(current.text.split()) > max_word_count:
+            continue
+        smoothed[index] = TranscriptSegment(
+            speaker=previous.speaker,
+            start_time=current.start_time,
+            end_time=current.end_time,
+            text=current.text,
+            extras=dict(current.extras),
+        )
+    return smoothed
+
+
+def _segment_overlap_key(segment: TranscriptSegment) -> tuple[str, ...]:
+    raw_value = segment.extras.get("overlap_speakers")
+    if not isinstance(raw_value, list | tuple):
+        return ()
+    return tuple(
+        str(speaker).strip()
+        for speaker in raw_value
+        if str(speaker).strip()
+    )
 
 
 def _word_anchor(start_ms: int, end_ms: int, *, anchor: str) -> int:

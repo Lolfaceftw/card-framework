@@ -1,0 +1,72 @@
+Episode: The Lion, the Lamb & the Meadow (Chap. 12-13)
+Sample ID: sporc_00430_https_www_buzzsprout_com_202613_3990386_the_lion_the_lamb_the_meadow_chap_12_13_
+
+1. [SPEAKER_01] SPEAKER_00: I'm Sam. This is our not first ever long distance podcast, but second ever. Third ever, actually. Third? Yeah, because we lost two episodes of the first season and we did two. I thought we only lost one. Yeah, I like to black that out of my memory. This is like the first time we have the proper technology I feel.
+SPEAKER_01: Totally. I just recently bought a microphone. Stephanie Meyer announced Midnight Sun and I immediately bought a microphone. So that we could start recording and finish Twilight before Midnight Sun comes out so that we're adequately prepared to read it.
+Source: 2-7 (00:00:27-00:01:19) | multi_speaker_exchange | measured 51.210s
+Rationale: Intro exchange: hosts introduce themselves, explain the long-distance setup, and reveal the Midnight Sun announcement as the catalyst for resuming recording.
+
+2. [SPEAKER_01] SPEAKER_00: It really is a new world. I did not think that it was going to be Midnight Sun. When I saw that countdown, I thought it was going to be something I wouldn't care about. I thought it was going to be something Twilight related because correct me if I'm wrong, but I don't think she has the clout or the following for anything else that it would be worth doing that dramatic of a reveal.
+SPEAKER_00: I wouldn't have doubted her using Midnight Sun clout to drop a host sequel.
+SPEAKER_00: I have waited literally half my life for this?
+Source: 12-22 (00:01:38-00:02:08) | multi_speaker_exchange | measured 30.160s
+Rationale: Hosts react to the Midnight Sun announcement — disbelief, speculation about what the countdown could have been, and the emotional weight of waiting half their lives for this book.
+
+3. [SPEAKER_00] SPEAKER_00: There's a lot of talk going around. We've been saying it online. Other people have been saying it online. This is a really great time to donate to the Quilliot Tribes Move to Higher Ground Campaign. So, Stephanie Meyer, some entertainment. That whole conglomerate has never given any money to the Quilliot Tribe, even though they use their name and image and sort of their stories in the saga. If you would like to write that, I mean, we discussed, and a lot of people are discussing either matching donations or donating even more to the Move to Higher Ground Campaign in tandem to buying the Midnight Sun if you're going to buy it, or any other merch that goes along with it.
+SPEAKER_01: Yeah, personally, I'm trying to donate exactly what I spend on any Twilight-related purchase.
+Source: 56-61 (00:03:43-00:04:51) | multi_speaker_exchange | measured 67.630s
+Rationale: Hosts make a direct call to action about the Quilliot Tribe's Move to Higher Ground Campaign, explaining the ethical context around Twilight's use of the tribe's name and image.
+
+4. [SPEAKER_00] SPEAKER_00: Should we give a little update about what's up with us? Yeah, sure. You go ahead. Okay. We talked about it a little bit on the podcast before, and we talked about it more, like, on our Patreon, I think, and, like, on our Instagram. That right before the pandemic hit, we were supposed to go on a twilight road trip of the Pacific Northwest. We had everything booked like the first week of March, and then everything happened like a week after that. Obviously, devastated beyond belief that it's not happening. Honestly, Midnight Sun coming out has, like, eased a lot of that pain for me.
+SPEAKER_00: Like, I felt like I definitely had to grieve for a bit, and, like, couldn't engage with Twilight for a second.
+Source: 96-103 (00:08:44-00:09:24) | multi_speaker_exchange | measured 40.560s
+Rationale: Personal update: the hosts had a Twilight Pacific Northwest road trip booked that was cancelled by COVID-19, and how the Midnight Sun announcement helped ease that grief.
+
+5. [SPEAKER_01] SPEAKER_00: For today's episode, we read chapters 12 and 13 of Twilight. That's Bouncing and Confessions.
+SPEAKER_01: I want to say chapter 12 is the cutoff point of where Midnight Sun ends. The part that we've been exposed to already. Oh, that was the other thing I wanted to say about Midnight Sun. Do you think she's going to go back and edit? Probably. Heavily? Or do you think she's just going to be like— I mean, I'm sure the bare bones are the same.
+Source: 173-180 (00:15:57-00:16:17) | multi_speaker_exchange | measured 20.260s
+Rationale: Episode scope introduction: chapters 12 and 13 (Balancing and Confessions), plus the key note that chapter 12 is where the leaked Midnight Sun draft ends.
+
+6. [SPEAKER_01] SPEAKER_01: So 12 and 13, basically where we left off, is that Edward, I guess, drove Bella home from school. Billy Jacob and Charlie are all getting there around the same time. Basically where we left off is they're about to come into the house, all of them. And Bella is like, "Oh shit." From the look in Billy's eyes, she knows that Billy truly believes that— or knows and believes that Edward is a vampire. So she's like, "Oh shit."
+SPEAKER_00: And she basically spends the entire time that they're there, not letting them out of her sight so that she can intercept in case Billy tries to tell something to Charlie, which he doesn't.
+SPEAKER_01: Right. And it's also really interesting. So Billy and Jacob saw Edward kind of leaving quickly, but Jacob didn't know who it was because he didn't recognize his car.
+Source: 208-218 (00:18:11-00:19:12) | multi_speaker_exchange | measured 60.360s
+Rationale: Chapter 12 recap begins: Billy Black's visit, Bella's anxiety about Billy knowing Edward is a vampire, and Jacob's obliviousness about the car.
+
+7. [SPEAKER_00] SPEAKER_00: On page 241, Bella continues with her very extraneous, almost flamboyant descriptions of Edward. We are getting more and more of in this section. She sees him and she says, I couldn't imagine how an angel could be any more glorious. There was nothing about him that could be improved upon. It's like me when I look at my cat. Yeah. I'm like, that's perfection.
+SPEAKER_01: Yeah. It was cute. She's like so excited. She's like running to his car, like jumping in the front seat really quickly. Yeah. And then she asks him how his night was and he says pleasant. His smile was amused. I felt like I was missing an inside joke. I was like, you watched her sleep, you dirty fuck. You motherfucker.
+SPEAKER_00: Hey, honestly that kind of made my skin crawl a little bit. Yeah. It's gross.
+SPEAKER_01: I wish Twilight had leaned into the creepy.
+Source: 285-296 (00:24:22-00:25:15) | multi_speaker_exchange | measured 53.080s
+Rationale: Hosts discuss Bella's over-the-top descriptions of Edward and the creepy implication that he watched her sleep — and their wish the book had leaned into that horror rather than romanticizing it.
+
+8. [SPEAKER_00] SPEAKER_00: There's a lot of lines in the next, in the rest of this chapter and the next chapter that are kind of like this. So I probably won't even like pick apart every single one. But there's a lot of like hot and cold here. They're talking about going to the meadow or to, I don't know if they're still going to Seattle at this point. I don't remember, but he's like, you could always cancel, you know. Like he's like kind of pleading with her to like cancel. And it's like, you could also cancel. You dumbass. Like if you really don't think you can handle it, just cancel it. And so much use of the word like fear and afraid. And it's used in so many different contexts. I don't know if that's just like a writing thing that's bothering me or what, but there's a lot of discussion of fear. And Bella keeps saying that she's not afraid of him, but then sometimes she is afraid of him. And then sometimes she's just afraid of losing him. And then she's afraid of like what he will think of her and like all these different uses of fear.
+SPEAKER_00: Yeah, better. Really hard to keep track of honestly.
+Source: 375-382 (00:30:31-00:31:48) | multi_speaker_exchange | measured 76.490s
+Rationale: Hosts analyze the emotional texture of chapters 12-13: the hot-and-cold dynamic, Edward's mixed signals about canceling, and the overloaded use of 'fear' throughout the text.
+
+9. [SPEAKER_01] SPEAKER_01: I remember the meadow scene. This is what caused the whole shit. Like this is what caused the whole saga — this one dream.
+SPEAKER_00: I never have dreams that are like that. I mean, case in point, the dream I had last night about headless Renesmee. That's my dream. That's the book that I want.
+Source: 636-640 (00:50:01-00:50:22) | multi_speaker_exchange | measured 20.660s
+Rationale: Hosts note that the meadow scene originated from Stephanie Meyer's famous dream — the genesis of the entire Twilight saga — and Sam riffs on her own Renesmee-beheading dream from earlier in the episode.
+
+10. [SPEAKER_00] SPEAKER_00: So this whole chapter is like a long conversation. It really does end up being a turning point for their relationship. A lot happens. They get a lot of clarity — or especially Bella gets a lot of clarity about where Edward's head has been at this entire time. They end up like basically declaring that they're in love with one another. We kind of understand where Edward's coming from in this a lot. But with that same sort of ebb and flow of like fear and not fear and anger and not anger. And then understanding.
+SPEAKER_01: There's a lot of these like iconic lines of Twilight that are happening in this chapter — between like the "as if you could outrun me," "everything about me invites you in," "as if you could fight me off."
+Source: 703-710 (00:55:42-00:56:24) | multi_speaker_exchange | measured 42.640s
+Rationale: Chapter 13 overview: the meadow conversation as a turning point where Bella and Edward declare love, Edward reveals his history, and the iconic predator lines appear.
+
+11. [SPEAKER_01] SPEAKER_01: After this like extremely long conversation with Edward and Bella, he turns the conversation from like this danger to saying "you were the most important thing to me now. The most important thing to me ever." And I was like, I felt— I'd be complimenting hours.
+SPEAKER_00: I felt a little bit— even after that huge conversation I'm like, but where did that come from?
+SPEAKER_01: And she seems to like— she's excited by it. A little surprised maybe, but she's like agreeing wholeheartedly. Like they come to this— so the lion fell in love with the lamb, right? And it's like, y'all are in love now. They're in love now.
+SPEAKER_00: I mean, she said she was in love with him like in one of the last chapters. But they're sharing it now. It's very— first of all it's very heteronormative. Also, what's very heteronormative is on page 273, he calls her Isabella.
+SPEAKER_01: Yeah. It's very intense.
+Source: 928-940 (01:14:07-01:15:18) | multi_speaker_exchange | measured 70.770s
+Rationale: The emotional climax of chapter 13: Edward declares Bella is the most important thing to him ever, they mutually acknowledge love, and the 'lion fell in love with the lamb' moment — plus hosts' commentary on the heteronormativity.
+
+12. [SPEAKER_00] SPEAKER_00: Edward is like so beside himself for the rest of this chapter. He's so— this is the happiest we've ever seen him.
+SPEAKER_01: Also, it's funny because after the kiss like she's like, should I back up? And he's like, no, it's tolerable. And I'm like, yeah, but everyone wants to hear after their first kiss, it's tolerable.
+SPEAKER_00: Right. Well, she's just had this like kind of wild— not wild, pretty normal reaction to kissing someone that you like. But more than what maybe both of them bargained for in that moment. And actually felt like that was really well communicated. I mean, in the movie, that happens and he flings himself away from her very dramatically and it's like, honestly, that's traumatizing. But here in the book it happens and he just kind of like firmly moves, like stops kissing her. And then she offers to move away and he's like, no, it's okay. It's tolerable.
+SPEAKER_01: They drive back. Friends don't let friends drunk drive — another really good Edward line.
+SPEAKER_00: Yeah, like, are you still faint from the run or wasn't it my kissing expertise?
+Source: 1026-1038 (01:22:17-01:23:10) | multi_speaker_exchange | measured 53.200s
+Rationale: Chapter 13 resolution: the first kiss, Edward's 'it's tolerable' line, comparison of book vs. movie handling of the moment, and Edward's playful happiness — closing out the chapter discussion.

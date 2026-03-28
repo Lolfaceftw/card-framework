@@ -368,6 +368,19 @@ def _apply_device_override(
         audio_cfg["voice_clone"] = voice_clone_cfg
         modified = True
 
+    affect_cfg = _as_mapping(audio_cfg.get("affect_analysis", {}))
+    categorical_cfg = _as_mapping(affect_cfg.get("categorical", {}))
+    if _resolve_optional_text(str(categorical_cfg.get("device", ""))) != device:
+        categorical_cfg["device"] = device
+        affect_cfg["categorical"] = categorical_cfg
+        modified = True
+    dimensional_cfg = _as_mapping(affect_cfg.get("dimensional", {}))
+    if _resolve_optional_text(str(dimensional_cfg.get("device", ""))) != device:
+        dimensional_cfg["device"] = device
+        affect_cfg["dimensional"] = dimensional_cfg
+        modified = True
+    audio_cfg["affect_analysis"] = affect_cfg
+
     config["audio"] = audio_cfg
 
     embedding_cfg = _as_mapping(config.get("embedding", {}))

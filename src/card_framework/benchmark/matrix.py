@@ -21,7 +21,12 @@ from card_framework.shared.config_loading import normalize_runtime_config_mappin
 from card_framework.shared.paths import REPO_ROOT
 
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
-_VLLM_URL_ENV_NAMES = ("VLLM_URL", "CARD_FRAMEWORK_VLLM_URL", "VLLM_BASE_URL")
+_VLLM_URL_ENV_NAMES = (
+    "VLLM_URL",
+    "CARD_FRAMEWORK_VLLM_URL",
+    "CARD_FRAMEWORK_VLLM_BASE_URL",
+    "VLLM_BASE_URL",
+)
 _LEGACY_CONFIG_PATH = REPO_ROOT / "conf" / "config.yaml"
 _LEGACY_PROVIDER_TARGET_PREFIX = "providers."
 _CURRENT_PROVIDER_TARGET_PREFIX = "card_framework.providers."

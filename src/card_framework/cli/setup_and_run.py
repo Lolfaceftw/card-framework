@@ -8,12 +8,18 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 from typing import Any, Literal, Mapping, Sequence, TypeAlias, cast
+from uuid import uuid4
 
 from card_framework.runtime.bootstrap import ensure_index_tts_runtime
+from card_framework.runtime.pipeline_sessions import (
+    PipelineResumePlan,
+    PipelineSessionStore,
+)
 from card_framework.shared.paths import (
     DEFAULT_CONFIG_PATH as SHARED_DEFAULT_CONFIG_PATH,
     REPO_ROOT,
@@ -53,6 +59,37 @@ VOICE_CLONE_REQUIRED_REPO_PATHS = (
     "src/card_framework/_vendor/index_tts/uv.lock",
 )
 PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3", "stage-4"]
+InteractiveMenuMode: TypeAlias = Literal[
+    "stage1_single",
+    "stage1_batch",
+    "stage1_batch_duration_sweep",
+    "stage2_transcript",
+    "stage3_summary",
+    "resume_session",
+    "setup_only",
+]
+DEFAULT_DURATION_SWEEP_PRESET_LABELS = ("30s", "1m", "5m")
+DURATION_SWEEP_PRESET_SECONDS = {
+    "30s": 30,
+    "1m": 60,
+    "5m": 300,
+}
+PROFILE_DISPLAY_NAMES: dict[str, str] = {
+    "anthropic_claude_opus": "Anthropic Claude Opus (cloud, requires ANTHROPIC_API_KEY)",
+    "deepseek_chat": "DeepSeek Chat",
+    "deepseek_reasoner": "DeepSeek Reasoner",
+    "disabled": "Disabled",
+    "glm_46": "ZAI GLM 4.6",
+    "google_gemini": "Google Gemini 2.5 Pro",
+    "huggingface_toolace": "Hugging Face ToolACE",
+    "minilm_cpu": "MiniLM CPU embeddings",
+    "nanbeige_thinking": "Nanbeige Thinking",
+    "qwen3_4b": "Qwen3 4B embeddings",
+    "transformers_local": "Local Transformers tool model",
+    "vllm_local": "vLLM / OpenAI-compatible endpoint",
+}
+_MENU_CONSOLE: Any | None = None
+_MENU_CONSOLE_UNAVAILABLE = object()
 
 
 @dataclass(slots=True, frozen=True)
@@ -105,6 +142,21 @@ class ModelProvisionResult:
     source: str
 
 
+@dataclass(slots=True, frozen=True)
+class InteractiveMenuSelection:
+    """Represent one interactive setup-and-run menu result."""
+
+    mode: InteractiveMenuMode
+    audio_paths: tuple[str, ...] = ()
+    duration_presets: tuple[str, ...] = ()
+    transcript_path: str | None = None
+    voiceclone_from_summary: str | None = None
+    resume_session: str | None = None
+    output_root: str | None = None
+    setup_only: bool = False
+    overrides: tuple[str, ...] = ()
+
+
 def _emit_setup_status(message: str) -> None:
     """Emit one operator-facing setup status line to stderr."""
     print(message, file=sys.stderr, flush=True)
@@ -118,12 +170,48 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "speaker samples, voice cloning, and Stage-4 interjections."
         )
     )
+    menu_group = parser.add_mutually_exclusive_group()
+    menu_group.add_argument(
+        "--menu",
+        action="store_true",
+        help=(
+            "Force the interactive setup menu even when explicit run inputs were "
+            "already supplied."
+        ),
+    )
+    menu_group.add_argument(
+        "--no-menu",
+        action="store_true",
+        help=(
+            "Skip the interactive setup menu and use only CLI flags plus the "
+            "existing auto-stage behavior."
+        ),
+    )
     parser.add_argument(
         "--audio-path",
+        action="append",
+        default=[],
         help=(
             "Source audio path for pipeline.start_stage=stage-1. When omitted, "
             "the bootstrap auto-uses stage-2 if a reusable transcript JSON is "
-            "already present."
+            "already present. Repeat this flag to run a sequential batch sweep "
+            "across multiple audio files."
+        ),
+    )
+    parser.add_argument(
+        "--duration-sweep",
+        action="store_true",
+        help=(
+            "When one or more --audio-path values are supplied, reuse each "
+            "episode transcript and rerun stage-2 across duration presets "
+            "instead of redoing stage-1 for every target."
+        ),
+    )
+    parser.add_argument(
+        "--duration-presets",
+        help=(
+            "Comma-separated duration presets for --duration-sweep. Defaults "
+            "to 30s,1m,5m."
         ),
     )
     parser.add_argument(
@@ -133,6 +221,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Shortcut mode. Skip stage-1/stage-2 and run stage-3 voice clone "
             "directly from an existing summary XML file."
         ),
+    )
+    parser.add_argument(
+        "--resume-session",
+        help="Resume a previously saved pipeline session by UUID.",
     )
     parser.add_argument(
         "--override",
@@ -224,6 +316,78 @@ def has_explicit_output_root() -> bool:
 def resolve_setup_state_path() -> Path:
     """Return the per-workspace setup-state JSON path."""
     return (resolve_workspace_root() / "artifacts" / "bootstrap" / "setup_state.json").resolve()
+
+
+def resolve_pipeline_session_store_path() -> Path:
+    """Return the SQLite database path used for pipeline session persistence."""
+    return (
+        resolve_output_root() / "artifacts" / "pipeline_sessions" / "sessions.sqlite3"
+    ).resolve()
+
+
+def resolve_pipeline_session_root(session_id: str) -> Path:
+    """Return the artifact root used for one pipeline session UUID."""
+    return (resolve_output_root() / "artifacts" / "pipeline_sessions" / session_id).resolve()
+
+
+def resolve_pipeline_session_summary_path(session_id: str) -> Path:
+    """Return the session-scoped summary checkpoint path for one UUID."""
+    return (resolve_pipeline_session_root(session_id) / "summary.xml").resolve()
+
+
+def build_pipeline_session_artifacts(
+    *,
+    run_id: str,
+    transcript_path_override: Path | None = None,
+) -> dict[str, str]:
+    """Build the deterministic artifact path catalog for one pipeline session."""
+    if has_explicit_output_root():
+        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
+        transcript_path = (
+            transcript_path_override.resolve()
+            if transcript_path_override is not None
+            else (resolve_output_root() / "transcript.json").resolve()
+        )
+        workspace_summary_path = (resolve_output_root() / "summary.xml").resolve()
+    else:
+        workspace_root = resolve_workspace_root()
+        run_work_dir = (
+            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
+        ).resolve()
+        transcript_path = (
+            transcript_path_override.resolve()
+            if transcript_path_override is not None
+            else (
+                workspace_root
+                / "artifacts"
+                / "transcripts"
+                / f"{run_id}.transcript.json"
+            ).resolve()
+        )
+        workspace_summary_path = (workspace_root / "summary.xml").resolve()
+    return {
+        "work_dir": str(run_work_dir),
+        "transcript_path": str(transcript_path),
+        "workspace_summary_path": str(workspace_summary_path),
+        "session_summary_path": str(resolve_pipeline_session_summary_path(run_id)),
+        "voice_clone_manifest_path": str(
+            (run_work_dir / "voice_clone" / "manifest.json").resolve()
+        ),
+        "interjector_manifest_path": str(
+            (run_work_dir / "interjector" / "interjector_manifest.json").resolve()
+        ),
+    }
+
+
+def resolve_session_transcript_artifact_override(
+    *,
+    start_stage: PipelineStartStage,
+    transcript_path: Path | None,
+) -> Path | None:
+    """Persist external transcript inputs for stage-2/stage-3 session resume."""
+    if start_stage in {"stage-2", "stage-3"} and transcript_path is not None:
+        return transcript_path.resolve()
+    return None
 
 
 def resolve_root_project_dir() -> Path | None:
@@ -544,10 +708,147 @@ def _read_setup_state() -> dict[str, Any]:
 def _write_setup_state(payload: Mapping[str, Any]) -> None:
     """Persist setup-state JSON atomically."""
     setup_state_path = resolve_setup_state_path()
-    setup_state_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = setup_state_path.with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(setup_state_path)
+    _write_json_atomic(setup_state_path, payload)
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    """Persist one JSON payload atomically with a UTF-8 trailing newline."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def _slugify_batch_audio_name(audio_path: Path) -> str:
+    """Return a short filesystem-safe slug for one batch audio input."""
+    raw_name = audio_path.stem.strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", raw_name).strip("-")
+    if not slug:
+        return "audio"
+    return slug[:48]
+
+
+def _ensure_unique_directory_path(path: Path) -> Path:
+    """Return a non-existent directory path by suffixing when needed."""
+    if not path.exists():
+        return path
+    for counter in range(2, 10_000):
+        candidate = path.parent / f"{path.name}-{counter}"
+        if not candidate.exists():
+            return candidate
+    raise BootstrapError(
+        step="input",
+        message=f"Failed to allocate a unique output directory under {path.parent}.",
+    )
+
+
+def resolve_batch_output_root(
+    *,
+    workspace_root: Path,
+    output_root: Path,
+    explicit_output_root: bool,
+) -> tuple[str, Path]:
+    """Resolve the parent output directory used for one multi-audio batch run."""
+    batch_id = utc_now_compact()
+    if explicit_output_root:
+        batch_root = output_root.resolve()
+    else:
+        batch_root = _ensure_unique_directory_path(
+            (
+                workspace_root / "artifacts" / "pipeline_batches" / batch_id
+            ).resolve()
+        )
+    batch_root.mkdir(parents=True, exist_ok=True)
+    return batch_id, batch_root
+
+
+def resolve_batch_run_output_root(
+    *,
+    batch_root: Path,
+    audio_path: Path,
+    index: int,
+) -> Path:
+    """Resolve one isolated per-audio output directory inside a batch root."""
+    candidate = batch_root / f"{index:03d}_{_slugify_batch_audio_name(audio_path)}"
+    return _ensure_unique_directory_path(candidate.resolve())
+
+
+def parse_duration_sweep_presets(raw_value: str | None) -> tuple[str, ...]:
+    """Parse supported setup-and-run duration sweep preset labels."""
+    if raw_value is None:
+        return DEFAULT_DURATION_SWEEP_PRESET_LABELS
+    labels = [
+        item.strip().lower()
+        for item in str(raw_value).split(",")
+        if item.strip()
+    ]
+    if not labels:
+        raise BootstrapError(
+            step="input",
+            message="At least one duration preset is required for --duration-sweep.",
+        )
+    invalid = [
+        label
+        for label in labels
+        if label not in DURATION_SWEEP_PRESET_SECONDS
+    ]
+    if invalid:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "Unsupported duration preset(s) for --duration-sweep: "
+                + ", ".join(invalid)
+                + ". Supported presets: "
+                + ", ".join(DEFAULT_DURATION_SWEEP_PRESET_LABELS)
+            ),
+        )
+    ordered_labels: list[str] = []
+    for label in labels:
+        if label not in ordered_labels:
+            ordered_labels.append(label)
+    return tuple(ordered_labels)
+
+
+def resolve_duration_sweep_output_root(
+    *,
+    workspace_root: Path,
+    output_root: Path,
+    explicit_output_root: bool,
+) -> tuple[str, Path]:
+    """Resolve the parent output directory used for one duration sweep run."""
+    sweep_id = utc_now_compact()
+    if explicit_output_root:
+        sweep_root = output_root.resolve()
+    else:
+        sweep_root = _ensure_unique_directory_path(
+            (
+                workspace_root / "artifacts" / "pipeline_duration_sweeps" / sweep_id
+            ).resolve()
+        )
+    sweep_root.mkdir(parents=True, exist_ok=True)
+    return sweep_id, sweep_root
+
+
+def resolve_duration_sweep_episode_output_root(
+    *,
+    sweep_root: Path,
+    audio_path: Path,
+    index: int,
+) -> Path:
+    """Return the deterministic per-episode directory inside a duration sweep."""
+    return (sweep_root / f"{index:03d}_{_slugify_batch_audio_name(audio_path)}").resolve()
+
+
+def resolve_duration_sweep_preset_output_root(
+    *,
+    episode_root: Path,
+    preset_label: str,
+) -> Path:
+    """Return the deterministic per-preset directory for one episode sweep."""
+    return (episode_root / preset_label).resolve()
 
 
 def checkpoints_ready(checkpoints_dir: Path) -> tuple[bool, str]:
@@ -688,6 +989,11 @@ def resolve_audio_input(path_value: str) -> Path:
     return candidate
 
 
+def resolve_audio_inputs(path_values: Sequence[str]) -> tuple[Path, ...]:
+    """Resolve and validate multiple user-provided audio paths."""
+    return tuple(resolve_audio_input(path_value) for path_value in path_values)
+
+
 def prompt_or_validate_audio_path(cli_audio_path: str | None) -> Path:
     """
     Resolve audio path from CLI flag or interactive prompt.
@@ -771,6 +1077,501 @@ def resolve_file_input(
     return candidate
 
 
+def is_interactive_console() -> bool:
+    """Return whether the current invocation can safely prompt a human operator."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def should_launch_interactive_menu(args: argparse.Namespace) -> bool:
+    """Return whether setup_and_run should open the interactive menu."""
+    if bool(getattr(args, "no_menu", False)):
+        return False
+    if bool(getattr(args, "menu", False)):
+        return True
+    if not is_interactive_console():
+        return False
+    return not any(
+        (
+            bool(getattr(args, "audio_path", ())),
+            bool(getattr(args, "voiceclone_from_summary", None)),
+            bool(getattr(args, "resume_session", None)),
+            bool(getattr(args, "override", ())),
+            bool(getattr(args, "setup_only", False)),
+        )
+    )
+
+
+def _profile_display_name(profile_name: str) -> str:
+    """Return one operator-facing label for a runtime profile key."""
+    if profile_name in PROFILE_DISPLAY_NAMES:
+        return PROFILE_DISPLAY_NAMES[profile_name]
+    return profile_name.replace("_", " ").strip() or profile_name
+
+
+def _get_menu_console() -> Any | None:
+    """Return a cached Rich console for the interactive menu when available."""
+    global _MENU_CONSOLE
+    if _MENU_CONSOLE is _MENU_CONSOLE_UNAVAILABLE:
+        return None
+    if _MENU_CONSOLE is None:
+        try:
+            from rich.console import Console
+        except ImportError:  # pragma: no cover - optional fallback
+            _MENU_CONSOLE = _MENU_CONSOLE_UNAVAILABLE
+            return None
+        _MENU_CONSOLE = Console(highlight=False, soft_wrap=True)
+    return _MENU_CONSOLE
+
+
+def _menu_print(message: str, *, style: str = "") -> None:
+    """Print one menu status line with Rich styling when available."""
+    console = _get_menu_console()
+    if console is None:
+        print(message)
+        return
+    if style:
+        console.print(message, style=style)
+        return
+    console.print(message)
+
+
+def _menu_input(prompt: str, *, style: str = "bold bright_cyan") -> str:
+    """Prompt for input with Rich styling when available."""
+    console = _get_menu_console()
+    if console is None:
+        return input(prompt)
+    return console.input(f"[{style}]{prompt}[/{style}]")
+
+
+def _menu_warning(message: str) -> None:
+    """Render one operator-facing warning inside the menu."""
+    _menu_print(message, style="bold yellow")
+
+
+def _menu_error(message: str) -> None:
+    """Render one operator-facing error inside the menu."""
+    _menu_print(message, style="bold red")
+
+
+def _prompt_menu_choice(
+    *,
+    title: str,
+    options: Sequence[tuple[str, str]],
+    default_index: int = 0,
+) -> str:
+    """Prompt for one numbered menu choice."""
+    console = _get_menu_console()
+    if console is None:
+        print(f"\n{title}")
+        for index, (_value, label) in enumerate(options, start=1):
+            default_marker = " [default]" if index - 1 == default_index else ""
+            print(f"  {index}. {label}{default_marker}")
+    else:
+        from rich.panel import Panel
+        from rich.table import Table
+
+        table = Table(
+            show_header=False,
+            box=None,
+            pad_edge=False,
+            collapse_padding=True,
+        )
+        table.add_column(style="bold cyan", no_wrap=True)
+        table.add_column(style="white")
+        for index, (_value, label) in enumerate(options, start=1):
+            option_style = "bold bright_white" if index - 1 == default_index else "white"
+            default_note = " [dim](default)[/dim]" if index - 1 == default_index else ""
+            table.add_row(f"{index}.", f"[{option_style}]{label}[/{option_style}]{default_note}")
+        console.print(
+            Panel.fit(
+                table,
+                title=f"[bold magenta]{title}[/bold magenta]",
+                border_style="bright_blue",
+                padding=(0, 1),
+            )
+        )
+    while True:
+        raw = _menu_input("Select an option: ").strip()
+        if not raw:
+            return options[default_index][0]
+        if raw.isdigit():
+            choice_index = int(raw) - 1
+            if 0 <= choice_index < len(options):
+                return options[choice_index][0]
+        _menu_warning("Please enter one of the numbered choices above.")
+
+
+def _prompt_menu_text(
+    prompt: str,
+    *,
+    default: str = "",
+    allow_blank: bool = False,
+) -> str:
+    """Prompt for one short text value."""
+    rendered_prompt = prompt
+    if default:
+        rendered_prompt += f" [{default}]"
+    rendered_prompt += ": "
+    while True:
+        raw = _menu_input(rendered_prompt).strip()
+        if raw:
+            return raw
+        if default:
+            return default
+        if allow_blank:
+            return ""
+        _menu_warning("A value is required here.")
+
+
+def _prompt_optional_file_input(
+    *,
+    prompt: str,
+    field_name: str,
+) -> Path | None:
+    """Prompt for an optional file path, returning None when left blank."""
+    while True:
+        raw = _menu_input(f"{prompt} (leave blank to skip): ").strip()
+        if not raw:
+            return None
+        try:
+            return resolve_path_input(raw, field_name=field_name)
+        except BootstrapError as exc:
+            _menu_error(exc.render())
+
+
+def _prompt_audio_paths_for_menu(*, allow_multiple: bool) -> tuple[Path, ...]:
+    """Prompt for one or more audio file paths."""
+    if not allow_multiple:
+        while True:
+            raw = _menu_input("Source audio path: ").strip()
+            try:
+                return (resolve_audio_input(raw),)
+            except BootstrapError as exc:
+                _menu_error(exc.render())
+
+    _menu_print(
+        "\nEnter one audio path per line. Press Enter on a blank line when you are done.",
+        style="bold blue",
+    )
+    audio_paths: list[Path] = []
+    while True:
+        raw = _menu_input(f"Audio path {len(audio_paths) + 1}: ").strip()
+        if not raw:
+            if len(audio_paths) >= 2:
+                return tuple(audio_paths)
+            _menu_warning("Batch mode needs at least two audio files.")
+            continue
+        try:
+            audio_paths.append(resolve_audio_input(raw))
+        except BootstrapError as exc:
+            _menu_error(exc.render())
+
+
+def _build_profile_choice_options(
+    *,
+    profile_group: str,
+    keep_current_label: str,
+    include_default_stage_option: bool = False,
+    default_stage_label: str = "Use shared LLM",
+) -> list[tuple[str, str]]:
+    """Build ordered interactive menu options for one profile group."""
+    options: list[tuple[str, str]] = [("__keep_current__", keep_current_label)]
+    if include_default_stage_option:
+        options.append(("default", default_stage_label))
+    for profile_name in resolve_repo_config_child_keys(key_path=("profiles", profile_group)):
+        options.append((profile_name, _profile_display_name(profile_name)))
+    return options
+
+
+def run_interactive_menu() -> InteractiveMenuSelection:
+    """Collect one interactive setup-and-run launch plan from the operator."""
+    console = _get_menu_console()
+    current_llm = resolve_repo_config_string(
+        key_path=("selection", "llm"),
+        fallback="vllm_local",
+    )
+    current_embedding = resolve_repo_config_string(
+        key_path=("selection", "embedding"),
+        fallback="disabled",
+    )
+    current_stage_defaults = {
+        stage_name: resolve_repo_config_string(
+            key_path=("selection", "stage_llm", stage_name),
+            fallback="default",
+        )
+        for stage_name in ("summarizer", "critic", "interjector")
+    }
+    current_voice_clone_enabled = resolve_repo_config_boolean(
+        key_path=("audio", "voice_clone", "enabled"),
+        fallback=True,
+    )
+    current_interjector_enabled = resolve_repo_config_boolean(
+        key_path=("audio", "interjector", "enabled"),
+        fallback=False,
+    )
+
+    if console is None:
+        print("\nInteractive setup_and_run menu")
+        print(f"Config: {resolve_repo_config_path()}")
+        print("Selections apply to this run only unless you later save them in config.")
+    else:
+        from rich.panel import Panel
+        from rich.table import Table
+
+        current_settings = Table(
+            show_header=False,
+            box=None,
+            pad_edge=False,
+            collapse_padding=True,
+        )
+        current_settings.add_column(style="bold cyan", no_wrap=True)
+        current_settings.add_column(style="white")
+        current_settings.add_row("Config", str(resolve_repo_config_path()))
+        current_settings.add_row("LLM", _profile_display_name(current_llm))
+        current_settings.add_row("Embedding", _profile_display_name(current_embedding))
+        current_settings.add_row(
+            "Voice clone",
+            "Enabled" if current_voice_clone_enabled else "Disabled",
+        )
+        current_settings.add_row(
+            "Interjector",
+            "Enabled" if current_interjector_enabled else "Disabled",
+        )
+        console.print(
+            Panel.fit(
+                current_settings,
+                title="[bold bright_white]Setup And Run[/bold bright_white]",
+                subtitle="[dim]Selections apply to this run only unless you later save them in config.[/dim]",
+                border_style="bright_magenta",
+                padding=(0, 1),
+            )
+        )
+
+    mode = _prompt_menu_choice(
+        title="Run mode",
+        options=[
+            ("stage1_single", "Full pipeline from one source audio file"),
+            ("stage1_batch", "Sequential batch sweep from multiple audio files"),
+            (
+                "stage1_batch_duration_sweep",
+                "Batch audio + duration sweep (30s, 1m, 5m per episode)",
+            ),
+            ("stage2_transcript", "Resume from an existing transcript JSON (stage-2)"),
+            ("stage3_summary", "Voice clone from an existing summary XML (stage-3)"),
+            ("resume_session", "Resume a saved session by UUID"),
+            ("setup_only", "Setup checks/models only without running the pipeline"),
+        ],
+        default_index=0,
+    )
+
+    output_root_raw = _prompt_menu_text(
+        "Output root",
+        default="",
+        allow_blank=True,
+    )
+    output_root = output_root_raw or None
+
+    overrides: list[str] = []
+    if mode in {
+        "stage1_single",
+        "stage1_batch",
+        "stage1_batch_duration_sweep",
+        "stage2_transcript",
+    }:
+        llm_choice = _prompt_menu_choice(
+            title="Shared LLM profile",
+            options=_build_profile_choice_options(
+                profile_group="llm",
+                keep_current_label=(
+                    "Keep current config default "
+                    f"({_profile_display_name(current_llm)})"
+                ),
+            ),
+            default_index=0,
+        )
+        if llm_choice != "__keep_current__":
+            overrides.append(f"selection.llm={llm_choice}")
+
+        stage_strategy_default_index = 0 if llm_choice == "__keep_current__" else 1
+        stage_strategy = _prompt_menu_choice(
+            title="Stage LLM routing",
+            options=[
+                ("config_default", "Keep per-stage selections from config"),
+                ("shared_for_all", "Use the shared LLM for all stages"),
+                ("custom", "Choose summarizer, critic, and interjector profiles separately"),
+            ],
+            default_index=stage_strategy_default_index,
+        )
+        if stage_strategy == "shared_for_all":
+            for stage_name in ("summarizer", "critic", "interjector"):
+                overrides.append(f"selection.stage_llm.{stage_name}=default")
+        elif stage_strategy == "custom":
+            for stage_name in ("summarizer", "critic", "interjector"):
+                stage_choice = _prompt_menu_choice(
+                    title=f"{stage_name.title()} LLM profile",
+                    options=_build_profile_choice_options(
+                        profile_group="llm",
+                        keep_current_label=(
+                            "Keep config default "
+                            f"({current_stage_defaults[stage_name]})"
+                        ),
+                        include_default_stage_option=True,
+                        default_stage_label="Use the shared LLM",
+                    ),
+                    default_index=0,
+                )
+                if stage_choice != "__keep_current__":
+                    overrides.append(f"selection.stage_llm.{stage_name}={stage_choice}")
+
+        embedding_choice = _prompt_menu_choice(
+            title="Embedding profile",
+            options=_build_profile_choice_options(
+                profile_group="embedding",
+                keep_current_label=(
+                    "Keep current config default "
+                    f"({_profile_display_name(current_embedding)})"
+                ),
+            ),
+            default_index=0,
+        )
+        if embedding_choice != "__keep_current__":
+            overrides.append(f"selection.embedding={embedding_choice}")
+
+        voice_clone_choice = _prompt_menu_choice(
+            title="Voice clone stage",
+            options=[
+                (
+                    "__keep_current__",
+                    "Keep current config default "
+                    f"({'enabled' if current_voice_clone_enabled else 'disabled'})",
+                ),
+                ("true", "Enable voice clone"),
+                ("false", "Disable voice clone"),
+            ],
+            default_index=0,
+        )
+        if voice_clone_choice != "__keep_current__":
+            overrides.append(f"audio.voice_clone.enabled={voice_clone_choice}")
+
+        if voice_clone_choice == "false":
+            overrides.append("audio.interjector.enabled=false")
+        else:
+            interjector_choice = _prompt_menu_choice(
+                title="Stage-4 interjector",
+                options=[
+                    (
+                        "__keep_current__",
+                        "Keep current config default "
+                        f"({'enabled' if current_interjector_enabled else 'disabled'})",
+                    ),
+                    ("true", "Enable interjector"),
+                    ("false", "Disable interjector"),
+                ],
+                default_index=0,
+            )
+            if interjector_choice != "__keep_current__":
+                overrides.append(f"audio.interjector.enabled={interjector_choice}")
+
+    if mode == "stage1_single":
+        audio_paths = _prompt_audio_paths_for_menu(allow_multiple=False)
+        return InteractiveMenuSelection(
+            mode="stage1_single",
+            audio_paths=tuple(str(path) for path in audio_paths),
+            output_root=output_root,
+            overrides=tuple(overrides),
+        )
+    if mode == "stage1_batch":
+        audio_paths = _prompt_audio_paths_for_menu(allow_multiple=True)
+        return InteractiveMenuSelection(
+            mode="stage1_batch",
+            audio_paths=tuple(str(path) for path in audio_paths),
+            output_root=output_root,
+            overrides=tuple(overrides),
+        )
+    if mode == "stage1_batch_duration_sweep":
+        audio_paths = _prompt_audio_paths_for_menu(allow_multiple=True)
+        _menu_print(
+            "Duration sweep presets: "
+            + ", ".join(DEFAULT_DURATION_SWEEP_PRESET_LABELS),
+            style="bold bright_green",
+        )
+        return InteractiveMenuSelection(
+            mode="stage1_batch_duration_sweep",
+            audio_paths=tuple(str(path) for path in audio_paths),
+            duration_presets=DEFAULT_DURATION_SWEEP_PRESET_LABELS,
+            output_root=output_root,
+            overrides=tuple(overrides),
+        )
+    if mode == "stage2_transcript":
+        transcript_path = resolve_path_input(
+            _prompt_menu_text("Transcript JSON path"),
+            field_name="Transcript JSON path",
+        )
+        optional_audio_path = _prompt_optional_file_input(
+            prompt="Optional source audio path for stage-2 speaker-sample fallback",
+            field_name="Source audio path",
+        )
+        audio_paths = (
+            (str(optional_audio_path),)
+            if optional_audio_path is not None
+            else ()
+        )
+        return InteractiveMenuSelection(
+            mode="stage2_transcript",
+            audio_paths=audio_paths,
+            transcript_path=str(transcript_path),
+            output_root=output_root,
+            overrides=tuple(overrides),
+        )
+    if mode == "stage3_summary":
+        summary_path = resolve_path_input(
+            _prompt_menu_text("Summary XML path"),
+            field_name="Summary XML path",
+        )
+        return InteractiveMenuSelection(
+            mode="stage3_summary",
+            voiceclone_from_summary=str(summary_path),
+            output_root=output_root,
+        )
+    if mode == "resume_session":
+        return InteractiveMenuSelection(
+            mode="resume_session",
+            resume_session=_prompt_menu_text("Session UUID"),
+            output_root=output_root,
+        )
+    return InteractiveMenuSelection(
+        mode="setup_only",
+        setup_only=True,
+        output_root=output_root,
+    )
+
+
+def apply_interactive_menu_selection(
+    args: argparse.Namespace,
+    selection: InteractiveMenuSelection,
+) -> argparse.Namespace:
+    """Project one interactive menu selection back onto parsed CLI args."""
+    args.audio_path = list(selection.audio_paths)
+    args.duration_sweep = bool(selection.duration_presets)
+    args.duration_presets = (
+        ",".join(selection.duration_presets)
+        if selection.duration_presets
+        else None
+    )
+    args.voiceclone_from_summary = selection.voiceclone_from_summary
+    args.resume_session = selection.resume_session
+    args.setup_only = bool(selection.setup_only)
+    if selection.output_root is not None:
+        args.output_root = selection.output_root
+    if selection.transcript_path is not None:
+        args.override = list(args.override) + [
+            f"transcript_path={_path_for_override(Path(selection.transcript_path))}"
+        ]
+    if selection.overrides:
+        args.override = list(args.override) + list(selection.overrides)
+    return args
+
+
 def normalize_cli_overrides(raw_overrides: Sequence[str]) -> tuple[str, ...]:
     """
     Validate and normalize pass-through Hydra CLI overrides.
@@ -810,6 +1611,180 @@ def normalize_cli_overrides(raw_overrides: Sequence[str]) -> tuple[str, ...]:
             )
         normalized.append(candidate)
     return tuple(normalized)
+
+
+def validate_resume_session_inputs(
+    *,
+    resume_session: str | None,
+    voiceclone_from_summary: str | None,
+    audio_paths: Sequence[str],
+    pass_through_overrides: Sequence[str],
+) -> None:
+    """Reject resume inputs that would conflict with the stored session state."""
+    if not str(resume_session or "").strip():
+        return
+    if voiceclone_from_summary is not None:
+        raise BootstrapError(
+            step="input",
+            message="--resume-session cannot be combined with --voiceclone-from-summary.",
+        )
+    if audio_paths:
+        raise BootstrapError(
+            step="input",
+            message="--resume-session cannot be combined with --audio-path.",
+        )
+    conflicting_keys = {
+        "pipeline.start_stage",
+        "transcript_path",
+        "pipeline.final_summary_path",
+        "pipeline.voice_clone_manifest_path",
+    }
+    conflicting = [
+        override
+        for override in pass_through_overrides
+        if any(override.startswith(f"{key}=") for key in conflicting_keys)
+    ]
+    if conflicting:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "--resume-session cannot be combined with stage/input overrides: "
+                + ", ".join(conflicting)
+            ),
+        )
+
+
+def validate_duration_sweep_inputs(
+    *,
+    duration_sweep_enabled: bool,
+    audio_paths: Sequence[str],
+    voiceclone_from_summary: str | None,
+    resume_session: str | None,
+    pass_through_overrides: Sequence[str],
+) -> None:
+    """Reject input combinations that would break duration-sweep runs."""
+    if not duration_sweep_enabled:
+        return
+    if not audio_paths:
+        raise BootstrapError(
+            step="input",
+            message="--duration-sweep requires at least one --audio-path value.",
+        )
+    if voiceclone_from_summary is not None:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "--duration-sweep cannot be combined with "
+                "--voiceclone-from-summary."
+            ),
+        )
+    if str(resume_session or "").strip():
+        raise BootstrapError(
+            step="input",
+            message="--duration-sweep cannot be combined with --resume-session.",
+        )
+    if _has_override_key(pass_through_overrides, "pipeline.start_stage"):
+        requested_stage = resolve_start_stage(pass_through_overrides)
+        if requested_stage != "stage-1":
+            raise BootstrapError(
+                step="input",
+                message=(
+                    "--duration-sweep manages the stage transitions automatically "
+                    "and only supports pipeline.start_stage=stage-1."
+                ),
+            )
+    managed_override_keys = (
+        "audio.audio_path",
+        "audio.work_dir",
+        "audio.output_transcript_path",
+        "transcript_path",
+        "session.enabled",
+        "session.session_id",
+        "session.store_path",
+        "session.summary_output_path",
+        "pipeline.final_summary_path",
+        "pipeline.voice_clone_manifest_path",
+        "orchestrator.target_seconds",
+        "orchestrator.target_minutes",
+    )
+    conflicting = [
+        override
+        for override in pass_through_overrides
+        if any(override.startswith(f"{key}=") for key in managed_override_keys)
+    ]
+    if conflicting:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "--duration-sweep manages per-run inputs, stage targets, sessions, "
+                "and artifact paths automatically. Remove these overrides: "
+                + ", ".join(conflicting)
+            ),
+        )
+
+
+def validate_batch_audio_inputs(
+    *,
+    audio_paths: Sequence[str],
+    voiceclone_from_summary: str | None,
+    resume_session: str | None,
+    pass_through_overrides: Sequence[str],
+) -> None:
+    """Reject input combinations that would break isolated multi-audio runs."""
+    if len(audio_paths) < 2:
+        return
+    if voiceclone_from_summary is not None:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "Batch --audio-path runs cannot be combined with "
+                "--voiceclone-from-summary."
+            ),
+        )
+    if str(resume_session or "").strip():
+        raise BootstrapError(
+            step="input",
+            message=(
+                "Batch --audio-path runs cannot be combined with "
+                "--resume-session."
+            ),
+        )
+    if _has_override_key(pass_through_overrides, "pipeline.start_stage"):
+        requested_stage = resolve_start_stage(pass_through_overrides)
+        if requested_stage != "stage-1":
+            raise BootstrapError(
+                step="input",
+                message=(
+                    "Batch --audio-path runs only support "
+                    "pipeline.start_stage=stage-1."
+                ),
+            )
+    managed_override_keys = (
+        "audio.audio_path",
+        "audio.work_dir",
+        "audio.output_transcript_path",
+        "transcript_path",
+        "session.enabled",
+        "session.session_id",
+        "session.store_path",
+        "session.summary_output_path",
+        "pipeline.final_summary_path",
+        "pipeline.voice_clone_manifest_path",
+    )
+    conflicting = [
+        override
+        for override in pass_through_overrides
+        if any(override.startswith(f"{key}=") for key in managed_override_keys)
+    ]
+    if conflicting:
+        raise BootstrapError(
+            step="input",
+            message=(
+                "Batch --audio-path runs manage per-run inputs, sessions, and "
+                "artifact paths automatically. Remove these overrides: "
+                + ", ".join(conflicting)
+            ),
+        )
 
 
 def build_shortcut_overrides(
@@ -975,6 +1950,28 @@ def _has_override_key(overrides: Sequence[str], key: str) -> bool:
     return any(override.startswith(prefix) for override in overrides)
 
 
+def _replace_or_append_override(
+    *,
+    overrides: list[str],
+    key: str,
+    value: str,
+) -> None:
+    """Replace one override in place using last-wins semantics."""
+    prefix = f"{key}="
+    replacement = f"{key}={value}"
+    for index in range(len(overrides) - 1, -1, -1):
+        if overrides[index].startswith(prefix):
+            overrides[index] = replacement
+            return
+    overrides.append(replacement)
+
+
+def _remove_override_key(*, overrides: list[str], key: str) -> None:
+    """Remove every override assignment for one key."""
+    prefix = f"{key}="
+    overrides[:] = [override for override in overrides if not override.startswith(prefix)]
+
+
 def resolve_repo_config_boolean(
     *,
     key_path: Sequence[str],
@@ -1033,6 +2030,96 @@ def resolve_repo_config_boolean(
         return fallback
 
     return fallback
+
+
+def resolve_repo_config_string(
+    *,
+    key_path: Sequence[str],
+    fallback: str,
+) -> str:
+    """Read a scalar string value from the active repo config with a light parser."""
+    resolved = _resolve_repo_config_scalar(key_path=key_path)
+    if resolved is None:
+        return fallback
+    normalized = str(resolved).strip().strip('"').strip("'")
+    return normalized or fallback
+
+
+def resolve_repo_config_child_keys(
+    *,
+    key_path: Sequence[str],
+) -> tuple[str, ...]:
+    """Return the immediate child mapping keys for one repo-config section path."""
+    config_path = resolve_repo_config_path()
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+
+    parent_path = list(key_path)
+    section_stack: list[tuple[int, str]] = []
+    child_keys: list[str] = []
+
+    for raw_line in config_text.splitlines():
+        line_without_comment = raw_line.split("#", 1)[0].rstrip()
+        if not line_without_comment.strip():
+            continue
+
+        stripped = line_without_comment.lstrip(" ")
+        indent = len(line_without_comment) - len(stripped)
+        key, separator, raw_value = stripped.partition(":")
+        if not separator:
+            continue
+
+        while section_stack and indent <= section_stack[-1][0]:
+            section_stack.pop()
+
+        normalized_key = key.strip()
+        value = raw_value.strip()
+        current_path = [*(name for _, name in section_stack), normalized_key]
+
+        if current_path[:-1] == parent_path and normalized_key not in child_keys:
+            child_keys.append(normalized_key)
+
+        if not value:
+            section_stack.append((indent, normalized_key))
+
+    return tuple(child_keys)
+
+
+def _resolve_repo_config_scalar(*, key_path: Sequence[str]) -> str | None:
+    """Resolve one scalar YAML value from the active repo config when present."""
+    config_path = resolve_repo_config_path()
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    section_stack: list[tuple[int, str]] = []
+    for raw_line in config_text.splitlines():
+        line_without_comment = raw_line.split("#", 1)[0].rstrip()
+        if not line_without_comment.strip():
+            continue
+
+        stripped = line_without_comment.lstrip(" ")
+        indent = len(line_without_comment) - len(stripped)
+        key, separator, raw_value = stripped.partition(":")
+        if not separator:
+            continue
+
+        while section_stack and indent <= section_stack[-1][0]:
+            section_stack.pop()
+
+        normalized_key = key.strip()
+        value = raw_value.strip()
+        current_path = [*(name for _, name in section_stack), normalized_key]
+        if current_path == list(key_path):
+            return value
+
+        if not value:
+            section_stack.append((indent, normalized_key))
+
+    return None
 
 
 def resolve_repo_backed_boolean_override(
@@ -1280,20 +2367,28 @@ def build_run_overrides(
     Returns:
         Ordered list of Hydra override key-value strings.
     """
+    session_artifacts = build_pipeline_session_artifacts(run_id=run_id)
+    run_work_dir = Path(session_artifacts["work_dir"]).resolve()
+    transcript_path = Path(session_artifacts["transcript_path"]).resolve()
     if has_explicit_output_root():
-        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
-        transcript_path = (resolve_output_root() / "transcript.json").resolve()
-    else:
-        workspace_root = resolve_workspace_root()
-        run_work_dir = (
-            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
+        eta_store_path = (
+            resolve_output_root() / "audio_stage" / "eta_history.sqlite3"
         ).resolve()
-        transcript_path = (
-            workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
+    else:
+        eta_store_path = (
+            resolve_workspace_root() / "artifacts" / "audio_stage" / "eta_history.sqlite3"
         ).resolve()
     overrides = [
         f"pipeline.start_stage={start_stage}",
+        "session.enabled=true",
+        f"session.session_id={run_id}",
+        f"session.store_path={_path_for_override(resolve_pipeline_session_store_path())}",
+        (
+            "session.summary_output_path="
+            f"{_path_for_override(Path(session_artifacts['session_summary_path']))}"
+        ),
         f"audio.work_dir={_path_for_override(run_work_dir)}",
+        f"audio.eta.store_path={_path_for_override(eta_store_path)}",
         "audio.speaker_samples.enabled=true",
         "audio.speaker_samples.source_audio=vocals",
         "audio.speaker_samples.target_duration_seconds=30",
@@ -1330,6 +2425,79 @@ def build_run_overrides(
         )
     if audio_path is not None:
         overrides.append(f"audio.audio_path={_path_for_override(audio_path)}")
+    return overrides
+
+
+def build_pipeline_session_options(
+    *,
+    requested_start_stage: PipelineStartStage,
+    voice_clone_enabled: bool,
+    interjector_enabled: bool,
+    workspace_root: Path,
+    output_root: Path,
+) -> dict[str, Any]:
+    """Build the stored session options payload used for resume planning."""
+    return {
+        "requested_start_stage": requested_start_stage,
+        "voice_clone_enabled": voice_clone_enabled,
+        "interjector_enabled": interjector_enabled,
+        "workspace_root": str(workspace_root.resolve()),
+        "output_root": str(output_root.resolve()),
+    }
+
+
+def build_resume_overrides(plan: PipelineResumePlan) -> list[str]:
+    """Build the effective override list needed to resume one stored session."""
+    if plan.resume_stage is None:
+        raise BootstrapError(
+            step="input",
+            message=f"Pipeline session is already complete: {plan.session_id}",
+        )
+    overrides = list(plan.prepared_overrides)
+    _replace_or_append_override(
+        overrides=overrides,
+        key="pipeline.start_stage",
+        value=plan.resume_stage,
+    )
+    _remove_override_key(overrides=overrides, key="pipeline.final_summary_path")
+    _remove_override_key(overrides=overrides, key="pipeline.voice_clone_manifest_path")
+    transcript_path = plan.artifacts.get("transcript_path", "")
+    session_summary_path = plan.artifacts.get("session_summary_path", "")
+    voice_clone_manifest_path = plan.artifacts.get("voice_clone_manifest_path", "")
+    if plan.resume_stage in {"stage-2", "stage-3"} and transcript_path:
+        _replace_or_append_override(
+            overrides=overrides,
+            key="transcript_path",
+            value=_path_for_override(Path(transcript_path)),
+        )
+    if plan.resume_stage in {"stage-3", "stage-4"}:
+        if not session_summary_path:
+            raise BootstrapError(
+                step="input",
+                message=(
+                    "Cannot resume this session because its summary checkpoint path "
+                    "is missing."
+                ),
+            )
+        _replace_or_append_override(
+            overrides=overrides,
+            key="pipeline.final_summary_path",
+            value=_path_for_override(Path(session_summary_path)),
+        )
+    if plan.resume_stage == "stage-4":
+        if not voice_clone_manifest_path:
+            raise BootstrapError(
+                step="input",
+                message=(
+                    "Cannot resume this session because its voice-clone manifest "
+                    "checkpoint path is missing."
+                ),
+            )
+        _replace_or_append_override(
+            overrides=overrides,
+            key="pipeline.voice_clone_manifest_path",
+            value=_path_for_override(Path(voice_clone_manifest_path)),
+        )
     return overrides
 
 
@@ -1603,12 +2771,21 @@ def run_pipeline(*, uv_executable: str, overrides: Sequence[str]) -> None:
             *overrides,
         ]
     )
-    run_cmd(
-        step="pipeline_run",
-        command=command,
-        cwd=resolve_output_root(),
-        stream_output=True,
+    completed = subprocess.run(
+        command,
+        cwd=str(resolve_output_root()),
+        check=False,
+        text=True,
     )
+    if completed.returncode == 130:
+        raise KeyboardInterrupt
+    if completed.returncode != 0:
+        raise BootstrapError(
+            step="pipeline_run",
+            message=f"Command failed with exit code {completed.returncode}.",
+            command=tuple(command),
+            stderr_tail="See streamed command output above for details.",
+        )
 
 
 def run_calibration(
@@ -1654,11 +2831,948 @@ def run_calibration(
     )
 
 
+def _build_batch_run_result(
+    *,
+    index: int,
+    audio_path: Path,
+    output_root: Path,
+    run_id: str | None,
+    status: str,
+    error: str = "",
+) -> dict[str, Any]:
+    """Build one serializable batch-result payload for the manifest."""
+    payload: dict[str, Any] = {
+        "index": index,
+        "audio_path": str(audio_path.resolve()),
+        "output_root": str(output_root.resolve()),
+        "session_id": run_id,
+        "status": status,
+    }
+    if error:
+        payload["error"] = error
+    if run_id is not None:
+        payload["artifacts"] = build_pipeline_session_artifacts(run_id=run_id)
+    return payload
+
+
+def _build_expected_output_artifacts(
+    *,
+    output_root: Path,
+    transcript_path: Path | None = None,
+) -> dict[str, str]:
+    """Build the deterministic output-artifact paths for one explicit output root."""
+    resolved_root = output_root.resolve()
+    transcript_candidate = (
+        transcript_path.resolve()
+        if transcript_path is not None
+        else (resolved_root / "transcript.json").resolve()
+    )
+    return {
+        "work_dir": str((resolved_root / "audio_stage").resolve()),
+        "transcript_path": str(transcript_candidate),
+        "workspace_summary_path": str((resolved_root / "summary.xml").resolve()),
+        "session_summary_path": str((resolved_root / "summary.xml").resolve()),
+        "voice_clone_manifest_path": str(
+            (resolved_root / "audio_stage" / "voice_clone" / "manifest.json").resolve()
+        ),
+        "interjector_manifest_path": str(
+            (
+                resolved_root
+                / "audio_stage"
+                / "interjector"
+                / "interjector_manifest.json"
+            ).resolve()
+        ),
+    }
+
+
+def _is_duration_sweep_output_complete(
+    output_root: Path,
+    *,
+    voice_clone_enabled: bool,
+    interjector_enabled: bool,
+) -> bool:
+    """Return whether one duration-sweep preset output already looks complete."""
+    artifacts = _build_expected_output_artifacts(output_root=output_root)
+    if not Path(artifacts["workspace_summary_path"]).is_file():
+        return False
+    if interjector_enabled:
+        return Path(artifacts["interjector_manifest_path"]).is_file()
+    if voice_clone_enabled:
+        return Path(artifacts["voice_clone_manifest_path"]).is_file()
+    return True
+
+
+def _find_reusable_duration_sweep_transcript(
+    *,
+    episode_root: Path,
+    preset_labels: Sequence[str],
+    source_audio_path: Path,
+) -> Path | None:
+    """Return the best reusable transcript for one episode sweep when available."""
+    fallback_candidate: Path | None = None
+    for preset_label in preset_labels:
+        candidate = (
+            resolve_duration_sweep_preset_output_root(
+                episode_root=episode_root,
+                preset_label=preset_label,
+            )
+            / "transcript.json"
+        ).resolve()
+        if not candidate.is_file():
+            continue
+        try:
+            transcript_source_audio_path = resolve_transcript_source_audio_path(candidate)
+        except BootstrapError:
+            continue
+        if (
+            transcript_source_audio_path is not None
+            and transcript_source_audio_path.resolve() != source_audio_path.resolve()
+        ):
+            continue
+        try:
+            has_speaker_samples_manifest = (
+                transcript_has_usable_speaker_samples_manifest(candidate)
+            )
+        except BootstrapError:
+            has_speaker_samples_manifest = False
+        if has_speaker_samples_manifest:
+            return candidate
+        if fallback_candidate is None:
+            fallback_candidate = candidate
+    return fallback_candidate
+
+
+def _build_duration_sweep_run_result(
+    *,
+    episode_index: int,
+    audio_path: Path,
+    output_root: Path,
+    duration_preset: str,
+    target_seconds: int,
+    status: str,
+    start_stage: PipelineStartStage | None = None,
+    session_id: str | None = None,
+    transcript_path: Path | None = None,
+    reused_existing: bool = False,
+    error: str = "",
+) -> dict[str, Any]:
+    """Build one serializable duration-sweep result payload."""
+    payload: dict[str, Any] = {
+        "episode_index": episode_index,
+        "audio_path": str(audio_path.resolve()),
+        "duration_preset": duration_preset,
+        "target_seconds": target_seconds,
+        "output_root": str(output_root.resolve()),
+        "status": status,
+        "reused_existing": reused_existing,
+    }
+    if start_stage is not None:
+        payload["start_stage"] = start_stage
+    if session_id is not None:
+        payload["session_id"] = session_id
+        payload["artifacts"] = build_pipeline_session_artifacts(
+            run_id=session_id,
+            transcript_path_override=transcript_path,
+        )
+    elif transcript_path is not None:
+        payload["transcript_path"] = str(transcript_path.resolve())
+        payload["artifacts"] = _build_expected_output_artifacts(
+            output_root=output_root,
+            transcript_path=transcript_path,
+        )
+    else:
+        payload["artifacts"] = _build_expected_output_artifacts(output_root=output_root)
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def write_batch_manifest(
+    *,
+    batch_id: str,
+    batch_root: Path,
+    run_results: Sequence[Mapping[str, Any]],
+) -> Path:
+    """Persist the current batch run ledger for operator inspection."""
+    manifest_path = (batch_root / "batch_manifest.json").resolve()
+    succeeded_runs = sum(
+        1 for result in run_results if str(result.get("status", "")).strip() == "ok"
+    )
+    failed_runs = sum(
+        1
+        for result in run_results
+        if str(result.get("status", "")).strip() in {"failed", "paused"}
+    )
+    payload = {
+        "batch_id": batch_id,
+        "generated_at_utc": utc_now_iso(),
+        "workspace_root": str(resolve_workspace_root()),
+        "batch_output_root": str(batch_root.resolve()),
+        "total_runs": len(run_results),
+        "succeeded_runs": succeeded_runs,
+        "failed_runs": failed_runs,
+        "runs": list(run_results),
+    }
+    _write_json_atomic(manifest_path, payload)
+    return manifest_path
+
+
+def print_batch_summary(
+    *,
+    batch_root: Path,
+    manifest_path: Path,
+    run_results: Sequence[Mapping[str, Any]],
+) -> None:
+    """Print a compact operator-facing summary for a multi-audio batch."""
+    succeeded_runs = sum(
+        1 for result in run_results if str(result.get("status", "")).strip() == "ok"
+    )
+    failed_runs = sum(
+        1
+        for result in run_results
+        if str(result.get("status", "")).strip() in {"failed", "paused"}
+    )
+    print("\n===== setup_and_run batch summary =====")
+    print(f"batch_output_root: {batch_root.resolve()}")
+    print(f"batch_manifest: {manifest_path.resolve()}")
+    print(f"total_runs: {len(run_results)}")
+    print(f"succeeded_runs: {succeeded_runs}")
+    print(f"failed_runs: {failed_runs}")
+    for result in run_results:
+        status = str(result.get("status", "")).strip() or "unknown"
+        audio_path = str(result.get("audio_path", "")).strip() or "<unknown-audio>"
+        output_root = str(result.get("output_root", "")).strip() or "<unknown-output>"
+        line = f"[{status}] {audio_path} -> {output_root}"
+        error = str(result.get("error", "")).strip()
+        if error:
+            line += f" ({error})"
+        print(line)
+
+
+def write_duration_sweep_manifest(
+    *,
+    sweep_id: str,
+    sweep_root: Path,
+    duration_presets: Sequence[str],
+    run_results: Sequence[Mapping[str, Any]],
+) -> Path:
+    """Persist the current duration-sweep ledger for operator inspection."""
+    manifest_path = (sweep_root / "duration_sweep_manifest.json").resolve()
+    completed_runs = sum(
+        1
+        for result in run_results
+        if str(result.get("status", "")).strip() in {"ok", "skipped"}
+    )
+    failed_runs = sum(
+        1
+        for result in run_results
+        if str(result.get("status", "")).strip() in {"failed", "paused"}
+    )
+    payload = {
+        "sweep_id": sweep_id,
+        "generated_at_utc": utc_now_iso(),
+        "workspace_root": str(resolve_workspace_root()),
+        "sweep_output_root": str(sweep_root.resolve()),
+        "duration_presets": [
+            {
+                "label": preset_label,
+                "target_seconds": DURATION_SWEEP_PRESET_SECONDS[preset_label],
+            }
+            for preset_label in duration_presets
+        ],
+        "total_runs": len(run_results),
+        "completed_runs": completed_runs,
+        "failed_runs": failed_runs,
+        "runs": list(run_results),
+    }
+    _write_json_atomic(manifest_path, payload)
+    return manifest_path
+
+
+def print_duration_sweep_summary(
+    *,
+    sweep_root: Path,
+    manifest_path: Path,
+    run_results: Sequence[Mapping[str, Any]],
+) -> None:
+    """Print a compact operator-facing summary for a duration sweep."""
+    completed_runs = sum(
+        1
+        for result in run_results
+        if str(result.get("status", "")).strip() in {"ok", "skipped"}
+    )
+    failed_runs = sum(
+        1
+        for result in run_results
+        if str(result.get("status", "")).strip() in {"failed", "paused"}
+    )
+    print("\n===== setup_and_run duration sweep summary =====")
+    print(f"sweep_output_root: {sweep_root.resolve()}")
+    print(f"sweep_manifest: {manifest_path.resolve()}")
+    print(f"total_runs: {len(run_results)}")
+    print(f"completed_runs: {completed_runs}")
+    print(f"failed_runs: {failed_runs}")
+    for result in run_results:
+        status = str(result.get("status", "")).strip() or "unknown"
+        audio_path = str(result.get("audio_path", "")).strip() or "<unknown-audio>"
+        preset_label = (
+            str(result.get("duration_preset", "")).strip() or "<unknown-preset>"
+        )
+        output_root = str(result.get("output_root", "")).strip() or "<unknown-output>"
+        start_stage = str(result.get("start_stage", "")).strip()
+        line = f"[{status}] [{preset_label}] {audio_path} -> {output_root}"
+        if start_stage:
+            line += f" ({start_stage})"
+        error = str(result.get("error", "")).strip()
+        if error:
+            line += f" ({error})"
+        print(line)
+
+
+def run_audio_duration_sweep(
+    *,
+    audio_paths: Sequence[Path],
+    duration_presets: Sequence[str],
+    workspace_root: Path,
+    base_output_root: Path,
+    explicit_output_root: bool,
+    pass_through_overrides: Sequence[str],
+    voice_clone_enabled: bool,
+    interjector_enabled: bool,
+    live_draft_audio_enabled: bool,
+    calibration_runtime_enabled: bool,
+    uv_executable: str,
+) -> int:
+    """Run one duration sweep that reuses each episode transcript across presets."""
+    global OUTPUT_ROOT
+
+    original_output_root = OUTPUT_ROOT
+    sweep_id, sweep_root = resolve_duration_sweep_output_root(
+        workspace_root=workspace_root,
+        output_root=base_output_root,
+        explicit_output_root=explicit_output_root,
+    )
+    run_results: list[dict[str, Any]] = []
+    manifest_path = write_duration_sweep_manifest(
+        sweep_id=sweep_id,
+        sweep_root=sweep_root,
+        duration_presets=duration_presets,
+        run_results=run_results,
+    )
+    print(
+        "Duration sweep enabled for "
+        f"{len(audio_paths)} audio file(s) across presets "
+        f"{', '.join(duration_presets)}. Sweep outputs will be written under "
+        f"{sweep_root}."
+    )
+
+    try:
+        for episode_index, audio_path in enumerate(audio_paths, start=1):
+            episode_root = resolve_duration_sweep_episode_output_root(
+                sweep_root=sweep_root,
+                audio_path=audio_path,
+                index=episode_index,
+            )
+            episode_root.mkdir(parents=True, exist_ok=True)
+            reusable_transcript_path = _find_reusable_duration_sweep_transcript(
+                episode_root=episode_root,
+                preset_labels=duration_presets,
+                source_audio_path=audio_path,
+            )
+            bootstrap_failed = False
+            print(
+                f"\n===== duration sweep episode {episode_index}/{len(audio_paths)} =====\n"
+                f"audio_path: {audio_path}\n"
+                f"episode_root: {episode_root}"
+            )
+
+            for preset_label in duration_presets:
+                target_seconds = DURATION_SWEEP_PRESET_SECONDS[preset_label]
+                preset_output_root = resolve_duration_sweep_preset_output_root(
+                    episode_root=episode_root,
+                    preset_label=preset_label,
+                )
+                preset_output_root.mkdir(parents=True, exist_ok=True)
+                if _is_duration_sweep_output_complete(
+                    preset_output_root,
+                    voice_clone_enabled=voice_clone_enabled,
+                    interjector_enabled=interjector_enabled,
+                ):
+                    print(
+                        f"[skip] preset={preset_label} already complete at "
+                        f"{preset_output_root}"
+                    )
+                    reusable_transcript_path = (
+                        reusable_transcript_path
+                        or _find_reusable_duration_sweep_transcript(
+                            episode_root=episode_root,
+                            preset_labels=duration_presets,
+                            source_audio_path=audio_path,
+                        )
+                    )
+                    run_results.append(
+                        _build_duration_sweep_run_result(
+                            episode_index=episode_index,
+                            audio_path=audio_path,
+                            output_root=preset_output_root,
+                            duration_preset=preset_label,
+                            target_seconds=target_seconds,
+                            status="skipped",
+                            start_stage="stage-2"
+                            if reusable_transcript_path is not None
+                            else "stage-1",
+                            transcript_path=reusable_transcript_path,
+                            reused_existing=True,
+                        )
+                    )
+                    manifest_path = write_duration_sweep_manifest(
+                        sweep_id=sweep_id,
+                        sweep_root=sweep_root,
+                        duration_presets=duration_presets,
+                        run_results=run_results,
+                    )
+                    continue
+                if reusable_transcript_path is None and bootstrap_failed:
+                    error_message = (
+                        "Skipped because this episode has no reusable transcript "
+                        "after an earlier stage-1 bootstrap failure."
+                    )
+                    print(f"[skip] preset={preset_label} {error_message}")
+                    run_results.append(
+                        _build_duration_sweep_run_result(
+                            episode_index=episode_index,
+                            audio_path=audio_path,
+                            output_root=preset_output_root,
+                            duration_preset=preset_label,
+                            target_seconds=target_seconds,
+                            status="failed",
+                            start_stage="stage-1",
+                            error=error_message,
+                        )
+                    )
+                    manifest_path = write_duration_sweep_manifest(
+                        sweep_id=sweep_id,
+                        sweep_root=sweep_root,
+                        duration_presets=duration_presets,
+                        run_results=run_results,
+                    )
+                    continue
+
+                OUTPUT_ROOT = preset_output_root
+                records: list[StepRecord] = []
+                run_id: str | None = None
+                session_store: PipelineSessionStore | None = None
+                start_stage: PipelineStartStage = (
+                    "stage-2" if reusable_transcript_path is not None else "stage-1"
+                )
+                transcript_path_override = (
+                    reusable_transcript_path if start_stage == "stage-2" else None
+                )
+                run_artifacts: dict[str, str] | None = None
+                print(
+                    f"\n----- preset {preset_label} ({target_seconds}s) -----\n"
+                    f"start_stage: {start_stage}\n"
+                    f"output_root: {preset_output_root}"
+                )
+                try:
+                    run_id = str(uuid4())
+                    run_artifacts = build_pipeline_session_artifacts(
+                        run_id=run_id,
+                        transcript_path_override=transcript_path_override,
+                    )
+                    overrides = build_run_overrides(
+                        run_id=run_id,
+                        start_stage=start_stage,
+                        audio_path=audio_path,
+                        enable_voice_clone=voice_clone_enabled,
+                        enable_interjector=interjector_enabled,
+                    )
+                    if transcript_path_override is not None:
+                        overrides.append(
+                            "transcript_path="
+                            f"{_path_for_override(transcript_path_override)}"
+                        )
+                    overrides.append(f"orchestrator.target_seconds={target_seconds}")
+                    overrides.extend(pass_through_overrides)
+                    if start_stage == "stage-2":
+                        stage_selection_detail = (
+                            "pipeline.start_stage=stage-2 because duration sweep is "
+                            "reusing a prior transcript artifact."
+                        )
+                    else:
+                        stage_selection_detail = (
+                            "pipeline.start_stage=stage-1 because this episode does "
+                            "not yet have a reusable transcript artifact."
+                        )
+                    print(f"Selected {stage_selection_detail}")
+                    records.append(
+                        StepRecord(
+                            name="start_stage",
+                            status="ok",
+                            detail=stage_selection_detail,
+                        )
+                    )
+                    records.append(
+                        StepRecord(
+                            name="input",
+                            status="ok",
+                            detail=f"audio_path={audio_path}",
+                        )
+                    )
+                    records.append(
+                        StepRecord(
+                            name="duration_target",
+                            status="ok",
+                            detail=(
+                                f"preset={preset_label}, target_seconds="
+                                f"{target_seconds}"
+                            ),
+                        )
+                    )
+
+                    session_store = PipelineSessionStore(
+                        resolve_pipeline_session_store_path()
+                    )
+                    session_store.create_or_replace_session(
+                        session_id=run_id,
+                        requested_start_stage=start_stage,
+                        prepared_overrides=list(overrides),
+                        artifacts=run_artifacts,
+                        options=build_pipeline_session_options(
+                            requested_start_stage=start_stage,
+                            voice_clone_enabled=voice_clone_enabled,
+                            interjector_enabled=interjector_enabled,
+                            workspace_root=workspace_root,
+                            output_root=preset_output_root,
+                        ),
+                    )
+
+                    if start_stage == "stage-1" and calibration_runtime_enabled:
+                        records.append(
+                            StepRecord(
+                                name="calibration",
+                                status="deferred",
+                                detail=(
+                                    "Deferred to card_framework.cli.main after "
+                                    "transcript generation so the audio stage does "
+                                    "not run twice."
+                                ),
+                            )
+                        )
+                    elif live_draft_audio_enabled:
+                        records.append(
+                            StepRecord(
+                                name="calibration",
+                                status="skipped",
+                                detail=(
+                                    "Skipped because live stage-2/stage-3 drafting "
+                                    "uses actual rendered audio durations."
+                                ),
+                            )
+                        )
+                    elif start_stage == "stage-2":
+                        calibration_warning_message = build_calibration_warning_message(
+                            start_stage=start_stage,
+                        )
+                        if calibration_warning_message is not None:
+                            print(f"Note: {calibration_warning_message}")
+                        with report_loading_duration(
+                            "voice-clone calibration helper",
+                            reporter=_emit_setup_status,
+                        ):
+                            run_calibration(
+                                uv_executable=uv_executable,
+                                transcript_path=transcript_path_override,
+                                audio_path=audio_path,
+                            )
+                        records.append(
+                            StepRecord(
+                                name="calibration",
+                                status="ok",
+                                detail="Calibration artifact is ready.",
+                            )
+                        )
+                    else:
+                        records.append(
+                            StepRecord(
+                                name="calibration",
+                                status="skipped",
+                                detail=(
+                                    "Skipped because this duration preset does not "
+                                    "need a separate pre-run calibration step."
+                                ),
+                            )
+                        )
+
+                    run_pipeline(uv_executable=uv_executable, overrides=overrides)
+                    records.append(
+                        StepRecord(
+                            name="pipeline_run",
+                            status="ok",
+                            detail="card_framework.cli.main completed successfully.",
+                        )
+                    )
+                    print_summary(
+                        records=records,
+                        run_id=run_id,
+                        artifacts=run_artifacts,
+                    )
+                    run_results.append(
+                        _build_duration_sweep_run_result(
+                            episode_index=episode_index,
+                            audio_path=audio_path,
+                            output_root=preset_output_root,
+                            duration_preset=preset_label,
+                            target_seconds=target_seconds,
+                            status="ok",
+                            start_stage=start_stage,
+                            session_id=run_id,
+                            transcript_path=transcript_path_override,
+                        )
+                    )
+                    if start_stage == "stage-1":
+                        reusable_transcript_path = (
+                            preset_output_root / "transcript.json"
+                        ).resolve()
+                except BootstrapError as exc:
+                    child_failure_record = (
+                        session_store.get_session(run_id)
+                        if session_store is not None and run_id is not None
+                        else None
+                    )
+                    child_failure_already_persisted = (
+                        exc.step == "pipeline_run"
+                        and child_failure_record is not None
+                        and child_failure_record.status
+                        in {"failed", "paused", "completed"}
+                    )
+                    if (
+                        session_store is not None
+                        and run_id is not None
+                        and not child_failure_already_persisted
+                    ):
+                        session_store.mark_session_failed(
+                            session_id=run_id,
+                            current_stage=None,
+                            reason=exc.message,
+                        )
+                    records.append(
+                        StepRecord(name=exc.step, status="failed", detail=exc.message)
+                    )
+                    print(exc.render())
+                    print_summary(
+                        records=records,
+                        run_id=run_id,
+                        artifacts=run_artifacts,
+                    )
+                    run_results.append(
+                        _build_duration_sweep_run_result(
+                            episode_index=episode_index,
+                            audio_path=audio_path,
+                            output_root=preset_output_root,
+                            duration_preset=preset_label,
+                            target_seconds=target_seconds,
+                            status="failed",
+                            start_stage=start_stage,
+                            session_id=run_id,
+                            transcript_path=transcript_path_override,
+                            error=exc.message,
+                        )
+                    )
+                    if start_stage == "stage-1":
+                        bootstrap_failed = True
+                        reusable_transcript_path = None
+                except KeyboardInterrupt:
+                    if session_store is not None and run_id is not None:
+                        session_store.mark_session_paused(
+                            session_id=run_id,
+                            current_stage=None,
+                            reason="Pipeline interrupted by user.",
+                        )
+                    print_summary(
+                        records=records,
+                        run_id=run_id,
+                        interrupted=True,
+                        artifacts=run_artifacts,
+                    )
+                    run_results.append(
+                        _build_duration_sweep_run_result(
+                            episode_index=episode_index,
+                            audio_path=audio_path,
+                            output_root=preset_output_root,
+                            duration_preset=preset_label,
+                            target_seconds=target_seconds,
+                            status="paused",
+                            start_stage=start_stage,
+                            session_id=run_id,
+                            transcript_path=transcript_path_override,
+                            error="Pipeline interrupted by user.",
+                        )
+                    )
+                    manifest_path = write_duration_sweep_manifest(
+                        sweep_id=sweep_id,
+                        sweep_root=sweep_root,
+                        duration_presets=duration_presets,
+                        run_results=run_results,
+                    )
+                    print_duration_sweep_summary(
+                        sweep_root=sweep_root,
+                        manifest_path=manifest_path,
+                        run_results=run_results,
+                    )
+                    raise
+                manifest_path = write_duration_sweep_manifest(
+                    sweep_id=sweep_id,
+                    sweep_root=sweep_root,
+                    duration_presets=duration_presets,
+                    run_results=run_results,
+                )
+
+        print_duration_sweep_summary(
+            sweep_root=sweep_root,
+            manifest_path=manifest_path,
+            run_results=run_results,
+        )
+        return 0 if all(result.get("status") in {"ok", "skipped"} for result in run_results) else 1
+    finally:
+        OUTPUT_ROOT = original_output_root
+
+
+def run_audio_batch(
+    *,
+    audio_paths: Sequence[Path],
+    workspace_root: Path,
+    base_output_root: Path,
+    explicit_output_root: bool,
+    pass_through_overrides: Sequence[str],
+    voice_clone_enabled: bool,
+    interjector_enabled: bool,
+    live_draft_audio_enabled: bool,
+    calibration_runtime_enabled: bool,
+    uv_executable: str,
+) -> int:
+    """Run the stage-1 pipeline sequentially for multiple audio inputs."""
+    global OUTPUT_ROOT
+
+    original_output_root = OUTPUT_ROOT
+    batch_id, batch_root = resolve_batch_output_root(
+        workspace_root=workspace_root,
+        output_root=base_output_root,
+        explicit_output_root=explicit_output_root,
+    )
+    run_results: list[dict[str, Any]] = []
+    manifest_path = write_batch_manifest(
+        batch_id=batch_id,
+        batch_root=batch_root,
+        run_results=run_results,
+    )
+    print(
+        "Batch mode enabled for "
+        f"{len(audio_paths)} audio file(s). Batch outputs will be written under "
+        f"{batch_root}."
+    )
+
+    try:
+        for index, audio_path in enumerate(audio_paths, start=1):
+            run_output_root = resolve_batch_run_output_root(
+                batch_root=batch_root,
+                audio_path=audio_path,
+                index=index,
+            )
+            run_output_root.mkdir(parents=True, exist_ok=True)
+            OUTPUT_ROOT = run_output_root
+            records: list[StepRecord] = []
+            run_id: str | None = None
+            session_store: PipelineSessionStore | None = None
+
+            print(
+                f"\n===== batch run {index}/{len(audio_paths)} =====\n"
+                f"audio_path: {audio_path}\n"
+                f"output_root: {run_output_root}"
+            )
+
+            try:
+                run_id = str(uuid4())
+                overrides = build_run_overrides(
+                    run_id=run_id,
+                    start_stage="stage-1",
+                    audio_path=audio_path,
+                    enable_voice_clone=voice_clone_enabled,
+                    enable_interjector=interjector_enabled,
+                )
+                overrides.extend(pass_through_overrides)
+                stage_selection_detail = (
+                    "pipeline.start_stage=stage-1 because multiple --audio-path "
+                    "inputs were provided."
+                )
+                print(f"Selected {stage_selection_detail}")
+                records.append(
+                    StepRecord(
+                        name="start_stage",
+                        status="ok",
+                        detail=stage_selection_detail,
+                    )
+                )
+                records.append(
+                    StepRecord(
+                        name="input",
+                        status="ok",
+                        detail=f"audio_path={audio_path}",
+                    )
+                )
+
+                session_store = PipelineSessionStore(resolve_pipeline_session_store_path())
+                session_store.create_or_replace_session(
+                    session_id=run_id,
+                    requested_start_stage="stage-1",
+                    prepared_overrides=list(overrides),
+                    artifacts=build_pipeline_session_artifacts(run_id=run_id),
+                    options=build_pipeline_session_options(
+                        requested_start_stage="stage-1",
+                        voice_clone_enabled=voice_clone_enabled,
+                        interjector_enabled=interjector_enabled,
+                        workspace_root=workspace_root,
+                        output_root=run_output_root,
+                    ),
+                )
+
+                if calibration_runtime_enabled:
+                    records.append(
+                        StepRecord(
+                            name="calibration",
+                            status="deferred",
+                            detail=(
+                                "Deferred to card_framework.cli.main after transcript "
+                                "generation so the audio stage does not run twice."
+                            ),
+                        )
+                    )
+                elif live_draft_audio_enabled:
+                    records.append(
+                        StepRecord(
+                            name="calibration",
+                            status="skipped",
+                            detail=(
+                                "Skipped because live stage-2/stage-3 drafting uses "
+                                "actual rendered audio durations."
+                            ),
+                        )
+                    )
+                else:
+                    records.append(
+                        StepRecord(
+                            name="calibration",
+                            status="skipped",
+                            detail="Skipped because this batch run does not need calibration.",
+                        )
+                    )
+
+                run_pipeline(uv_executable=uv_executable, overrides=overrides)
+                records.append(
+                    StepRecord(
+                        name="pipeline_run",
+                        status="ok",
+                        detail="card_framework.cli.main completed successfully.",
+                    )
+                )
+                print_summary(records=records, run_id=run_id)
+                run_results.append(
+                    _build_batch_run_result(
+                        index=index,
+                        audio_path=audio_path,
+                        output_root=run_output_root,
+                        run_id=run_id,
+                        status="ok",
+                    )
+                )
+            except BootstrapError as exc:
+                child_failure_record = (
+                    session_store.get_session(run_id)
+                    if session_store is not None and run_id is not None
+                    else None
+                )
+                child_failure_already_persisted = (
+                    exc.step == "pipeline_run"
+                    and child_failure_record is not None
+                    and child_failure_record.status in {"failed", "paused", "completed"}
+                )
+                if (
+                    session_store is not None
+                    and run_id is not None
+                    and not child_failure_already_persisted
+                ):
+                    session_store.mark_session_failed(
+                        session_id=run_id,
+                        current_stage=None,
+                        reason=exc.message,
+                    )
+                records.append(
+                    StepRecord(name=exc.step, status="failed", detail=exc.message)
+                )
+                print(exc.render())
+                print_summary(records=records, run_id=run_id)
+                run_results.append(
+                    _build_batch_run_result(
+                        index=index,
+                        audio_path=audio_path,
+                        output_root=run_output_root,
+                        run_id=run_id,
+                        status="failed",
+                        error=exc.message,
+                    )
+                )
+            except KeyboardInterrupt:
+                if session_store is not None and run_id is not None:
+                    session_store.mark_session_paused(
+                        session_id=run_id,
+                        current_stage=None,
+                        reason="Pipeline interrupted by user.",
+                    )
+                print_summary(records=records, run_id=run_id, interrupted=True)
+                run_results.append(
+                    _build_batch_run_result(
+                        index=index,
+                        audio_path=audio_path,
+                        output_root=run_output_root,
+                        run_id=run_id,
+                        status="paused",
+                        error="Pipeline interrupted by user.",
+                    )
+                )
+                manifest_path = write_batch_manifest(
+                    batch_id=batch_id,
+                    batch_root=batch_root,
+                    run_results=run_results,
+                )
+                print_batch_summary(
+                    batch_root=batch_root,
+                    manifest_path=manifest_path,
+                    run_results=run_results,
+                )
+                raise
+            manifest_path = write_batch_manifest(
+                batch_id=batch_id,
+                batch_root=batch_root,
+                run_results=run_results,
+            )
+
+        print_batch_summary(
+            batch_root=batch_root,
+            manifest_path=manifest_path,
+            run_results=run_results,
+        )
+        return 0 if all(result.get("status") == "ok" for result in run_results) else 1
+    finally:
+        OUTPUT_ROOT = original_output_root
+
+
 def print_summary(
     *,
     records: Sequence[StepRecord],
     run_id: str | None,
     interrupted: bool = False,
+    artifacts: Mapping[str, str] | None = None,
 ) -> None:
     """Print compact step summary and expected output artifact locations."""
     print("\n===== setup_and_run summary =====")
@@ -1669,24 +3783,26 @@ def print_summary(
     if run_id is None:
         return
 
-    if has_explicit_output_root():
-        run_work_dir = (resolve_output_root() / "audio_stage").resolve()
-        transcript_path = (resolve_output_root() / "transcript.json").resolve()
-    else:
-        workspace_root = resolve_workspace_root()
-        run_work_dir = (
-            workspace_root / "artifacts" / "audio_stage" / "runs" / run_id
-        ).resolve()
-        transcript_path = (
-            workspace_root / "artifacts" / "transcripts" / f"{run_id}.transcript.json"
-        ).resolve()
+    resolved_artifacts = (
+        dict(artifacts)
+        if artifacts is not None
+        else build_pipeline_session_artifacts(run_id=run_id)
+    )
+    run_work_dir = Path(resolved_artifacts["work_dir"]).resolve()
+    transcript_path = Path(resolved_artifacts["transcript_path"]).resolve()
     speaker_manifest = run_work_dir / "speaker_samples" / "manifest.json"
-    voice_clone_manifest = run_work_dir / "voice_clone" / "manifest.json"
-    interjector_manifest = run_work_dir / "interjector" / "interjector_manifest.json"
+    voice_clone_manifest = Path(resolved_artifacts["voice_clone_manifest_path"]).resolve()
+    interjector_manifest = Path(
+        resolved_artifacts["interjector_manifest_path"]
+    ).resolve()
+    session_summary_path = Path(
+        resolved_artifacts.get("session_summary_path", transcript_path.parent / "summary.xml")
+    ).resolve()
 
-    print(f"run_id: {run_id}")
+    print(f"session_id: {run_id}")
     print(f"work_dir: {run_work_dir}")
     print(f"transcript: {transcript_path}")
+    print(f"session_summary: {session_summary_path}")
     print(f"speaker_samples_manifest: {speaker_manifest}")
     print(f"voice_clone_manifest: {voice_clone_manifest}")
     print(f"interjector_manifest: {interjector_manifest}")
@@ -1716,13 +3832,66 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_dir=workspace_root,
         )
     WORKSPACE_ROOT = workspace_root
-    OUTPUT_ROOT = output_root if args.output_root else None
     CONFIG_FILE_PATH = config_file_path
+    if args.menu and not is_interactive_console():
+        print("[input] --menu requires an interactive terminal.")
+        return 1
+    if should_launch_interactive_menu(args):
+        args = apply_interactive_menu_selection(args, run_interactive_menu())
+        output_root = workspace_root
+        if args.output_root:
+            output_root_candidate = Path(args.output_root).expanduser()
+            if not output_root_candidate.is_absolute():
+                output_root_candidate = (workspace_root / output_root_candidate).resolve()
+            output_root = output_root_candidate.resolve()
+    OUTPUT_ROOT = output_root if args.output_root else None
+    raw_audio_paths = tuple(args.audio_path or [])
+    cli_audio_path = raw_audio_paths[0] if len(raw_audio_paths) == 1 else None
+    batch_mode = len(raw_audio_paths) > 1
     records: list[StepRecord] = []
     run_id: str | None = None
+    session_store: PipelineSessionStore | None = None
+    resume_plan: PipelineResumePlan | None = None
 
     try:
         pass_through_overrides = normalize_cli_overrides(args.override)
+        if args.duration_presets and not args.duration_sweep:
+            raise BootstrapError(
+                step="input",
+                message=(
+                    "--duration-presets requires --duration-sweep so the wrapper "
+                    "knows to fan out duration targets."
+                ),
+            )
+        duration_sweep_presets = (
+            parse_duration_sweep_presets(args.duration_presets)
+            if bool(args.duration_sweep)
+            else ()
+        )
+        validate_resume_session_inputs(
+            resume_session=args.resume_session,
+            voiceclone_from_summary=args.voiceclone_from_summary,
+            audio_paths=raw_audio_paths,
+            pass_through_overrides=pass_through_overrides,
+        )
+        validate_duration_sweep_inputs(
+            duration_sweep_enabled=bool(args.duration_sweep),
+            audio_paths=raw_audio_paths,
+            voiceclone_from_summary=args.voiceclone_from_summary,
+            resume_session=args.resume_session,
+            pass_through_overrides=pass_through_overrides,
+        )
+        validate_batch_audio_inputs(
+            audio_paths=raw_audio_paths,
+            voiceclone_from_summary=args.voiceclone_from_summary,
+            resume_session=args.resume_session,
+            pass_through_overrides=pass_through_overrides,
+        )
+        multi_audio_paths = (
+            resolve_audio_inputs(raw_audio_paths)
+            if batch_mode or bool(args.duration_sweep)
+            else ()
+        )
         preflight_shortcut_overrides: list[str] = []
         if args.voiceclone_from_summary is not None:
             preflight_shortcut_overrides.extend(
@@ -1732,30 +3901,65 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "audio.voice_clone.enabled=true",
                 ]
             )
-        effective_start_stage = resolve_bootstrap_start_stage(
-            shortcut_overrides=preflight_shortcut_overrides,
-            pass_through_overrides=pass_through_overrides,
-            cli_audio_path=args.audio_path,
-        )
+        if args.resume_session:
+            session_store = PipelineSessionStore(resolve_pipeline_session_store_path())
+            resume_plan = session_store.compute_resume_plan(
+                session_id=str(args.resume_session).strip()
+            )
+            run_id = resume_plan.session_id
+            if resume_plan.is_completed:
+                records.append(
+                    StepRecord(
+                        name="pipeline_run",
+                        status="skipped",
+                        detail=(
+                            f"Session {run_id} is already complete; no resume needed."
+                        ),
+                    )
+                )
+                print_summary(records=records, run_id=run_id)
+                return 0
+            effective_start_stage = resume_plan.resume_stage
+            if effective_start_stage is None:
+                raise BootstrapError(
+                    step="input",
+                    message=(
+                        "Resume planning did not resolve a next stage for session "
+                        f"{run_id}."
+                    ),
+                )
+        elif batch_mode or bool(args.duration_sweep):
+            effective_start_stage = "stage-1"
+        else:
+            effective_start_stage = resolve_bootstrap_start_stage(
+                shortcut_overrides=preflight_shortcut_overrides,
+                pass_through_overrides=pass_through_overrides,
+                cli_audio_path=cli_audio_path,
+            )
         combined_bootstrap_overrides = [
             *preflight_shortcut_overrides,
             *pass_through_overrides,
         ]
+        effective_boolean_overrides = (
+            list(resume_plan.prepared_overrides)
+            if resume_plan is not None
+            else combined_bootstrap_overrides
+        )
         voice_clone_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.voice_clone.enabled",
             repo_key_path=("audio", "voice_clone", "enabled"),
             fallback=True,
         )
         live_draft_audio_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.voice_clone.live_drafting.enabled",
             repo_key_path=("audio", "voice_clone", "live_drafting", "enabled"),
             fallback=True,
         )
         live_draft_audio_enabled = voice_clone_enabled and live_draft_audio_enabled
         interjector_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.interjector.enabled",
             repo_key_path=("audio", "interjector", "enabled"),
             fallback=False,
@@ -1768,7 +3972,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             voice_clone_enabled or interjector_enabled or calibration_runtime_enabled
         )
         speaker_samples_enabled = resolve_repo_backed_boolean_override(
-            combined_bootstrap_overrides,
+            effective_boolean_overrides,
             key="audio.speaker_samples.enabled",
             repo_key_path=("audio", "speaker_samples", "enabled"),
             fallback=True,
@@ -1890,25 +4094,64 @@ def main(argv: Sequence[str] | None = None) -> int:
             print_summary(records=records, run_id=None)
             return 0
 
+        if args.duration_sweep:
+            return run_audio_duration_sweep(
+                audio_paths=multi_audio_paths,
+                duration_presets=duration_sweep_presets,
+                workspace_root=workspace_root,
+                base_output_root=output_root,
+                explicit_output_root=bool(args.output_root),
+                pass_through_overrides=pass_through_overrides,
+                voice_clone_enabled=voice_clone_enabled,
+                interjector_enabled=interjector_enabled,
+                live_draft_audio_enabled=live_draft_audio_enabled,
+                calibration_runtime_enabled=calibration_runtime_enabled,
+                uv_executable=args.uv_executable,
+            )
+
+        if batch_mode:
+            return run_audio_batch(
+                audio_paths=multi_audio_paths,
+                workspace_root=workspace_root,
+                base_output_root=output_root,
+                explicit_output_root=bool(args.output_root),
+                pass_through_overrides=pass_through_overrides,
+                voice_clone_enabled=voice_clone_enabled,
+                interjector_enabled=interjector_enabled,
+                live_draft_audio_enabled=live_draft_audio_enabled,
+                calibration_runtime_enabled=calibration_runtime_enabled,
+                uv_executable=args.uv_executable,
+            )
+
+        if session_store is None:
+            session_store = PipelineSessionStore(resolve_pipeline_session_store_path())
+
         print("[5/7] Resolve runtime input")
-        run_id = utc_now_compact()
-        shortcut_overrides = build_shortcut_overrides(
-            voiceclone_from_summary=args.voiceclone_from_summary,
-            run_id=run_id,
-        )
-        base_overrides = build_run_overrides(
-            run_id=run_id,
-            start_stage=effective_start_stage,
-            enable_voice_clone=voice_clone_enabled,
-            enable_interjector=interjector_enabled,
-        )
-        overrides = [*base_overrides, *shortcut_overrides, *pass_through_overrides]
-        stage_selection_detail = build_start_stage_selection_detail(
-            start_stage=effective_start_stage,
-            voiceclone_from_summary=args.voiceclone_from_summary,
-            pass_through_overrides=pass_through_overrides,
-            cli_audio_path=args.audio_path,
-        )
+        if resume_plan is not None:
+            run_id = resume_plan.session_id
+            overrides = build_resume_overrides(resume_plan)
+            stage_selection_detail = (
+                f"Resuming session {run_id} from {effective_start_stage}."
+            )
+        else:
+            run_id = str(uuid4())
+            shortcut_overrides = build_shortcut_overrides(
+                voiceclone_from_summary=args.voiceclone_from_summary,
+                run_id=run_id,
+            )
+            base_overrides = build_run_overrides(
+                run_id=run_id,
+                start_stage=effective_start_stage,
+                enable_voice_clone=voice_clone_enabled,
+                enable_interjector=interjector_enabled,
+            )
+            overrides = [*base_overrides, *shortcut_overrides, *pass_through_overrides]
+            stage_selection_detail = build_start_stage_selection_detail(
+                start_stage=effective_start_stage,
+                voiceclone_from_summary=args.voiceclone_from_summary,
+                pass_through_overrides=pass_through_overrides,
+                cli_audio_path=cli_audio_path,
+            )
         print(f"Selected {stage_selection_detail}")
         records.append(
             StepRecord(
@@ -1927,10 +4170,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if effective_start_stage == "stage-1"
             else resolve_transcript_override_path(overrides=overrides)
         )
+        session_transcript_override = resolve_session_transcript_artifact_override(
+            start_stage=effective_start_stage,
+            transcript_path=runtime_transcript_path,
+        )
         resolved_audio_path = resolve_audio_override_path(overrides=overrides)
         if requires_audio_path_input(overrides):
             if resolved_audio_path is None:
-                resolved_audio_path = prompt_or_validate_audio_path(args.audio_path)
+                resolved_audio_path = prompt_or_validate_audio_path(cli_audio_path)
                 overrides.append(
                     f"audio.audio_path={_path_for_override(resolved_audio_path)}"
                 )
@@ -1938,8 +4185,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 input_detail = f"audio_path={resolved_audio_path} (override)"
             records.append(StepRecord(name="input", status="ok", detail=input_detail))
-        elif args.audio_path is not None:
-            resolved_audio_path = resolve_audio_input(args.audio_path)
+        elif cli_audio_path is not None:
+            resolved_audio_path = resolve_audio_input(cli_audio_path)
             overrides.append(f"audio.audio_path={_path_for_override(resolved_audio_path)}")
             records.append(
                 StepRecord(
@@ -1990,6 +4237,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                     status="ok",
                     detail="audio_path=not_required_for_selected_stage",
                 )
+            )
+
+        if (
+            session_store is not None
+            and run_id is not None
+            and resume_plan is not None
+            and effective_start_stage is not None
+        ):
+            session_store.cleanup_for_stage_restart(
+                session_id=run_id,
+                stage_name=effective_start_stage,
+            )
+
+        if session_store is not None and run_id is not None and resume_plan is None:
+            session_store.create_or_replace_session(
+                session_id=run_id,
+                requested_start_stage=effective_start_stage,
+                prepared_overrides=list(overrides),
+                artifacts=build_pipeline_session_artifacts(
+                    run_id=run_id,
+                    transcript_path_override=session_transcript_override,
+                ),
+                options=build_pipeline_session_options(
+                    requested_start_stage=effective_start_stage,
+                    voice_clone_enabled=voice_clone_enabled,
+                    interjector_enabled=interjector_enabled,
+                    workspace_root=workspace_root,
+                    output_root=output_root,
+                ),
             )
 
         print("[6/7] Duration setup")
@@ -2076,11 +4352,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_summary(records=records, run_id=run_id)
         return 0
     except BootstrapError as exc:
+        child_failure_record = (
+            session_store.get_session(run_id)
+            if session_store is not None and run_id is not None
+            else None
+        )
+        child_failure_already_persisted = (
+            exc.step == "pipeline_run"
+            and child_failure_record is not None
+            and child_failure_record.status in {"failed", "paused", "completed"}
+        )
+        if (
+            session_store is not None
+            and run_id is not None
+            and not child_failure_already_persisted
+        ):
+            session_store.mark_session_failed(
+                session_id=run_id,
+                current_stage=None,
+                reason=exc.message,
+            )
         records.append(StepRecord(name=exc.step, status="failed", detail=exc.message))
         print(exc.render())
         print_summary(records=records, run_id=run_id)
         return 1
     except KeyboardInterrupt:
+        if batch_mode:
+            return 130
+        if session_store is not None and run_id is not None:
+            session_store.mark_session_paused(
+                session_id=run_id,
+                current_stage=None,
+                reason="Pipeline interrupted by user.",
+            )
         print_summary(records=records, run_id=run_id, interrupted=True)
         return 130
 

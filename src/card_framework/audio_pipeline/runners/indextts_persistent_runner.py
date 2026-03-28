@@ -9,6 +9,8 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from card_framework.audio_pipeline.emotion_vectors import EmotionVector
+
 _INDEXTTS_PROTOCOL_PREFIX = "__INDEXTTS_JSON__"
 
 
@@ -112,6 +114,7 @@ def _handle_synthesize_request(
     text = str(payload.get("text", "")).strip()
     output_audio_path = Path(str(payload.get("output_audio_path", "")).strip())
     emo_text = _normalize_emo_text(payload.get("emo_text"))
+    direct_emotion_vector = EmotionVector.from_raw(payload.get("emotion_vector"))
     verbose = bool(payload.get("verbose", False))
     max_text_tokens_per_segment = int(payload.get("max_text_tokens_per_segment", 120))
     raw_generation_kwargs = payload.get("generation_kwargs", {})
@@ -130,10 +133,14 @@ def _handle_synthesize_request(
     if not str(output_audio_path).strip():
         raise ValueError("Missing output_audio_path.")
 
-    emo_vector = _resolve_cached_emo_vector(
-        tts=tts,
-        emo_text=emo_text,
-        emo_vector_cache=emo_vector_cache,
+    emo_vector = (
+        direct_emotion_vector.with_index_tts_normalization().to_list()
+        if direct_emotion_vector is not None
+        else _resolve_cached_emo_vector(
+            tts=tts,
+            emo_text=emo_text,
+            emo_vector_cache=emo_vector_cache,
+        )
     )
     output_audio_path.parent.mkdir(parents=True, exist_ok=True)
     with redirect_stdout(sys.stderr):

@@ -92,6 +92,7 @@ def test_compute_target_words_uses_configurable_wpm_and_factor() -> None:
     assert _compute_target_words(30, words_per_minute=170.0, sample_factor=5.0) == 425
     assert _compute_target_words(60, words_per_minute=170.0, sample_factor=5.0) == 850
     assert _compute_target_words(300, words_per_minute=170.0, sample_factor=5.0) == 4250
+    assert _compute_target_words(600, words_per_minute=170.0, sample_factor=5.0) == 8500
 
 
 def test_build_episode_plan_creates_word_balanced_windows(tmp_path: Path) -> None:
