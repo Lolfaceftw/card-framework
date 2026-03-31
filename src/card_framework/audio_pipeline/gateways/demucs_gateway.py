@@ -57,6 +57,7 @@ class DemucsSourceSeparator(SourceSeparator):
         retry_base_seconds: float = 1.0,
         window_length_seconds: int = 600,
         window_context_seconds: int = 5,
+        cuda_window_length_seconds: int | None = 180,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be > 0.")
@@ -68,12 +69,15 @@ class DemucsSourceSeparator(SourceSeparator):
             raise ValueError("window_length_seconds must be > 0.")
         if window_context_seconds < 0:
             raise ValueError("window_context_seconds must be >= 0.")
+        if cuda_window_length_seconds is not None and cuda_window_length_seconds <= 0:
+            raise ValueError("cuda_window_length_seconds must be > 0 when set.")
         self.model_name = model_name
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
         self.window_length_seconds = window_length_seconds
         self.window_context_seconds = window_context_seconds
+        self.cuda_window_length_seconds = cuda_window_length_seconds
 
     def separate_vocals(
         self,
@@ -109,7 +113,11 @@ class DemucsSourceSeparator(SourceSeparator):
             f"Demucs source separation '{self.model_name}'",
             reporter=self._report_system_message,
         ):
-            if self._should_window_separation(total_duration_ms):
+            if self._should_window_separation(
+                total_duration_ms=total_duration_ms,
+                device=device,
+            ):
+                self._report_windowing_mode_if_needed(device=device)
                 return self._separate_windowed_vocals(
                     input_audio_path=input_audio_path,
                     output_dir=output_dir,
@@ -132,11 +140,17 @@ class DemucsSourceSeparator(SourceSeparator):
             )
             return vocals_path
 
-    def _should_window_separation(self, total_duration_ms: int | None) -> bool:
+    def _should_window_separation(
+        self,
+        *,
+        total_duration_ms: int | None,
+        device: str,
+    ) -> bool:
         """Return whether long-audio windowing should be used for this source."""
         if total_duration_ms is None:
             return False
-        return total_duration_ms > self.window_length_seconds * 1000
+        window_length_ms = self._resolve_window_length_ms(device=device)
+        return total_duration_ms > window_length_ms
 
     def _separate_single_pass_vocals(
         self,
@@ -201,7 +215,10 @@ class DemucsSourceSeparator(SourceSeparator):
             raise NonRetryableAudioStageError(
                 "Windowed Demucs separation requires a known positive audio duration."
             )
-        windows = self._plan_windows(total_duration_ms=total_duration_ms)
+        windows = self._plan_windows(
+            total_duration_ms=total_duration_ms,
+            device=device,
+        )
         if not windows:
             raise NonRetryableAudioStageError(
                 "Demucs window planning returned no audio windows."
@@ -260,11 +277,16 @@ class DemucsSourceSeparator(SourceSeparator):
         finally:
             self._remove_dir(temp_root)
 
-    def _plan_windows(self, *, total_duration_ms: int) -> list[_SeparationWindow]:
+    def _plan_windows(
+        self,
+        *,
+        total_duration_ms: int,
+        device: str,
+    ) -> list[_SeparationWindow]:
         """Plan base/context windows for one long source audio file."""
         if total_duration_ms <= 0:
             return []
-        window_length_ms = self.window_length_seconds * 1000
+        window_length_ms = self._resolve_window_length_ms(device=device)
         context_ms = self.window_context_seconds * 1000
         windows: list[_SeparationWindow] = []
         base_start_ms = 0
@@ -512,6 +534,26 @@ class DemucsSourceSeparator(SourceSeparator):
                 file_path.unlink()
         except OSError:
             pass
+
+    def _resolve_window_length_ms(self, *, device: str) -> int:
+        """Return the active Demucs outer-window length for one runtime device."""
+        if str(device).strip().lower() == "cuda" and self.cuda_window_length_seconds:
+            return self.cuda_window_length_seconds * 1000
+        return self.window_length_seconds * 1000
+
+    def _report_windowing_mode_if_needed(self, *, device: str) -> None:
+        """Surface CUDA-specific Demucs window sizing so operators see the real mode."""
+        if str(device).strip().lower() != "cuda":
+            return
+        if not self.cuda_window_length_seconds:
+            return
+        if self.cuda_window_length_seconds == self.window_length_seconds:
+            return
+        self._report_system_message(
+            "Demucs CUDA windowing active: using "
+            f"{self.cuda_window_length_seconds}s outer windows instead of the "
+            f"default {self.window_length_seconds}s."
+        )
 
 
 def _format_ffmpeg_seconds(milliseconds: int) -> str:

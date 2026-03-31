@@ -13,7 +13,7 @@ from collections.abc import Sequence
 import uuid
 
 from card_framework.agents.utils import count_words
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector, serialize_emotion_vector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector, serialize_emotion_vector
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, SummaryTurn
 
@@ -358,4 +358,5 @@ class MessageRegistry:
 
     def __len__(self) -> int:
         return len(self._messages)
+
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +119,40 @@ class _CapturingStageOrchestrator(_FakeStageOrchestrator):
     def __init__(self, *args, **kwargs) -> None:
         del args
         type(self).captured_kwargs = dict(kwargs)
+
+
+class _FakeSpeakerSampleGenerator:
+    """Test double that records the source audio used for sample generation."""
+
+    def __init__(self, *, generated_at_utc: str = "2026-03-31T03:00:00+00:00") -> None:
+        self.generated_at_utc = generated_at_utc
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        *,
+        transcript_payload,
+        source_audio_path: Path,
+        output_dir: Path,
+        progress_callback=None,
+    ):
+        del progress_callback
+        output_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = output_dir / "manifest.json"
+        manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
+        self.calls.append(
+            {
+                "transcript_payload": transcript_payload,
+                "source_audio_path": source_audio_path,
+                "output_dir": output_dir,
+            }
+        )
+        return SimpleNamespace(
+            manifest_path=manifest_path,
+            output_dir=output_dir,
+            artifacts=[SimpleNamespace(path=output_dir / "SPEAKER_00.wav")],
+            generated_at_utc=self.generated_at_utc,
+        )
 
 
 def test_main_emits_timed_loading_messages_for_startup_phases(
@@ -885,3 +920,157 @@ def test_main_converts_keyboard_interrupt_into_exit_130(
     assert record is not None
     assert record.status == "paused"
     assert record.resume_stage == "stage-2"
+
+
+def test_stage_two_speaker_samples_backfill_from_reusable_vocals_audio(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Stage-2 should reuse a persisted vocals stem instead of re-entering audio bootstrap."""
+    vocals_path = tmp_path / "artifacts" / "audio_stage" / "runs" / "old" / "vocals.wav"
+    vocals_path.parent.mkdir(parents=True, exist_ok=True)
+    vocals_path.write_bytes(b"wav")
+    transcript_path = tmp_path / "transcript.json"
+    transcript_payload = {
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 1_000,
+                "text": "hello world",
+            }
+        ],
+        "metadata": {
+            "vocals_audio_path": str(vocals_path),
+            "separator_model": "htdemucs",
+            "transcriber_model": "ibm-granite/granite-4.0-1b-speech",
+            "diarizer_backend": "nemo",
+        },
+    }
+    transcript_path.write_text(
+        json.dumps(transcript_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    transcript = runtime_main.Transcript.from_mapping(transcript_payload)
+    sample_generator = _FakeSpeakerSampleGenerator()
+
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_audio_pipeline_builders",
+        lambda **_: (
+            None,
+            None,
+            None,
+            lambda _audio_cfg: sample_generator,
+            None,
+            None,
+        ),
+    )
+
+    def _unexpected_bootstrap(**kwargs):
+        raise AssertionError(f"Unexpected stage-2 bootstrap call: {kwargs}")
+
+    monkeypatch.setattr(
+        "card_framework.cli.main._bootstrap_stage_two_speaker_samples_from_audio",
+        _unexpected_bootstrap,
+    )
+
+    updated = runtime_main._run_post_transcript_speaker_sample_step(
+        stage_start="stage-2",
+        audio_cfg_dict={
+            "audio_path": "",
+            "work_dir": str(tmp_path / "runtime_work"),
+            "speaker_samples": {
+                "enabled": True,
+                "output_dir_name": "speaker_samples",
+            },
+        },
+        project_root=tmp_path,
+        transcript_path=str(transcript_path),
+        transcript=transcript,
+    )
+
+    assert sample_generator.calls
+    assert sample_generator.calls[0]["source_audio_path"] == vocals_path.resolve()
+    assert (
+        updated.metadata["speaker_samples_manifest_path"]
+        == str((tmp_path / "runtime_work" / "speaker_samples" / "manifest.json").resolve())
+    )
+    persisted = json.loads(transcript_path.read_text(encoding="utf-8"))
+    assert (
+        persisted["metadata"]["speaker_samples_manifest_path"]
+        == updated.metadata["speaker_samples_manifest_path"]
+    )
+
+
+def test_stage_two_speaker_samples_bootstrap_when_reusable_vocals_audio_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Stage-2 should keep the bootstrap path when the transcript lacks stage-1 metadata."""
+    vocals_path = tmp_path / "artifacts" / "audio_stage" / "runs" / "old" / "vocals.wav"
+    vocals_path.parent.mkdir(parents=True, exist_ok=True)
+    vocals_path.write_bytes(b"wav")
+    transcript_path = tmp_path / "transcript.json"
+    transcript_payload = {
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 1_000,
+                "text": "hello world",
+            }
+        ],
+        "metadata": {"vocals_audio_path": str(vocals_path)},
+    }
+    transcript_path.write_text(
+        json.dumps(transcript_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    transcript = runtime_main.Transcript.from_mapping(transcript_payload)
+    bootstrap_calls: list[dict[str, object]] = []
+    bootstrapped_transcript = transcript.with_metadata(
+        {"speaker_samples_manifest_path": str((tmp_path / "bootstrapped.json").resolve())}
+    )
+
+    monkeypatch.setattr(
+        "card_framework.cli.main._load_audio_pipeline_builders",
+        lambda **_: (
+            None,
+            None,
+            None,
+            lambda _audio_cfg: (_ for _ in ()).throw(
+                AssertionError("Unexpected reusable-artifact backfill path")
+            ),
+            None,
+            None,
+        ),
+    )
+
+    def _bootstrap(**kwargs):
+        bootstrap_calls.append(kwargs)
+        return bootstrapped_transcript
+
+    monkeypatch.setattr(
+        "card_framework.cli.main._bootstrap_stage_two_speaker_samples_from_audio",
+        _bootstrap,
+    )
+
+    updated = runtime_main._run_post_transcript_speaker_sample_step(
+        stage_start="stage-2",
+        audio_cfg_dict={
+            "audio_path": "",
+            "work_dir": str(tmp_path / "runtime_work"),
+            "speaker_samples": {
+                "enabled": True,
+                "output_dir_name": "speaker_samples",
+            },
+        },
+        project_root=tmp_path,
+        transcript_path=str(transcript_path),
+        transcript=transcript,
+    )
+
+    assert bootstrap_calls
+    assert updated.metadata["speaker_samples_manifest_path"] == str(
+        (tmp_path / "bootstrapped.json").resolve()
+    )

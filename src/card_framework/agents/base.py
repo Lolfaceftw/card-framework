@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import ast
 import hashlib
 import json
@@ -13,8 +13,8 @@ from a2a.server.events import EventQueue
 from a2a.types import Task, TaskState, TaskStatus
 from a2a.utils import new_agent_text_message
 
-from card_framework.agents.tool_call_utils import build_tool_signature
-from card_framework.agents.prompt_compaction import (
+from card_framework.agents.loop.tool_call_utils import build_tool_signature
+from card_framework.agents.loop.prompt_compaction import (
     ContextBudgetManager,
     PromptCompactionRequest,
     PromptCompactionResult,
@@ -741,7 +741,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         max_turns: int,
         context_data: dict[str, Any] | None = None,
     ) -> dict | None:
-        from card_framework.agents.parsers import get_default_parser_with_options
+        from card_framework.agents.loop.parsers import get_default_parser_with_options
         from card_framework.shared.events import event_bus
 
         runtime_context = context_data if context_data is not None else {}
@@ -1115,3 +1115,4 @@ class BaseA2AExecutor(AgentExecutor, ABC):
             f"[{self.name}] Tool loop summary parsed={total_parsed_calls} executed={total_executed_calls} skipped_duplicates={total_skipped_calls}"
         )
         return None
+

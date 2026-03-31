@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from copy import deepcopy
 import argparse
 import asyncio
@@ -241,6 +241,18 @@ class _SampleArtifactPaths:
     final_critic_feedback_path: str | None
     loop_diagnostics_path: str | None
     sample_result_artifact_path: str
+
+
+@dataclass(slots=True, frozen=True)
+class _JudgeOnlyArtifactSample:
+    """One persisted SPoRC sample artifact selected for judge-only reuse."""
+
+    source_report_path: Path
+    source_duration_preset: str
+    source_sample_id: str
+    reused_sample: PreparedBenchmarkSample
+    source_result: SampleBenchmarkResult
+    summary_xml_path: Path
 
 
 def _json_default(value: object) -> object:
@@ -2002,6 +2014,244 @@ def _write_execution_report_snapshot(
     return finalized_report
 
 
+def _write_execution_report_from_results(
+    *,
+    run_root: Path,
+    run_id: str,
+    dataset_manifest: Any,
+    summarizer_provider: str,
+    critic_provider: str,
+    judge_provider: str,
+    embedding_mode: str,
+    results: list[SampleBenchmarkResult],
+    duration_tolerance_ratio: float,
+    transcript_only: bool,
+    duration_preset: str,
+    override_target_seconds: int | None,
+    sample_seed: int | None,
+    target_sample_count: int,
+    checkpoint_path: Path | None,
+    resumed_from_checkpoint: bool,
+    resume_count: int,
+    sample_shard_index: int,
+    sample_shard_count: int,
+) -> BenchmarkExecutionReport:
+    """Write one execution report when results are already ordered."""
+    samples_root = (run_root / "samples").resolve()
+    sample_artifacts_root = str(samples_root) if samples_root.exists() else None
+    provisional_report = replace(
+        _build_execution_report(
+            run_id=run_id,
+            dataset_manifest=dataset_manifest,
+            summarizer_provider=summarizer_provider,
+            critic_provider=critic_provider,
+            judge_provider=judge_provider,
+            embedding_mode=embedding_mode,
+            results=results,
+            duration_tolerance_ratio=duration_tolerance_ratio,
+            transcript_only=transcript_only,
+            duration_preset=duration_preset,
+            override_target_seconds=override_target_seconds,
+            sample_seed=sample_seed,
+            target_sample_count=target_sample_count,
+            checkpoint_path=checkpoint_path,
+            resumed_from_checkpoint=resumed_from_checkpoint,
+            resume_count=resume_count,
+            sample_shard_index=sample_shard_index,
+            sample_shard_count=sample_shard_count,
+        ),
+        sample_artifacts_root=sample_artifacts_root,
+    )
+    report_path, notes_path, results_path = write_execution_artifacts(
+        run_root=run_root,
+        report=provisional_report,
+    )
+    finalized_report = replace(
+        provisional_report,
+        report_path=str(report_path),
+        notes_path=str(notes_path),
+        results_path=str(results_path),
+    )
+    write_execution_artifacts(run_root=run_root, report=finalized_report)
+    return finalized_report
+
+
+def _resolve_judge_only_source_paths(args: argparse.Namespace) -> list[Path]:
+    """Resolve any requested judge-only source paths from CLI args."""
+    raw_values = getattr(args, "judge_only_source", None) or []
+    resolved: list[Path] = []
+    for raw_value in raw_values:
+        candidate = str(raw_value).strip()
+        if not candidate:
+            continue
+        resolved.append(Path(candidate).expanduser().resolve())
+    return resolved
+
+
+def _discover_execute_report_paths_from_sweep_root(sweep_root: Path) -> list[Path]:
+    """Collect child execute report paths referenced by one sweep log directory."""
+    logs_root = (sweep_root / "logs").resolve()
+    if not logs_root.is_dir():
+        raise BenchmarkExecutionError(
+            f"Judge-only sweep source is missing logs/: {sweep_root}"
+        )
+    discovered: list[Path] = []
+    seen: set[Path] = set()
+    for log_path in sorted(logs_root.glob("*.log")):
+        for raw_line in log_path.read_text(encoding="utf-8").splitlines():
+            stripped = raw_line.strip()
+            if not stripped.startswith("{"):
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            raw_report_path = str(payload.get("report_path", "") or "").strip()
+            if not raw_report_path:
+                continue
+            report_path = Path(raw_report_path).expanduser().resolve()
+            if report_path in seen:
+                continue
+            seen.add(report_path)
+            discovered.append(report_path)
+    if not discovered:
+        raise BenchmarkExecutionError(
+            f"Judge-only sweep source did not reference any execute reports: {sweep_root}"
+        )
+    return discovered
+
+
+def _resolve_judge_only_report_paths(source_paths: list[Path]) -> list[Path]:
+    """Expand judge-only execute or sweep sources into execute report paths."""
+    if not source_paths:
+        return []
+    report_paths: list[Path] = []
+    seen: set[Path] = set()
+    for source_path in source_paths:
+        if not source_path.exists():
+            raise BenchmarkExecutionError(
+                f"Judge-only source does not exist: {source_path}"
+            )
+        candidate_paths: list[Path] = []
+        if source_path.is_file():
+            if source_path.name != "report.json":
+                raise BenchmarkExecutionError(
+                    "Judge-only sources must point to an execute/sweep directory or "
+                    f"a report.json file: {source_path}"
+                )
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and "sweep_id" in payload:
+                candidate_paths = _discover_execute_report_paths_from_sweep_root(
+                    source_path.parent
+                )
+            else:
+                candidate_paths = [source_path]
+        else:
+            execute_report_path = (source_path / "report.json").resolve()
+            if (source_path / "logs").is_dir():
+                candidate_paths = _discover_execute_report_paths_from_sweep_root(
+                    source_path
+                )
+            elif execute_report_path.exists():
+                candidate_paths = [execute_report_path]
+            else:
+                raise BenchmarkExecutionError(
+                    "Judge-only sources must be an execute run root, a sweep root, "
+                    f"or a report.json file: {source_path}"
+                )
+        for candidate in candidate_paths:
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            report_paths.append(resolved)
+    return report_paths
+
+
+def _load_judge_only_artifacts(
+    *,
+    report_paths: list[Path],
+    sample_lookup: dict[str, PreparedBenchmarkSample],
+    max_samples: int,
+) -> list[_JudgeOnlyArtifactSample]:
+    """Load persisted summary artifacts that should be re-scored by the judge."""
+    selected: list[_JudgeOnlyArtifactSample] = []
+    sample_id_counts: Counter[str] = Counter()
+    for report_path in report_paths:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise BenchmarkExecutionError(
+                f"Judge-only source report is invalid JSON: {report_path}"
+            )
+        source_duration_preset = str(payload.get("duration_preset", "") or "").strip()
+        for raw_result in payload.get("samples", []):
+            if not isinstance(raw_result, dict):
+                continue
+            if not bool(raw_result.get("counts_toward_target", False)):
+                continue
+            raw_summary_path = str(raw_result.get("final_summary_path", "") or "").strip()
+            if not raw_summary_path:
+                continue
+            summary_xml_path = Path(raw_summary_path).expanduser().resolve()
+            if not summary_xml_path.exists():
+                raise BenchmarkExecutionError(
+                    f"Judge-only summary artifact is missing: {summary_xml_path}"
+                )
+            source_sample_id = str(raw_result.get("sample_id", "") or "").strip()
+            if not source_sample_id:
+                raise BenchmarkExecutionError(
+                    f"Judge-only source result is missing sample_id: {report_path}"
+                )
+            prepared_sample = sample_lookup.get(source_sample_id)
+            if prepared_sample is None:
+                raise BenchmarkExecutionError(
+                    "Judge-only sample was not found in the active dataset manifest: "
+                    f"{source_sample_id}"
+                )
+            selected.append(
+                _JudgeOnlyArtifactSample(
+                    source_report_path=report_path,
+                    source_duration_preset=source_duration_preset,
+                    source_sample_id=source_sample_id,
+                    reused_sample=prepared_sample,
+                    source_result=_deserialize_sample_result(raw_result),
+                    summary_xml_path=summary_xml_path,
+                )
+            )
+            sample_id_counts[source_sample_id] += 1
+            if max_samples > 0 and len(selected) >= max_samples:
+                break
+        if max_samples > 0 and len(selected) >= max_samples:
+            break
+    if not selected:
+        raise BenchmarkExecutionError(
+            "Judge-only mode did not find any retained summary artifacts to score."
+        )
+
+    duplicate_indexes: Counter[str] = Counter()
+    normalized: list[_JudgeOnlyArtifactSample] = []
+    for artifact in selected:
+        synthetic_id = artifact.source_sample_id
+        if sample_id_counts[artifact.source_sample_id] > 1:
+            duplicate_indexes[artifact.source_sample_id] += 1
+            duration_label = artifact.source_duration_preset or str(
+                artifact.source_result.target_seconds
+            )
+            synthetic_id = (
+                f"{artifact.source_sample_id}__{duration_label}"
+                f"__{duplicate_indexes[artifact.source_sample_id]}"
+            )
+        normalized.append(
+            replace(
+                artifact,
+                reused_sample=replace(artifact.reused_sample, sample_id=synthetic_id),
+                source_result=replace(artifact.source_result, sample_id=synthetic_id),
+            )
+        )
+    return normalized
+
 def _build_runtime_port_args(
     args: argparse.Namespace,
     *,
@@ -3362,6 +3612,259 @@ async def _run_sample_with_retries(
         return result, runtime, force_dynamic_ports
 
 
+def _judge_only_duration_preset(
+    artifacts: list[_JudgeOnlyArtifactSample],
+) -> tuple[str, int | None]:
+    """Return the run-level duration label for a judge-only execution."""
+    duration_labels = {
+        artifact.source_duration_preset
+        for artifact in artifacts
+        if artifact.source_duration_preset
+    }
+    if len(duration_labels) == 1:
+        duration_label = next(iter(duration_labels))
+        return duration_label, DURATION_PRESET_SECONDS.get(duration_label)
+    target_seconds = {artifact.source_result.target_seconds for artifact in artifacts}
+    if len(target_seconds) == 1:
+        only_seconds = next(iter(target_seconds))
+        for label, seconds in DURATION_PRESET_SECONDS.items():
+            if seconds == only_seconds:
+                return label, only_seconds
+        return "", only_seconds
+    return "mixed", None
+
+
+def _judge_only_status(result: Any) -> tuple[dict[str, float] | None, str, str | None]:
+    """Normalize one judge result into report-friendly fields."""
+    judge_scores = result.scores if result is not None else None
+    judge_status = result.status if result is not None else "not_scored"
+    judge_error = result.error_message if result is not None else None
+    return judge_scores, judge_status, judge_error
+
+
+async def _run_judge_only_benchmark(
+    *,
+    args: argparse.Namespace,
+    run_root: Path,
+    run_id: str,
+    dataset_manifest: Any,
+    base_cfg: Any,
+    judge_provider_config: dict[str, Any],
+    judge_provider_id: str,
+    source_report_paths: list[Path],
+) -> BenchmarkExecutionReport:
+    """Re-score persisted summary artifacts without rerunning summarizer or critic."""
+    prepared_samples = tuple(
+        iter_prepared_dataset_samples(
+            dataset_manifest.manifest_path,
+            max_samples=None,
+        )
+    )
+    sample_lookup = {sample.sample_id: sample for sample in prepared_samples}
+    max_samples = int(args.max_samples)
+    artifacts = _load_judge_only_artifacts(
+        report_paths=source_report_paths,
+        sample_lookup=sample_lookup,
+        max_samples=max_samples,
+    )
+    duration_preset, override_target_seconds = _judge_only_duration_preset(artifacts)
+    logging_enabled = bool(base_cfg.get("logging", {}).get("enabled", False))
+
+    llm_judge: LLMProvider = hydra.utils.instantiate(
+        OmegaConf.create(judge_provider_config)
+    )
+    artifact_recorder = _SampleArtifactRecorder(run_root=run_root)
+    judge_callback: LLMResponseCallback = _ArtifactCaptureResponseCallback(
+        recorder=artifact_recorder,
+        role="judge",
+    )
+    if not bool(args.disable_stream_output):
+        judge_callback = CompositeResponseCallback(
+            judge_callback,
+            RichConsoleResponseCallback(),
+        )
+    _attach_response_callback(llm_judge, judge_callback)
+    if logging_enabled:
+        llm_judge = LoggingLLMProvider(inner_provider=llm_judge)
+    llm_judge = _ArtifactCaptureLLMProvider(
+        inner_provider=llm_judge,
+        recorder=artifact_recorder,
+        role="judge",
+    )
+    judge = SPoRCJudge(
+        judge_llm=llm_judge,
+        config=SPoRCJudgeConfig(),
+    )
+
+    source_summarizer_ids: set[str] = set()
+    source_critic_ids: set[str] = set()
+    source_sample_seed: int | None = None
+    if source_report_paths:
+        seeds: set[int] = set()
+        for report_path in source_report_paths:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                continue
+            source_summarizer_ids.add(str(payload.get("summarizer_provider", "") or ""))
+            source_critic_ids.add(str(payload.get("critic_provider", "") or ""))
+            if payload.get("sample_seed", None) is not None:
+                seeds.add(int(payload["sample_seed"]))
+        if len(seeds) == 1:
+            source_sample_seed = next(iter(seeds))
+
+    results: list[SampleBenchmarkResult] = []
+    for artifact in artifacts:
+        transcript_payload = json.loads(
+            Path(artifact.reused_sample.transcript_path).read_text(encoding="utf-8")
+        )
+        transcript = Transcript.from_mapping(transcript_payload)
+        normalized_transcript = _normalize_transcript_for_transcript_only_benchmark(
+            transcript=transcript,
+            sample=artifact.reused_sample,
+        )
+        normalized_payload = normalized_transcript.to_payload()
+        source_text = _format_transcript(normalized_payload)
+        alias_map = _coerce_alias_map(normalized_payload, artifact.reused_sample)
+        transcript_per_speaker_messages = _speaker_message_lists_from_transcript(
+            normalized_payload,
+            alias_map,
+        )
+        speaker_notes = _coerce_speaker_notes(normalized_payload, artifact.reused_sample)
+        summary_xml = artifact.summary_xml_path.read_text(encoding="utf-8").strip()
+        if not summary_xml:
+            raise BenchmarkExecutionError(
+                f"Judge-only summary artifact is empty: {artifact.summary_xml_path}"
+            )
+        summary_per_speaker_messages = _speaker_message_lists_from_summary(
+            summary_xml,
+            alias_map,
+        )
+        artifact_recorder.activate_sample(
+            sample=artifact.reused_sample,
+            target_seconds=artifact.source_result.target_seconds,
+        )
+        started = time.perf_counter()
+        try:
+            judge_result = judge.evaluate(
+                source_text=source_text,
+                summary_xml=summary_xml,
+                transcript_per_speaker_messages=transcript_per_speaker_messages,
+                summary_per_speaker_messages=summary_per_speaker_messages,
+                speaker_alias_map=alias_map,
+                speaker_notes=speaker_notes,
+            )
+            judge_scores, judge_status, judge_error = _judge_only_status(judge_result)
+            factualness = (
+                float(judge_scores.get("Factualness", 0.0)) if judge_scores else 0.0
+            )
+            naturalness = (
+                float(judge_scores.get("Naturalness", 0.0)) if judge_scores else 0.0
+            )
+            speaker_grammar_similarity = (
+                float(judge_scores.get("Speaker Grammar Similarity", 0.0))
+                if judge_scores
+                else 0.0
+            )
+            updated_result = replace(
+                artifact.source_result,
+                dataset=artifact.reused_sample.dataset,
+                episode_key=artifact.reused_sample.episode_key,
+                target_seconds=artifact.source_result.target_seconds,
+                duration_seconds=round(time.perf_counter() - started, 3),
+                retrieval_events=0,
+                tool_invocations=0,
+                metrics=SampleMetricBundle(
+                    factualness=factualness,
+                    naturalness=naturalness,
+                    speaker_grammar_similarity=speaker_grammar_similarity,
+                    composite=_compute_composite_score(
+                        factualness=factualness,
+                        naturalness=naturalness,
+                        speaker_grammar_similarity=speaker_grammar_similarity,
+                    ),
+                ),
+                transcript_per_speaker_messages=transcript_per_speaker_messages,
+                summary_per_speaker_messages=summary_per_speaker_messages,
+                speaker_alias_map=alias_map,
+                speaker_notes=speaker_notes,
+                judge_scores=judge_scores,
+                judge_status=judge_status,
+                judge_error=judge_error,
+                sample_artifact_dir=None,
+                artifact_manifest_path=None,
+                summarizer_trace_dir=None,
+                critic_trace_dir=None,
+                judge_trace_dir=None,
+                final_summary_path=None,
+                final_critic_feedback_path=None,
+                loop_diagnostics_path=None,
+                sample_result_artifact_path=None,
+            )
+            artifact_paths = artifact_recorder.finalize_sample(
+                result=updated_result,
+                diagnostics=None,
+                candidate_summary=summary_xml,
+            )
+            if artifact_paths is not None:
+                updated_result = replace(
+                    updated_result,
+                    sample_artifact_dir=artifact_paths.sample_artifact_dir,
+                    artifact_manifest_path=artifact_paths.artifact_manifest_path,
+                    summarizer_trace_dir=artifact_paths.summarizer_trace_dir,
+                    critic_trace_dir=artifact_paths.critic_trace_dir,
+                    judge_trace_dir=artifact_paths.judge_trace_dir,
+                    final_summary_path=artifact_paths.final_summary_path,
+                    final_critic_feedback_path=artifact_paths.final_critic_feedback_path,
+                    loop_diagnostics_path=artifact_paths.loop_diagnostics_path,
+                    sample_result_artifact_path=artifact_paths.sample_result_artifact_path,
+                )
+            results.append(updated_result)
+        finally:
+            artifact_recorder.clear_active_sample()
+
+    if hasattr(llm_judge, "inner_provider"):
+        inner_provider = getattr(llm_judge, "inner_provider")
+        close_method = getattr(inner_provider, "close", None)
+        if callable(close_method):
+            close_method()
+    else:
+        close_method = getattr(llm_judge, "close", None)
+        if callable(close_method):
+            close_method()
+
+    summarizer_provider = (
+        next(iter(source_summarizer_ids))
+        if len(source_summarizer_ids) == 1
+        else "mixed_artifact_sources"
+    )
+    critic_provider = (
+        next(iter(source_critic_ids))
+        if len(source_critic_ids) == 1
+        else "mixed_artifact_sources"
+    )
+    return _write_execution_report_from_results(
+        run_root=run_root,
+        run_id=run_id,
+        dataset_manifest=dataset_manifest,
+        summarizer_provider=summarizer_provider,
+        critic_provider=critic_provider,
+        judge_provider=judge_provider_id,
+        embedding_mode="disabled",
+        results=results,
+        duration_tolerance_ratio=float(base_cfg.orchestrator.duration_tolerance_ratio),
+        transcript_only=True,
+        duration_preset=duration_preset,
+        override_target_seconds=override_target_seconds,
+        sample_seed=source_sample_seed,
+        target_sample_count=len(results),
+        checkpoint_path=None,
+        resumed_from_checkpoint=False,
+        resume_count=0,
+        sample_shard_index=1,
+        sample_shard_count=1,
+    )
+
+
 async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionReport:
     requested_dataset_manifest_path = Path(args.dataset_manifest).resolve()
     dataset_manifest_path = requested_dataset_manifest_path
@@ -3420,6 +3923,38 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         print_to_terminal=not bool(getattr(args, "emit_progress_events", False)),
     )
     transcript_only = bool(getattr(args, "transcript_only", False))
+    judge_only_source_paths = _resolve_judge_only_source_paths(args)
+    if judge_only_source_paths:
+        if resumed_from_checkpoint:
+            raise BenchmarkExecutionError(
+                "--judge-only-source cannot be combined with --resume-from-checkpoint."
+            )
+        source_report_paths = _resolve_judge_only_report_paths(judge_only_source_paths)
+        profiles = load_provider_profiles(Path(args.provider_profiles).resolve())
+        judge_profile = _find_provider_profile(
+            profiles,
+            args.judge_provider or args.critic_provider or args.summarizer_provider,
+        )
+        missing_env = missing_required_env(judge_profile)
+        if missing_env:
+            raise BenchmarkExecutionError(
+                f"Provider '{judge_profile.provider_id}' is missing required environment variables: {missing_env}"
+            )
+        judge_provider_config = _prepare_provider_config(
+            judge_profile,
+            role="judge",
+            transcript_only=True,
+        )
+        return await _run_judge_only_benchmark(
+            args=args,
+            run_root=run_root,
+            run_id=run_id,
+            dataset_manifest=dataset_manifest,
+            base_cfg=base_cfg,
+            judge_provider_config=judge_provider_config,
+            judge_provider_id=judge_profile.provider_id,
+            source_report_paths=source_report_paths,
+        )
     duration_preset = str(getattr(args, "duration_preset", "") or "").strip()
     override_target_seconds = _resolve_override_target_seconds(args)
     duration_tolerance_ratio = float(base_cfg.orchestrator.duration_tolerance_ratio)
@@ -4142,6 +4677,16 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--summarizer-provider", default="vllm_default")
     parser.add_argument("--critic-provider", default="")
     parser.add_argument("--judge-provider", default="")
+    parser.add_argument(
+        "--judge-only-source",
+        action="append",
+        default=[],
+        help=(
+            "Reuse existing SPoRC summary artifacts and rerun only the judge. "
+            "Accepts an execute run root, a sweep root, or a report.json path. "
+            "Repeat the flag to combine multiple sources."
+        ),
+    )
     parser.add_argument(
         "--embedding-mode", choices=("disabled", "enabled"), default="disabled"
     )

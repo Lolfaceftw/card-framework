@@ -8,7 +8,7 @@ import time
 from typing import Any, Protocol
 
 from card_framework.agents.dtos import QAEvaluatorTaskRequest
-from card_framework.benchmark.qa_contracts import (
+from card_framework.benchmark.qa.contracts import (
     EvaluatorAnswerRecord,
     GroundTruthQuestion,
     GroundTruthSet,
@@ -303,4 +303,5 @@ async def evaluate_questions_with_fresh_contexts(
         "score": score.model_dump(),
         "answers": [answer.model_dump() for answer in answers],
     }
+
 

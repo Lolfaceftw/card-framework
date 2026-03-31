@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Any
+import wave
 
 import numpy as np
 
@@ -55,6 +56,7 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         enable_forced_alignment: bool = True,
         require_forced_alignment: bool = True,
         forced_alignment_batch_size: int = 8,
+        forced_alignment_max_audio_duration_seconds: int | None = 3600,
         forced_aligner: CtcForcedAlignerGateway | None = None,
     ) -> None:
         if chunk_length_seconds <= 0:
@@ -69,6 +71,13 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
             raise ValueError("max_new_tokens must be > 0.")
         if repetition_penalty <= 0:
             raise ValueError("repetition_penalty must be > 0.")
+        if (
+            forced_alignment_max_audio_duration_seconds is not None
+            and forced_alignment_max_audio_duration_seconds <= 0
+        ):
+            raise ValueError(
+                "forced_alignment_max_audio_duration_seconds must be > 0 when configured."
+            )
         if not prompt.strip():
             raise ValueError("prompt must be non-empty.")
         self.model_name = model_name
@@ -81,6 +90,9 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         self.enable_forced_alignment = enable_forced_alignment
         self.require_forced_alignment = require_forced_alignment
         self.forced_alignment_batch_size = forced_alignment_batch_size
+        self.forced_alignment_max_audio_duration_seconds = (
+            forced_alignment_max_audio_duration_seconds
+        )
         self.forced_aligner = forced_aligner or CtcForcedAlignerGateway()
         self._runtime_cache: dict[str, _GraniteRuntime] = {}
 
@@ -95,20 +107,29 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         if not audio_path.exists():
             raise NonRetryableAudioStageError(f"Audio file does not exist: {audio_path}")
 
-        runtime = self._get_runtime(device=device)
-        waveform = self._load_audio_waveform(audio_path)
-        prepared_audio = self._prepare_audio_waveform(waveform=waveform)
-        chunk_ranges = self._plan_chunk_ranges(total_samples=len(prepared_audio))
+        source_sample_rate, source_frame_count = self._probe_audio_metadata(audio_path)
+        prepared_total_samples = self._estimate_prepared_total_samples(
+            source_frame_count=source_frame_count,
+            source_sample_rate=source_sample_rate,
+        )
+        chunk_ranges = self._plan_chunk_ranges(total_samples=prepared_total_samples)
         if not chunk_ranges:
             raise NonRetryableAudioStageError(
                 "Granite Speech received empty audio after preprocessing."
             )
 
+        runtime = self._get_runtime(device=device)
+
         normalized_segments: list[TimedTextSegment] = []
         full_text = ""
         total_chunks = len(chunk_ranges)
         for index, (start_sample, end_sample) in enumerate(chunk_ranges, start=1):
-            chunk_audio = prepared_audio[start_sample:end_sample]
+            chunk_audio = self._load_prepared_audio_chunk(
+                audio_path=audio_path,
+                source_sample_rate=source_sample_rate,
+                start_sample=start_sample,
+                end_sample=end_sample,
+            )
             chunk_text = self._transcribe_chunk(runtime=runtime, audio_chunk=chunk_audio)
             unique_text = _dedupe_chunk_text(
                 previous_text=full_text,
@@ -145,7 +166,8 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
 
         resolved_language = (self.language or "en").strip() or "en"
         words = self._resolve_word_timestamps(
-            audio_waveform=prepared_audio,
+            audio_path=audio_path,
+            prepared_total_samples=prepared_total_samples,
             transcript_text=full_text,
             language=resolved_language,
             device=device,
@@ -209,8 +231,9 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
     def release_cached_resources(self, *, device: str) -> None:
         """Drop cached model state for one device and release CUDA allocator slack."""
         runtime = self._runtime_cache.pop(device, None)
-        if runtime is not None:
-            del runtime
+        if runtime is None:
+            return
+        del runtime
         release_torch_device_memory_with_reporting(
             device=device,
             description=f"Granite Speech ASR model '{self.model_name}'",
@@ -236,6 +259,34 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
             )
         return waveform, int(sample_rate)
 
+    def _probe_audio_metadata(self, audio_path: Path) -> tuple[int, int]:
+        """Probe source sample rate and frame count without decoding the full file."""
+        try:
+            import torchaudio
+        except Exception as exc:
+            raise DependencyMissingError(
+                "Granite Speech requires the 'torchaudio' runtime."
+            ) from exc
+        try:
+            info_reader = getattr(torchaudio, "info", None)
+            if callable(info_reader):
+                info = info_reader(str(audio_path))
+                sample_rate = int(getattr(info, "sample_rate", 0) or 0)
+                frame_count = int(getattr(info, "num_frames", 0) or 0)
+            else:
+                with wave.open(str(audio_path), "rb") as wav_file:
+                    sample_rate = int(wav_file.getframerate() or 0)
+                    frame_count = int(wav_file.getnframes() or 0)
+        except Exception as exc:
+            raise NonRetryableAudioStageError(
+                f"Unable to inspect audio for Granite Speech: {audio_path}"
+            ) from exc
+        if sample_rate <= 0 or frame_count <= 0:
+            raise NonRetryableAudioStageError(
+                "Granite Speech expected a non-empty audio file with a valid sample rate."
+            )
+        return sample_rate, frame_count
+
     def _prepare_audio_waveform(self, *, waveform: Any) -> np.ndarray:
         """Convert input waveform to mono 16 kHz float audio."""
         try:
@@ -258,6 +309,71 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
             )
         flattened = mono_waveform.squeeze(0).to(torch.float32).cpu()
         return flattened.numpy()
+
+    def _estimate_prepared_total_samples(
+        self,
+        *,
+        source_frame_count: int,
+        source_sample_rate: int,
+    ) -> int:
+        """Estimate the mono 16 kHz sample count after preprocessing."""
+        if source_sample_rate <= 0:
+            raise ValueError("source_sample_rate must be > 0.")
+        if source_frame_count <= 0:
+            return 0
+        return max(
+            1,
+            int(round((source_frame_count / source_sample_rate) * _TARGET_SAMPLE_RATE_HZ)),
+        )
+
+    def _load_prepared_audio_chunk(
+        self,
+        *,
+        audio_path: Path,
+        source_sample_rate: int,
+        start_sample: int,
+        end_sample: int,
+    ) -> np.ndarray:
+        """Load, resample, and trim one prepared audio chunk on demand."""
+        target_chunk_samples = max(0, end_sample - start_sample)
+        if target_chunk_samples <= 0:
+            return np.zeros(0, dtype=np.float32)
+        try:
+            import torchaudio
+        except Exception as exc:
+            raise DependencyMissingError(
+                "Granite Speech requires the 'torchaudio' runtime."
+            ) from exc
+
+        source_start_frame = max(
+            0,
+            int(round((start_sample / _TARGET_SAMPLE_RATE_HZ) * source_sample_rate)),
+        )
+        source_end_frame = max(
+            source_start_frame + 1,
+            int(round((end_sample / _TARGET_SAMPLE_RATE_HZ) * source_sample_rate)),
+        )
+        try:
+            waveform, loaded_sample_rate = torchaudio.load(
+                str(audio_path),
+                frame_offset=source_start_frame,
+                num_frames=max(1, source_end_frame - source_start_frame),
+            )
+        except Exception as exc:
+            raise NonRetryableAudioStageError(
+                f"Unable to load Granite Speech chunk from: {audio_path}"
+            ) from exc
+        prepared_chunk = self._prepare_audio_waveform(
+            waveform=(waveform, int(loaded_sample_rate))
+        )
+        if prepared_chunk.size > target_chunk_samples:
+            return prepared_chunk[:target_chunk_samples]
+        if prepared_chunk.size < target_chunk_samples:
+            return np.pad(
+                prepared_chunk,
+                (0, target_chunk_samples - prepared_chunk.size),
+            )
+        return prepared_chunk
 
     def _plan_chunk_ranges(self, *, total_samples: int) -> list[tuple[int, int]]:
         """Build overlapping chunk ranges for the prepared audio."""
@@ -353,7 +469,8 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
     def _resolve_word_timestamps(
         self,
         *,
-        audio_waveform: np.ndarray,
+        audio_path: Path,
+        prepared_total_samples: int,
         transcript_text: str,
         language: str,
         device: str,
@@ -363,9 +480,20 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
         if not self.enable_forced_alignment:
             return self._fallback_word_timestamps(fallback_segments)
 
+        if self._should_skip_forced_alignment_for_sample_count(
+            total_samples=prepared_total_samples
+        ):
+            return self._fallback_word_timestamps(fallback_segments)
+
+        if device == "cuda":
+            self.release_cached_resources(device=device)
+
+        prepared_audio = self._prepare_audio_waveform(
+            waveform=self._load_audio_waveform(audio_path)
+        )
         try:
             words = self.forced_aligner.align_words(
-                audio_waveform=audio_waveform,
+                audio_waveform=prepared_audio,
                 transcript_text=transcript_text,
                 language=language,
                 device=device,
@@ -383,6 +511,27 @@ class GraniteSpeechTranscriber(SpeechTranscriber):
                 "Forced alignment completed but returned zero word timestamps."
             )
         return self._fallback_word_timestamps(fallback_segments)
+
+    def _should_skip_forced_alignment_for_sample_count(
+        self,
+        *,
+        total_samples: int,
+    ) -> bool:
+        """Skip CTC alignment when the configured duration ceiling is exceeded."""
+        max_audio_duration_seconds = self.forced_alignment_max_audio_duration_seconds
+        if max_audio_duration_seconds is None:
+            return False
+        audio_duration_ms = _samples_to_milliseconds(total_samples)
+        if audio_duration_ms <= max_audio_duration_seconds * 1000:
+            return False
+        event_bus.publish(
+            "system_message",
+            "Skipping CTC forced alignment for "
+            f"{audio_duration_ms / 60000.0:.1f}-minute audio because it exceeds "
+            "audio.asr.forced_alignment.max_audio_duration_seconds="
+            f"{max_audio_duration_seconds}; using approximate word timestamps.",
+        )
+        return True
 
     def _fallback_word_timestamps(
         self,

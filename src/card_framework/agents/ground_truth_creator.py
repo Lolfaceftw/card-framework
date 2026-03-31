@@ -1,4 +1,4 @@
-"""A2A executor for generating source-grounded QA benchmark questions."""
+﻿"""A2A executor for generating source-grounded QA benchmark questions."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from card_framework.agents.dtos import (
     CorrectorTaskRequest,
     GroundTruthCreatorTaskRequest,
 )
-from card_framework.benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
+from card_framework.benchmark.qa.contracts import GroundTruthQuestion, GroundTruthSet
 from card_framework.shared.events import EventBus, get_event_bus
 from card_framework.shared.llm_provider import LLMProvider
 from card_framework.shared.logger_utils import logger
@@ -502,3 +502,4 @@ class GroundTruthCreatorExecutor(BaseA2AExecutor):
             f"Generated QA ground truth: {len(question_set.questions)} questions.",
         )
         await self.send_response(json.dumps(response_payload), context, event_queue)
+

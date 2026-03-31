@@ -16,7 +16,7 @@ from card_framework.audio_pipeline.audio_normalization import (
     AudioNormalizationPolicy,
     normalize_audio_file,
 )
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import ArtifactWriteError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.runtime import ensure_command_available
@@ -505,4 +505,5 @@ def _write_json_atomic(payload: dict[str, Any], output_path: Path) -> None:
         raise ArtifactWriteError(
             f"Failed to write voice clone manifest to '{output_path}'."
         ) from exc
+
 

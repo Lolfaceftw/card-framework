@@ -1924,6 +1924,263 @@ def test_build_execute_parser_accepts_sample_seed() -> None:
     assert args.sample_seed == 29
 
 
+def test_build_execute_parser_accepts_judge_only_sources() -> None:
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+
+    args = parser.parse_args(
+        [
+            "--judge-only-source",
+            "run-a",
+            "--judge-only-source",
+            "run-b",
+        ]
+    )
+
+    assert args.judge_only_source == ["run-a", "run-b"]
+
+
+def test_execute_benchmark_rejudges_persisted_artifacts_from_sweep_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    transcript_path = tmp_path / "sample.transcript.json"
+    _write_transcript(transcript_path, text="hello from the transcript benchmark")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_sample",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "sample",
+                "episode_data_path": str(tmp_path / "episode.jsonl.gz"),
+                "turn_data_path": str(tmp_path / "turn.jsonl.gz"),
+                "sample_count": 1,
+                "samples": [
+                    {
+                        "sample_id": "sample-a",
+                        "dataset": "sporc_sample",
+                        "episode_key": "sample-a.mp3",
+                        "transcript_path": str(transcript_path),
+                        "reference_summary": "reference",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source_root = tmp_path / "source-runs"
+    sweep_root = tmp_path / "source-sweep"
+    (sweep_root / "logs").mkdir(parents=True)
+
+    def _write_source_report(
+        *,
+        run_id: str,
+        duration_preset: str,
+        target_seconds: int,
+    ) -> Path:
+        run_root = source_root / run_id
+        summary_dir = run_root / "samples" / "sample-a" / "final"
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = summary_dir / "summary.xml"
+        summary_path.write_text(
+            '<SPEAKER_00 emo_preset="neutral">hello</SPEAKER_00>',
+            encoding="utf-8",
+        )
+        report_path = run_root / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "partial",
+                    "dataset_manifest_path": str(manifest_path),
+                    "sporc_dataset_id": "blitt/SPoRC",
+                    "dataset_variant": "sample",
+                    "summarizer_provider": "vllm_default",
+                    "critic_provider": "vllm_default",
+                    "judge_provider": "vllm_default",
+                    "embedding_mode": "disabled",
+                    "commands_executed": ["python -m card_framework ..."],
+                    "git_commit": "deadbeef",
+                    "git_branch": "test",
+                    "report_path": str(report_path),
+                    "notes_path": str(run_root / "notes.md"),
+                    "results_path": str(run_root / "results.md"),
+                    "samples": [
+                        {
+                            "sample_id": "sample-a",
+                            "dataset": "sporc_sample",
+                            "episode_key": "sample-a.mp3",
+                            "status": "completed",
+                            "target_seconds": target_seconds,
+                            "candidate_seconds": float(target_seconds),
+                            "converged": True,
+                            "iterations_run": 1,
+                            "final_status": "pass",
+                            "duration_seconds": 12.0,
+                            "retrieval_events": 1,
+                            "tool_invocations": 2,
+                            "metrics": {
+                                "factualness": 0.1,
+                                "naturalness": 0.2,
+                                "speaker_grammar_similarity": 0.3,
+                                "composite": 0.2,
+                            },
+                            "counts_toward_target": True,
+                            "judge_status": "ok",
+                            "judge_scores": {
+                                "Factualness": 0.1,
+                                "Naturalness": 0.2,
+                                "Speaker Grammar Similarity": 0.3,
+                            },
+                            "final_summary_path": str(summary_path),
+                        }
+                    ],
+                    "summary": {
+                        "target_sample_count": 1,
+                        "sample_count": 1,
+                        "attempted_candidate_count": 1,
+                        "replacement_count": 0,
+                        "executed_count": 1,
+                        "skipped_count": 0,
+                        "success_count": 1,
+                        "failure_count": 0,
+                        "mean_factualness": 0.1,
+                        "mean_naturalness": 0.2,
+                        "mean_speaker_grammar_similarity": 0.3,
+                        "mean_composite": 0.2,
+                    },
+                    "sample_seed": 42,
+                    "duration_tolerance_ratio": 0.05,
+                    "transcript_only": True,
+                    "duration_preset": duration_preset,
+                    "override_target_seconds": target_seconds,
+                    "checkpoint_path": None,
+                    "resumed_from_checkpoint": False,
+                    "resume_count": 0,
+                    "sample_shard_index": 1,
+                    "sample_shard_count": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return report_path
+
+    report_30s = _write_source_report(
+        run_id="source-30s",
+        duration_preset="30s",
+        target_seconds=30,
+    )
+    report_1m = _write_source_report(
+        run_id="source-1m",
+        duration_preset="1m",
+        target_seconds=60,
+    )
+    (sweep_root / "report.json").write_text(
+        json.dumps({"sweep_id": "sweep-1"}),
+        encoding="utf-8",
+    )
+    (sweep_root / "logs" / "30s.log").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "sporc_progress_event": "run_complete",
+                        "report_path": str(report_30s),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "sporc_progress_event": "run_complete",
+                        "report_path": str(report_1m),
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(manifest_path),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--judge-provider",
+            "deepseek_judge",
+            "--judge-only-source",
+            str(sweep_root),
+            "--max-samples",
+            "10",
+            "--disable-stream-output",
+        ]
+    )
+
+    provider_profile = ProviderProfile(
+        provider_id="deepseek_judge",
+        description="judge",
+        llm_config={"_target_": "tests.fake.Provider"},
+    )
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._load_base_config",
+        lambda path: _benchmark_base_cfg(tmp_path),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.load_provider_profiles",
+        lambda path: [provider_profile],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._find_provider_profile",
+        lambda profiles, provider_id: provider_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.missing_required_env",
+        lambda profile: [],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.hydra.utils.instantiate",
+        lambda cfg: _CallbackAwareProvider(
+            agent_name="judge",
+            response_text=json.dumps(
+                {
+                    "Factualness": 0.75,
+                    "Naturalness": 0.5,
+                    "Speaker Grammar Similarity": 0.25,
+                }
+            ),
+            reasoning_tokens=["judge-thought"],
+            content_tokens=["judge-content"],
+        ),
+    )
+
+    report = execute_benchmark(args)
+
+    assert report.status == "completed"
+    assert report.summary.sample_count == 2
+    assert report.summary.target_sample_count == 2
+    assert report.duration_preset == "mixed"
+    assert report.judge_provider == "deepseek_judge"
+    assert report.summarizer_provider == "vllm_default"
+    assert report.critic_provider == "vllm_default"
+    assert report.sample_seed == 42
+    assert [sample.target_seconds for sample in report.samples] == [30, 60]
+    assert report.samples[0].sample_id.startswith("sample-a__30s__")
+    assert report.samples[1].sample_id.startswith("sample-a__1m__")
+    assert all(sample.judge_scores is not None for sample in report.samples)
+    assert [sample.metrics.composite for sample in report.samples] == [0.5, 0.5]
+    assert all(sample.sample_artifact_dir is not None for sample in report.samples)
+    assert all(sample.judge_trace_dir is not None for sample in report.samples)
+    assert all(Path(sample.final_summary_path).exists() for sample in report.samples)
+    assert all(Path(sample.sample_result_artifact_path).exists() for sample in report.samples)
+
+
 def test_execute_benchmark_backfills_sidecar_candidates_until_target_or_exhaustion(
     monkeypatch,
     tmp_path: Path,

@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 
 import pytest
 
-from card_framework.agents.prompt_compaction import (
+from card_framework.agents.loop.prompt_compaction import (
     ContextBudgetManager,
     ContextWindowProfile,
     LLMDrivenPromptCompactionStrategy,
@@ -259,3 +259,4 @@ def test_is_context_window_overflow_error_matches_deepseek_failure_text() -> Non
     )
 
     assert is_context_window_overflow_error(error) is True
+

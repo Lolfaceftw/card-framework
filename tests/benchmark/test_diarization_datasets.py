@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from card_framework.benchmark.diarization_datasets import prepare_ami_manifest
+from card_framework.benchmark.diarization.datasets import prepare_ami_manifest
 
 
 class _FakeResponse:
@@ -102,4 +102,5 @@ def test_prepare_ami_manifest_downloads_assets_and_writes_manifest(
     expected_audio_path = data_root / "audio" / "test" / "ES2004a.Mix-Headset.wav"
     assert expected_audio_path.read_bytes() == b"audio-a"
     assert session.requested_urls[0].endswith("lists/test.meetings.txt")
+
 

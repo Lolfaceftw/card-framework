@@ -8,6 +8,12 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PACKAGE_ROOT.parent
 REPO_ROOT = SRC_ROOT.parent
 
+DOCS_DIR = REPO_ROOT / "docs"
+RESEARCH_DIR = REPO_ROOT / "research"
+DATASETS_DIR = REPO_ROOT / "datasets"
+SPORC_DATASETS_DIR = DATASETS_DIR / "sporc"
+SPORC_HUMAN_EVAL_ASSETS_DIR = SPORC_DATASETS_DIR / "human_eval_assets_10m"
+
 CONFIG_DIR = PACKAGE_ROOT / "config"
 REPO_CONFIG_DIR = REPO_ROOT / "conf"
 PROMPTS_DIR = PACKAGE_ROOT / "prompts" / "templates"

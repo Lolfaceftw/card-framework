@@ -1,4 +1,4 @@
-"""Turn-level emotion resolution strategies for live-draft rendering."""
+﻿"""Turn-level emotion resolution strategies for live-draft rendering."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector
-from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector
+from card_framework.audio_pipeline.emotion.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
 )
 from card_framework.orchestration.transcript import Transcript
@@ -183,3 +183,4 @@ def coerce_fallback_order(raw_value: object) -> tuple[str, ...]:
     if isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes)):
         return tuple(str(step).strip().lower() for step in raw_value if str(step).strip())
     return ()
+

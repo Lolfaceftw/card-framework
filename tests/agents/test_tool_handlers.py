@@ -1,20 +1,20 @@
-"""Tests for summarizer tool handlers."""
+﻿"""Tests for summarizer tool handlers."""
 
 from __future__ import annotations
 
 import asyncio
 
-from card_framework.agents.message_registry import MessageRegistry
-from card_framework.agents.tool_handlers import (
+from card_framework.agents.loop.message_registry import MessageRegistry
+from card_framework.agents.loop.tool_handlers import (
     AddSpeakerMessageHandler,
     BudgetContext,
     EditMessageHandler,
 )
-from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+from card_framework.audio_pipeline.emotion.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
     SummaryTurnEmotionLinkingConfig,
 )
-from card_framework.audio_pipeline.turn_emotion_resolution import (
+from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     SourceLinkedTurnEmotionResolutionStrategy,
     TurnEmotionResolutionConfig,
 )
@@ -166,3 +166,4 @@ def test_add_speaker_message_prelinks_source_grounded_vector() -> None:
     assert result["emotion_vector_source"] == "summary_turn_linking"
     assert result["source_segment_indices"] == [0]
     assert result["source_segment_weights"] == [1.0]
+

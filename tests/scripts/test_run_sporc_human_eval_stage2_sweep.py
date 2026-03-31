@@ -27,6 +27,33 @@ def _load_module():
     return module
 
 
+def test_default_package_root_uses_datasets_home() -> None:
+    """The sweep should default to the tracked datasets home, not the repo root."""
+    module = _load_module()
+
+    assert module.DEFAULT_PACKAGE_ROOT == (
+        REPO_ROOT / "datasets" / "sporc" / "human_eval_assets_10m"
+    ).resolve()
+
+
+def test_resolve_summary_relative_path_prefers_package_root_relative_entries(
+    tmp_path: Path,
+) -> None:
+    """Cleaned package summaries should resolve paths relative to the package root."""
+    module = _load_module()
+    package_root = (tmp_path / "human_eval_assets_10m").resolve()
+    transcript_path = (package_root / "transcript_slices" / "episode.txt").resolve()
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text("sample", encoding="utf-8")
+
+    resolved = module._resolve_summary_relative_path(
+        package_root=package_root,
+        raw_value="transcript_slices\\episode.txt",
+    )
+
+    assert resolved == transcript_path
+
+
 def test_to_container_path_uses_posix_workspace_root() -> None:
     """Container-bound paths should stay Linux-style even on Windows hosts."""
     module = _load_module()

@@ -645,6 +645,34 @@ def _run_post_transcript_speaker_sample_step(
         raise ValueError("audio.speaker_samples.output_dir_name must be non-empty.")
     samples_output_dir = resolve_path(output_dir_name, base_dir=work_dir)
     if stage_start == "stage-2":
+        reusable_vocals_audio_path = _resolve_reusable_stage_two_vocals_audio_path(
+            transcript=transcript,
+            project_root=project_root,
+        )
+        if reusable_vocals_audio_path is not None:
+            event_bus.publish(
+                "system_message",
+                (
+                    "Backfilling stage-2 speaker samples from reusable transcript "
+                    f"vocals audio: {reusable_vocals_audio_path}"
+                ),
+            )
+            return _generate_speaker_samples_from_transcript_audio(
+                audio_cfg_dict=audio_cfg_dict,
+                project_root=project_root,
+                transcript_path=transcript_path,
+                transcript=transcript,
+                samples_output_dir=samples_output_dir,
+                source_audio_path=reusable_vocals_audio_path,
+                loading_label="stage-2 speaker-sample backfill from reusable transcript audio",
+                eta_strategy=eta_strategy,
+                eta_profile_path=eta_profile_path,
+                eta_profile_context=eta_profile_context,
+                eta_update_interval_seconds=eta_update_interval_seconds,
+                eta_progress_smoothing=eta_progress_smoothing,
+                eta_overrun_factor=eta_overrun_factor,
+                eta_headroom_seconds=eta_headroom_seconds,
+            )
         with report_loading_duration(
             "stage-2 speaker-sample bootstrap",
             reporter=_emit_runtime_loading_status,
@@ -664,6 +692,101 @@ def _run_post_transcript_speaker_sample_step(
         configured_audio_path=str(audio_cfg_dict.get("audio_path", "")),
         base_dir=project_root,
     )
+    return _generate_speaker_samples_from_transcript_audio(
+        audio_cfg_dict=audio_cfg_dict,
+        project_root=project_root,
+        transcript_path=transcript_path,
+        transcript=transcript,
+        samples_output_dir=samples_output_dir,
+        source_audio_path=source_audio_path,
+        loading_label="speaker samples from transcript audio",
+        eta_strategy=eta_strategy,
+        eta_profile_path=eta_profile_path,
+        eta_profile_context=eta_profile_context,
+        eta_update_interval_seconds=eta_update_interval_seconds,
+        eta_progress_smoothing=eta_progress_smoothing,
+        eta_overrun_factor=eta_overrun_factor,
+        eta_headroom_seconds=eta_headroom_seconds,
+    )
+
+
+def _resolve_existing_affect_analysis_manifest_path(
+    *,
+    transcript: Transcript,
+    project_root: Path,
+) -> Path | None:
+    """Resolve an existing transcript-linked affect-analysis manifest when present."""
+    manifest_value = str(
+        transcript.metadata.get("affect_analysis_manifest_path", "")
+    ).strip()
+    if not manifest_value:
+        return None
+    candidate = Path(manifest_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (project_root / candidate).resolve()
+    return candidate if candidate.is_file() else None
+
+
+def _resolve_existing_speaker_samples_manifest_path(
+    *,
+    transcript: Transcript,
+    project_root: Path,
+) -> Path | None:
+    """Resolve an existing transcript-linked speaker-sample manifest when present."""
+    manifest_value = str(
+        transcript.metadata.get("speaker_samples_manifest_path", "")
+    ).strip()
+    if not manifest_value:
+        return None
+    candidate = Path(manifest_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (project_root / candidate).resolve()
+    return candidate if candidate.is_file() else None
+
+
+def _resolve_reusable_stage_two_vocals_audio_path(
+    *,
+    transcript: Transcript,
+    project_root: Path,
+) -> Path | None:
+    """Resolve an existing reusable stage-1 vocals stem for stage-2 sample backfill."""
+    required_stage_one_fields = (
+        "separator_model",
+        "transcriber_model",
+        "diarizer_backend",
+    )
+    if any(
+        not str(transcript.metadata.get(field, "")).strip()
+        for field in required_stage_one_fields
+    ):
+        return None
+    vocals_value = str(transcript.metadata.get("vocals_audio_path", "")).strip()
+    if not vocals_value:
+        return None
+    candidate = Path(vocals_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (project_root / candidate).resolve()
+    return candidate if candidate.is_file() else None
+
+
+def _generate_speaker_samples_from_transcript_audio(
+    *,
+    audio_cfg_dict: dict[str, Any],
+    project_root: Path,
+    transcript_path: str,
+    transcript: Transcript,
+    samples_output_dir: Path,
+    source_audio_path: Path,
+    loading_label: str,
+    eta_strategy: StageEtaStrategy | None = None,
+    eta_profile_path: Path | None = None,
+    eta_profile_context: dict[str, str] | None = None,
+    eta_update_interval_seconds: float = 10.0,
+    eta_progress_smoothing: float = 0.25,
+    eta_overrun_factor: float = 1.15,
+    eta_headroom_seconds: float = 1.0,
+) -> Transcript:
+    """Generate speaker samples from an existing transcript plus reusable audio."""
     (_, _, _, build_speaker_sample_generator, _, _) = _load_audio_pipeline_builders(
         status_reporter=_emit_runtime_loading_status
     )
@@ -721,6 +844,7 @@ def _run_post_transcript_speaker_sample_step(
 
     progress_callback: StageProgressCallback | None = None
     if eta_tracker is not None:
+
         def _on_progress(update: StageProgressUpdate) -> None:
             elapsed_seconds = max(0.0, time.monotonic() - started_at)
             with tracker_lock:
@@ -732,6 +856,7 @@ def _run_post_transcript_speaker_sample_step(
         progress_callback = _on_progress
 
         if eta_update_interval_seconds > 0:
+
             def _ticker() -> None:
                 while not stop_event.wait(eta_update_interval_seconds):
                     elapsed_seconds = max(0.0, time.monotonic() - started_at)
@@ -763,7 +888,7 @@ def _run_post_transcript_speaker_sample_step(
 
     try:
         with report_loading_duration(
-            "speaker samples from transcript audio",
+            loading_label,
             reporter=_emit_runtime_loading_status,
         ):
             sample_result = sample_generator.generate(
@@ -829,40 +954,6 @@ def _run_post_transcript_speaker_sample_step(
         f"Speaker sample manifest written to {sample_result.manifest_path}",
     )
     return updated_transcript
-
-
-def _resolve_existing_affect_analysis_manifest_path(
-    *,
-    transcript: Transcript,
-    project_root: Path,
-) -> Path | None:
-    """Resolve an existing transcript-linked affect-analysis manifest when present."""
-    manifest_value = str(
-        transcript.metadata.get("affect_analysis_manifest_path", "")
-    ).strip()
-    if not manifest_value:
-        return None
-    candidate = Path(manifest_value).expanduser()
-    if not candidate.is_absolute():
-        candidate = (project_root / candidate).resolve()
-    return candidate if candidate.is_file() else None
-
-
-def _resolve_existing_speaker_samples_manifest_path(
-    *,
-    transcript: Transcript,
-    project_root: Path,
-) -> Path | None:
-    """Resolve an existing transcript-linked speaker-sample manifest when present."""
-    manifest_value = str(
-        transcript.metadata.get("speaker_samples_manifest_path", "")
-    ).strip()
-    if not manifest_value:
-        return None
-    candidate = Path(manifest_value).expanduser()
-    if not candidate.is_absolute():
-        candidate = (project_root / candidate).resolve()
-    return candidate if candidate.is_file() else None
 
 
 def _load_bootstrap_transcript(bootstrap_transcript_path: Path) -> Transcript:
@@ -1713,7 +1804,7 @@ def main(cfg: DictConfig) -> None:
                 _suppress_chatty_logger_propagation()
 
     shared_agent_client: Any | None = None
-    from card_framework.agents.prompt_compaction import (
+    from card_framework.agents.loop.prompt_compaction import (
         LLMDrivenPromptCompactionStrategy,
         NoOpPromptCompactionStrategy,
         build_context_budget_manager,
@@ -2181,4 +2272,5 @@ def main(cfg: DictConfig) -> None:
 
 if __name__ == "__main__":
     main()
+
 

@@ -14,7 +14,7 @@ from card_framework.audio_pipeline.gpu_heartbeat import VoiceCloneGpuHeartbeatSe
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
 from card_framework.audio_pipeline.interjector import InterjectorOrchestrator, InterjectorRunResult
 from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
-from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+from card_framework.audio_pipeline.emotion.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
 )
 from card_framework.audio_pipeline.eta import (
@@ -822,4 +822,5 @@ class StageOrchestrator:
             stage_name=stage_name,
             detail=detail,
         )
+
 

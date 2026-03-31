@@ -2,7 +2,7 @@
 
 import pytest
 
-from card_framework.audio_pipeline.affect_analysis import TranscriptAffectAnalyzer
+from card_framework.audio_pipeline.emotion.affect_analysis import TranscriptAffectAnalyzer
 from card_framework.audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
     build_interjector_orchestrator,
@@ -31,7 +31,7 @@ from card_framework.audio_pipeline.gateways.granite_speech_gateway import Granit
 from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
 from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
 from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
-from card_framework.audio_pipeline.turn_emotion_resolution import (
+from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     SourceLinkedTurnEmotionResolutionStrategy,
 )
 from card_framework.shared.llm_provider import LLMProvider
@@ -75,10 +75,14 @@ def test_factory_builds_default_strategies() -> None:
     assert isinstance(orchestrator.separator, DemucsSourceSeparator)
     assert orchestrator.separator.window_length_seconds == 600
     assert orchestrator.separator.window_context_seconds == 5
+    assert orchestrator.separator.cuda_window_length_seconds == 180
     assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
     assert isinstance(orchestrator.diarizer, NemoSpeakerDiarizer)
     assert orchestrator.diarizer.allow_single_speaker_fallback is False
     assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.25)
+    assert orchestrator.diarizer.inference_batch_size == 8
+    assert orchestrator.diarizer.cuda_max_audio_duration_seconds == 3600
+    assert orchestrator.diarizer.long_audio_fallback_device == "cpu"
     assert orchestrator.diarizer.max_speakers == 10
     assert orchestrator.diarizer.vad_onset == pytest.approx(0.8)
     assert orchestrator.diarizer.vad_offset == pytest.approx(0.6)
@@ -299,6 +303,39 @@ def test_factory_builds_nemo_clustering_search_overrides() -> None:
     assert diarizer.clustering_maj_vote_spk_count is True
 
 
+def test_factory_builds_nemo_runtime_guard_overrides() -> None:
+    diarizer = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo",
+                "nemo_inference_batch_size": 4,
+                "nemo_cuda_long_audio_guard_enabled": True,
+                "nemo_cuda_max_audio_duration_seconds": 900,
+                "nemo_long_audio_fallback_device": "cpu",
+            }
+        }
+    )
+
+    assert isinstance(diarizer, NemoSpeakerDiarizer)
+    assert diarizer.inference_batch_size == 4
+    assert diarizer.cuda_long_audio_guard_enabled is True
+    assert diarizer.cuda_max_audio_duration_seconds == 900
+    assert diarizer.long_audio_fallback_device == "cpu"
+
+
+def test_factory_disables_nemo_runtime_guard_by_default() -> None:
+    diarizer = build_speaker_diarizer(
+        {
+            "diarization": {
+                "provider": "nemo",
+            }
+        }
+    )
+
+    assert isinstance(diarizer, NemoSpeakerDiarizer)
+    assert diarizer.cuda_long_audio_guard_enabled is False
+
+
 def test_factory_builds_granite_repetition_penalty_override() -> None:
     orchestrator = build_audio_to_script_orchestrator(
         {
@@ -438,7 +475,24 @@ def test_factory_builds_granite_transcriber_defaults() -> None:
     assert orchestrator.transcriber.chunk_overlap_seconds == 1
     assert orchestrator.transcriber.max_new_tokens == 96
     assert orchestrator.transcriber.repetition_penalty == pytest.approx(1.25)
+    assert orchestrator.transcriber.forced_alignment_max_audio_duration_seconds == 3600
     assert orchestrator.transcriber.language == "en"
+
+
+def test_factory_respects_forced_alignment_max_audio_duration_override() -> None:
+    orchestrator = build_audio_to_script_orchestrator(
+        {
+            "asr": {
+                "provider": "granite_speech",
+                "forced_alignment": {
+                    "max_audio_duration_seconds": 120,
+                },
+            },
+        }
+    )
+
+    assert isinstance(orchestrator.transcriber, GraniteSpeechTranscriber)
+    assert orchestrator.transcriber.forced_alignment_max_audio_duration_seconds == 120
 
 
 def test_factory_builds_demucs_separator_defaults() -> None:
@@ -452,6 +506,20 @@ def test_factory_builds_demucs_separator_defaults() -> None:
     assert orchestrator.separator.model_name == "htdemucs"
     assert orchestrator.separator.window_length_seconds == 600
     assert orchestrator.separator.window_context_seconds == 5
+    assert orchestrator.separator.cuda_window_length_seconds == 180
+
+
+def test_factory_respects_demucs_cuda_window_override() -> None:
+    orchestrator = build_audio_to_script_orchestrator(
+        {
+            "separation": {
+                "cuda_window_length_seconds": 120,
+            },
+        }
+    )
+
+    assert isinstance(orchestrator.separator, DemucsSourceSeparator)
+    assert orchestrator.separator.cuda_window_length_seconds == 120
 
 
 def test_factory_builds_speaker_sample_generator_defaults() -> None:
@@ -685,4 +753,5 @@ def test_factory_builds_interjector_with_indextts_defaults(tmp_path: Path) -> No
     assert provider.runner_project_dir == (
         tmp_path / "src" / "card_framework" / "_vendor" / "index_tts"
     ).resolve()
+
 

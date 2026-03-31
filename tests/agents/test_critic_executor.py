@@ -1,4 +1,4 @@
-"""Unit tests for critic deterministic-check tool handling."""
+﻿"""Unit tests for critic deterministic-check tool handling."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.utils"] = utils_module
 
 from card_framework.agents.base import BaseA2AExecutor
-from card_framework.agents.prompt_compaction import (
+from card_framework.agents.loop.prompt_compaction import (
     ContextBudgetManager,
     ContextWindowProfile,
     PromptCompactionConfig,
@@ -1234,3 +1234,4 @@ def test_handle_task_preserves_normal_tool_flow() -> None:
         "estimated_seconds": 1.5,
         "feedback": "ok",
     }
+

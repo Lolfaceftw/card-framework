@@ -24,6 +24,7 @@ wheels/
 outputs/
 artifacts/
 /artifacts?*/
+MUSHRA/
 neo4j_data/
 summary.json
 summary.xml

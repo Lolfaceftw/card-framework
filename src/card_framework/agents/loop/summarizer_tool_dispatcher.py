@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from card_framework.agents.tool_call_utils import build_tool_signature
+from card_framework.agents.loop.tool_call_utils import build_tool_signature
 from card_framework.shared.events import EventBus
 
 _DEFAULT_DRAFT_REVIEW_CHAT_MAX_TOKENS = 256
@@ -582,4 +582,5 @@ class SummarizerToolDispatcher:
             tool_name=event_name or name,
             result=event_result or json.dumps(result, indent=2),
         )
+
 

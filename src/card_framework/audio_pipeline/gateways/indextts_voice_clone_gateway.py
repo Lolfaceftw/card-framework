@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Any
 
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
 from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
 from card_framework.audio_pipeline.runtime import release_torch_device_memory_with_reporting
@@ -904,4 +904,5 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             uv_executable=self.uv_executable,
             stream_subprocess_output=self.stream_subprocess_output,
         )
+
 

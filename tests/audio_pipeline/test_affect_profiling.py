@@ -1,8 +1,8 @@
-"""Tests for affect-analysis resource profiling helpers."""
+﻿"""Tests for affect-analysis resource profiling helpers."""
 
 from __future__ import annotations
 
-from card_framework.audio_pipeline.affect_profiling import (
+from card_framework.audio_pipeline.emotion.affect_profiling import (
     aggregate_adapter_memory,
     aggregate_process_memory_for_pid,
     parse_adapter_memory_rows,
@@ -38,3 +38,4 @@ def test_parse_and_aggregate_adapter_gpu_rows() -> None:
     assert len(rows) == 2
     assert aggregated.dedicated_bytes == 7 * 1024 * 1024
     assert aggregated.shared_bytes == 1 * 1024 * 1024
+

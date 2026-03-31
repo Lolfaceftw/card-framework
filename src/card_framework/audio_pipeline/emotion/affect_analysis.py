@@ -1,4 +1,4 @@
-"""Transcript-affect analysis orchestration and contracts."""
+﻿"""Transcript-affect analysis orchestration and contracts."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-from card_framework.audio_pipeline.affect_profiling import (
+from card_framework.audio_pipeline.emotion.affect_profiling import (
     ResourceProfile,
     ResourceUsageMonitor,
 )
-from card_framework.audio_pipeline.emotion_vectors import (
+from card_framework.audio_pipeline.emotion.emotion_vectors import (
     EmotionVector,
     INDEX_TTS_EMOTION_ORDER,
 )
@@ -1011,3 +1011,4 @@ def _expand_segment_bounds(
     else:
         clip_start_ms = max(0, clip_end_ms - min_duration_ms)
     return clip_start_ms, clip_end_ms
+

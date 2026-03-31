@@ -18,6 +18,9 @@ from card_framework.audio_pipeline.runtime import (
     release_torch_device_memory_with_reporting,
 )
 from card_framework.audio_pipeline.gateways.ctc_forced_aligner_gateway import CtcForcedAlignerGateway
+from card_framework.shared.events import event_bus
+
+_TARGET_SAMPLE_RATE_HZ = 16_000
 
 
 class FasterWhisperTranscriber(SpeechTranscriber):
@@ -37,6 +40,7 @@ class FasterWhisperTranscriber(SpeechTranscriber):
         enable_forced_alignment: bool = True,
         require_forced_alignment: bool = True,
         forced_alignment_batch_size: int = 8,
+        forced_alignment_max_audio_duration_seconds: int | None = 3600,
         forced_aligner: CtcForcedAlignerGateway | None = None,
     ) -> None:
         self.model_name = model_name
@@ -50,6 +54,16 @@ class FasterWhisperTranscriber(SpeechTranscriber):
         self.enable_forced_alignment = enable_forced_alignment
         self.require_forced_alignment = require_forced_alignment
         self.forced_alignment_batch_size = forced_alignment_batch_size
+        if (
+            forced_alignment_max_audio_duration_seconds is not None
+            and forced_alignment_max_audio_duration_seconds <= 0
+        ):
+            raise ValueError(
+                "forced_alignment_max_audio_duration_seconds must be > 0 when configured."
+            )
+        self.forced_alignment_max_audio_duration_seconds = (
+            forced_alignment_max_audio_duration_seconds
+        )
         self.forced_aligner = forced_aligner or CtcForcedAlignerGateway()
         self._model_cache: dict[tuple[str, str], object] = {}
 
@@ -172,6 +186,12 @@ class FasterWhisperTranscriber(SpeechTranscriber):
         if not self.enable_forced_alignment:
             return self._fallback_word_timestamps(fallback_segments)
 
+        if self._should_skip_forced_alignment_for_audio(audio_waveform=audio_waveform):
+            return self._fallback_word_timestamps(fallback_segments)
+
+        if device == "cuda":
+            self.release_cached_resources(device=device)
+
         try:
             words = self.forced_aligner.align_words(
                 audio_waveform=audio_waveform,
@@ -192,6 +212,27 @@ class FasterWhisperTranscriber(SpeechTranscriber):
                 "Forced alignment completed but returned zero word timestamps."
             )
         return self._fallback_word_timestamps(fallback_segments)
+
+    def _should_skip_forced_alignment_for_audio(
+        self,
+        *,
+        audio_waveform: object,
+    ) -> bool:
+        """Skip CTC alignment when the configured duration ceiling is exceeded."""
+        max_audio_duration_seconds = self.forced_alignment_max_audio_duration_seconds
+        if max_audio_duration_seconds is None:
+            return False
+        audio_duration_ms = _samples_to_milliseconds(len(audio_waveform))
+        if audio_duration_ms <= max_audio_duration_seconds * 1000:
+            return False
+        event_bus.publish(
+            "system_message",
+            "Skipping CTC forced alignment for "
+            f"{audio_duration_ms / 60000.0:.1f}-minute audio because it exceeds "
+            "audio.asr.forced_alignment.max_audio_duration_seconds="
+            f"{max_audio_duration_seconds}; using approximate word timestamps.",
+        )
+        return True
 
     def _fallback_word_timestamps(
         self,
@@ -249,6 +290,8 @@ class FasterWhisperTranscriber(SpeechTranscriber):
     def release_cached_resources(self, *, device: str) -> None:
         """Drop cached whisper models for one device and release CUDA allocator slack."""
         cache_keys = [key for key in self._model_cache if key[0] == device]
+        if not cache_keys:
+            return
         for cache_key in cache_keys:
             model = self._model_cache.pop(cache_key, None)
             if model is None:
@@ -283,4 +326,9 @@ class FasterWhisperTranscriber(SpeechTranscriber):
             if symbol_pattern.search(str(token))
         ]
         return token_ids or [-1]
+
+
+def _samples_to_milliseconds(sample_count: int) -> int:
+    """Convert 16 kHz sample counts into millisecond timestamps."""
+    return max(0, int(round((sample_count / _TARGET_SAMPLE_RATE_HZ) * 1000.0)))
 

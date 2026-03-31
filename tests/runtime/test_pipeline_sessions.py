@@ -178,3 +178,15 @@ def test_mark_session_failed_infers_current_stage_for_attempt_update(
             ("session-3",),
         ).fetchone()
     assert row == ("failed", "voice clone crashed")
+
+
+def test_pipeline_session_store_uses_rollback_journal_mode(tmp_path: Path) -> None:
+    """Keep session persistence off WAL for Docker bind-mounted workspaces."""
+    store = PipelineSessionStore(tmp_path / "sessions.sqlite3")
+
+    with store._connect() as connection:
+        journal_mode = str(
+            connection.execute("PRAGMA journal_mode").fetchone()[0]
+        ).lower()
+
+    assert journal_mode == "delete"

@@ -42,6 +42,10 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         max_speakers: int | None = 10,
         min_speakers: int | None = None,
         allow_single_speaker_fallback: bool = False,
+        inference_batch_size: int = 8,
+        cuda_long_audio_guard_enabled: bool = False,
+        cuda_max_audio_duration_seconds: int | None = 3600,
+        long_audio_fallback_device: str = "cpu",
         vad_onset: float = 0.8,
         vad_offset: float = 0.6,
         vad_pad_onset: float = 0.1,
@@ -61,9 +65,27 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             and int(min_speakers) > int(max_speakers)
         ):
             raise ValueError("min_speakers must be <= max_speakers.")
+        if inference_batch_size <= 0:
+            raise ValueError("inference_batch_size must be > 0.")
+        if (
+            cuda_max_audio_duration_seconds is not None
+            and cuda_max_audio_duration_seconds <= 0
+        ):
+            raise ValueError(
+                "cuda_max_audio_duration_seconds must be > 0 when configured."
+            )
+        normalized_fallback_device = long_audio_fallback_device.strip().lower()
+        if normalized_fallback_device not in {"cpu", "cuda"}:
+            raise ValueError(
+                "long_audio_fallback_device must be one of: cpu, cuda."
+            )
         self.max_speakers = max_speakers
         self.min_speakers = min_speakers
         self.allow_single_speaker_fallback = allow_single_speaker_fallback
+        self.inference_batch_size = inference_batch_size
+        self.cuda_long_audio_guard_enabled = cuda_long_audio_guard_enabled
+        self.cuda_max_audio_duration_seconds = cuda_max_audio_duration_seconds
+        self.long_audio_fallback_device = normalized_fallback_device
         self.vad_onset = vad_onset
         self.vad_offset = vad_offset
         self.vad_pad_onset = vad_pad_onset
@@ -180,6 +202,10 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             audio_path=audio_path,
             output_dir=output_dir,
         )
+        runtime_device = self._resolve_runtime_device(
+            audio_path=diarization_audio_path,
+            requested_device=device,
+        )
         manifest_path = output_dir / "diarization_manifest.json"
         manifest_payload = self._build_manifest_payload(diarization_audio_path)
         manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
@@ -188,17 +214,19 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             manifest_path=manifest_path,
             output_dir=output_dir,
             omega_conf=OmegaConf,
-            device=device,
+            device=runtime_device,
         )
 
-        diarizer = NeuralDiarizer(cfg=cfg).to("cuda" if device == "cuda" else "cpu")
+        diarizer = NeuralDiarizer(cfg=cfg).to(
+            "cuda" if runtime_device == "cuda" else "cpu"
+        )
         exact_speaker_count = self._exact_speaker_count()
         diarizer._initialize_configs(
             manifest_path=str(manifest_path),
             max_speakers=int(self.max_speakers or 8),
             num_speakers=exact_speaker_count,
             tmpdir=str(output_dir),
-            batch_size=24,
+            batch_size=self.inference_batch_size,
             num_workers=0,
             verbose=False,
         )
@@ -234,6 +262,38 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         if turns:
             return turns
         return normalize_speaker_labels(parse_rttm_file(rttm_path))
+
+    def _resolve_runtime_device(
+        self,
+        *,
+        audio_path: Path,
+        requested_device: str,
+    ) -> str:
+        """Downgrade long-form NeMo CUDA runs before they reach the driver-reset path."""
+        normalized_requested_device = requested_device.strip().lower()
+        if normalized_requested_device != "cuda":
+            return normalized_requested_device
+        if not self.cuda_long_audio_guard_enabled:
+            return normalized_requested_device
+        max_audio_duration_seconds = self.cuda_max_audio_duration_seconds
+        if max_audio_duration_seconds is None:
+            return normalized_requested_device
+        audio_duration_ms = probe_audio_duration_ms(audio_path)
+        if audio_duration_ms is None:
+            return normalized_requested_device
+        if audio_duration_ms <= max_audio_duration_seconds * 1000:
+            return normalized_requested_device
+        fallback_device = self.long_audio_fallback_device
+        if fallback_device == normalized_requested_device:
+            return normalized_requested_device
+        self._report_system_message(
+            "Switching NeMo diarization to "
+            f"{fallback_device.upper()} for {audio_duration_ms / 60000.0:.1f}-minute "
+            "audio because it exceeds "
+            "audio.diarization.nemo_cuda_max_audio_duration_seconds="
+            f"{max_audio_duration_seconds}; avoiding the long-form CUDA watchdog path."
+        )
+        return fallback_device
 
     def _exact_speaker_count(self) -> int | None:
         """Return an exact speaker count only when both bounds match."""
@@ -274,7 +334,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             ) from exc
 
         cfg.num_workers = 0
-        cfg.batch_size = 24
+        cfg.batch_size = self.inference_batch_size
         cfg.sample_rate = 16000
         cfg.verbose = False
         cfg.device = "cuda" if device == "cuda" else "cpu"

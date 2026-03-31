@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from card_framework.agents.message_registry import MessageRegistry
+from card_framework.agents.loop.message_registry import MessageRegistry
 
 
 def test_edit_returns_noop_metadata_when_content_is_unchanged() -> None:
@@ -51,4 +51,5 @@ def test_registry_preserves_emotion_vector_in_snapshot() -> None:
     snapshot = registry.snapshot()
 
     assert snapshot[0]["emotion_vector"] == [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2]
+
 

@@ -1,4 +1,4 @@
-"""emotion2vec+ adapter for segment-level categorical affect analysis."""
+﻿"""emotion2vec+ adapter for segment-level categorical affect analysis."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from card_framework.audio_pipeline.affect_analysis import (
+from card_framework.audio_pipeline.emotion.affect_analysis import (
     AffectClip,
     AffectScore,
     SegmentAffectProvider,
@@ -318,3 +318,4 @@ class _suppress_vendor_output:
         self._stderr.__exit__(exc_type, exc, exc_tb)
         self._stdout.__exit__(exc_type, exc, exc_tb)
         return None
+

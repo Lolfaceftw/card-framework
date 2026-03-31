@@ -1,4 +1,4 @@
-"""Link final summary turns back to source segments and blend their emotion vectors."""
+﻿"""Link final summary turns back to source segments and blend their emotion vectors."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 import math
 import re
 
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector
 from card_framework.orchestration.transcript import Transcript, TranscriptSegment
 from card_framework.shared.summary_xml import SummaryTurn
 
@@ -451,3 +451,4 @@ def _tokenize_text(text: str) -> list[str]:
     if tokens:
         return tokens
     return _TOKEN_PATTERN.findall(lowered)
+

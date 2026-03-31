@@ -1,4 +1,4 @@
-"""Serve repeated IndexTTS2 synthesis requests from one warm subprocess."""
+﻿"""Serve repeated IndexTTS2 synthesis requests from one warm subprocess."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector
 
 _INDEXTTS_PROTOCOL_PREFIX = "__INDEXTTS_JSON__"
 
@@ -246,3 +246,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

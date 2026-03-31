@@ -1,4 +1,4 @@
-"""Tests for transcript affect-analysis orchestration."""
+﻿"""Tests for transcript affect-analysis orchestration."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from card_framework.audio_pipeline.affect_analysis import (
+from card_framework.audio_pipeline.emotion.affect_analysis import (
     AffectPresetMappingConfig,
     AffectProfilingConfig,
     AffectScore,
@@ -142,3 +142,4 @@ def test_transcript_affect_analyzer_enriches_transcript_and_writes_manifest(
     assert result.transcript.metadata["affect_analysis_source_audio_path"] == str(
         audio_path
     )
+

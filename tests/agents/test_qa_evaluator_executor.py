@@ -88,8 +88,8 @@ if "a2a.server.agent_execution" not in sys.modules:
     sys.modules["a2a.server.events"] = events_module
     sys.modules["a2a.utils"] = utils_module
 
-from card_framework.benchmark.qa_contracts import GroundTruthQuestion, GroundTruthSet
-from card_framework.benchmark.qa_settings import EvaluatorRuntimeConfig, QuoteRelevanceConfig
+from card_framework.benchmark.qa.contracts import GroundTruthQuestion, GroundTruthSet
+from card_framework.benchmark.qa.settings import EvaluatorRuntimeConfig, QuoteRelevanceConfig
 from card_framework.shared.events import EventBus
 from card_framework.agents.dtos import (
     CorrectorFewShotExample,
@@ -1100,4 +1100,5 @@ def test_handle_task_does_not_leak_expected_answer_to_prompt() -> None:
 
     serialized_messages = " ".join(str(message) for message in llm.last_messages)
     assert "expected_answer" not in serialized_messages
+
 

@@ -4,7 +4,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
-from card_framework.agents.tool_call_utils import dedupe_tool_calls_by_signature
+from card_framework.agents.loop.tool_call_utils import dedupe_tool_calls_by_signature
 from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET
 
 
@@ -322,4 +322,5 @@ def get_default_parser_with_options(
             TextFallbackParser(enable_extended_patterns=enable_extended_text_fallback),
         ]
     )
+
 

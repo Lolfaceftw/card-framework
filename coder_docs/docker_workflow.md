@@ -37,8 +37,8 @@ hosts the preferred service is `setup-and-run-gpu` under the `gpu` profile.
   volumes so Linux virtual environments do not pollute the host checkout.
 - Hugging Face and uv caches are also stored in named volumes so repeated runs
   reuse downloaded assets.
-- Both runtime services inherit `mem_limit: 8g` and `memswap_limit: 10g`, so
-  the container stays capped at about `8 GB` of RAM with about `2 GB` of swap.
+- Both runtime services inherit `mem_limit: 16g` and `memswap_limit: 20g`, so
+  the container stays capped at about `16 GB` of RAM with about `4 GB` of swap.
 - The Compose services force `linux/amd64` so the runtime matches the Linux
   x86_64 path that NeMo supports upstream. On Apple Silicon that means Docker
   runs under emulation, so expect slower startup.
@@ -164,8 +164,14 @@ Linux container automatically.
   `/workspace/card-framework`.
 - The GPU profile is intentionally separate so CPU hosts do not fail on `gpus:
   all`.
-- The container-side resource cap is set in `compose.yml` to about `8 GB` RAM
-  plus `2 GB` swap (`mem_limit: 8g`, `memswap_limit: 10g`).
+- The container-side resource cap is set in `compose.yml` to about `16 GB` RAM
+  plus `4 GB` swap (`mem_limit: 16g`, `memswap_limit: 20g`).
+- Very long stage-1 runs also respect
+  `audio.asr.forced_alignment.max_audio_duration_seconds` (default `3600`).
+  When the vocals audio exceeds that ceiling, the runtime skips CTC word
+  alignment and falls back to approximate timings instead of risking a
+  container OOM. Set that field to `null` only when the Docker host has enough
+  real memory for full long-form alignment.
 - For transcript tuning, prefer fixing one stage-1 run ID first and then reuse
   its `separation/.../vocals.wav` with `scripts/run_diarization_experiment.py`
   when you want to isolate NeMo changes from run-to-run Demucs variation.

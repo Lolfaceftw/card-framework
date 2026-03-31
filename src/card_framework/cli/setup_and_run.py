@@ -92,7 +92,7 @@ _MENU_CONSOLE: Any | None = None
 _MENU_CONSOLE_UNAVAILABLE = object()
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class BootstrapError(RuntimeError):
     """Represent a fail-fast bootstrap error for one setup stage."""
 
@@ -160,6 +160,11 @@ class InteractiveMenuSelection:
 def _emit_setup_status(message: str) -> None:
     """Emit one operator-facing setup status line to stderr."""
     print(message, file=sys.stderr, flush=True)
+
+
+def _emit_session_store_warning(*, action: str, exc: Exception) -> None:
+    """Report session-store failures without hiding the primary pipeline error."""
+    _emit_setup_status(f"Session store warning during {action}: {exc}")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -2798,6 +2803,7 @@ def run_calibration(
 ) -> None:
     """Run the dedicated calibration helper with resolved inputs."""
     command: list[str]
+    workspace_root = resolve_workspace_root()
     if is_repo_checkout_runtime():
         command = [uv_executable, "run", "python", "-m", CALIBRATE_MODULE]
     else:
@@ -2805,7 +2811,7 @@ def run_calibration(
     command.extend(
         [
             "--project-root",
-            str(resolve_output_root()),
+            str(workspace_root),
             "--config-file",
             str(resolve_repo_config_path()),
         ]
@@ -2826,7 +2832,7 @@ def run_calibration(
     run_cmd(
         step="calibration",
         command=command,
-        cwd=resolve_output_root(),
+        cwd=workspace_root,
         stream_output=True,
     )
 
@@ -3436,11 +3442,15 @@ def run_audio_duration_sweep(
                             preset_output_root / "transcript.json"
                         ).resolve()
                 except BootstrapError as exc:
-                    child_failure_record = (
-                        session_store.get_session(run_id)
-                        if session_store is not None and run_id is not None
-                        else None
-                    )
+                    child_failure_record = None
+                    if session_store is not None and run_id is not None:
+                        try:
+                            child_failure_record = session_store.get_session(run_id)
+                        except Exception as session_exc:
+                            _emit_session_store_warning(
+                                action=f"failure lookup for session {run_id}",
+                                exc=session_exc,
+                            )
                     child_failure_already_persisted = (
                         exc.step == "pipeline_run"
                         and child_failure_record is not None
@@ -3452,11 +3462,17 @@ def run_audio_duration_sweep(
                         and run_id is not None
                         and not child_failure_already_persisted
                     ):
-                        session_store.mark_session_failed(
-                            session_id=run_id,
-                            current_stage=None,
-                            reason=exc.message,
-                        )
+                        try:
+                            session_store.mark_session_failed(
+                                session_id=run_id,
+                                current_stage=None,
+                                reason=exc.message,
+                            )
+                        except Exception as session_exc:
+                            _emit_session_store_warning(
+                                action=f"failure persistence for session {run_id}",
+                                exc=session_exc,
+                            )
                     records.append(
                         StepRecord(name=exc.step, status="failed", detail=exc.message)
                     )
@@ -3687,11 +3703,15 @@ def run_audio_batch(
                     )
                 )
             except BootstrapError as exc:
-                child_failure_record = (
-                    session_store.get_session(run_id)
-                    if session_store is not None and run_id is not None
-                    else None
-                )
+                child_failure_record = None
+                if session_store is not None and run_id is not None:
+                    try:
+                        child_failure_record = session_store.get_session(run_id)
+                    except Exception as session_exc:
+                        _emit_session_store_warning(
+                            action=f"failure lookup for session {run_id}",
+                            exc=session_exc,
+                        )
                 child_failure_already_persisted = (
                     exc.step == "pipeline_run"
                     and child_failure_record is not None
@@ -3702,11 +3722,17 @@ def run_audio_batch(
                     and run_id is not None
                     and not child_failure_already_persisted
                 ):
-                    session_store.mark_session_failed(
-                        session_id=run_id,
-                        current_stage=None,
-                        reason=exc.message,
-                    )
+                    try:
+                        session_store.mark_session_failed(
+                            session_id=run_id,
+                            current_stage=None,
+                            reason=exc.message,
+                        )
+                    except Exception as session_exc:
+                        _emit_session_store_warning(
+                            action=f"failure persistence for session {run_id}",
+                            exc=session_exc,
+                        )
                 records.append(
                     StepRecord(name=exc.step, status="failed", detail=exc.message)
                 )
@@ -4352,11 +4378,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_summary(records=records, run_id=run_id)
         return 0
     except BootstrapError as exc:
-        child_failure_record = (
-            session_store.get_session(run_id)
-            if session_store is not None and run_id is not None
-            else None
-        )
+        child_failure_record = None
+        if session_store is not None and run_id is not None:
+            try:
+                child_failure_record = session_store.get_session(run_id)
+            except Exception as session_exc:
+                _emit_session_store_warning(
+                    action=f"failure lookup for session {run_id}",
+                    exc=session_exc,
+                )
         child_failure_already_persisted = (
             exc.step == "pipeline_run"
             and child_failure_record is not None
@@ -4367,11 +4397,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             and run_id is not None
             and not child_failure_already_persisted
         ):
-            session_store.mark_session_failed(
-                session_id=run_id,
-                current_stage=None,
-                reason=exc.message,
-            )
+            try:
+                session_store.mark_session_failed(
+                    session_id=run_id,
+                    current_stage=None,
+                    reason=exc.message,
+                )
+            except Exception as session_exc:
+                _emit_session_store_warning(
+                    action=f"failure persistence for session {run_id}",
+                    exc=session_exc,
+                )
         records.append(StepRecord(name=exc.step, status="failed", detail=exc.message))
         print(exc.render())
         print_summary(records=records, run_id=run_id)
@@ -4380,11 +4416,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if batch_mode:
             return 130
         if session_store is not None and run_id is not None:
-            session_store.mark_session_paused(
-                session_id=run_id,
-                current_stage=None,
-                reason="Pipeline interrupted by user.",
-            )
+            try:
+                session_store.mark_session_paused(
+                    session_id=run_id,
+                    current_stage=None,
+                    reason="Pipeline interrupted by user.",
+                )
+            except Exception as session_exc:
+                _emit_session_store_warning(
+                    action=f"pause persistence for session {run_id}",
+                    exc=session_exc,
+                )
         print_summary(records=records, run_id=run_id, interrupted=True)
         return 130
 

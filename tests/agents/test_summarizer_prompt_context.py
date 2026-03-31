@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
@@ -13,8 +13,8 @@ if _jinja2 is None or getattr(_jinja2, "__spec__", None) is None:
         allow_module_level=True,
     )
 
-from card_framework.agents.loop_context import build_loop_context_prompt_block
-from card_framework.agents.message_registry import MessageRegistry
+from card_framework.agents.loop.loop_context import build_loop_context_prompt_block
+from card_framework.agents.loop.message_registry import MessageRegistry
 from card_framework.agents.summarizer import SummarizerExecutor
 from card_framework.shared.prompt_manager import PromptManager
 
@@ -114,3 +114,4 @@ def test_summarizer_excerpt_segment_includes_affect_hint_when_present() -> None:
         rendered
         == "[SPEAKER_00] [affect: preset=urgent; top=angry:0.75]: hello world\n"
     )
+

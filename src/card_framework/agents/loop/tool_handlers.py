@@ -9,11 +9,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from card_framework.agents.client import AgentTaskClient, get_default_agent_client
-from card_framework.agents.message_registry import MessageRegistry
+from card_framework.agents.loop.message_registry import MessageRegistry
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector, serialize_emotion_vector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector, serialize_emotion_vector
 from card_framework.audio_pipeline.live_draft_voice_clone import LiveDraftVoiceCloneSession
-from card_framework.audio_pipeline.turn_emotion_resolution import (
+from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     ResolvedTurnEmotion,
     TurnEmotionResolutionStrategy,
 )
@@ -952,4 +952,5 @@ def build_revise_tools(
     tool_registry.register(SaveDraftHandler(registry))
     tool_registry.register(FinalizeDraftHandler(registry))
     return tool_registry
+
 

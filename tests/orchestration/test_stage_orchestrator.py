@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from pathlib import Path
 
 import pytest
 
-from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+from card_framework.audio_pipeline.emotion.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
     SummaryTurnEmotionLinkingConfig,
 )
@@ -525,3 +525,4 @@ def test_full_loop_does_not_mark_stage_three_complete_when_verification_fails(
 
     assert session_store.started == ["stage-2", "stage-3"]
     assert session_store.completed == ["stage-2"]
+
