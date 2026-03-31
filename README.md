@@ -2,7 +2,7 @@
 
 This repository is the current implementation of **CARD: Constraint-aware Audio
 Resynthesis and Distillation**, the project described in
-[`EEE_196_CARD_UCL.md`](./EEE_196_CARD_UCL.md).
+[`research/EEE_196_CARD_UCL.md`](./research/EEE_196_CARD_UCL.md).
 
 The paper is the conceptual and academic baseline. The codebase, however, has
 already moved beyond parts of the manuscript's original implementation plan.
@@ -89,7 +89,7 @@ At a high level, the repository currently supports:
 
 ## Paper vs. Current Repository
 
-[`EEE_196_CARD_UCL.md`](./EEE_196_CARD_UCL.md) explains the original CARD paper,
+[`research/EEE_196_CARD_UCL.md`](./research/EEE_196_CARD_UCL.md) explains the original CARD paper,
 problem framing, and proposed module design. The repository now reflects a more
 developed engineering system than that initial write-up.
 
@@ -117,8 +117,12 @@ In short: the paper explains **why CARD exists**; this repository captures
 ```text
 src/card_framework/
   agents/           A2A executors, DTOs, tool loops, client transport
+    loop/           Summarizer loop, tool dispatch, parsing, and prompt helpers
   audio_pipeline/   Audio ingestion, speaker samples, voice cloning, interjector
+    emotion/        Affect analysis, emotion vectors, and summary-turn linking
   benchmark/        Summarization, QA, and diarization benchmarks
+    qa/             QA benchmark contracts, settings, evaluator, and supervisor
+    diarization/    Diarization benchmark datasets and type definitions
   cli/              Runtime, setup, calibration, matrix, and eval entrypoints
   config/           Bundled fallback config for packaged installs
   orchestration/    Transcript DTOs and stage orchestration
@@ -135,6 +139,9 @@ Other important locations:
 - `artifacts/`: generated transcripts, cloned audio, benchmark outputs, and
   other runtime artifacts
 - `checkpoints/`: local model/runtime checkpoints
+- `datasets/`: tracked benchmark handoff packages and review manifests that are
+  intentionally kept out of the primary source tree
+- `docs/`: human-facing configuration, logging, and repo navigation guides
 - `compose.yml`: Docker Compose operator workflow centered on `setup_and_run`
 - `Dockerfile`: base container runtime used by the Compose services
 - `conf/config.yaml`: canonical human-edited runtime config for source checkouts
@@ -143,6 +150,9 @@ Other important locations:
 - `.env.example`: template for provider secrets and optional local overrides
 - `coder_docs/`: repository-specific architecture, workflow, and maintenance
   guidance
+- `research/`: the paper manuscript, bibliography, and related research assets
+- `scripts/`: repo-local helper scripts, including `scripts/manual/` for manual
+  probes that are not part of the shipped package
 
 ## Common Commands
 
@@ -181,7 +191,7 @@ uv run python -m card_framework.cli.calibrate
 Prefer the Docker Compose path for repo-local runtime launches. If Docker can
 expose CUDA, use `docker compose --profile gpu run --rm setup-and-run-gpu ...`;
 otherwise use `setup-and-run`. Both runtime services are capped in
-`compose.yml` at about `8 GB` RAM plus `2 GB` swap.
+`compose.yml` at about `16 GB` RAM plus `4 GB` swap.
 
 Running `uv run python -m card_framework.cli.setup_and_run` with no explicit
 run inputs now opens an interactive menu by default. Use that menu to choose
@@ -237,8 +247,8 @@ The repository now includes a Docker operator path centered on
 - The Compose services bind-mount the repo checkout, reuse `conf/config.yaml`
   and `.env`, and isolate the Linux `.venv` directories into Docker volumes so
   the host checkout does not get container-built virtual environments.
-- The Compose services are capped at about `8 GB` RAM plus `2 GB` swap through
-  `mem_limit: 8g` and `memswap_limit: 10g`.
+- The Compose services are capped at about `16 GB` RAM plus `4 GB` swap through
+  `mem_limit: 16g` and `memswap_limit: 20g`.
 - For real run validation, do not rely only on the terminal stream; inspect
   persisted logs and sample RAM plus GPU telemetry too.
 
@@ -264,7 +274,7 @@ comment-and-uncomment provider block.
   forced alignment enabled. `faster_whisper` remains available as an explicit
   opt-in provider.
 - For the full workflow, profile names, and common examples, see
-  [`CONFIG.MD`](./CONFIG.MD).
+  [`docs/config.md`](./docs/config.md).
 
 Benchmark helpers:
 
@@ -540,10 +550,12 @@ see [`coder_docs/github_actions_release_spec.md`](./coder_docs/github_actions_re
 
 ## Documentation
 
-- [`EEE_196_CARD_UCL.md`](./EEE_196_CARD_UCL.md): the CARD paper and project
+- [`research/EEE_196_CARD_UCL.md`](./research/EEE_196_CARD_UCL.md): the CARD paper and project
   manuscript
-- [`CONFIG.MD`](./CONFIG.MD): runtime config, `.env`, provider profiles, and
+- [`docs/config.md`](./docs/config.md): runtime config, `.env`, provider profiles, and
   common configuration examples
+- [`docs/navigation.md`](./docs/navigation.md): short navigation map for the
+  repo root and the main tracked content areas
 - [`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md):
   containerized `setup_and_run` workflow and Docker commands
 - [`coder_docs/codebase_guide.md`](./coder_docs/codebase_guide.md): current

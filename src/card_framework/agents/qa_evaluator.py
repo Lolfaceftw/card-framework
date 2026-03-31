@@ -1,4 +1,4 @@
-"""A2A executor for QA-based summary benchmark scoring."""
+﻿"""A2A executor for QA-based summary benchmark scoring."""
 
 from __future__ import annotations
 
@@ -17,13 +17,13 @@ from card_framework.agents.corrector import (
     render_correction_guidance,
 )
 from card_framework.agents.dtos import CorrectorTaskRequest, QAEvaluatorTaskRequest
-from card_framework.benchmark.qa_contracts import (
+from card_framework.benchmark.qa.contracts import (
     EvaluatorAnswerRecord,
     GroundTruthQuestion,
     GroundTruthSet,
     build_score,
 )
-from card_framework.benchmark.qa_settings import (
+from card_framework.benchmark.qa.settings import (
     EvaluatorRuntimeConfig,
     QuoteRelevanceConfig,
 )
@@ -1142,3 +1142,4 @@ class QAEvaluatorExecutor(BaseA2AExecutor):
             return True, self._build_result_payload(context_data)
 
         return False, None
+

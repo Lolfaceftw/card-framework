@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from card_framework.audio_pipeline.gateways import granite_speech_gateway
+from card_framework.audio_pipeline.contracts import TimedTextSegment, WordTimestamp
 from card_framework.audio_pipeline.gateways.granite_speech_gateway import (
     GraniteSpeechTranscriber,
     _GraniteRuntime,
@@ -76,13 +77,15 @@ def test_granite_transcribe_chunks_audio_and_reports_progress(
     )
     monkeypatch.setattr(
         transcriber,
-        "_load_audio_waveform",
-        lambda audio_path: ("ignored", 16_000),
+        "_probe_audio_metadata",
+        lambda audio_path: (16_000, 70 * 16_000),
     )
     monkeypatch.setattr(
         transcriber,
-        "_prepare_audio_waveform",
-        lambda *, waveform: np.zeros(70 * 16_000, dtype=np.float32),
+        "_load_audio_waveform",
+        lambda audio_path: (_ for _ in ()).throw(
+            AssertionError("full audio load should not run when forced alignment is disabled")
+        ),
     )
     chunk_texts = iter(
         [
@@ -90,6 +93,14 @@ def test_granite_transcribe_chunks_audio_and_reports_progress(
             "there general kenobi",
             "kenobi final words",
         ]
+    )
+    monkeypatch.setattr(
+        transcriber,
+        "_load_prepared_audio_chunk",
+        lambda **kwargs: np.zeros(
+            kwargs["end_sample"] - kwargs["start_sample"],
+            dtype=np.float32,
+        ),
     )
     monkeypatch.setattr(
         transcriber,
@@ -232,6 +243,37 @@ def test_granite_runtime_reports_loading_messages(monkeypatch) -> None:
     )
 
 
+def test_granite_probe_audio_metadata_falls_back_to_wave(monkeypatch) -> None:
+    """Use the WAV header when torchaudio lacks an `info()` helper."""
+    monkeypatch.setitem(sys.modules, "torchaudio", SimpleNamespace())
+
+    class _FakeWaveFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+
+        def getframerate(self) -> int:
+            return 44_100
+
+        def getnframes(self) -> int:
+            return 88_200
+
+    monkeypatch.setattr(
+        granite_speech_gateway.wave,
+        "open",
+        lambda path, mode: _FakeWaveFile(),
+    )
+
+    transcriber = GraniteSpeechTranscriber()
+
+    sample_rate, frame_count = transcriber._probe_audio_metadata(Path("ignored.wav"))
+
+    assert sample_rate == 44_100
+    assert frame_count == 88_200
+
+
 def test_granite_release_cached_resources_clears_device_cache(monkeypatch) -> None:
     """Drop the cached runtime bundle and release device memory for one device."""
     transcriber = GraniteSpeechTranscriber()
@@ -257,3 +299,96 @@ def test_granite_release_cached_resources_clears_device_cache(monkeypatch) -> No
     assert released_devices == [
         "cuda:Granite Speech ASR model 'ibm-granite/granite-4.0-1b-speech'"
     ]
+
+
+def test_granite_skips_long_audio_forced_alignment_with_fallback() -> None:
+    """Fall back to approximate words before CTC alignment on very long audio."""
+    class _FakeAligner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def align_words(self, **kwargs) -> list[WordTimestamp]:
+            self.calls.append(kwargs)
+            return []
+
+    fake_aligner = _FakeAligner()
+    transcriber = GraniteSpeechTranscriber(
+        forced_alignment_max_audio_duration_seconds=60,
+        forced_aligner=fake_aligner,
+    )
+    fallback_segments = [
+        TimedTextSegment(
+            start_time_ms=0,
+            end_time_ms=2000,
+            text="hello world",
+        )
+    ]
+    messages: list[str] = []
+
+    def _capture(message: str) -> None:
+        messages.append(message)
+
+    event_bus.subscribe("system_message", _capture)
+    try:
+        words = transcriber._resolve_word_timestamps(
+            audio_path=Path("ignored.wav"),
+            prepared_total_samples=61 * 16_000,
+            transcript_text="hello world",
+            language="en",
+            device="cuda",
+            fallback_segments=fallback_segments,
+        )
+    finally:
+        event_bus.unsubscribe("system_message", _capture)
+
+    assert fake_aligner.calls == []
+    assert [word.word for word in words] == ["hello", "world"]
+    assert any("Skipping CTC forced alignment" in message for message in messages)
+
+
+def test_granite_releases_cuda_runtime_before_forced_alignment() -> None:
+    """Unload the Granite ASR runtime before launching CUDA forced alignment."""
+    class _FakeAligner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def align_words(self, **kwargs) -> list[WordTimestamp]:
+            self.calls.append(kwargs)
+            return [
+                WordTimestamp(
+                    word="hello",
+                    start_time_ms=0,
+                    end_time_ms=500,
+                )
+            ]
+
+    fake_aligner = _FakeAligner()
+    transcriber = GraniteSpeechTranscriber(
+        forced_alignment_max_audio_duration_seconds=None,
+        forced_aligner=fake_aligner,
+    )
+    released_devices: list[str] = []
+    transcriber.release_cached_resources = lambda *, device: released_devices.append(device)
+    transcriber._load_audio_waveform = lambda audio_path: ("ignored", 16_000)
+    transcriber._prepare_audio_waveform = (
+        lambda *, waveform: np.zeros(16_000, dtype=np.float32)
+    )
+
+    words = transcriber._resolve_word_timestamps(
+        audio_path=Path("ignored.wav"),
+        prepared_total_samples=16_000,
+        transcript_text="hello",
+        language="en",
+        device="cuda",
+        fallback_segments=[
+            TimedTextSegment(
+                start_time_ms=0,
+                end_time_ms=1000,
+                text="hello",
+            )
+        ],
+    )
+
+    assert released_devices == ["cuda"]
+    assert len(fake_aligner.calls) == 1
+    assert [word.word for word in words] == ["hello"]

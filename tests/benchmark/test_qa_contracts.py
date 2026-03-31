@@ -2,7 +2,7 @@
 
 import pytest
 
-from card_framework.benchmark.qa_contracts import (
+from card_framework.benchmark.qa.contracts import (
     EvaluatorAnswerRecord,
     GroundTruthSet,
     _normalize_question_intent,
@@ -135,4 +135,5 @@ def test_normalize_question_intent_supports_non_latin_text() -> None:
     assert first
     assert second
     assert first != second
+
 

@@ -1,0 +1,33 @@
+{
+  "sample_count": 5,
+  "samples": [
+    {
+      "sample_id": "s0",
+      "episode_key": "https://example.com/0.mp3"
+    },
+    {
+      "sample_id": "s1",
+      "episode_key": "https://example.com/1.mp3"
+    },
+    {
+      "sample_id": "s2",
+      "episode_key": "https://example.com/2.mp3"
+    },
+    {
+      "sample_id": "s3",
+      "episode_key": "https://example.com/3.mp3"
+    },
+    {
+      "sample_id": "s4",
+      "episode_key": "https://example.com/4.mp3"
+    }
+  ],
+  "audio_url_filter": {
+    "performed_at_utc": "2026-03-20T17:56:24.700467+00:00",
+    "source_manifest_path": "C:\\Users\\chris\\card-framework\\datasets\\sporc\\review_manifests\\tmp_review_sporc3\\manifest.json",
+    "original_sample_count": 5,
+    "kept_sample_count": 5,
+    "removed_sample_count": 0,
+    "audit_path": "C:\\Users\\chris\\card-framework\\datasets\\sporc\\review_manifests\\tmp_review_sporc3\\manifest.audio_url_audit.json"
+  }
+}

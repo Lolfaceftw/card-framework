@@ -13,6 +13,7 @@ class _FakeJudgeLLM:
         self.response = response
         self.system_prompt = ""
         self.user_prompt = ""
+        self.max_tokens: int | None = -1
 
     def generate(
         self,
@@ -20,9 +21,9 @@ class _FakeJudgeLLM:
         user_prompt: str,
         max_tokens: int | None = None,
     ) -> str:
-        del max_tokens
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
+        self.max_tokens = max_tokens
         return self.response
 
 
@@ -57,6 +58,7 @@ def test_sporc_judge_parses_three_required_dimensions() -> None:
     assert "S1." in llm.user_prompt
     assert "1 -> 0.00" in llm.user_prompt
     assert "average the three normalized item scores" in llm.user_prompt
+    assert llm.max_tokens is None
 
 
 def test_sporc_judge_includes_full_transcript_in_prompt_by_default() -> None:

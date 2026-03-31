@@ -1,11 +1,11 @@
-"""audEERING MSP-dim adapter for segment-level affect regression."""
+﻿"""audEERING MSP-dim adapter for segment-level affect regression."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-from card_framework.audio_pipeline.affect_analysis import (
+from card_framework.audio_pipeline.emotion.affect_analysis import (
     AffectClip,
     SegmentAffectProvider,
     SegmentAffectUpdate,
@@ -267,3 +267,4 @@ class AudeeringMspDimAffectGateway(SegmentAffectProvider):
         )
         self._runtime_cache[device] = runtime
         return runtime
+

@@ -21,11 +21,11 @@ from card_framework.audio_pipeline.io import write_transcript_atomic
 from card_framework.audio_pipeline.runtime import resolve_device
 from card_framework.cli.calibrate import load_audio_config
 from card_framework.orchestration.transcript import Transcript, TranscriptSegment
-from card_framework.shared.paths import REPO_ROOT
+from card_framework.shared.paths import REPO_ROOT, SPORC_HUMAN_EVAL_ASSETS_DIR
 from card_framework.shared.summary_xml import parse_summary_xml
 
 CONTAINER_REPO_ROOT = PurePosixPath("/workspace/card-framework")
-DEFAULT_PACKAGE_ROOT = (REPO_ROOT / "sporc_human_eval_assets_10m").resolve()
+DEFAULT_PACKAGE_ROOT = SPORC_HUMAN_EVAL_ASSETS_DIR.resolve()
 DEFAULT_NOTES_PATH = (
     REPO_ROOT / "artifacts" / "run_notes" / "2026-03-21_sporc_gpu_gemini_sweep.md"
 ).resolve()
@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--package-root",
         default=str(DEFAULT_PACKAGE_ROOT),
-        help="Root of the sporc_human_eval_assets_10m package.",
+        help="Root of the tracked SPoRC human-eval asset package.",
     )
     parser.add_argument(
         "--output-root",
@@ -630,7 +630,19 @@ def _resolve_summary_relative_path(*, package_root: Path, raw_value: str) -> Pat
     candidate = Path(raw_value.replace("\\", "/"))
     if candidate.is_absolute():
         return candidate.resolve()
-    return (REPO_ROOT / candidate).resolve() if candidate.parts else package_root
+    if not candidate.parts:
+        return package_root
+
+    resolved_candidates: list[Path] = []
+    if candidate.parts[0] == package_root.name:
+        resolved_candidates.append((package_root.parent / candidate).resolve())
+    resolved_candidates.append((package_root / candidate).resolve())
+    resolved_candidates.append((REPO_ROOT / candidate).resolve())
+
+    for resolved in resolved_candidates:
+        if resolved.exists():
+            return resolved
+    return resolved_candidates[0]
 
 
 def _parse_transcript_slice(transcript_slice_path: Path) -> tuple[ParsedTranscriptBlock, ...]:
@@ -997,7 +1009,7 @@ def _materialize_preset_inputs(*, preset_root: Path, episode: ParsedEpisode) -> 
     transcript_payload = Transcript(
         segments=tuple(segments),
         metadata={
-            "dataset": "sporc_human_eval_assets_10m",
+            "dataset": "datasets/sporc/human_eval_assets_10m",
             "sample_id": episode.sample_id,
             "episode_title": episode.title,
             "speaker_samples_manifest_path": _to_container_path(speaker_manifest_path),

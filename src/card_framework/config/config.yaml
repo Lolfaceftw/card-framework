@@ -131,6 +131,7 @@ audio:
     timeout_seconds: 1800
     window_length_seconds: 600
     window_context_seconds: 5
+    cuda_window_length_seconds: 180
   asr:
     provider: "granite_speech"
     model: "ibm-granite/granite-4.0-1b-speech"
@@ -144,11 +145,16 @@ audio:
       enabled: true
       required: true
       batch_size: 8
+      max_audio_duration_seconds: 3600
   diarization:
     provider: "nemo"
     nemo_model: "diar_msdd_telephonic"
     vad_model: "vad_multilingual_marblenet"
     speaker_embedding_model: "titanet_large"
+    nemo_inference_batch_size: 8
+    nemo_cuda_long_audio_guard_enabled: false
+    nemo_cuda_max_audio_duration_seconds: 3600
+    nemo_long_audio_fallback_device: "cpu"
     min_speakers:
     max_speakers: 10
     allow_single_speaker_fallback: false

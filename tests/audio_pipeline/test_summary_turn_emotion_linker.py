@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+from card_framework.audio_pipeline.emotion.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
     SummaryTurnEmotionLinkingConfig,
 )
@@ -212,3 +212,4 @@ def test_linker_preserves_existing_explicit_vectors_when_configured() -> None:
     assert result.turns[0].emotion_vector == EmotionVector.from_raw(
         [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.20]
     )
+

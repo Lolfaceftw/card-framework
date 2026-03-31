@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from card_framework.agents.loop_context import (
+from card_framework.agents.loop.loop_context import (
     LoopIssue,
     SummarizerLoopMemory,
     UnresolvedIssueState,
@@ -236,4 +236,5 @@ def test_loop_memory_artifact_roundtrip_preserves_repeated_remedy_history(
         )
         is False
     )
+
 

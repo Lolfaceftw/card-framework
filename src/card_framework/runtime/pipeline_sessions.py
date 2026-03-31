@@ -483,7 +483,10 @@ class PipelineSessionStore:
         """Open one SQLite connection for store operations."""
         connection = sqlite3.connect(str(self.database_path))
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode = WAL")
+        # Keep the session store on SQLite's rollback journal because Docker
+        # bind-mounted workspaces can lose or reject WAL sidecar files after a
+        # child process is killed, which breaks failure reporting and resume.
+        connection.execute("PRAGMA journal_mode = DELETE")
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection

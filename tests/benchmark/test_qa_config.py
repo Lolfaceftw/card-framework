@@ -5,7 +5,7 @@ from __future__ import annotations
 from omegaconf import OmegaConf
 import pytest
 
-from card_framework.benchmark.qa_settings import (
+from card_framework.benchmark.qa.settings import (
     CorrectorRuntimeConfig,
     EvaluatorRuntimeConfig,
     QAConfigError,
@@ -202,4 +202,5 @@ def test_resolve_corrector_runtime_config_reads_values() -> None:
     assert resolved.enabled is False
     assert resolved.max_tokens == 1200
     assert resolved.max_examples == 4
+
 

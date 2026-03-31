@@ -15,7 +15,7 @@ from card_framework.audio_pipeline.audio_normalization import (
     AudioNormalizationPolicy,
     normalize_audio_file,
 )
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector, serialize_emotion_vector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector, serialize_emotion_vector
 from card_framework.audio_pipeline.errors import NonRetryableAudioStageError
 from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneArtifact, VoiceCloneProvider
@@ -693,4 +693,5 @@ def _snapshot_matches_summary_xml(
 def _utc_now_iso() -> str:
     """Return UTC timestamp in ISO-8601 format without microseconds."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
 

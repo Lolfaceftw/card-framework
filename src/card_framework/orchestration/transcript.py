@@ -1,11 +1,11 @@
-"""Transcript domain DTOs and adapters for orchestration boundaries."""
+﻿"""Transcript domain DTOs and adapters for orchestration boundaries."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, TypeAlias
 
-from card_framework.audio_pipeline.emotion_vectors import serialize_emotion_vector
+from card_framework.audio_pipeline.emotion.emotion_vectors import serialize_emotion_vector
 
 
 @dataclass(slots=True, frozen=True)
@@ -151,3 +151,4 @@ def coerce_transcript(value: TranscriptLike) -> Transcript:
     if isinstance(value, Transcript):
         return value
     return Transcript.from_mapping(value)
+

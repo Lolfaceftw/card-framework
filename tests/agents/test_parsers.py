@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from card_framework.agents.parsers import get_default_parser, get_default_parser_with_options
+from card_framework.agents.loop.parsers import get_default_parser, get_default_parser_with_options
 
 
 def test_xml_fallback_assigns_unique_ids_for_distinct_calls() -> None:
@@ -115,4 +115,5 @@ def test_text_fallback_can_disable_extended_patterns() -> None:
     calls = parser.parse(message)
 
     assert calls == []
+
 

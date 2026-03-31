@@ -14,8 +14,8 @@ x-setup-and-run-base: &setup-and-run-base
     PYTHONUNBUFFERED: "1"
     TRANSFORMERS_CACHE: /root/.cache/huggingface/transformers
   shm_size: "8gb"
-  mem_limit: "8g"
-  memswap_limit: "10g"
+  mem_limit: "16g"
+  memswap_limit: "20g"
   stdin_open: true
   tty: true
   volumes:

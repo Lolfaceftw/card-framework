@@ -24,6 +24,9 @@ wording now lives in shared prompt templates under
 `src/card_framework/prompts/templates/conversation_summary_judge_system.jinja2`
 and `src/card_framework/prompts/templates/conversation_summary_judge_user.jinja2`
 instead of inline SPoRC-only strings.
+Judge calls also stop setting an explicit output-token cap from the application
+side, so the provider receives no `max_tokens` override unless a different
+caller adds one.
 
 The judge scores three dimensions from `0.0` to `1.0`:
 
@@ -109,6 +112,9 @@ Use `execute` when you want one benchmark configuration:
 - one transcript-only or voice-clone run,
 - one optional `--duration-preset` value or one `--target-seconds-override`,
 - one retained-sample target controlled by `--max-samples`.
+- one optional `--judge-only-source <path>` reuse pass that skips summarizer and
+  critic, loads persisted `summary.xml` artifacts from prior execute runs or
+  sweep logs, and reruns only the judge over those saved summaries.
 
 Use `duration-sweep` when you want multiple duration targets in one invocation:
 
@@ -128,6 +134,9 @@ Use `duration-sweep` when you want multiple duration targets in one invocation:
 Common flag mix-ups:
 
 - `execute` does not accept a comma-separated list in `--duration-preset`.
+- `--judge-only-source` belongs to `execute`; it is not a `duration-sweep`
+  flag, and it reuses existing summary artifacts instead of launching new
+  summarizer/critic work.
 - `duration-sweep --mode batch-all` should use `--duration-presets`, not `--duration-preset`.
 - `duration-sweep` now honors `--max-samples`; use `--examples` only when you want a sweep-only override.
 - `--max-samples 100` means "retain 100 benchmarked samples," not "stop after the first 100 candidates touched."
@@ -315,6 +324,29 @@ To inspect one sweep shard end to end:
 3. Open `sporc_runs/<run_id>/report.json` or `sporc_runs/<run_id>/notes.md`.
 4. Open `sporc_runs/<run_id>/samples/README.md` or `sporc_runs/<run_id>/samples/index.json`.
 5. Drill into `sporc_runs/<run_id>/samples/<sample_id>/` for that shard's final outputs and raw LLM traces.
+
+To rerun only the judge against a prior execute run or sweep:
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
+  --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.compact.json" \
+  --judge-provider deepseek_judge \
+  --judge-only-source "artifacts/summarizer_critic_benchmark/sweeps/20260320T180920Z" \
+  --output-root "artifacts/summarizer_critic_benchmark/sporc_runs" \
+  --disable-stream-output
+```
+
+`--judge-only-source` accepts:
+
+- an execute run root such as `artifacts/.../sporc_runs/<run_id>`
+- an execute `report.json`
+- a sweep root such as `artifacts/.../sweeps/<sweep_id>`
+- a sweep `report.json`
+
+Repeat `--judge-only-source` to combine multiple execute runs or sweeps into one
+judge-only report. When the same `sample_id` appears multiple times across the
+reused artifacts, the judge-only run appends the duration label to keep the new
+sample artifact directories unique.
 
 ## Step 1: Prepare The Dataset
 

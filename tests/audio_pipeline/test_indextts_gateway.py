@@ -1,4 +1,4 @@
-"""Tests for IndexTTS gateway subprocess command construction."""
+﻿"""Tests for IndexTTS gateway subprocess command construction."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sys
 
-from card_framework.audio_pipeline.emotion_vectors import EmotionVector
+from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector
 from card_framework.audio_pipeline.gateways.indextts_voice_clone_gateway import (
     IndexTTSVoiceCloneGateway,
     _build_persistent_worker_command,
@@ -98,3 +98,4 @@ def test_gateway_prefers_direct_emotion_vector_over_emo_text() -> None:
     )
 
     assert resolved == [0.14, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.24]
+

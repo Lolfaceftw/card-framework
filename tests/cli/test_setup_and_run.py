@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 import sys
 from types import SimpleNamespace
 
 import card_framework.cli.setup_and_run as setup_and_run
+import pytest
 from card_framework.runtime.pipeline_sessions import PipelineSessionStore
 from card_framework.runtime.pipeline_sessions import PipelineResumePlan
+from card_framework.shared.perf import report_loading_duration
 
 
 def test_build_run_overrides_uses_explicit_output_root(
@@ -1173,3 +1176,339 @@ def test_main_preserves_child_pipeline_failure_reason(
     assert record is not None
     assert record.status == "failed"
     assert record.last_error == "Child runtime failed during stage-2."
+
+
+def test_main_preserves_bootstrap_error_when_session_store_reopen_fails(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """Do not let session persistence errors mask the original pipeline failure."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(
+        (
+            '{"segments": [{"speaker": "SPEAKER_00", "start_time": 0, '
+            '"end_time": 1000, "text": "hello"}], "metadata": {}}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_and_run, "uuid4", lambda: "session-store-failure")
+    monkeypatch.setattr(setup_and_run, "normalize_cli_overrides", lambda _: ())
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_bootstrap_start_stage",
+        lambda **_: "stage-2",
+    )
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "run_calibration", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del overrides, repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": False,
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": False,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "run_pipeline",
+        lambda **_: (_ for _ in ()).throw(
+            setup_and_run.BootstrapError(
+                step="pipeline_run",
+                message="Command failed with exit code 137.",
+            )
+        ),
+    )
+
+    def _raise_session_store_error(*args, **kwargs):
+        del args, kwargs
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(PipelineSessionStore, "get_session", _raise_session_store_error)
+    monkeypatch.setattr(
+        PipelineSessionStore,
+        "mark_session_failed",
+        _raise_session_store_error,
+    )
+
+    exit_code = setup_and_run.main([])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Command failed with exit code 137." in captured.out
+    assert "Session store warning during failure lookup" in captured.err
+    assert "Session store warning during failure persistence" in captured.err
+
+
+def test_run_calibration_uses_workspace_root_for_project_and_cwd(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Keep calibration checkpoint resolution anchored to the workspace root."""
+    workspace_root = tmp_path / "workspace"
+    output_root = tmp_path / "outputs"
+    config_path = workspace_root / "conf" / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("audio: {}\n", encoding="utf-8")
+
+    recorded: dict[str, object] = {}
+
+    def _fake_run_cmd(**kwargs) -> None:  # type: ignore[no-untyped-def]
+        recorded.update(kwargs)
+
+    monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", workspace_root)
+    monkeypatch.setattr(setup_and_run, "OUTPUT_ROOT", output_root)
+    monkeypatch.setattr(setup_and_run, "CONFIG_FILE_PATH", config_path)
+    monkeypatch.setattr(setup_and_run, "run_cmd", _fake_run_cmd)
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+
+    setup_and_run.run_calibration(uv_executable="uv")
+
+    assert recorded["cwd"] == workspace_root
+    assert recorded["command"][:7] == [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "card_framework.cli.calibrate",
+        "--project-root",
+        str(workspace_root),
+    ]
+
+
+def test_bootstrap_error_survives_loading_duration_context() -> None:
+    """Allow context managers to preserve BootstrapError traceback metadata."""
+    with pytest.raises(setup_and_run.BootstrapError, match="boom"):
+        with report_loading_duration("demo", reporter=lambda _: None):
+            raise setup_and_run.BootstrapError(step="demo", message="boom")
+
+
+def test_batch_run_preserves_bootstrap_error_when_session_store_reopen_fails(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """Batch runs should keep the child pipeline error visible when session IO fails."""
+    audio_path = tmp_path / "episode.wav"
+    audio_path.write_bytes(b"RIFF")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_and_run, "uuid4", lambda: "batch-session-failure")
+    monkeypatch.setattr(setup_and_run, "normalize_cli_overrides", lambda _: ())
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "run_calibration", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "write_batch_manifest", lambda **_: tmp_path / "batch_manifest.json")
+    monkeypatch.setattr(setup_and_run, "print_batch_summary", lambda **_: None)
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del overrides, repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": False,
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": False,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "run_pipeline",
+        lambda **_: (_ for _ in ()).throw(
+            setup_and_run.BootstrapError(
+                step="pipeline_run",
+                message="Command failed with exit code 137.",
+            )
+        ),
+    )
+
+    def _raise_session_store_error(*args, **kwargs):
+        del args, kwargs
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(PipelineSessionStore, "get_session", _raise_session_store_error)
+    monkeypatch.setattr(
+        PipelineSessionStore,
+        "mark_session_failed",
+        _raise_session_store_error,
+    )
+
+    exit_code = setup_and_run.main(["--audio-path", str(audio_path), "--no-menu"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Command failed with exit code 137." in captured.out
+    assert "Session store warning during failure lookup" in captured.err
+    assert "Session store warning during failure persistence" in captured.err
+
+
+def test_duration_sweep_preserves_bootstrap_error_when_session_store_reopen_fails(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """Duration sweeps should keep the child pipeline error visible when session IO fails."""
+    audio_path = tmp_path / "episode.wav"
+    audio_path.write_bytes(b"RIFF")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_and_run, "utc_now_compact", lambda: "20260331_123000")
+    monkeypatch.setattr(setup_and_run, "uuid4", lambda: "duration-session-failure")
+    monkeypatch.setattr(setup_and_run, "normalize_cli_overrides", lambda _: ())
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **_: setup_and_run.RepoSyncResult(
+            cloned=False,
+            updated=False,
+            pull_skipped_dirty=False,
+            lfs_pulled=False,
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **_: ("card-framework",),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **_: setup_and_run.ModelProvisionResult(
+            downloaded=False,
+            source="cached",
+        ),
+    )
+    monkeypatch.setattr(setup_and_run, "run_calibration", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "print_duration_sweep_summary", lambda **_: None)
+
+    def _fake_resolve_repo_backed_boolean_override(
+        overrides,
+        *,
+        key: str,
+        repo_key_path,
+        fallback: bool,
+    ) -> bool:
+        del overrides, repo_key_path, fallback
+        values = {
+            "audio.voice_clone.enabled": False,
+            "audio.voice_clone.live_drafting.enabled": False,
+            "audio.interjector.enabled": False,
+            "audio.speaker_samples.enabled": False,
+        }
+        return values[key]
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "resolve_repo_backed_boolean_override",
+        _fake_resolve_repo_backed_boolean_override,
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "run_pipeline",
+        lambda **_: (_ for _ in ()).throw(
+            setup_and_run.BootstrapError(
+                step="pipeline_run",
+                message="Command failed with exit code 137.",
+            )
+        ),
+    )
+
+    def _raise_session_store_error(*args, **kwargs):
+        del args, kwargs
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(PipelineSessionStore, "get_session", _raise_session_store_error)
+    monkeypatch.setattr(
+        PipelineSessionStore,
+        "mark_session_failed",
+        _raise_session_store_error,
+    )
+
+    exit_code = setup_and_run.main(
+        ["--audio-path", str(audio_path), "--duration-sweep", "--no-menu"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Command failed with exit code 137." in captured.out
+    assert "Session store warning during failure lookup" in captured.err
+    assert "Session store warning during failure persistence" in captured.err

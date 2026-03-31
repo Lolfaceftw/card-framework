@@ -1,4 +1,4 @@
-"""Summarizer executor with duration-aware incremental tool use."""
+﻿"""Summarizer executor with duration-aware incremental tool use."""
 
 from __future__ import annotations
 
@@ -12,29 +12,29 @@ from a2a.server.events import EventQueue
 from card_framework.agents.base import BaseA2AExecutor
 from card_framework.agents.client import AgentTaskClient, get_default_agent_client
 from card_framework.agents.dtos import RetrieveTaskRequest
-from card_framework.agents.loop_context import build_loop_context_prompt_block
-from card_framework.agents.message_registry import MessageRegistry
-from card_framework.agents.prompt_compaction import (
+from card_framework.agents.loop.loop_context import build_loop_context_prompt_block
+from card_framework.agents.loop.message_registry import MessageRegistry
+from card_framework.agents.loop.prompt_compaction import (
     ContextBudgetManager,
     ContextBudgetSnapshot,
     PromptCompactionRequest,
     PromptCompactionStrategy,
 )
-from card_framework.agents.summarizer_loop_controller import SummarizerLoopController
-from card_framework.agents.summarizer_tool_dispatcher import (
+from card_framework.agents.loop.summarizer_loop_controller import SummarizerLoopController
+from card_framework.agents.loop.summarizer_tool_dispatcher import (
     SummarizerToolDispatcher,
     coerce_positive_int,
 )
-from card_framework.agents.tool_handlers import (
+from card_framework.agents.loop.tool_handlers import (
     build_revise_tools,
     build_summarizer_tools,
 )
 from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
-from card_framework.audio_pipeline.emotion_vectors import serialize_emotion_vector
+from card_framework.audio_pipeline.emotion.emotion_vectors import serialize_emotion_vector
 from card_framework.audio_pipeline.live_draft_voice_clone import (
     LiveDraftVoiceCloneSession,
 )
-from card_framework.audio_pipeline.turn_emotion_resolution import (
+from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     TurnEmotionResolutionStrategy,
 )
 from card_framework.audio_pipeline.voice_clone_orchestrator import (
@@ -794,3 +794,4 @@ class SummarizerExecutor(BaseA2AExecutor):
             messages=messages,
             context_data=context_data,
         )
+

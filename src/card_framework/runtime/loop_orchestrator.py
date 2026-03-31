@@ -1,4 +1,4 @@
-"""Summarizer-critic orchestration for duration-aware convergence."""
+﻿"""Summarizer-critic orchestration for duration-aware convergence."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from card_framework.agents.dtos import (
     IndexTaskRequest,
     SummarizerTaskRequest,
 )
-from card_framework.agents.loop_context import SummarizerLoopMemory
+from card_framework.agents.loop.loop_context import SummarizerLoopMemory
 from card_framework.shared.events import EventBus, get_event_bus
 from card_framework.orchestration.transcript import TranscriptLike, coerce_transcript
 
@@ -656,3 +656,4 @@ class Orchestrator:
             "final_feedback": feedback,
             "iteration_details": iteration_details,
         }
+

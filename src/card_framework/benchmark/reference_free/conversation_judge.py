@@ -38,7 +38,7 @@ class JudgeLLMProtocol(Protocol):
 class ConversationSummaryJudgeConfig:
     """Configuration for reusable conversation-summary judge scoring."""
 
-    max_tokens: int = 900
+    max_tokens: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

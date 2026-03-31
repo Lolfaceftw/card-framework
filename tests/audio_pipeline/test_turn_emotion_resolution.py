@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+from card_framework.audio_pipeline.emotion.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
     SummaryTurnEmotionLinkingConfig,
 )
-from card_framework.audio_pipeline.turn_emotion_resolution import (
+from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     SourceLinkedTurnEmotionResolutionStrategy,
     TurnEmotionResolutionConfig,
 )
@@ -96,3 +96,4 @@ def test_resolution_strategy_falls_back_to_explicit_then_no_vector_by_default() 
     )
     assert no_vector.emotion_vector is None
     assert no_vector.emotion_vector_source == ""
+

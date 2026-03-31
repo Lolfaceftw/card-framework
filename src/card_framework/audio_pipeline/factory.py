@@ -1,4 +1,4 @@
-"""Composition root for audio pipeline adapters."""
+﻿"""Composition root for audio pipeline adapters."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from card_framework.audio_pipeline.affect_analysis import (
+from card_framework.audio_pipeline.emotion.affect_analysis import (
     AffectPresetMappingConfig,
     AffectProfilingConfig,
     EmotionVectorMappingConfig,
@@ -43,7 +43,7 @@ from card_framework.audio_pipeline.interjector import (
     InterjectorOrchestrator,
     LLMInterjectionPlanner,
 )
-from card_framework.audio_pipeline.summary_turn_emotion_linker import (
+from card_framework.audio_pipeline.emotion.summary_turn_emotion_linker import (
     SummaryTurnEmotionLinker,
     SummaryTurnEmotionLinkingConfig,
 )
@@ -56,7 +56,7 @@ from card_framework.audio_pipeline.gateways.indextts_voice_clone_gateway import 
 from card_framework.audio_pipeline.orchestrator import AudioToScriptOrchestrator
 from card_framework.audio_pipeline.runtime import resolve_device, resolve_path
 from card_framework.audio_pipeline.speaker_samples import SpeakerSampleGenerator
-from card_framework.audio_pipeline.turn_emotion_resolution import (
+from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     SourceLinkedTurnEmotionResolutionStrategy,
     TurnEmotionResolutionConfig,
 )
@@ -680,6 +680,9 @@ def _build_separator(
             window_context_seconds=int(
                 separation_cfg.get("window_context_seconds", 5)
             ),
+            cuda_window_length_seconds=_optional_int(
+                separation_cfg.get("cuda_window_length_seconds", 180)
+            ),
         )
     if provider in {"passthrough", "none"}:
         return PassthroughSourceSeparator()
@@ -706,6 +709,9 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
             enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
             require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),
             forced_alignment_batch_size=int(forced_alignment_cfg.get("batch_size", 8)),
+            forced_alignment_max_audio_duration_seconds=_optional_int(
+                forced_alignment_cfg.get("max_audio_duration_seconds", 3600)
+            ),
         )
     if provider == "faster_whisper":
         return FasterWhisperTranscriber(
@@ -727,6 +733,9 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
             ),
             forced_alignment_batch_size=int(
                 forced_alignment_cfg.get("batch_size", 8)
+            ),
+            forced_alignment_max_audio_duration_seconds=_optional_int(
+                forced_alignment_cfg.get("max_audio_duration_seconds", 3600)
             ),
         )
     raise ValueError(f"Unsupported ASR provider: {provider}")
@@ -753,6 +762,18 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
             max_speakers=_optional_int(diarization_cfg.get("max_speakers", 10)),
             allow_single_speaker_fallback=bool(
                 diarization_cfg.get("allow_single_speaker_fallback", False)
+            ),
+            inference_batch_size=int(
+                diarization_cfg.get("nemo_inference_batch_size", 8)
+            ),
+            cuda_long_audio_guard_enabled=bool(
+                diarization_cfg.get("nemo_cuda_long_audio_guard_enabled", False)
+            ),
+            cuda_max_audio_duration_seconds=_optional_int(
+                diarization_cfg.get("nemo_cuda_max_audio_duration_seconds", 3600)
+            ),
+            long_audio_fallback_device=str(
+                diarization_cfg.get("nemo_long_audio_fallback_device", "cpu")
             ),
             vad_onset=_configured_float(diarization_cfg.get("vad_onset"), default=0.8),
             vad_offset=_configured_float(diarization_cfg.get("vad_offset"), default=0.6),
@@ -1126,4 +1147,5 @@ def _default_index_tts_checkpoints_dir(
     """Return the default IndexTTS checkpoints directory for one project root."""
     del runner_project_dir
     return (project_root / "checkpoints" / "index_tts").resolve()
+
 

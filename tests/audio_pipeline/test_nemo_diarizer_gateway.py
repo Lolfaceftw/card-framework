@@ -94,6 +94,7 @@ def test_nemo_diarizer_builds_msdd_config_with_vad_postprocessing_overrides(
     assert vad_parameters.pad_offset == pytest.approx(0.0)
     assert vad_parameters.min_duration_on == pytest.approx(0.3)
     assert vad_parameters.min_duration_off == pytest.approx(0.7)
+    assert cfg.batch_size == 8
     assert cfg.diarizer.ignore_overlap is False
     clustering_parameters = cfg.diarizer.clustering.parameters
     assert clustering_parameters.oracle_num_speakers is False
@@ -166,3 +167,84 @@ def test_nemo_diarizer_builds_clustering_search_overrides(
     assert clustering_parameters.max_rp_threshold == pytest.approx(0.4)
     assert clustering_parameters.sparse_search_volume == 60
     assert clustering_parameters.maj_vote_spk_count is True
+
+
+def test_nemo_diarizer_falls_back_to_cpu_for_long_cuda_audio(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"RIFF")
+    diarizer = NemoSpeakerDiarizer(
+        cuda_long_audio_guard_enabled=True,
+        cuda_max_audio_duration_seconds=60,
+        long_audio_fallback_device="cpu",
+    )
+
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.gateways.nemo_diarizer_gateway.probe_audio_duration_ms",
+        lambda _: 120_000,
+    )
+
+    messages: list[str] = []
+
+    def _capture(message: str) -> None:
+        messages.append(message)
+
+    event_bus.subscribe("system_message", _capture)
+    try:
+        resolved_device = diarizer._resolve_runtime_device(
+            audio_path=audio_path,
+            requested_device="cuda",
+        )
+    finally:
+        event_bus.unsubscribe("system_message", _capture)
+
+    assert resolved_device == "cpu"
+    assert messages == [
+        "Switching NeMo diarization to CPU for 2.0-minute audio because it exceeds "
+        "audio.diarization.nemo_cuda_max_audio_duration_seconds=60; avoiding the "
+        "long-form CUDA watchdog path."
+    ]
+
+
+def test_nemo_diarizer_keeps_cuda_when_long_audio_guard_disabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"RIFF")
+    diarizer = NemoSpeakerDiarizer(cuda_max_audio_duration_seconds=60)
+
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.gateways.nemo_diarizer_gateway.probe_audio_duration_ms",
+        lambda _: 120_000,
+    )
+
+    resolved_device = diarizer._resolve_runtime_device(
+        audio_path=audio_path,
+        requested_device="cuda",
+    )
+
+    assert resolved_device == "cuda"
+
+
+def test_nemo_diarizer_keeps_cuda_within_duration_limit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"RIFF")
+    diarizer = NemoSpeakerDiarizer(cuda_max_audio_duration_seconds=180)
+
+    monkeypatch.setattr(
+        "card_framework.audio_pipeline.gateways.nemo_diarizer_gateway.probe_audio_duration_ms",
+        lambda _: 120_000,
+    )
+
+    resolved_device = diarizer._resolve_runtime_device(
+        audio_path=audio_path,
+        requested_device="cuda",
+    )
+
+    assert resolved_device == "cuda"
