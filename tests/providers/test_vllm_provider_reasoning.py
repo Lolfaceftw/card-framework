@@ -117,6 +117,21 @@ def _build_provider(
     )
 
 
+def test_provider_rejects_unadvertised_explicit_model(free_tcp_port: int) -> None:
+    """Fail fast when a pinned benchmark model is not served by the endpoint."""
+    with run_openai_compatible_server(
+        port=free_tcp_port,
+        model_id="Qwen3-32B",
+    ):
+        with pytest.raises(ValueError, match="Qwen3-14B"):
+            VLLMProvider(
+                base_url=f"http://127.0.0.1:{free_tcp_port}/v1",
+                api_key="EMPTY",
+                model="Qwen3-14B",
+                enable_thinking=False,
+            )
+
+
 def test_generate_requests_thinking_mode(free_tcp_port: int) -> None:
     """Send the real reasoning-mode request body to a local vLLM-style server."""
     with run_openai_compatible_server(port=free_tcp_port) as server:

@@ -26,6 +26,11 @@ Use these SPoRC benchmark provider ids from
 - Local open/open-weight contestant: `vllm_default`
 - Google judge: `google_gemini_3_1_pro_preview_judge`
 
+For the local `vllm_default` contestant, also set `CARD_FRAMEWORK_VLLM_MODEL`
+or `VLLM_MODEL` to the exact served model id you want benchmarked. Without
+that pin, the local vLLM adapter falls back to the first model exposed by the
+server's `/models` endpoint.
+
 Budget-safety defaults in the benchmark path:
 
 - Gemini `gemini-3.1-pro-preview` judge keeps thinking enabled.

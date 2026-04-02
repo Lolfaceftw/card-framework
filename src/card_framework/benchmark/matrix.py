@@ -27,6 +27,10 @@ _VLLM_URL_ENV_NAMES = (
     "CARD_FRAMEWORK_VLLM_BASE_URL",
     "VLLM_BASE_URL",
 )
+_VLLM_MODEL_ENV_NAMES = (
+    "CARD_FRAMEWORK_VLLM_MODEL",
+    "VLLM_MODEL",
+)
 _LEGACY_CONFIG_PATH = REPO_ROOT / "conf" / "config.yaml"
 _LEGACY_PROVIDER_TARGET_PREFIX = "providers."
 _CURRENT_PROVIDER_TARGET_PREFIX = "card_framework.providers."
@@ -291,6 +295,7 @@ def _apply_vllm_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
     """Override vLLM provider config from benchmark-friendly environment variables."""
     if config.get("_target_") != _VLLM_PROVIDER_TARGET:
         return config
+    resolved = dict(config)
     for env_name in _VLLM_URL_ENV_NAMES:
         raw_value = os.getenv(env_name)
         if raw_value is None:
@@ -298,10 +303,18 @@ def _apply_vllm_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
         normalized = _normalize_vllm_base_url(raw_value)
         if not normalized:
             continue
-        resolved = dict(config)
         resolved["base_url"] = normalized
-        return resolved
-    return config
+        break
+    for env_name in _VLLM_MODEL_ENV_NAMES:
+        raw_value = os.getenv(env_name)
+        if raw_value is None:
+            continue
+        normalized = raw_value.strip()
+        if not normalized:
+            continue
+        resolved["model"] = normalized
+        break
+    return resolved
 
 
 def resolve_provider_config(profile: ProviderProfile) -> dict[str, Any]:

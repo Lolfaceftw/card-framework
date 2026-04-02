@@ -1,3 +1,7 @@
+### 2026-04-02T19:17:42+08:00 - Reproducible SPoRC vLLM Budget Runs Must Pin The Local Model Id
+- Problem: The `vllm_default` benchmark profile only pointed at a local OpenAI-compatible endpoint and then accepted whichever model the server listed first at `/models`. That made the SPoRC budget-plan "local open/open-weight contestant" ambiguous and not reproducible across different vLLM hosts.
+- Solution: Let the vLLM provider accept an explicit `model`, honor `CARD_FRAMEWORK_VLLM_MODEL` / `VLLM_MODEL` benchmark overrides, validate that the requested id is actually served, and document that the SPoRC budget plan must set one of those env vars when using `vllm_default`.
+
 ### 2026-04-02T15:40:00+08:00 - Budget-Safe SPoRC Sweep Profiles Must Explicitly Disable Contestant Thinking And Use Responses For OpenAI GPT-5.4 Mini
 - Problem: The SPoRC benchmark profiles did not include OpenAI `gpt-5.4-mini`, Anthropic `claude-haiku-4.5`, or a Gemini `gemini-3.1-pro-preview` judge profile, and the existing Google/VLLM defaults could still leave non-judge thinking on. For OpenAI GPT-5.4 models, forcing `reasoning: none` in Chat Completions also breaks tool calling, so a naive adapter would fail the summarizer/critic loop.
 - Solution: Add dedicated SPoRC benchmark profiles for the budget-plan providers, implement an OpenAI Responses-API provider for GPT-5.4 mini tool loops, keep Gemini 3.1 Pro judge thinking enabled, and force all other benchmark contestants onto explicit thinking-off settings instead of relying on omitted fields.

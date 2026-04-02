@@ -39,6 +39,7 @@ class VLLMProvider(LLMProvider):
     Args:
         base_url: The base URL of the API server (for example ``http://host:8000/v1``).
         api_key: API key (use ``"EMPTY"`` for keyless vLLM servers).
+        model: Optional explicit model id to pin for reproducible benchmarks.
         enable_thinking: Whether to request reasoning/thinking chunks from vLLM.
         fallback_to_reasoning_content: Use ``reasoning_content`` when final content is empty.
         fallback_requires_structured_reasoning: Only fallback when reasoning looks structured.
@@ -51,6 +52,7 @@ class VLLMProvider(LLMProvider):
         self,
         base_url: str,
         api_key: str = "EMPTY",
+        model: str | None = None,
         enable_thinking: bool = True,
         extra_body: dict[str, Any] | None = None,
         fallback_to_reasoning_content: bool = True,
@@ -61,6 +63,7 @@ class VLLMProvider(LLMProvider):
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
+        self.requested_model = str(model).strip() if model else ""
         self.enable_thinking = enable_thinking
         self.extra_body = self._coerce_jsonable(extra_body) or {}
         self.fallback_to_reasoning_content = bool(fallback_to_reasoning_content)
@@ -82,7 +85,7 @@ class VLLMProvider(LLMProvider):
         )
 
         # Resolve model id from the server on startup.
-        self.model_id = self._fetch_model_id()
+        self.model_id = self._fetch_model_id(self.requested_model or None)
         event_bus.publish(
             "system_message",
             f"Connected to VLLM -> model={self.model_id}, url={self.base_url}",
@@ -104,14 +107,35 @@ class VLLMProvider(LLMProvider):
         """Replace the streaming callback sink at runtime."""
         self._response_callback = response_callback
 
-    def _fetch_model_id(self) -> str:
-        """Return the first available model id from the configured endpoint."""
+    def _fetch_model_id(self, requested_model: str | None = None) -> str:
+        """Return a validated model id from the configured endpoint."""
         resp = requests.get(
             f"{self.base_url}/models",
             timeout=self.request_timeout_seconds,
         )
         resp.raise_for_status()
-        return str(resp.json()["data"][0]["id"])
+        payload = resp.json()
+        raw_models = payload.get("data") if isinstance(payload, Mapping) else None
+        available_model_ids = [
+            str(item.get("id", "")).strip()
+            for item in raw_models or []
+            if isinstance(item, Mapping) and str(item.get("id", "")).strip()
+        ]
+        if not available_model_ids:
+            raise ValueError(
+                f"No models were advertised by the vLLM endpoint at {self.base_url}/models."
+            )
+        if requested_model is None:
+            return available_model_ids[0]
+        normalized_requested_model = requested_model.strip()
+        if normalized_requested_model in available_model_ids:
+            return normalized_requested_model
+        available_models_display = ", ".join(available_model_ids)
+        raise ValueError(
+            "Configured vLLM model "
+            f"'{normalized_requested_model}' is not advertised by {self.base_url}/models. "
+            f"Available models: {available_models_display}."
+        )
 
     def _maybe_enable_thinking(self, create_kwargs: dict[str, Any]) -> dict[str, Any]:
         """Attach configured OpenAI-compatible extra-body payloads."""

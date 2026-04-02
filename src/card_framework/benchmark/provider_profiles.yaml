@@ -1,6 +1,6 @@
 providers:
   - id: vllm_default
-    description: OpenAI-compatible vLLM endpoint running locally.
+    description: OpenAI-compatible vLLM endpoint running locally; pin the served model with CARD_FRAMEWORK_VLLM_MODEL or VLLM_MODEL for reproducible benchmark runs.
     required_env: []
     llm:
       _target_: card_framework.providers.vllm_provider.VLLMProvider
