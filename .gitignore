@@ -47,3 +47,6 @@ audio.wav
 *.wav
 *.mp3
 third_party/index_tts/
+
+# Local research workspaces and exports
+research/*
