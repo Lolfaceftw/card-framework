@@ -25,6 +25,24 @@ providers:
       model: "deepseek-chat"
       base_url: "https://api.deepseek.com"
 
+  - id: openai_gpt_5_4_mini
+    description: OpenAI GPT-5.4 mini with reasoning disabled for SPoRC budget sweeps.
+    required_env: ["OPENAI_API_KEY"]
+    llm:
+      _target_: card_framework.providers.openai_provider.OpenAIProvider
+      api_key: "$ENV{OPENAI_API_KEY}"
+      model: "gpt-5.4-mini"
+      enable_thinking: false
+
+  - id: anthropic_claude_haiku_4_5
+    description: Anthropic Claude Haiku 4.5 with thinking disabled for SPoRC budget sweeps.
+    required_env: ["ANTHROPIC_API_KEY"]
+    llm:
+      _target_: card_framework.providers.anthropic_provider.AnthropicProvider
+      api_key: "$ENV{ANTHROPIC_API_KEY}"
+      model: "claude-haiku-4-5"
+      enable_thinking: false
+
   - id: deepseek_judge
     description: Dedicated DeepSeek reasoner backend for reference-free scoring.
     required_env: ["DEEPSEEK_API_KEY"]
@@ -49,6 +67,15 @@ providers:
       _target_: card_framework.providers.google_genai_provider.GoogleGenAIProvider
       api_key: "$ENV{GEMINI_API_KEY}"
       model: "gemini-2.5-pro"
+
+  - id: google_gemini_3_1_pro_preview_judge
+    description: Gemini 3.1 Pro Preview judge with default thinking enabled.
+    required_env: ["GEMINI_API_KEY"]
+    llm:
+      _target_: card_framework.providers.google_genai_provider.GoogleGenAIProvider
+      api_key: "$ENV{GEMINI_API_KEY}"
+      model: "gemini-3.1-pro-preview"
+      enable_thinking: true
 
   - id: huggingface_toolace
     description: Hugging Face ToolACE backend.

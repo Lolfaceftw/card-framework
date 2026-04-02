@@ -15,6 +15,22 @@ This note records the under-$50 benchmark plan discussed on 2026-04-02.
   - one local open/open-weight model, preferably `Qwen3-32B`, `Qwen3-14B`, or `Llama 4 Scout`
 - Judge: `gemini-3.1-pro-preview`
 
+## Repo provider-profile ids for this plan
+
+Use these SPoRC benchmark provider ids from
+`src/card_framework/benchmark/provider_profiles.yaml`:
+
+- OpenAI contestant: `openai_gpt_5_4_mini`
+- Anthropic contestant: `anthropic_claude_haiku_4_5`
+- DeepSeek contestant: `deepseek_chat`
+- Local open/open-weight contestant: `vllm_default`
+- Google judge: `google_gemini_3_1_pro_preview_judge`
+
+Budget-safety defaults in the benchmark path:
+
+- Gemini `gemini-3.1-pro-preview` judge keeps thinking enabled.
+- Other budget-plan contestants default to thinking disabled; custom Gemini 3 Pro contestant profiles may still fall back to provider defaults because Gemini does not support thinking-off there.
+
 Why this design:
 
 - It still covers both proprietary and open/open-weight models.

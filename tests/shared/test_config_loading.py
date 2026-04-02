@@ -98,7 +98,9 @@ def test_normalize_runtime_config_mapping_preserves_explicit_runtime_sections() 
     assert normalized["stage_llm"]["interjector"] == {}
 
 
-def test_validate_runtime_credentials_reports_missing_selected_provider_secret() -> None:
+def test_validate_runtime_credentials_reports_missing_selected_provider_secret() -> (
+    None
+):
     """Raise an actionable error when the selected provider secret is absent."""
 
     with pytest.raises(RuntimeConfigError, match="DEEPSEEK_API_KEY"):
@@ -137,6 +139,31 @@ def test_validate_runtime_credentials_reports_missing_anthropic_secret() -> None
                             "_target_": "card_framework.providers.anthropic_provider.AnthropicProvider",
                             "api_key": "",
                             "model": "claude-opus-4-6",
+                        }
+                    },
+                    "embedding": {
+                        "disabled": {
+                            "_target_": "card_framework.providers.null_provider.NoOpEmbeddingProvider"
+                        }
+                    },
+                },
+            }
+        )
+
+
+def test_validate_runtime_credentials_reports_missing_openai_secret() -> None:
+    """OpenAI profile selections should fail fast without an API key."""
+
+    with pytest.raises(RuntimeConfigError, match="OPENAI_API_KEY"):
+        validate_runtime_credentials(
+            {
+                "selection": {"llm": "openai_gpt_5_4_mini", "embedding": "disabled"},
+                "profiles": {
+                    "llm": {
+                        "openai_gpt_5_4_mini": {
+                            "_target_": "card_framework.providers.openai_provider.OpenAIProvider",
+                            "api_key": "",
+                            "model": "gpt-5.4-mini",
                         }
                     },
                     "embedding": {

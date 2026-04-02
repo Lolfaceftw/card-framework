@@ -46,6 +46,11 @@ _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _SETUP_AND_RUN_MODULE = "card_framework.cli.setup_and_run"
 _CUDA_VERSION_PATTERN = re.compile(r"(\d+\.\d+)")
 _PROVIDER_API_KEY_REQUIREMENTS: dict[str, dict[str, object]] = {
+    "card_framework.providers.openai_provider.OpenAIProvider": {
+        "credential_id": "openai_api_key",
+        "prompt_label": "OpenAI API key",
+        "env_var_names": ("OPENAI_API_KEY",),
+    },
     "card_framework.providers.deepseek_provider.DeepSeekProvider": {
         "credential_id": "deepseek_api_key",
         "prompt_label": "DeepSeek API key",
@@ -299,10 +304,13 @@ def _prepared_inference_config(
             )
             config_modified = True
         elif resolved_vllm_api_key:
-            config_modified = _apply_optional_vllm_api_key(
-                effective_config,
-                api_key=resolved_vllm_api_key,
-            ) or config_modified
+            config_modified = (
+                _apply_optional_vllm_api_key(
+                    effective_config,
+                    api_key=resolved_vllm_api_key,
+                )
+                or config_modified
+            )
 
         config_modified = (
             _resolve_runtime_credentials(effective_config) or config_modified
@@ -400,7 +408,10 @@ def _apply_optional_vllm_api_key(config: dict[str, Any], *, api_key: str) -> boo
         return False
     modified = False
     for field_path, section_cfg in _iter_llm_sections(config):
-        if _resolve_optional_text(str(section_cfg.get("_target_", ""))) != _VLLM_PROVIDER_TARGET:
+        if (
+            _resolve_optional_text(str(section_cfg.get("_target_", "")))
+            != _VLLM_PROVIDER_TARGET
+        ):
             continue
         if _resolve_optional_text(str(section_cfg.get("api_key", ""))) == api_key:
             continue
@@ -444,8 +455,7 @@ def _resolve_runtime_credentials(config: dict[str, Any]) -> bool:
             "CARD infer is missing required runtime credentials.\n"
             "Provide them in CARD_FRAMEWORK_CONFIG, set the documented environment "
             "variable, or rerun from an interactive terminal so infer() can prompt "
-            "securely.\n"
-            + "\n".join(f"- {message}" for message in missing_messages)
+            "securely.\n" + "\n".join(f"- {message}" for message in missing_messages)
         )
 
     return modified
@@ -532,7 +542,10 @@ def _collect_credential_requirements(
 
     audio_cfg = _as_mapping(config.get("audio", {}))
     diarization_cfg = _as_mapping(audio_cfg.get("diarization", {}))
-    if _resolve_optional_text(str(diarization_cfg.get("provider", ""))) == "pyannote_community1":
+    if (
+        _resolve_optional_text(str(diarization_cfg.get("provider", "")))
+        == "pyannote_community1"
+    ):
         pyannote_cfg = _as_mapping(diarization_cfg.get("pyannote", {}))
         auth_token_env = _resolve_optional_text(
             str(pyannote_cfg.get("auth_token_env", ""))
@@ -580,9 +593,7 @@ def _iter_llm_sections(
 
 def _prompt_for_requirement(requirement: _CredentialRequirement) -> str:
     """Prompt for one missing credential in an interactive terminal."""
-    prompt = (
-        f"Enter {requirement.prompt_label} for {requirement.provider_label}: "
-    )
+    prompt = f"Enter {requirement.prompt_label} for {requirement.provider_label}: "
     if requirement.secret:
         return getpass.getpass(prompt).strip()
     return input(prompt).strip()
@@ -753,7 +764,10 @@ def _detect_host_cuda_runtime() -> _HostCudaDetection:
         if detected_version:
             return _HostCudaDetection(version=detected_version, source="CUDA_PATH")
 
-    for command, source in ((["nvidia-smi"], "nvidia-smi"), (["nvcc", "--version"], "nvcc")):
+    for command, source in (
+        (["nvidia-smi"], "nvidia-smi"),
+        (["nvcc", "--version"], "nvcc"),
+    ):
         detected_version = _detect_cuda_version_from_command(command)
         if detected_version:
             return _HostCudaDetection(version=detected_version, source=source)
@@ -999,9 +1013,7 @@ def _resolve_config_path() -> Path:
             f"Configured CARD framework config does not exist: {candidate}"
         )
     if candidate.suffix.lower() not in {".yaml", ".yml"}:
-        raise ValueError(
-            "CARD_FRAMEWORK_CONFIG must point to a .yaml or .yml file."
-        )
+        raise ValueError("CARD_FRAMEWORK_CONFIG must point to a .yaml or .yml file.")
     return candidate
 
 
@@ -1010,7 +1022,9 @@ def _resolve_target_duration_seconds(target_duration_seconds: int) -> int:
     if isinstance(target_duration_seconds, bool) or not isinstance(
         target_duration_seconds, int
     ):
-        raise ValueError("target_duration_seconds must be an integer number of seconds.")
+        raise ValueError(
+            "target_duration_seconds must be an integer number of seconds."
+        )
     if target_duration_seconds <= 0:
         raise ValueError("target_duration_seconds must be greater than zero.")
     return target_duration_seconds
@@ -1119,21 +1133,30 @@ def _build_inference_result(
     summary_xml_path = output_dir / "summary.xml"
     work_dir = output_dir / "audio_stage"
 
-    voice_clone_dir = work_dir / str(voice_clone_cfg.get("output_dir_name", "voice_clone"))
+    voice_clone_dir = work_dir / str(
+        voice_clone_cfg.get("output_dir_name", "voice_clone")
+    )
     voice_clone_manifest_path = _optional_existing_path(
         voice_clone_dir / str(voice_clone_cfg.get("manifest_filename", "manifest.json"))
     )
     voice_clone_audio_path = _optional_existing_path(
-        voice_clone_dir / str(voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav"))
+        voice_clone_dir
+        / str(voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav"))
     )
 
-    interjector_dir = work_dir / str(interjector_cfg.get("output_dir_name", "interjector"))
+    interjector_dir = work_dir / str(
+        interjector_cfg.get("output_dir_name", "interjector")
+    )
     interjector_manifest_path = _optional_existing_path(
-        interjector_dir / str(interjector_cfg.get("manifest_filename", "interjector_manifest.json"))
+        interjector_dir
+        / str(interjector_cfg.get("manifest_filename", "interjector_manifest.json"))
     )
     interjector_audio_path = _optional_existing_path(
-        interjector_dir / str(
-            interjector_cfg.get("merged_output_filename", "voice_cloned_interjected.wav")
+        interjector_dir
+        / str(
+            interjector_cfg.get(
+                "merged_output_filename", "voice_cloned_interjected.wav"
+            )
         )
     )
 

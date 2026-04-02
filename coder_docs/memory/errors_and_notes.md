@@ -1,3 +1,7 @@
+### 2026-04-02T15:40:00+08:00 - Budget-Safe SPoRC Sweep Profiles Must Explicitly Disable Contestant Thinking And Use Responses For OpenAI GPT-5.4 Mini
+- Problem: The SPoRC benchmark profiles did not include OpenAI `gpt-5.4-mini`, Anthropic `claude-haiku-4.5`, or a Gemini `gemini-3.1-pro-preview` judge profile, and the existing Google/VLLM defaults could still leave non-judge thinking on. For OpenAI GPT-5.4 models, forcing `reasoning: none` in Chat Completions also breaks tool calling, so a naive adapter would fail the summarizer/critic loop.
+- Solution: Add dedicated SPoRC benchmark profiles for the budget-plan providers, implement an OpenAI Responses-API provider for GPT-5.4 mini tool loops, keep Gemini 3.1 Pro judge thinking enabled, and force all other benchmark contestants onto explicit thinking-off settings instead of relying on omitted fields.
+
 ### 2026-04-02T16:45:00+08:00 - Benchmark Budget Estimates Must Call Out Hidden Thinking-Token Risk
 - Problem: Repo-default provider settings can enable reasoning or thinking on Anthropic, Gemini, and GLM requests, but a benchmark budget estimate built only from visible prompt, tool, and output payloads undercounts the real billed usage when those hidden thought tokens are charged.
 - Solution: When documenting or approving benchmark budgets, label visible-token calculations as lower-bound estimates, explicitly note provider-side thinking defaults, and add a separate safer wallet top-up recommendation or disable thinking for the budget-constrained run.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import json
-from typing import Any
+from typing import Any, cast
 
 from google import genai
 from google.genai import types
@@ -33,8 +33,7 @@ def _coerce_jsonable(value: Any) -> Any:
         return _coerce_jsonable(value.model_dump())
     if isinstance(value, Mapping):
         return {
-            str(key): _coerce_jsonable(raw_value)
-            for key, raw_value in value.items()
+            str(key): _coerce_jsonable(raw_value) for key, raw_value in value.items()
         }
     if isinstance(value, list | tuple):
         return [_coerce_jsonable(item) for item in value]
@@ -74,6 +73,8 @@ class GoogleGenAIProvider(LLMProvider):
         model: str = "gemini-2.5-pro",
         *,
         enable_thinking: bool = True,
+        thinking_level: str | None = None,
+        thinking_budget: int | None = None,
         request_timeout_seconds: float = 60.0,
         response_callback: LLMResponseCallback | None = None,
     ) -> None:
@@ -84,6 +85,12 @@ class GoogleGenAIProvider(LLMProvider):
         self.api_key = str(api_key).strip()
         self.model = str(model).strip() or "gemini-2.5-pro"
         self.enable_thinking = bool(enable_thinking)
+        self.thinking_level = (
+            str(thinking_level).strip().lower() if thinking_level else None
+        )
+        self.thinking_budget = (
+            int(thinking_budget) if thinking_budget is not None else None
+        )
         self.request_timeout_seconds = max(1.0, float(request_timeout_seconds))
         self._client = genai.Client(api_key=self.api_key)
         self._response_callback: LLMResponseCallback = (
@@ -122,7 +129,7 @@ class GoogleGenAIProvider(LLMProvider):
         try:
             response_stream = self._client.models.generate_content_stream(
                 model=self.model,
-                contents=contents,
+                contents=cast(Any, contents),
                 config=config,
             )
             full_content = ""
@@ -164,7 +171,7 @@ class GoogleGenAIProvider(LLMProvider):
             )
             response = self._client.models.generate_content(
                 model=self.model,
-                contents=contents,
+                contents=cast(Any, contents),
                 config=config,
             )
             assistant_message = self._assistant_message_from_response(response)
@@ -209,7 +216,7 @@ class GoogleGenAIProvider(LLMProvider):
         if use_non_streaming:
             response = self._client.models.generate_content(
                 model=self.model,
-                contents=contents,
+                contents=cast(Any, contents),
                 config=config,
             )
             assistant_message = self._assistant_message_from_response(response)
@@ -238,7 +245,7 @@ class GoogleGenAIProvider(LLMProvider):
         try:
             response_stream = self._client.models.generate_content_stream(
                 model=self.model,
-                contents=contents,
+                contents=cast(Any, contents),
                 config=config,
             )
             assistant_message = self._stream_chat_response(
@@ -264,7 +271,7 @@ class GoogleGenAIProvider(LLMProvider):
             )
             response = self._client.models.generate_content(
                 model=self.model,
-                contents=contents,
+                contents=cast(Any, contents),
                 config=config,
             )
             assistant_message = self._assistant_message_from_response(response)
@@ -300,10 +307,9 @@ class GoogleGenAIProvider(LLMProvider):
             config_kwargs["system_instruction"] = system_instruction.strip()
         if max_tokens is not None:
             config_kwargs["max_output_tokens"] = max_tokens
-        if self.enable_thinking:
-            config_kwargs["thinking_config"] = types.ThinkingConfig(
-                include_thoughts=True
-            )
+        thinking_config = self._resolve_thinking_config()
+        if thinking_config is not None:
+            config_kwargs["thinking_config"] = thinking_config
         if tools:
             config_kwargs["tools"] = tools
             config_kwargs["automatic_function_calling"] = (
@@ -313,6 +319,50 @@ class GoogleGenAIProvider(LLMProvider):
             if tool_config is not None:
                 config_kwargs["tool_config"] = tool_config
         return types.GenerateContentConfig(**config_kwargs)
+
+    def _resolve_thinking_config(self) -> types.ThinkingConfig | None:
+        """Build a Gemini thinking config for explicit on/off behavior."""
+        if self.enable_thinking:
+            config_kwargs: dict[str, Any] = {"include_thoughts": True}
+            if self.thinking_level:
+                config_kwargs["thinking_level"] = self.thinking_level
+            if self.thinking_budget is not None:
+                config_kwargs["thinking_budget"] = self.thinking_budget
+            return types.ThinkingConfig(**config_kwargs)
+
+        explicit_disabled = self._explicit_disabled_thinking_config()
+        if explicit_disabled is not None:
+            return explicit_disabled
+
+        normalized_model = self.model.strip().lower()
+        if normalized_model.startswith(("gemini-3.1-pro", "gemini-3-pro")):
+            logger.warning(
+                "[GoogleGenAIProvider] %s does not support thinking-off; keeping provider defaults.",
+                self.model,
+            )
+            return None
+        if normalized_model.startswith("gemini-3"):
+            return types.ThinkingConfig(thinking_level=cast(Any, "minimal"))
+        if normalized_model.startswith(
+            (
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemini-robotics",
+            )
+        ):
+            return types.ThinkingConfig(thinking_budget=0)
+        return None
+
+    def _explicit_disabled_thinking_config(self) -> types.ThinkingConfig | None:
+        """Honor explicit thinking-disable overrides when configured."""
+        config_kwargs: dict[str, Any] = {}
+        if self.thinking_level:
+            config_kwargs["thinking_level"] = self.thinking_level
+        if self.thinking_budget is not None:
+            config_kwargs["thinking_budget"] = self.thinking_budget
+        if not config_kwargs:
+            return None
+        return types.ThinkingConfig(**config_kwargs)
 
     def _normalize_messages(
         self,
@@ -382,9 +432,7 @@ class GoogleGenAIProvider(LLMProvider):
                 name = str(function.get("name") or "").strip()
                 if not name:
                     continue
-                arguments = self._parse_tool_call_arguments(
-                    function.get("arguments")
-                )
+                arguments = self._parse_tool_call_arguments(function.get("arguments"))
                 tool_id = str(tool_call.get("id") or f"call_{index}").strip()
                 parts.append(
                     types.Part(
@@ -461,11 +509,15 @@ class GoogleGenAIProvider(LLMProvider):
             normalized = tool_choice.strip().lower()
             if normalized == "auto":
                 return types.ToolConfig(
-                    function_calling_config=types.FunctionCallingConfig(mode="AUTO")
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode=types.FunctionCallingConfigMode.AUTO
+                    )
                 )
             if normalized == "required":
                 return types.ToolConfig(
-                    function_calling_config=types.FunctionCallingConfig(mode="ANY")
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode=types.FunctionCallingConfigMode.ANY
+                    )
                 )
             return None
         if not isinstance(tool_choice, Mapping):
@@ -474,29 +526,33 @@ class GoogleGenAIProvider(LLMProvider):
         type_name = str(tool_choice.get("type") or "").strip().lower()
         if type_name == "auto":
             return types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(mode="AUTO")
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.AUTO
+                )
             )
         if type_name == "function":
             function_payload = tool_choice.get("function", {})
-            function = (
-                function_payload if isinstance(function_payload, Mapping) else {}
-            )
+            function = function_payload if isinstance(function_payload, Mapping) else {}
             function_name = str(function.get("name") or "").strip()
             if not function_name:
                 return None
             return types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(
-                    mode="ANY",
+                    mode=types.FunctionCallingConfigMode.ANY,
                     allowed_function_names=[function_name],
                 )
             )
         if type_name in {"required", "any"}:
             return types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(mode="ANY")
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.ANY
+                )
             )
         if type_name == "none":
             return types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(mode="NONE")
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.NONE
+                )
             )
         return None
 
@@ -535,10 +591,14 @@ class GoogleGenAIProvider(LLMProvider):
         if role == "tool":
             return True
         raw_tool_calls = message.get("tool_calls")
-        return role in {"assistant", "model"} and isinstance(
-            raw_tool_calls,
-            Sequence,
-        ) and not isinstance(raw_tool_calls, str | bytes)
+        return (
+            role in {"assistant", "model"}
+            and isinstance(
+                raw_tool_calls,
+                Sequence,
+            )
+            and not isinstance(raw_tool_calls, str | bytes)
+        )
 
     def _cached_assistant_content_for_message(
         self,
@@ -576,16 +636,12 @@ class GoogleGenAIProvider(LLMProvider):
             if not isinstance(tool_call, Mapping):
                 continue
             function_payload = tool_call.get("function", {})
-            function = (
-                function_payload if isinstance(function_payload, Mapping) else {}
-            )
+            function = function_payload if isinstance(function_payload, Mapping) else {}
             name = str(function.get("name") or "").strip()
             if not name:
                 continue
             tool_id = str(tool_call.get("id") or f"call_{index}").strip()
-            arguments = self._compact_tool_call_arguments(
-                function.get("arguments")
-            )
+            arguments = self._compact_tool_call_arguments(function.get("arguments"))
             tool_signatures.append(f"{tool_id}|{name}|{arguments}")
 
         if len(tool_signatures) == 1:
@@ -620,7 +676,9 @@ class GoogleGenAIProvider(LLMProvider):
 
         cache_key = self._assistant_tool_cache_key(
             content=assistant_message.content,
-            raw_tool_calls=[tool_call.model_dump() for tool_call in assistant_message.tool_calls],
+            raw_tool_calls=[
+                tool_call.model_dump() for tool_call in assistant_message.tool_calls
+            ],
         )
         if cache_key is None:
             return
@@ -661,9 +719,7 @@ class GoogleGenAIProvider(LLMProvider):
                     else f"TOOL {tool_call.function.name}: "
                 )
                 self._response_callback.on_content_token(prefix)
-                self._response_callback.on_content_token(
-                    tool_call.function.arguments
-                )
+                self._response_callback.on_content_token(tool_call.function.arguments)
                 emitted_tool_preview = True
         finally:
             self._response_callback.on_complete()

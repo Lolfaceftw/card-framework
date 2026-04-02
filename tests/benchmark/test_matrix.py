@@ -6,6 +6,7 @@ import card_framework.benchmark.matrix as matrix_module
 from card_framework.benchmark.matrix import (
     build_cells,
     build_embedding_profiles,
+    load_provider_profiles,
     resolve_provider_config,
 )
 from card_framework.benchmark.types import (
@@ -13,6 +14,7 @@ from card_framework.benchmark.types import (
     EmbeddingProfile,
     ProviderProfile,
 )
+from card_framework.shared.paths import DEFAULT_PROVIDER_PROFILES_PATH
 
 
 def test_build_cells_prunes_with_provider_coverage() -> None:
@@ -228,4 +230,31 @@ embedding:
         ),
         "model_name": "sentence-transformers/all-MiniLM-L6-v2",
         "device": "cpu",
+    }
+
+
+def test_default_provider_profiles_include_sporc_budget_sweep_profiles() -> None:
+    profiles = {
+        profile.provider_id: profile
+        for profile in load_provider_profiles(DEFAULT_PROVIDER_PROFILES_PATH)
+    }
+
+    assert profiles["openai_gpt_5_4_mini"].llm_config == {
+        "_target_": "card_framework.providers.openai_provider.OpenAIProvider",
+        "api_key": "$ENV{OPENAI_API_KEY}",
+        "model": "gpt-5.4-mini",
+        "enable_thinking": False,
+    }
+    assert profiles["anthropic_claude_haiku_4_5"].llm_config == {
+        "_target_": "card_framework.providers.anthropic_provider.AnthropicProvider",
+        "api_key": "$ENV{ANTHROPIC_API_KEY}",
+        "model": "claude-haiku-4-5",
+        "enable_thinking": False,
+    }
+    assert profiles["deepseek_chat"].llm_config["model"] == "deepseek-chat"
+    assert profiles["google_gemini_3_1_pro_preview_judge"].llm_config == {
+        "_target_": "card_framework.providers.google_genai_provider.GoogleGenAIProvider",
+        "api_key": "$ENV{GEMINI_API_KEY}",
+        "model": "gemini-3.1-pro-preview",
+        "enable_thinking": True,
     }

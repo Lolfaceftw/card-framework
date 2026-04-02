@@ -39,7 +39,7 @@
     <directory path="src/card_framework/benchmark/qa">QA benchmark contracts, evaluator runtime, input guards, settings, and supervisor implementation details.</directory>
     <directory path="src/card_framework/benchmark/diarization">Diarization benchmark dataset helpers and typed result structures.</directory>
     <directory path="src/card_framework/cli">Operator-facing CLI modules for the runtime, calibration helper, setup bootstrap, summary-matrix runner, evaluation entrypoint, and terminal UI.</directory>
-    <directory path="src/card_framework/providers">Concrete LLM and embedding adapters such as vLLM, Transformers, DeepSeek, GLM, Google GenAI, Hugging Face, Nanbeige, sentence-transformer embeddings, and logging wrappers.</directory>
+    <directory path="src/card_framework/providers">Concrete LLM and embedding adapters such as OpenAI Responses, Anthropic, vLLM, Transformers, DeepSeek, GLM, Google GenAI, Hugging Face, Nanbeige, sentence-transformer embeddings, and logging wrappers.</directory>
     <directory path="src/card_framework/prompts/templates">Jinja2 prompt templates for summarizer, critic, QA ground-truth generation, QA evaluator, and corrector flows.</directory>
     <directory path="src/card_framework/orchestration">Typed transcript DTOs and the stage orchestrator that bridges stage plans with runtime execution.</directory>
     <directory path="src/card_framework/config">Hydra application configuration, including provider selection, stage controls, audio settings, ports, orchestrator limits, and logging.</directory>

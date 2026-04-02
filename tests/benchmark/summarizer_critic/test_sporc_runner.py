@@ -112,8 +112,12 @@ def _write_prepared_manifest_with_sidecar(
                 "dataset_id": "sporc_full",
                 "sporc_dataset_id": "blitt/SPoRC",
                 "dataset_variant": "full",
-                "episode_data_path": str(manifest_path.parent / "episodeLevelData.jsonl.gz"),
-                "turn_data_path": str(manifest_path.parent / "speakerTurnData.jsonl.gz"),
+                "episode_data_path": str(
+                    manifest_path.parent / "episodeLevelData.jsonl.gz"
+                ),
+                "turn_data_path": str(
+                    manifest_path.parent / "speakerTurnData.jsonl.gz"
+                ),
                 "sample_count": len(samples),
                 "samples_path": str(samples_path),
             }
@@ -424,9 +428,9 @@ def test_sample_artifact_recorder_writes_hierarchical_llm_traces(
     assert (sample_root / "final" / "summary.xml").read_text(encoding="utf-8") == (
         "plain summary output"
     )
-    assert (
-        sample_root / "final" / "critic_feedback.txt"
-    ).read_text(encoding="utf-8") == "critic accepted the draft"
+    assert (sample_root / "final" / "critic_feedback.txt").read_text(
+        encoding="utf-8"
+    ) == "critic accepted the draft"
 
     summarizer_trace = json.loads(
         (sample_root / "llm" / "summarizer" / "call_001.json").read_text(
@@ -434,14 +438,10 @@ def test_sample_artifact_recorder_writes_hierarchical_llm_traces(
         )
     )
     critic_trace = json.loads(
-        (sample_root / "llm" / "critic" / "call_001.json").read_text(
-            encoding="utf-8"
-        )
+        (sample_root / "llm" / "critic" / "call_001.json").read_text(encoding="utf-8")
     )
     judge_trace = json.loads(
-        (sample_root / "llm" / "judge" / "call_001.json").read_text(
-            encoding="utf-8"
-        )
+        (sample_root / "llm" / "judge" / "call_001.json").read_text(encoding="utf-8")
     )
     assert summarizer_trace["streamed_reasoning_content"] == "summary reasoning"
     assert summarizer_trace["streamed_content"] == "plain summary output"
@@ -519,11 +519,7 @@ def test_execute_sample_persists_artifact_paths_in_result(tmp_path: Path) -> Non
     )
     assert result.final_critic_feedback_path == str(
         (
-            run_root
-            / "samples"
-            / sample.sample_id
-            / "final"
-            / "critic_feedback.txt"
+            run_root / "samples" / sample.sample_id / "final" / "critic_feedback.txt"
         ).resolve()
     )
     assert Path(result.sample_result_artifact_path or "").exists()
@@ -538,12 +534,15 @@ def test_execute_sample_persists_artifact_paths_in_result(tmp_path: Path) -> Non
     assert Path(result.final_summary_path or "").read_text(encoding="utf-8") == (
         "plain summary output"
     )
-    assert Path(result.final_critic_feedback_path or "").read_text(
-        encoding="utf-8"
-    ) == "critic accepted the draft"
+    assert (
+        Path(result.final_critic_feedback_path or "").read_text(encoding="utf-8")
+        == "critic accepted the draft"
+    )
 
 
-def test_execute_sample_clears_retrieval_namespace_after_success(tmp_path: Path) -> None:
+def test_execute_sample_clears_retrieval_namespace_after_success(
+    tmp_path: Path,
+) -> None:
     transcript_path = tmp_path / "sample.transcript.json"
     _write_transcript(transcript_path, text="apple banana cherry")
     run_root = tmp_path / "run"
@@ -588,7 +587,9 @@ def test_execute_sample_clears_retrieval_namespace_after_success(tmp_path: Path)
     assert orchestrator.clear_calls == 1
 
 
-def test_execute_sample_clears_retrieval_namespace_after_failure(tmp_path: Path) -> None:
+def test_execute_sample_clears_retrieval_namespace_after_failure(
+    tmp_path: Path,
+) -> None:
     transcript_path = tmp_path / "sample.transcript.json"
     _write_transcript(transcript_path, text="apple banana cherry")
     run_root = tmp_path / "run"
@@ -724,12 +725,16 @@ def test_copy_sample_transcript_keeps_raw_speakers_and_marks_uncertainty(
         "Blair Guest": "SPEAKER_01",
     }
     assert copied_payload["metadata"]["speaker_normalization"]["raw_segment_count"] == 6
-    assert copied_payload["metadata"]["speaker_normalization"][
-        "speaker_assignment_mode"
-    ] == "raw_with_uncertainty"
-    assert copied_payload["metadata"]["speaker_normalization"][
-        "speaker_reassignment_enabled"
-    ] is False
+    assert (
+        copied_payload["metadata"]["speaker_normalization"]["speaker_assignment_mode"]
+        == "raw_with_uncertainty"
+    )
+    assert (
+        copied_payload["metadata"]["speaker_normalization"][
+            "speaker_reassignment_enabled"
+        ]
+        is False
+    )
     assert (
         copied_payload["metadata"]["speaker_normalization"][
             "normalized_distinct_speaker_count"
@@ -815,7 +820,9 @@ def test_copy_sample_transcript_preserves_stable_main_speakers(
     ]
 
 
-def test_canonical_speaker_label_is_case_insensitive_without_duplicate_alias_keys() -> None:
+def test_canonical_speaker_label_is_case_insensitive_without_duplicate_alias_keys() -> (
+    None
+):
     alias_map = {
         "SPEAKER_00": "SPEAKER_00",
         "Alex Host": "SPEAKER_00",
@@ -906,7 +913,13 @@ def test_select_samples_uses_seed_independent_of_manifest_order() -> None:
 
 
 def test_select_sample_shard_uses_deterministic_modulo_partition() -> None:
-    selected_samples = [_sample("a"), _sample("b"), _sample("c"), _sample("d"), _sample("e")]
+    selected_samples = [
+        _sample("a"),
+        _sample("b"),
+        _sample("c"),
+        _sample("d"),
+        _sample("e"),
+    ]
 
     assert [
         sample.sample_id
@@ -1102,11 +1115,13 @@ def test_shared_sample_queue_manifest_catalog_loads_only_claimed_sample(
     )
     connection = _open_shared_sample_queue_connection(tmp_path / "shared_queue")
     try:
-        sample_order, target_sample_count = _initialize_shared_sample_queue_from_manifest(
-            connection,
-            manifest_path=manifest_path,
-            requested_target_sample_count=2,
-            sample_seed=None,
+        sample_order, target_sample_count = (
+            _initialize_shared_sample_queue_from_manifest(
+                connection,
+                manifest_path=manifest_path,
+                requested_target_sample_count=2,
+                sample_seed=None,
+            )
         )
 
         assert sample_order == ["sample-a", "sample-b", "sample-c"]
@@ -1347,9 +1362,36 @@ def test_prepare_provider_config_applies_transcript_only_critic_overrides() -> N
     )
 
     assert prepared["request_timeout_seconds"] == 300.0
-    assert prepared["enable_thinking"] is True
-    assert prepared["thinking_extra_body"] == {
+    assert prepared["enable_thinking"] is False
+    assert prepared["extra_body"] == {
         "chat_template_kwargs": {"enable_thinking": False}
+    }
+
+
+def test_prepare_provider_config_preserves_existing_vllm_extra_body() -> None:
+    profile = ProviderProfile(
+        provider_id="vllm_default",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+            "extra_body": {
+                "top_k": 20,
+                "chat_template_kwargs": {"foo": "bar"},
+            },
+        },
+    )
+
+    prepared = _prepare_provider_config(profile)
+
+    assert prepared["enable_thinking"] is False
+    assert prepared["extra_body"] == {
+        "top_k": 20,
+        "chat_template_kwargs": {
+            "foo": "bar",
+            "enable_thinking": False,
+        },
     }
 
 
@@ -2178,7 +2220,9 @@ def test_execute_benchmark_rejudges_persisted_artifacts_from_sweep_root(
     assert all(sample.sample_artifact_dir is not None for sample in report.samples)
     assert all(sample.judge_trace_dir is not None for sample in report.samples)
     assert all(Path(sample.final_summary_path).exists() for sample in report.samples)
-    assert all(Path(sample.sample_result_artifact_path).exists() for sample in report.samples)
+    assert all(
+        Path(sample.sample_result_artifact_path).exists() for sample in report.samples
+    )
 
 
 def test_execute_benchmark_backfills_sidecar_candidates_until_target_or_exhaustion(
@@ -2272,7 +2316,101 @@ def test_prepare_provider_config_applies_judge_specific_vllm_overrides() -> None
 
     prepared = _prepare_provider_config(profile, role="judge")
 
-    assert prepared["enable_thinking"] is True
-    assert prepared["thinking_extra_body"] == {
+    assert prepared["enable_thinking"] is False
+    assert prepared["extra_body"] == {
         "chat_template_kwargs": {"enable_thinking": False}
     }
+
+
+def test_prepare_provider_config_disables_thinking_for_openai_contestants() -> None:
+    profile = ProviderProfile(
+        provider_id="openai_gpt_5_4_mini",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.openai_provider.OpenAIProvider",
+            "api_key": "test-key",
+            "model": "gpt-5.4-mini",
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="summarizer")
+
+    assert prepared["enable_thinking"] is False
+    assert prepared["reasoning_effort"] == "none"
+
+
+def test_prepare_provider_config_disables_thinking_for_anthropic_contestants() -> None:
+    profile = ProviderProfile(
+        provider_id="anthropic_claude_haiku_4_5",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.anthropic_provider.AnthropicProvider",
+            "api_key": "test-key",
+            "model": "claude-haiku-4-5",
+            "enable_thinking": True,
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="critic")
+
+    assert prepared["enable_thinking"] is False
+
+
+def test_prepare_provider_config_keeps_gemini_3_1_pro_judge_thinking_enabled() -> None:
+    profile = ProviderProfile(
+        provider_id="google_gemini_3_1_pro_preview_judge",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.google_genai_provider.GoogleGenAIProvider",
+            "api_key": "test-key",
+            "model": "gemini-3.1-pro-preview",
+            "enable_thinking": False,
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="judge")
+
+    assert prepared["enable_thinking"] is True
+
+
+def test_prepare_provider_config_disables_nonjudge_gemini_3_thinking() -> None:
+    profile = ProviderProfile(
+        provider_id="google_gemini_3_flash",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.google_genai_provider.GoogleGenAIProvider",
+            "api_key": "test-key",
+            "model": "gemini-3-flash-preview",
+            "enable_thinking": True,
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="summarizer")
+
+    assert prepared["enable_thinking"] is False
+    assert prepared["thinking_level"] == "minimal"
+
+
+def test_prepare_provider_config_does_not_force_unsupported_gemini_3_pro_level() -> (
+    None
+):
+    profile = ProviderProfile(
+        provider_id="google_gemini_3_pro",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.google_genai_provider.GoogleGenAIProvider",
+            "api_key": "test-key",
+            "model": "gemini-3-pro-preview",
+            "enable_thinking": True,
+            "thinking_level": "high",
+            "thinking_budget": 128,
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="summarizer")
+
+    assert prepared["enable_thinking"] is False
+    assert "thinking_level" not in prepared
+    assert "thinking_budget" not in prepared

@@ -29,6 +29,7 @@ _PROVIDER_SECRET_ENV_NAMES: dict[str, tuple[str, ...]] = {
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
     ),
+    "card_framework.providers.openai_provider.OpenAIProvider": ("OPENAI_API_KEY",),
     "card_framework.providers.glm_provider.GLMProvider": (
         "ZAI_API_KEY",
         "GLM_API_KEY",
@@ -36,9 +37,7 @@ _PROVIDER_SECRET_ENV_NAMES: dict[str, tuple[str, ...]] = {
     "card_framework.providers.huggingface_provider.HuggingfaceProvider": (
         *_HF_ENV_NAMES,
     ),
-    "card_framework.providers.nanbeige_provider.NanbeigeProvider": (
-        *_HF_ENV_NAMES,
-    ),
+    "card_framework.providers.nanbeige_provider.NanbeigeProvider": (*_HF_ENV_NAMES,),
 }
 
 

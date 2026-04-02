@@ -7,7 +7,9 @@ from typing import Any
 
 from google.genai import types
 
-from card_framework.providers import google_genai_provider as google_genai_provider_module
+from card_framework.providers import (
+    google_genai_provider as google_genai_provider_module,
+)
 from card_framework.providers.google_genai_provider import GoogleGenAIProvider
 
 
@@ -315,3 +317,40 @@ def test_chat_falls_back_to_non_streaming_response(monkeypatch) -> None:
         ("content", '{"episode_key":"episode://sample"}'),
         ("complete", ""),
     ]
+
+
+def test_chat_with_thinking_disabled_uses_minimal_level_for_gemini_3(
+    monkeypatch,
+) -> None:
+    """Gemini 3 contestants should explicitly request the lowest thinking mode."""
+
+    def _stream_impl(**kwargs: Any) -> list[object]:
+        thinking_config = kwargs["config"].thinking_config
+        assert thinking_config is not None
+        assert thinking_config.include_thoughts in (None, False)
+        assert (
+            str(
+                getattr(
+                    thinking_config.thinking_level,
+                    "value",
+                    thinking_config.thinking_level,
+                )
+            ).lower()
+            == "minimal"
+        )
+        return [_chunk(types.Part.from_text(text="done"))]
+
+    def _non_stream_impl(**kwargs: Any) -> object:
+        raise AssertionError("non-stream fallback should not be used")
+
+    _install_fake_client(monkeypatch, _stream_impl, _non_stream_impl)
+    provider = GoogleGenAIProvider(
+        api_key="test-key",
+        model="gemini-3-flash-preview",
+        enable_thinking=False,
+    )
+
+    response = provider.chat(messages=[{"role": "system", "content": "Summarizer"}])
+
+    assert response.content == "done"
+    assert response.reasoning_content is None

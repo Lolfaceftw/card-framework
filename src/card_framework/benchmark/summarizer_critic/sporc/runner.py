@@ -140,6 +140,13 @@ _SOURCE_AUDIO_HEADERS = {
 }
 _SHARED_SAMPLE_QUEUE_DB_NAME = "sample_queue.sqlite3"
 _EMBEDDING_CACHE_ROOT = (DEFAULT_RUNS_ROOT.parent / "embedding_cache").resolve()
+_ANTHROPIC_PROVIDER_TARGET = (
+    "card_framework.providers.anthropic_provider.AnthropicProvider"
+)
+_GOOGLE_PROVIDER_TARGET = (
+    "card_framework.providers.google_genai_provider.GoogleGenAIProvider"
+)
+_OPENAI_PROVIDER_TARGET = "card_framework.providers.openai_provider.OpenAIProvider"
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
@@ -495,7 +502,9 @@ class _SampleArtifactRecorder:
                     state.final_dir / "loop_diagnostics.json"
                 ).resolve()
                 self._write_json(loop_diagnostics_path, diagnostics)
-                critic_feedback = str(diagnostics.get("final_feedback", "") or "").strip()
+                critic_feedback = str(
+                    diagnostics.get("final_feedback", "") or ""
+                ).strip()
                 if critic_feedback:
                     critic_feedback_path = (
                         state.final_dir / "critic_feedback.txt"
@@ -546,7 +555,9 @@ class _SampleArtifactRecorder:
                     "sample_artifact_dir": str(state.sample_root),
                     "final": {
                         "summary_xml": (
-                            str(final_summary_path) if final_summary_path is not None else ""
+                            str(final_summary_path)
+                            if final_summary_path is not None
+                            else ""
                         ),
                         "critic_feedback": (
                             str(critic_feedback_path)
@@ -563,7 +574,9 @@ class _SampleArtifactRecorder:
                     "llm_traces": {
                         role: {
                             "directory": str(state.llm_dirs[role]),
-                            "calls": [str(path) for path in state.recorded_call_paths[role]],
+                            "calls": [
+                                str(path) for path in state.recorded_call_paths[role]
+                            ],
                         }
                         for role in ("summarizer", "critic", "judge")
                     },
@@ -1076,9 +1089,7 @@ def _build_failed_result(
         metrics=SampleMetricBundle(0.0, 0.0, 0.0, 0.0),
         error_message=error_message,
         counts_toward_target=counts_toward_target,
-        replacement_reason=(
-            final_status if not counts_toward_target else None
-        ),
+        replacement_reason=(final_status if not counts_toward_target else None),
     )
 
 
@@ -1209,38 +1220,69 @@ def _prepare_provider_config(
     role: str = "",
     transcript_only: bool = False,
 ) -> dict[str, Any]:
-    """Resolve provider config, applying SPoRC benchmark-safe vLLM overrides."""
+    """Resolve provider config, applying SPoRC benchmark-safe thinking defaults."""
     resolved = resolve_provider_config(profile)
-    if str(resolved.get("_target_", "")).strip() != _VLLM_PROVIDER_TARGET:
-        return resolved
     prepared = dict(resolved)
+    provider_target = str(prepared.get("_target_", "")).strip()
+
+    if provider_target == _ANTHROPIC_PROVIDER_TARGET:
+        prepared["enable_thinking"] = False
+        return prepared
+
+    if provider_target == _OPENAI_PROVIDER_TARGET:
+        prepared["enable_thinking"] = False
+        prepared["reasoning_effort"] = "none"
+        return prepared
+
+    if provider_target == _GOOGLE_PROVIDER_TARGET:
+        model_name = str(prepared.get("model", "") or "").strip().lower()
+        judge_gemini_31_pro = role == "judge" and model_name.startswith(
+            "gemini-3.1-pro"
+        )
+        prepared["enable_thinking"] = judge_gemini_31_pro
+        if not judge_gemini_31_pro:
+            if model_name.startswith(("gemini-3.1-pro", "gemini-3-pro")):
+                prepared.pop("thinking_level", None)
+                prepared.pop("thinking_budget", None)
+            elif model_name.startswith("gemini-3"):
+                prepared["thinking_level"] = "minimal"
+                prepared.pop("thinking_budget", None)
+            elif model_name.startswith(
+                (
+                    "gemini-2.5-flash",
+                    "gemini-2.5-flash-lite",
+                    "gemini-robotics",
+                )
+            ):
+                prepared["thinking_budget"] = 0
+                prepared.pop("thinking_level", None)
+        return prepared
+
+    if provider_target != _VLLM_PROVIDER_TARGET:
+        return prepared
+
     prepared["request_timeout_seconds"] = max(
         float(prepared.get("request_timeout_seconds", 0.0) or 0.0),
         _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS,
     )
+    prepared["enable_thinking"] = False
+    existing_extra_body = prepared.get("extra_body")
+    merged_extra_body = (
+        dict(existing_extra_body) if isinstance(existing_extra_body, dict) else {}
+    )
+    chat_template_kwargs = merged_extra_body.get("chat_template_kwargs")
+    merged_chat_template_kwargs = (
+        dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
+    )
+    merged_chat_template_kwargs["enable_thinking"] = False
+    merged_extra_body["chat_template_kwargs"] = merged_chat_template_kwargs
+    prepared["extra_body"] = merged_extra_body
     if role == "critic" and transcript_only:
         prepared["request_timeout_seconds"] = max(
             float(prepared.get("request_timeout_seconds", 0.0) or 0.0),
             _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS,
         )
-        # Qwen-backed transcript-only critic prompts inline the full transcript,
-        # which can make thinking-mode tool selection stall long enough to hit
-        # request timeouts before the first tool call arrives. Keep the vLLM
-        # extra_body path but disable chat-template thinking explicitly.
-        prepared["enable_thinking"] = True
-        prepared["thinking_extra_body"] = {
-            "chat_template_kwargs": {"enable_thinking": False}
-        }
         return prepared
-    if role != "judge":
-        return prepared
-    # Some Qwen-backed vLLM judge prompts return empty content unless the chat
-    # template disables thinking explicitly while still sending extra_body.
-    # See repo memory notes dated 2026-03-12 and 2026-03-13.
-    prepared["enable_thinking"] = True
-    prepared["thinking_extra_body"] = {
-        "chat_template_kwargs": {"enable_thinking": False}
-    }
     return prepared
 
 
@@ -1596,7 +1638,11 @@ def _initialize_shared_sample_queue(
                     for index, sample_id in enumerate(sample_order, start=1)
                 ],
             )
-        elif str(row[0]) != serialized_order or target_row is None or str(target_row[0]) != serialized_target:
+        elif (
+            str(row[0]) != serialized_order
+            or target_row is None
+            or str(target_row[0]) != serialized_target
+        ):
             raise BenchmarkExecutionError(
                 "Shared sample queue does not match the selected benchmark sample order or retained target."
             )
@@ -2191,7 +2237,9 @@ def _load_judge_only_artifacts(
                 continue
             if not bool(raw_result.get("counts_toward_target", False)):
                 continue
-            raw_summary_path = str(raw_result.get("final_summary_path", "") or "").strip()
+            raw_summary_path = str(
+                raw_result.get("final_summary_path", "") or ""
+            ).strip()
             if not raw_summary_path:
                 continue
             summary_xml_path = Path(raw_summary_path).expanduser().resolve()
@@ -2251,6 +2299,7 @@ def _load_judge_only_artifacts(
             )
         )
     return normalized
+
 
 def _build_runtime_port_args(
     args: argparse.Namespace,
@@ -2749,10 +2798,7 @@ def _extract_main_speaker_labels(
                 if part.strip()
             ]
             return _dedupe_preserve_order(
-                [
-                    _canonical_speaker_label(label, alias_map)
-                    for label in raw_labels
-                ]
+                [_canonical_speaker_label(label, alias_map) for label in raw_labels]
             )
     return []
 
@@ -2772,9 +2818,11 @@ def _normalize_transcript_for_transcript_only_benchmark(
         cleaned_text = str(segment.text).strip()
         if not cleaned_text or not _TRANSCRIPT_ONLY_ALNUM_PATTERN.search(cleaned_text):
             continue
-        raw_primary_speaker = str(
-            segment.extras.get("raw_primary_speaker", segment.speaker)
-        ).strip() or str(segment.speaker).strip() or "UNKNOWN"
+        raw_primary_speaker = (
+            str(segment.extras.get("raw_primary_speaker", segment.speaker)).strip()
+            or str(segment.speaker).strip()
+            or "UNKNOWN"
+        )
         raw_overlap_speakers = _dedupe_preserve_order(
             _coerce_string_list(
                 segment.extras.get(
@@ -2834,9 +2882,7 @@ def _normalize_transcript_for_transcript_only_benchmark(
     updated_metadata["main_speaker_labels"] = main_speaker_labels
     raw_normalization = updated_metadata.get("speaker_normalization", {})
     normalization_metadata = (
-        dict(raw_normalization)
-        if isinstance(raw_normalization, dict)
-        else {}
+        dict(raw_normalization) if isinstance(raw_normalization, dict) else {}
     )
     normalization_metadata.pop("core_speaker_min_share", None)
     normalization_metadata.pop("core_speaker_labels", None)
@@ -2847,7 +2893,9 @@ def _normalize_transcript_for_transcript_only_benchmark(
             "speaker_reassignment_enabled": False,
             "merge_gap_ms": _TRANSCRIPT_ONLY_SPEAKER_MERGE_GAP_MS,
             "raw_segment_count": len(transcript.segments),
-            "raw_distinct_speaker_count": len(_dedupe_preserve_order(raw_speakers_seen)),
+            "raw_distinct_speaker_count": len(
+                _dedupe_preserve_order(raw_speakers_seen)
+            ),
             "normalized_segment_count": len(normalized_segments),
             "normalized_distinct_speaker_count": len(
                 {segment.speaker for segment in normalized_segments}
@@ -3729,7 +3777,9 @@ async def _run_judge_only_benchmark(
             normalized_payload,
             alias_map,
         )
-        speaker_notes = _coerce_speaker_notes(normalized_payload, artifact.reused_sample)
+        speaker_notes = _coerce_speaker_notes(
+            normalized_payload, artifact.reused_sample
+        )
         summary_xml = artifact.summary_xml_path.read_text(encoding="utf-8").strip()
         if not summary_xml:
             raise BenchmarkExecutionError(
@@ -3966,9 +4016,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     sample_shard_index, sample_shard_count = _resolve_sample_shard_args(args)
     shared_sample_queue_root = _resolve_shared_sample_queue_root(args)
     use_shared_sample_queue = shared_sample_queue_root is not None
-    if use_shared_sample_queue and (
-        sample_shard_index != 1 or sample_shard_count != 1
-    ):
+    if use_shared_sample_queue and (sample_shard_index != 1 or sample_shard_count != 1):
         raise BenchmarkExecutionError(
             "--shared-sample-queue-root cannot be combined with sample-shard selection."
         )
@@ -3980,11 +4028,13 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         shared_sample_queue_connection = _open_shared_sample_queue_connection(
             shared_sample_queue_root
         )
-        sample_order, target_sample_count = _initialize_shared_sample_queue_from_manifest(
-            shared_sample_queue_connection,
-            manifest_path=dataset_manifest.manifest_path,
-            requested_target_sample_count=sample_limit,
-            sample_seed=sample_seed,
+        sample_order, target_sample_count = (
+            _initialize_shared_sample_queue_from_manifest(
+                shared_sample_queue_connection,
+                manifest_path=dataset_manifest.manifest_path,
+                requested_target_sample_count=sample_limit,
+                sample_seed=sample_seed,
+            )
         )
     else:
         prepared_samples = tuple(
@@ -4044,7 +4094,10 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             requested_dataset_manifest_path.resolve(),
             dataset_manifest.manifest_path.resolve(),
         }
-        if checkpoint_manifest and Path(checkpoint_manifest).resolve() not in allowed_manifest_paths:
+        if (
+            checkpoint_manifest
+            and Path(checkpoint_manifest).resolve() not in allowed_manifest_paths
+        ):
             raise BenchmarkExecutionError(
                 "Resume checkpoint dataset manifest does not match the requested dataset manifest."
             )

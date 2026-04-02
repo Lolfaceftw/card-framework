@@ -52,6 +52,7 @@ class VLLMProvider(LLMProvider):
         base_url: str,
         api_key: str = "EMPTY",
         enable_thinking: bool = True,
+        extra_body: dict[str, Any] | None = None,
         fallback_to_reasoning_content: bool = True,
         fallback_requires_structured_reasoning: bool = True,
         thinking_extra_body: dict[str, Any] | None = None,
@@ -61,6 +62,7 @@ class VLLMProvider(LLMProvider):
         self.base_url = base_url
         self.api_key = api_key
         self.enable_thinking = enable_thinking
+        self.extra_body = self._coerce_jsonable(extra_body) or {}
         self.fallback_to_reasoning_content = bool(fallback_to_reasoning_content)
         self.fallback_requires_structured_reasoning = bool(
             fallback_requires_structured_reasoning
@@ -112,10 +114,29 @@ class VLLMProvider(LLMProvider):
         return str(resp.json()["data"][0]["id"])
 
     def _maybe_enable_thinking(self, create_kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Attach reasoning-mode request params when enabled."""
+        """Attach configured OpenAI-compatible extra-body payloads."""
+        extra_body: dict[str, Any] = dict(self.extra_body)
         if self.enable_thinking:
-            create_kwargs["extra_body"] = self.thinking_extra_body
+            extra_body = self._merge_extra_body(extra_body, self.thinking_extra_body)
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
         return create_kwargs
+
+    @classmethod
+    def _merge_extra_body(
+        cls,
+        base: dict[str, Any],
+        overlay: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge nested extra-body dictionaries without mutating inputs."""
+        merged = cls._coerce_jsonable(base)
+        for key, value in cls._coerce_jsonable(overlay).items():
+            existing = merged.get(key)
+            if isinstance(existing, Mapping) and isinstance(value, Mapping):
+                merged[key] = cls._merge_extra_body(dict(existing), dict(value))
+                continue
+            merged[key] = value
+        return merged
 
     def _resolve_streamed_content(
         self,
