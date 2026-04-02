@@ -1,8 +1,12 @@
-﻿"""Speaker alignment utilities for timed ASR segments."""
+"""Speaker alignment utilities for timed ASR segments."""
 
 from __future__ import annotations
 
-from card_framework.audio_pipeline.contracts import DiarizationTurn, TimedTextSegment, TranscriptSegment
+from card_framework.audio_pipeline.contracts import (
+    DiarizationTurn,
+    TimedTextSegment,
+    TranscriptSegment,
+)
 
 
 def align_segments_with_speakers(
@@ -121,7 +125,7 @@ def _merge_adjacent_segments(
             merged[-1] = TranscriptSegment(
                 speaker=previous.speaker,
                 start_time=previous.start_time,
-                end_time=current.end_time,
+                end_time=max(previous.end_time, current.end_time),
                 text=f"{previous.text} {current.text}".strip(),
                 extras=dict(previous.extras),
             )
@@ -134,9 +138,4 @@ def _segment_overlap_key(segment: TranscriptSegment) -> tuple[str, ...]:
     raw_value = segment.extras.get("overlap_speakers")
     if not isinstance(raw_value, list | tuple):
         return ()
-    return tuple(
-        str(speaker).strip()
-        for speaker in raw_value
-        if str(speaker).strip()
-    )
-
+    return tuple(str(speaker).strip() for speaker in raw_value if str(speaker).strip())

@@ -1,4 +1,4 @@
-﻿from card_framework.audio_pipeline.alignment import align_segments_with_speakers
+from card_framework.audio_pipeline.alignment import align_segments_with_speakers
 from card_framework.audio_pipeline.contracts import DiarizationTurn, TimedTextSegment
 
 
@@ -61,3 +61,22 @@ def test_align_segments_uses_default_when_no_diarization() -> None:
     assert aligned[0].speaker == "SPEAKER_00"
     assert aligned[0].text == "test one test two"
 
+
+def test_align_segments_merge_keeps_later_end_for_overlaps() -> None:
+    asr_segments = [
+        TimedTextSegment(start_time_ms=0, end_time_ms=1000, text="hello"),
+        TimedTextSegment(start_time_ms=900, end_time_ms=950, text="world"),
+    ]
+    turns = [
+        DiarizationTurn(speaker="SPEAKER_01", start_time_ms=0, end_time_ms=2000),
+    ]
+
+    aligned = align_segments_with_speakers(
+        asr_segments=asr_segments,
+        diarization_turns=turns,
+        merge_gap_ms=500,
+    )
+
+    assert len(aligned) == 1
+    assert aligned[0].text == "hello world"
+    assert aligned[0].end_time == 1000

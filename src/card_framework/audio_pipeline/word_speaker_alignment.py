@@ -1,4 +1,4 @@
-﻿"""Word-level speaker alignment utilities."""
+"""Word-level speaker alignment utilities."""
 
 from __future__ import annotations
 
@@ -54,7 +54,8 @@ def build_word_speaker_segments(
         enabled=restore_punctuation_model,
     )
     realigned = realign_speakers_with_punctuation(punctuated)
-    segmented = group_sentence_segments(realigned)
+    stabilized_tokens = _stabilize_word_token_timings(realigned)
+    segmented = group_sentence_segments(stabilized_tokens)
     smoothed = smooth_short_sandwich_segments(segmented)
     return merge_adjacent_segments(smoothed, merge_gap_ms=merge_gap_ms)
 
@@ -84,9 +85,15 @@ def map_words_to_speakers(
     turn_index = 0
     tokens: list[WordSpeakerToken] = []
     previous_speaker = default_speaker
+    previous_word_start_ms = -1
 
     for word in word_timestamps:
-        while turn_index < len(turns) - 1 and turns[turn_index].end_time_ms < word.start_time_ms:
+        if word.start_time_ms < previous_word_start_ms:
+            turn_index = 0
+        while (
+            turn_index < len(turns) - 1
+            and turns[turn_index].end_time_ms < word.start_time_ms
+        ):
             turn_index += 1
 
         best_overlap_ms = -1
@@ -113,7 +120,9 @@ def map_words_to_speakers(
         if best_overlap_ms > 0 and best_speaker.strip():
             resolved_speaker = best_speaker
         else:
-            anchor_time = _word_anchor(word.start_time_ms, word.end_time_ms, anchor=anchor)
+            anchor_time = _word_anchor(
+                word.start_time_ms, word.end_time_ms, anchor=anchor
+            )
             nearest_turn = min(
                 turns,
                 key=lambda turn: min(
@@ -142,7 +151,38 @@ def map_words_to_speakers(
             )
         )
         previous_speaker = resolved_speaker
+        previous_word_start_ms = word.start_time_ms
     return tokens
+
+
+def _stabilize_word_token_timings(
+    word_tokens: list[WordSpeakerToken],
+) -> list[WordSpeakerToken]:
+    """Clamp regressing token timings after speaker attribution preserves labels."""
+    if not word_tokens:
+        return []
+
+    stabilized: list[WordSpeakerToken] = []
+    previous_end_ms = 0
+    for token in word_tokens:
+        start_time_ms = token.start_time_ms
+        end_time_ms = token.end_time_ms
+        if start_time_ms < previous_end_ms:
+            start_time_ms = previous_end_ms
+        if end_time_ms < start_time_ms:
+            end_time_ms = start_time_ms
+        if start_time_ms == token.start_time_ms and end_time_ms == token.end_time_ms:
+            stabilized.append(token)
+        else:
+            stabilized.append(
+                replace(
+                    token,
+                    start_time_ms=start_time_ms,
+                    end_time_ms=end_time_ms,
+                )
+            )
+        previous_end_ms = end_time_ms
+    return stabilized
 
 
 def maybe_restore_punctuation(
@@ -164,7 +204,9 @@ def maybe_restore_punctuation(
 
     try:
         punct_model = PunctuationModel(model="kredor/punctuate-all")
-        predictions = punct_model.predict([token.word for token in word_tokens], chunk_size=230)
+        predictions = punct_model.predict(
+            [token.word for token in word_tokens], chunk_size=230
+        )
     except Exception:
         return word_tokens
 
@@ -172,9 +214,8 @@ def maybe_restore_punctuation(
     for token, prediction in zip(word_tokens, predictions):
         punct_label = str(prediction[1]) if len(prediction) > 1 else ""
         word = token.word
-        if (
-            punct_label in _SENTENCE_ENDING_PUNCTUATION
-            and (not word or word[-1] not in _MODEL_PUNCTUATION or _is_acronym(word))
+        if punct_label in _SENTENCE_ENDING_PUNCTUATION and (
+            not word or word[-1] not in _MODEL_PUNCTUATION or _is_acronym(word)
         ):
             word = f"{word}{punct_label}"
             if word.endswith(".."):
@@ -207,9 +248,13 @@ def realign_speakers_with_punctuation(
             index += 1
             continue
 
-        left = _first_word_index_of_sentence(index, words, speakers, max_words_in_sentence)
+        left = _first_word_index_of_sentence(
+            index, words, speakers, max_words_in_sentence
+        )
         right = (
-            _last_word_index_of_sentence(index, words, max_words_in_sentence - index + left - 1)
+            _last_word_index_of_sentence(
+                index, words, max_words_in_sentence - index + left - 1
+            )
             if left >= 0
             else -1
         )
@@ -229,7 +274,9 @@ def realign_speakers_with_punctuation(
             continue
 
         minority_indices = [
-            idx for idx, speaker in enumerate(window_speakers) if speaker != dominant_speaker
+            idx
+            for idx, speaker in enumerate(window_speakers)
+            if speaker != dominant_speaker
         ]
         if not minority_indices:
             index += 1
@@ -258,13 +305,12 @@ def realign_speakers_with_punctuation(
             speakers[left + relabel_offset] = dominant_speaker
         index = right + 1
 
-    return [
-        replace(token, speaker=speakers[i])
-        for i, token in enumerate(word_tokens)
-    ]
+    return [replace(token, speaker=speakers[i]) for i, token in enumerate(word_tokens)]
 
 
-def group_sentence_segments(word_tokens: list[WordSpeakerToken]) -> list[TranscriptSegment]:
+def group_sentence_segments(
+    word_tokens: list[WordSpeakerToken],
+) -> list[TranscriptSegment]:
     """Group aligned word tokens into speaker-attributed sentence segments."""
     if not word_tokens:
         return []
@@ -285,9 +331,7 @@ def group_sentence_segments(word_tokens: list[WordSpeakerToken]) -> list[Transcr
         split_sentence = sentence_break(candidate_text)
         if speaker_changed or overlap_changed or split_sentence:
             extras = (
-                {"overlap_speakers": list(current_overlap)}
-                if current_overlap
-                else {}
+                {"overlap_speakers": list(current_overlap)} if current_overlap else {}
             )
             segments.append(
                 TranscriptSegment(
@@ -306,13 +350,9 @@ def group_sentence_segments(word_tokens: list[WordSpeakerToken]) -> list[Transcr
             continue
 
         current_words.append(token.word)
-        current_end = token.end_time_ms
+        current_end = max(current_end, token.end_time_ms)
 
-    extras = (
-        {"overlap_speakers": list(current_overlap)}
-        if current_overlap
-        else {}
-    )
+    extras = {"overlap_speakers": list(current_overlap)} if current_overlap else {}
     segments.append(
         TranscriptSegment(
             speaker=current_speaker,
@@ -344,7 +384,7 @@ def merge_adjacent_segments(
             merged[-1] = TranscriptSegment(
                 speaker=previous.speaker,
                 start_time=previous.start_time,
-                end_time=current.end_time,
+                end_time=max(previous.end_time, current.end_time),
                 text=f"{previous.text} {current.text}".strip(),
                 extras=dict(previous.extras),
             )
@@ -372,8 +412,10 @@ def smooth_short_sandwich_segments(
             continue
         if current.speaker == previous.speaker:
             continue
-        if _segment_overlap_key(previous) or _segment_overlap_key(current) or _segment_overlap_key(
-            following
+        if (
+            _segment_overlap_key(previous)
+            or _segment_overlap_key(current)
+            or _segment_overlap_key(following)
         ):
             continue
         duration_ms = current.end_time - current.start_time
@@ -395,11 +437,7 @@ def _segment_overlap_key(segment: TranscriptSegment) -> tuple[str, ...]:
     raw_value = segment.extras.get("overlap_speakers")
     if not isinstance(raw_value, list | tuple):
         return ()
-    return tuple(
-        str(speaker).strip()
-        for speaker in raw_value
-        if str(speaker).strip()
-    )
+    return tuple(str(speaker).strip() for speaker in raw_value if str(speaker).strip())
 
 
 def _word_anchor(start_ms: int, end_ms: int, *, anchor: str) -> int:
@@ -468,4 +506,3 @@ def _sentence_breaker():
         return nltk.tokenize.PunktSentenceTokenizer().text_contains_sentbreak
     except Exception:
         return lambda text: text.strip().endswith(tuple(_SENTENCE_ENDING_PUNCTUATION))
-

@@ -7,6 +7,7 @@ from card_framework.audio_pipeline.contracts import (
 from card_framework.audio_pipeline.word_speaker_alignment import (
     build_word_speaker_segments,
     map_words_to_speakers,
+    merge_adjacent_segments,
     realign_speakers_with_punctuation,
     smooth_short_sandwich_segments,
 )
@@ -84,7 +85,9 @@ def test_map_words_to_speakers_records_overlapping_speakers() -> None:
     assert tokens[0].overlap_speakers == ("SPEAKER_01",)
 
 
-def test_build_word_speaker_segments_preserves_overlap_metadata_in_json_segments() -> None:
+def test_build_word_speaker_segments_preserves_overlap_metadata_in_json_segments() -> (
+    None
+):
     segments = build_word_speaker_segments(
         word_timestamps=[
             WordTimestamp(word="hello", start_time_ms=0, end_time_ms=350),
@@ -106,12 +109,97 @@ def test_build_word_speaker_segments_preserves_overlap_metadata_in_json_segments
     assert segments[1].extras["overlap_speakers"] == ["SPEAKER_01"]
 
 
+def test_build_word_speaker_segments_clamps_regressing_word_timestamps() -> None:
+    segments = build_word_speaker_segments(
+        word_timestamps=[
+            WordTimestamp(word="hello", start_time_ms=600, end_time_ms=700),
+            WordTimestamp(word="there", start_time_ms=100, end_time_ms=200),
+            WordTimestamp(word="friend", start_time_ms=710, end_time_ms=800),
+        ],
+        diarization_turns=[
+            DiarizationTurn(speaker="SPEAKER_01", start_time_ms=0, end_time_ms=705),
+            DiarizationTurn(speaker="SPEAKER_02", start_time_ms=705, end_time_ms=1000),
+        ],
+        default_speaker="SPEAKER_00",
+        language="en",
+        merge_gap_ms=800,
+        restore_punctuation_model=False,
+    )
+
+    assert len(segments) == 2
+    assert segments[0].speaker == "SPEAKER_01"
+    assert segments[0].text == "hello there"
+    assert segments[0].start_time == 600
+    assert segments[0].end_time == 700
+    assert segments[1].speaker == "SPEAKER_02"
+    assert segments[1].text == "friend"
+
+
+def test_build_word_speaker_segments_preserves_speaker_overlap_before_clamping() -> (
+    None
+):
+    segments = build_word_speaker_segments(
+        word_timestamps=[
+            WordTimestamp(word="hello", start_time_ms=600, end_time_ms=650),
+            WordTimestamp(word="there", start_time_ms=640, end_time_ms=720),
+        ],
+        diarization_turns=[
+            DiarizationTurn(speaker="SPEAKER_01", start_time_ms=0, end_time_ms=650),
+            DiarizationTurn(speaker="SPEAKER_02", start_time_ms=650, end_time_ms=1000),
+        ],
+        default_speaker="SPEAKER_00",
+        language="en",
+        merge_gap_ms=800,
+        restore_punctuation_model=False,
+    )
+
+    assert len(segments) == 2
+    assert segments[0].speaker == "SPEAKER_01"
+    assert segments[0].text == "hello"
+    assert segments[1].speaker == "SPEAKER_02"
+    assert segments[1].text == "there"
+    assert segments[1].start_time == 650
+    assert segments[1].end_time == 720
+
+
+def test_merge_adjacent_segments_keeps_later_end_for_overlapping_segments() -> None:
+    merged = merge_adjacent_segments(
+        [
+            TranscriptSegment(
+                speaker="SPEAKER_01",
+                start_time=0,
+                end_time=1000,
+                text="hello",
+            ),
+            TranscriptSegment(
+                speaker="SPEAKER_01",
+                start_time=900,
+                end_time=950,
+                text="world",
+            ),
+        ],
+        merge_gap_ms=800,
+    )
+
+    assert len(merged) == 1
+    assert merged[0].text == "hello world"
+    assert merged[0].end_time == 1000
+
+
 def test_realign_speakers_with_punctuation_preserves_edge_minority_turn() -> None:
     tokens = [
-        WordSpeakerToken(word="Well", speaker="SPEAKER_00", start_time_ms=0, end_time_ms=100),
-        WordSpeakerToken(word="I", speaker="SPEAKER_01", start_time_ms=100, end_time_ms=200),
-        WordSpeakerToken(word="think", speaker="SPEAKER_01", start_time_ms=200, end_time_ms=300),
-        WordSpeakerToken(word="so.", speaker="SPEAKER_01", start_time_ms=300, end_time_ms=400),
+        WordSpeakerToken(
+            word="Well", speaker="SPEAKER_00", start_time_ms=0, end_time_ms=100
+        ),
+        WordSpeakerToken(
+            word="I", speaker="SPEAKER_01", start_time_ms=100, end_time_ms=200
+        ),
+        WordSpeakerToken(
+            word="think", speaker="SPEAKER_01", start_time_ms=200, end_time_ms=300
+        ),
+        WordSpeakerToken(
+            word="so.", speaker="SPEAKER_01", start_time_ms=300, end_time_ms=400
+        ),
     ]
 
     realigned = realign_speakers_with_punctuation(tokens)
@@ -124,26 +212,64 @@ def test_realign_speakers_with_punctuation_preserves_edge_minority_turn() -> Non
     ]
 
 
-def test_realign_speakers_with_punctuation_relabels_mid_sentence_one_word_flip() -> None:
+def test_realign_speakers_with_punctuation_relabels_mid_sentence_one_word_flip() -> (
+    None
+):
     tokens = [
-        WordSpeakerToken(word="I", speaker="SPEAKER_01", start_time_ms=0, end_time_ms=100),
-        WordSpeakerToken(word="really", speaker="SPEAKER_01", start_time_ms=100, end_time_ms=200),
-        WordSpeakerToken(word="think", speaker="SPEAKER_01", start_time_ms=200, end_time_ms=300),
-        WordSpeakerToken(word="this", speaker="SPEAKER_01", start_time_ms=300, end_time_ms=400),
-        WordSpeakerToken(word="is", speaker="SPEAKER_01", start_time_ms=400, end_time_ms=500),
-        WordSpeakerToken(word="a", speaker="SPEAKER_01", start_time_ms=500, end_time_ms=600),
-        WordSpeakerToken(word="very", speaker="SPEAKER_01", start_time_ms=600, end_time_ms=700),
-        WordSpeakerToken(word="good", speaker="SPEAKER_01", start_time_ms=700, end_time_ms=800),
-        WordSpeakerToken(word="definition", speaker="SPEAKER_01", start_time_ms=800, end_time_ms=900),
-        WordSpeakerToken(word="of", speaker="SPEAKER_01", start_time_ms=900, end_time_ms=1000),
-        WordSpeakerToken(word="it", speaker="SPEAKER_01", start_time_ms=1000, end_time_ms=1100),
-        WordSpeakerToken(word="and", speaker="SPEAKER_01", start_time_ms=1100, end_time_ms=1200),
-        WordSpeakerToken(word="I", speaker="SPEAKER_05", start_time_ms=1200, end_time_ms=1300),
-        WordSpeakerToken(word="think", speaker="SPEAKER_01", start_time_ms=1300, end_time_ms=1400),
-        WordSpeakerToken(word="we", speaker="SPEAKER_01", start_time_ms=1400, end_time_ms=1500),
-        WordSpeakerToken(word="should", speaker="SPEAKER_01", start_time_ms=1500, end_time_ms=1600),
-        WordSpeakerToken(word="keep", speaker="SPEAKER_01", start_time_ms=1600, end_time_ms=1700),
-        WordSpeakerToken(word="going.", speaker="SPEAKER_01", start_time_ms=1700, end_time_ms=1800),
+        WordSpeakerToken(
+            word="I", speaker="SPEAKER_01", start_time_ms=0, end_time_ms=100
+        ),
+        WordSpeakerToken(
+            word="really", speaker="SPEAKER_01", start_time_ms=100, end_time_ms=200
+        ),
+        WordSpeakerToken(
+            word="think", speaker="SPEAKER_01", start_time_ms=200, end_time_ms=300
+        ),
+        WordSpeakerToken(
+            word="this", speaker="SPEAKER_01", start_time_ms=300, end_time_ms=400
+        ),
+        WordSpeakerToken(
+            word="is", speaker="SPEAKER_01", start_time_ms=400, end_time_ms=500
+        ),
+        WordSpeakerToken(
+            word="a", speaker="SPEAKER_01", start_time_ms=500, end_time_ms=600
+        ),
+        WordSpeakerToken(
+            word="very", speaker="SPEAKER_01", start_time_ms=600, end_time_ms=700
+        ),
+        WordSpeakerToken(
+            word="good", speaker="SPEAKER_01", start_time_ms=700, end_time_ms=800
+        ),
+        WordSpeakerToken(
+            word="definition", speaker="SPEAKER_01", start_time_ms=800, end_time_ms=900
+        ),
+        WordSpeakerToken(
+            word="of", speaker="SPEAKER_01", start_time_ms=900, end_time_ms=1000
+        ),
+        WordSpeakerToken(
+            word="it", speaker="SPEAKER_01", start_time_ms=1000, end_time_ms=1100
+        ),
+        WordSpeakerToken(
+            word="and", speaker="SPEAKER_01", start_time_ms=1100, end_time_ms=1200
+        ),
+        WordSpeakerToken(
+            word="I", speaker="SPEAKER_05", start_time_ms=1200, end_time_ms=1300
+        ),
+        WordSpeakerToken(
+            word="think", speaker="SPEAKER_01", start_time_ms=1300, end_time_ms=1400
+        ),
+        WordSpeakerToken(
+            word="we", speaker="SPEAKER_01", start_time_ms=1400, end_time_ms=1500
+        ),
+        WordSpeakerToken(
+            word="should", speaker="SPEAKER_01", start_time_ms=1500, end_time_ms=1600
+        ),
+        WordSpeakerToken(
+            word="keep", speaker="SPEAKER_01", start_time_ms=1600, end_time_ms=1700
+        ),
+        WordSpeakerToken(
+            word="going.", speaker="SPEAKER_01", start_time_ms=1700, end_time_ms=1800
+        ),
     ]
 
     realigned = realign_speakers_with_punctuation(tokens)
