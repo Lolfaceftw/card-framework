@@ -343,9 +343,9 @@ def _build_manifest_steps(
     source_manifest: Path,
     audit_path: Path,
 ) -> tuple[PlanStep, ...]:
-    dataset_ready, _ = _prepared_manifest_check(dataset_manifest)
+    dataset_ready, _ = _prepared_budget_manifest_check(dataset_manifest)
     effective_source_manifest = _effective_source_manifest_path(source_manifest)
-    source_ready, _ = _prepared_manifest_check(effective_source_manifest)
+    source_ready, _ = _prepared_source_manifest_check(effective_source_manifest)
     if dataset_ready:
         return ()
 
@@ -421,6 +421,32 @@ def _hf_token_present() -> bool:
     return any(str(os.getenv(env_name, "") or "").strip() for env_name in HF_ENV_NAMES)
 
 
+def _prepared_manifest_payload(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _coerce_int_or_zero(raw_value: object) -> int:
+    if isinstance(raw_value, bool):
+        return int(raw_value)
+    if isinstance(raw_value, int):
+        return raw_value
+    if isinstance(raw_value, float):
+        return int(raw_value)
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return 0
+        try:
+            return int(stripped)
+        except ValueError:
+            return 0
+    return 0
+
+
 def _prepared_manifest_check(path: Path) -> tuple[bool, str]:
     if not path.exists():
         return False, f"Prepared manifest does not exist: {path}"
@@ -432,6 +458,44 @@ def _prepared_manifest_check(path: Path) -> tuple[bool, str]:
         True,
         f"Prepared manifest is loadable with sample_count={manifest.sample_count}: {path}",
     )
+
+
+def _prepared_source_manifest_check(path: Path) -> tuple[bool, str]:
+    base_ok, base_detail = _prepared_manifest_check(path)
+    if not base_ok:
+        return base_ok, base_detail
+    payload = _prepared_manifest_payload(path)
+    sample_count = _coerce_int_or_zero(payload.get("sample_count")) if payload else 0
+    if sample_count <= 0:
+        return False, f"Prepared source manifest has no samples: {path}"
+    return base_ok, base_detail
+
+
+def _prepared_budget_manifest_check(path: Path) -> tuple[bool, str]:
+    base_ok, base_detail = _prepared_manifest_check(path)
+    if not base_ok:
+        return base_ok, base_detail
+    payload = _prepared_manifest_payload(path)
+    if payload is None:
+        return False, f"Prepared budget manifest is not JSON-object shaped: {path}"
+    sample_count = _coerce_int_or_zero(payload.get("sample_count"))
+    if sample_count <= 0:
+        return False, f"Prepared budget manifest has no samples: {path}"
+    thresholds = payload.get("curation_thresholds")
+    thresholds_map: dict[str, object] = (
+        {str(key): value for key, value in thresholds.items() if isinstance(key, str)}
+        if isinstance(thresholds, dict)
+        else {}
+    )
+    max_unique_speaker_count = _coerce_int_or_zero(
+        thresholds_map.get("max_unique_speaker_count")
+    )
+    if max_unique_speaker_count != 3:
+        return (
+            False,
+            f"Prepared budget manifest is not the <=3-speaker budget subset: {path}",
+        )
+    return base_ok, base_detail
 
 
 def _effective_source_manifest_path(source_manifest: Path) -> Path:
@@ -456,8 +520,10 @@ def _build_requirement_checks(
     checks: list[RequirementCheck] = []
 
     effective_source_manifest = _effective_source_manifest_path(source_manifest)
-    dataset_ready, dataset_detail = _prepared_manifest_check(dataset_manifest)
-    source_ready, source_detail = _prepared_manifest_check(effective_source_manifest)
+    dataset_ready, dataset_detail = _prepared_budget_manifest_check(dataset_manifest)
+    source_ready, source_detail = _prepared_source_manifest_check(
+        effective_source_manifest
+    )
     manifest_ready_or_buildable = dataset_ready or source_ready or _hf_token_present()
     manifest_detail = (
         dataset_detail

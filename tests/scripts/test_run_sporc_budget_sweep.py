@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -22,10 +23,41 @@ def _load_module():
     return module
 
 
+def _write_prepared_manifest(
+    path: Path,
+    *,
+    budget_ready: bool,
+) -> None:
+    payload: dict[str, object] = {
+        "dataset_id": "sporc_full_longform",
+        "sporc_dataset_id": "blitt/SPoRC",
+        "dataset_variant": "full",
+        "episode_data_path": str((path.parent / "episode.jsonl.gz").resolve()),
+        "turn_data_path": str((path.parent / "turn.jsonl.gz").resolve()),
+        "sample_count": 1,
+        "samples": [
+            {
+                "sample_id": "sporc_00001_example",
+                "dataset": "sporc_full",
+                "episode_key": "episode-001",
+                "transcript_path": str((path.parent / "transcript.json").resolve()),
+                "reference_summary": "reference",
+                "target_seconds": 300,
+                "metadata": {},
+            }
+        ],
+    }
+    if budget_ready:
+        payload["curation_thresholds"] = {"max_unique_speaker_count": 3}
+        payload["selected_max_unique_speaker_count"] = 3
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_build_budget_plan_defaults_to_live_budget_matrix(tmp_path: Path) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
-    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
 
     parser = module._build_parser()
     args = parser.parse_args(["--dataset-manifest", str(dataset_manifest)])
@@ -57,7 +89,7 @@ def test_validate_mode_marks_live_credentials_as_later_requirements(
 ) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
-    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
     for env_name in (
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -96,7 +128,7 @@ def test_validate_mode_marks_live_credentials_as_later_requirements(
 def test_build_budget_plan_dry_run_defaults_to_deepseek_pair(tmp_path: Path) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
-    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
 
     parser = module._build_parser()
     args = parser.parse_args(
@@ -120,7 +152,7 @@ def test_build_budget_plan_propagates_custom_provider_profiles_path(
 ) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
-    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
     provider_profiles = (tmp_path / "profiles.yaml").resolve()
     provider_profiles.write_text(
         "providers:\n"
@@ -211,7 +243,7 @@ def test_build_budget_plan_marks_vllm_pin_satisfied_when_env_model_is_set(
 ) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
-    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
     monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen3-32B")
 
@@ -245,7 +277,7 @@ def test_main_validate_succeeds_for_deepseek_only_dry_run(
 ) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
-    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
 
     exit_code = module.main(
@@ -270,7 +302,7 @@ def test_main_validate_succeeds_for_default_prefunding_plan(
 ) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
-    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
     for env_name in (
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -333,8 +365,7 @@ def test_invalid_budget_manifest_is_rebuilt_from_valid_full_manifest(
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
     dataset_manifest.write_text("not valid json", encoding="utf-8")
     source_manifest = (tmp_path / "prepared_full" / "manifest.json").resolve()
-    source_manifest.parent.mkdir(parents=True, exist_ok=True)
-    source_manifest.write_text('{"samples": []}', encoding="utf-8")
+    _write_prepared_manifest(source_manifest, budget_ready=False)
 
     parser = module._build_parser()
     args = parser.parse_args(
