@@ -170,6 +170,33 @@ def _resolve_session_report_paths(
     return resolved
 
 
+def _resolve_sample_final_artifact_path(
+    sample: Any,
+    *,
+    reported_path: str | None,
+    filename: str,
+) -> Path | None:
+    raw_reported_path = str(reported_path or "").strip()
+    candidate_paths: list[Path] = []
+    if raw_reported_path:
+        candidate_paths.append(Path(raw_reported_path))
+    sample_artifact_dir = str(getattr(sample, "sample_artifact_dir", "") or "").strip()
+    if sample_artifact_dir:
+        candidate_paths.append(Path(sample_artifact_dir) / "final" / filename)
+    for candidate in candidate_paths:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _sample_is_eligible_for_postprocess(sample: Any) -> bool:
+    if sample.status == "completed" and sample.final_status == "max_iterations_reached":
+        return True
+    if sample.status == "failed" and sample.final_status == _POSTPROCESS_FINAL_STATUS:
+        return True
+    return False
+
+
 def _eligible_samples(
     report, sample_filters: set[str]
 ) -> list[tuple[Any, str, str, dict[str, Any]]]:
@@ -177,32 +204,34 @@ def _eligible_samples(
     for sample in report.samples:
         if sample_filters and sample.sample_id not in sample_filters:
             continue
-        if sample.final_status != "max_iterations_reached":
+        if not _sample_is_eligible_for_postprocess(sample):
             continue
-        if sample.status != "completed":
-            continue
-        summary_path = str(sample.final_summary_path or "").strip()
-        feedback_path = str(sample.final_critic_feedback_path or "").strip()
-        diagnostics_path = str(sample.loop_diagnostics_path or "").strip()
-        if not summary_path or not feedback_path:
-            continue
-        summary_file = Path(summary_path)
-        feedback_file = Path(feedback_path)
-        if not summary_file.exists() or not feedback_file.exists():
+        summary_file = _resolve_sample_final_artifact_path(
+            sample,
+            reported_path=sample.final_summary_path,
+            filename="summary.xml",
+        )
+        feedback_file = _resolve_sample_final_artifact_path(
+            sample,
+            reported_path=sample.final_critic_feedback_path,
+            filename="critic_feedback.txt",
+        )
+        if summary_file is None or feedback_file is None:
             continue
         previous_draft = summary_file.read_text(encoding="utf-8").strip()
         critic_feedback = feedback_file.read_text(encoding="utf-8").strip()
         if not previous_draft or not critic_feedback:
             continue
         prior_diagnostics: dict[str, Any] = {}
-        if diagnostics_path:
-            diagnostics_file = Path(diagnostics_path)
-            if diagnostics_file.exists():
-                loaded = json.loads(diagnostics_file.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    prior_diagnostics = {
-                        str(key): value for key, value in loaded.items()
-                    }
+        diagnostics_file = _resolve_sample_final_artifact_path(
+            sample,
+            reported_path=sample.loop_diagnostics_path,
+            filename="loop_diagnostics.json",
+        )
+        if diagnostics_file is not None:
+            loaded = json.loads(diagnostics_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prior_diagnostics = {str(key): value for key, value in loaded.items()}
         eligible.append((sample, previous_draft, critic_feedback, prior_diagnostics))
     return eligible
 

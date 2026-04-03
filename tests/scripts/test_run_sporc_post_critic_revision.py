@@ -139,6 +139,31 @@ def test_eligible_samples_only_selects_completed_capped_results(tmp_path: Path) 
     assert prior_diagnostics["iterations_run"] == 1
 
 
+def test_eligible_samples_retry_failed_postprocess_from_sample_artifacts(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    failed_retry_sample = replace(
+        _report_sample(tmp_path, final_status="max_iterations_reached"),
+        status="failed",
+        final_status="post_critic_revision_applied",
+        final_summary_path=None,
+        final_critic_feedback_path=None,
+        loop_diagnostics_path=None,
+        sample_artifact_dir=str((tmp_path / "sample-a").resolve()),
+    )
+    report = _report(tmp_path, failed_retry_sample)
+
+    eligible = module._eligible_samples(report, set())
+
+    assert len(eligible) == 1
+    selected_sample, previous_draft, critic_feedback, prior_diagnostics = eligible[0]
+    assert selected_sample.sample_id == "sample-a"
+    assert previous_draft.startswith("<summary>")
+    assert critic_feedback == "Expand coverage."
+    assert prior_diagnostics["max_iterations"] == 1
+
+
 def test_resolve_session_report_paths_skips_incomplete_steps_by_default(
     tmp_path: Path,
 ) -> None:
@@ -538,3 +563,168 @@ def test_revise_report_in_place_persists_postprocess_feedback_artifacts(
         "No new critic pass was run after this salvage revision." in persisted_feedback
     )
     assert persisted_feedback.endswith("Expand coverage.")
+
+
+def test_revise_report_in_place_reuses_voice_clone_orchestrator_for_audio_reports(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    sample = _report_sample(tmp_path)
+    report = replace(_report(tmp_path, sample), transcript_only=False)
+    report_path = Path(report.report_path)
+    report_path.write_text("{}", encoding="utf-8")
+    manifest_path = Path(report.dataset_manifest_path)
+    manifest_path.write_text("{}", encoding="utf-8")
+    provider_profile = ProviderProfile(
+        provider_id="openai_gpt_5_4_mini",
+        description="test",
+        llm_config={"_target_": "provider"},
+        required_env=[],
+    )
+    judge_profile = ProviderProfile(
+        provider_id="google_gemini_3_1_pro_preview_judge",
+        description="test",
+        llm_config={"_target_": "provider"},
+        required_env=[],
+    )
+    voice_clone_orchestrator = SimpleNamespace(output_dir=(tmp_path / "voice_clone"))
+    execute_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(module, "_load_execution_report", lambda path: report)
+    monkeypatch.setattr(
+        module, "ensure_compact_prepared_dataset_manifest", lambda path: path
+    )
+    monkeypatch.setattr(
+        module,
+        "load_prepared_dataset_manifest",
+        lambda path, include_samples=False: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_sample_lookup",
+        lambda manifest_path, sample_ids: {
+            "sample-a": PreparedBenchmarkSample(
+                sample_id="sample-a",
+                dataset="sporc_sample",
+                episode_key="episode-1",
+                transcript_path=str((tmp_path / "transcript.json").resolve()),
+                reference_summary="reference",
+                target_seconds=30,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "load_provider_profiles",
+        lambda path: {
+            "openai_gpt_5_4_mini": provider_profile,
+            "google_gemini_3_1_pro_preview_judge": judge_profile,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_find_provider_profile",
+        lambda profiles, provider_id: profiles[provider_id],
+    )
+    monkeypatch.setattr(
+        module, "_validate_provider_role_constraints", lambda profile, role: None
+    )
+    monkeypatch.setattr(module, "missing_required_env", lambda profile: [])
+    monkeypatch.setattr(
+        module,
+        "_load_base_config",
+        lambda path: OmegaConf.create(
+            {"audio": {"voice_clone": {"enabled": True}}, "logging": {"enabled": False}}
+        ),
+    )
+    monkeypatch.setattr(
+        module, "_configure_benchmark_logging", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        module,
+        "_resolve_embedding_profile",
+        lambda base_cfg, embedding_mode: SimpleNamespace(embedding_id="disabled"),
+    )
+    monkeypatch.setattr(module, "_coerce_mapping", lambda value: value)
+    monkeypatch.setattr(
+        module,
+        "_prepare_benchmark_audio_cfg",
+        lambda audio_cfg, run_root: audio_cfg,
+    )
+    monkeypatch.setattr(
+        module, "_build_stub_calibration", lambda **kwargs: SimpleNamespace()
+    )
+    monkeypatch.setattr(module, "_prepare_provider_config", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        module,
+        "build_voice_clone_orchestrator",
+        lambda audio_cfg, project_root: voice_clone_orchestrator,
+    )
+
+    async def _fake_start_managed_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            orchestrator=object(),
+            event_capture=object(),
+            retrieval_enabled=False,
+            judge=object(),
+            artifact_recorder=object(),
+        )
+
+    async def _fake_execute_sample(**kwargs):  # type: ignore[no-untyped-def]
+        execute_calls.append(kwargs)
+        return replace(
+            sample,
+            final_status="post_critic_revision_applied",
+            final_summary_path=str((tmp_path / "summary.xml").resolve()),
+            final_critic_feedback_path=str(
+                (tmp_path / "critic_feedback.txt").resolve()
+            ),
+            loop_diagnostics_path=str((tmp_path / "loop_diagnostics.json").resolve()),
+        )
+
+    async def _fake_stop_managed_runtime(runtime):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(module, "_start_managed_runtime", _fake_start_managed_runtime)
+    monkeypatch.setattr(module, "_execute_sample", _fake_execute_sample)
+    monkeypatch.setattr(module, "_stop_managed_runtime", _fake_stop_managed_runtime)
+    monkeypatch.setattr(
+        module,
+        "_summarize_results",
+        lambda results, target_sample_count: BenchmarkSummary(
+            target_sample_count,
+            len(results),
+            len(results),
+            0,
+            len(results),
+            0,
+            len(results),
+            0,
+            0.8,
+            0.7,
+            0.6,
+            0.7,
+        ),
+    )
+    monkeypatch.setattr(
+        module, "_report_status_from_summary", lambda summary: "completed"
+    )
+    monkeypatch.setattr(
+        module, "_rewrite_report_in_place", lambda *, run_root, report: None
+    )
+
+    result = module.asyncio.run(
+        module._revise_report_in_place(
+            report_path=report_path,
+            provider_profiles_path=(tmp_path / "profiles.yaml").resolve(),
+            config_path=(tmp_path / "config.yaml").resolve(),
+            sample_filters=set(),
+            stream_output=False,
+        )
+    )
+
+    assert result["revised_sample_ids"] == ["sample-a"]
+    assert len(execute_calls) == 1
+    assert execute_calls[0]["transcript_only"] is False
+    assert execute_calls[0]["voice_clone_orchestrator"] is voice_clone_orchestrator
