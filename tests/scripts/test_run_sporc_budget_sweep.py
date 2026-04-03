@@ -271,6 +271,75 @@ def test_build_budget_plan_marks_vllm_pin_satisfied_when_env_model_is_set(
     assert "Qwen3-32B" in pin_check.detail
 
 
+def test_build_budget_plan_handles_invalid_vllm_base_url_without_crashing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
+    provider_profiles = (tmp_path / "profiles.yaml").resolve()
+    provider_profiles.write_text(
+        "providers:\n"
+        "  - id: deepseek_chat\n"
+        "    description: test\n"
+        "    required_env: [DEEPSEEK_API_KEY]\n"
+        "    llm:\n"
+        "      _target_: card_framework.providers.deepseek_provider.DeepSeekProvider\n"
+        "      api_key: $ENV{DEEPSEEK_API_KEY}\n"
+        "      model: deepseek-chat\n"
+        "      base_url: https://api.deepseek.com\n"
+        "  - id: deepseek_judge\n"
+        "    description: test\n"
+        "    required_env: [DEEPSEEK_API_KEY]\n"
+        "    llm:\n"
+        "      _target_: card_framework.providers.deepseek_provider.DeepSeekProvider\n"
+        "      api_key: $ENV{DEEPSEEK_API_KEY}\n"
+        "      model: deepseek-reasoner\n"
+        "      base_url: https://api.deepseek.com\n"
+        "  - id: vllm_default\n"
+        "    description: test\n"
+        "    required_env: []\n"
+        "    llm:\n"
+        "      _target_: card_framework.providers.vllm_provider.VLLMProvider\n"
+        "      base_url: http://://bad-url\n"
+        "      api_key: EMPTY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen3-32B")
+    for env_name in ("VLLM_URL", "CARD_FRAMEWORK_VLLM_URL", "VLLM_BASE_URL"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_BASE_URL", "://bad-url")
+
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "dry-run",
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--provider-profiles",
+            str(provider_profiles),
+            "--contestants",
+            "deepseek_chat,vllm_default",
+        ]
+    )
+
+    plan = module._build_budget_plan(args)
+
+    reachability_check = next(
+        check
+        for check in plan.requirement_checks
+        if check.label == "Reachable vLLM server for vllm_default"
+    )
+    assert reachability_check.satisfied is False
+    assert (
+        "Invalid vLLM base URL" in reachability_check.detail
+        or "Unable to reach" in reachability_check.detail
+    )
+
+
 def test_main_validate_succeeds_for_deepseek_only_dry_run(
     tmp_path: Path,
     monkeypatch,

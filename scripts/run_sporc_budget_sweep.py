@@ -387,14 +387,19 @@ def _probe_openai_compatible_models(
     api_key: str,
     timeout_seconds: float = 5.0,
 ) -> tuple[bool, str, tuple[str, ...]]:
-    models_url = f"{base_url.rstrip('/')}/models"
+    normalized_base_url = str(base_url or "").strip()
+    if not normalized_base_url:
+        return False, "vLLM base URL is missing.", ()
+    models_url = f"{normalized_base_url.rstrip('/')}/models"
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    request = Request(models_url, headers=headers)
     try:
+        request = Request(models_url, headers=headers)
         with urlopen(request, timeout=timeout_seconds) as response:
             payload = json.load(response)
+    except ValueError as exc:
+        return False, f"Invalid vLLM base URL '{normalized_base_url}': {exc}", ()
     except HTTPError as exc:
         return False, f"{models_url} returned HTTP {exc.code}.", ()
     except URLError as exc:
