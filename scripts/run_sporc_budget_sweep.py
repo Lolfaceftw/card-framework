@@ -499,12 +499,13 @@ def _prepared_budget_manifest_check(path: Path) -> tuple[bool, str]:
 
 
 def _effective_source_manifest_path(source_manifest: Path) -> Path:
-    if source_manifest.exists():
-        return source_manifest
     generated_manifest = (source_manifest.parent / "manifest.json").resolve()
-    if source_manifest.name != generated_manifest.name:
-        return generated_manifest
-    return source_manifest
+    if source_manifest.name == generated_manifest.name:
+        return source_manifest
+    source_ready, _ = _prepared_source_manifest_check(source_manifest)
+    if source_ready:
+        return source_manifest
+    return generated_manifest
 
 
 def _build_requirement_checks(

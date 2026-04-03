@@ -415,3 +415,36 @@ def test_missing_custom_source_manifest_falls_back_to_generated_manifest_name(
         curate_step.command[curate_step.command.index("--source-manifest") + 1]
         == generated_manifest
     )
+
+
+def test_invalid_custom_source_manifest_falls_back_to_generated_manifest_name(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    source_manifest = (tmp_path / "prepared_full" / "custom_name.json").resolve()
+    source_manifest.parent.mkdir(parents=True, exist_ok=True)
+    source_manifest.write_text("not valid json", encoding="utf-8")
+
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--source-manifest",
+            str(source_manifest),
+        ]
+    )
+
+    plan = module._build_budget_plan(args)
+
+    prepare_step = plan.manifest_steps[0]
+    curate_step = plan.manifest_steps[1]
+    generated_manifest = str((source_manifest.parent / "manifest.json").resolve())
+    assert prepare_step.command[
+        prepare_step.command.index("--prepared-root") + 1
+    ] == str(source_manifest.parent)
+    assert (
+        curate_step.command[curate_step.command.index("--source-manifest") + 1]
+        == generated_manifest
+    )
