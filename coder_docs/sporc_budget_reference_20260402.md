@@ -36,6 +36,10 @@ build the `<=3`-speaker long-form manifest when needed, and then launch one
 
 This prints the exact commands and checks the prerequisites only.
 
+`--mode validate` is intentionally pre-funding-safe: missing live-run API keys or
+the later `vllm_default` model pin are reported as later requirements, not as a
+validation failure.
+
 ```powershell
 uv run python scripts/run_sporc_budget_sweep.py --mode validate --skip-vllm-server-check
 ```

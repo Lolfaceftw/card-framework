@@ -65,6 +65,7 @@ class RequirementCheck:
     label: str
     satisfied: bool
     detail: str
+    blocking: bool = True
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,14 @@ class BudgetPlan:
     manifest_steps: tuple[PlanStep, ...]
     run_steps: tuple[PlanStep, ...]
     requirement_checks: tuple[RequirementCheck, ...]
+
+
+def _requirement_status_label(check: RequirementCheck) -> str:
+    if check.satisfied:
+        return "OK"
+    if check.blocking:
+        return "MISSING"
+    return "LATER"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -272,6 +281,7 @@ def _build_execute_command(
     judge_provider: str,
     dataset_manifest: Path,
     output_root: Path,
+    provider_profiles_path: Path,
     max_samples: int,
     sample_seed: int,
     max_iterations: int,
@@ -288,6 +298,8 @@ def _build_execute_command(
             str(dataset_manifest),
             "--output-root",
             str(contestant_output_root),
+            "--provider-profiles",
+            str(provider_profiles_path),
             "--summarizer-provider",
             contestant_provider,
             "--critic-provider",
@@ -316,16 +328,17 @@ def _build_manifest_steps(
     audit_path: Path,
 ) -> tuple[PlanStep, ...]:
     dataset_ready, _ = _prepared_manifest_check(dataset_manifest)
-    source_ready, _ = _prepared_manifest_check(source_manifest)
+    effective_source_manifest = _effective_source_manifest_path(source_manifest)
+    source_ready, _ = _prepared_manifest_check(effective_source_manifest)
     if dataset_ready:
         return ()
 
     steps: list[PlanStep] = []
     if not source_ready:
-        steps.append(_build_prepare_full_dataset_command(source_manifest))
+        steps.append(_build_prepare_full_dataset_command(effective_source_manifest))
     steps.append(
         _build_curate_longform_command(
-            source_manifest=source_manifest,
+            source_manifest=effective_source_manifest,
             dataset_manifest=dataset_manifest,
             audit_path=audit_path,
         )
@@ -405,8 +418,18 @@ def _prepared_manifest_check(path: Path) -> tuple[bool, str]:
     )
 
 
+def _effective_source_manifest_path(source_manifest: Path) -> Path:
+    if source_manifest.exists():
+        return source_manifest
+    generated_manifest = (source_manifest.parent / "manifest.json").resolve()
+    if source_manifest.name != generated_manifest.name:
+        return generated_manifest
+    return source_manifest
+
+
 def _build_requirement_checks(
     *,
+    mode: str,
     contestants: tuple[str, ...],
     judge_provider: str,
     profiles: dict[str, ProviderProfile],
@@ -416,8 +439,9 @@ def _build_requirement_checks(
 ) -> tuple[RequirementCheck, ...]:
     checks: list[RequirementCheck] = []
 
+    effective_source_manifest = _effective_source_manifest_path(source_manifest)
     dataset_ready, dataset_detail = _prepared_manifest_check(dataset_manifest)
-    source_ready, source_detail = _prepared_manifest_check(source_manifest)
+    source_ready, source_detail = _prepared_manifest_check(effective_source_manifest)
     manifest_ready_or_buildable = dataset_ready or source_ready or _hf_token_present()
     manifest_detail = (
         dataset_detail
@@ -426,12 +450,12 @@ def _build_requirement_checks(
             f"{dataset_detail} {source_detail} The wrapper can curate the <=3-speaker subset locally."
             if source_ready
             else (
-                f"{dataset_manifest} and {source_manifest} are both missing, but an HF token "
+                f"{dataset_manifest} and {effective_source_manifest} are both missing, but an HF token "
                 "is present so the script can prepare the full dataset then curate the budget "
                 "subset."
                 if _hf_token_present()
                 else (
-                    f"{dataset_manifest} and {source_manifest} are both missing. Set HF_ACCESS_TOKEN "
+                    f"{dataset_manifest} and {effective_source_manifest} are both missing. Set HF_ACCESS_TOKEN "
                     "or HF_TOKEN so the script can run prepare-dataset --dataset-variant full."
                 )
             )
@@ -442,6 +466,7 @@ def _build_requirement_checks(
             label="Budget manifest ready or buildable",
             satisfied=manifest_ready_or_buildable,
             detail=manifest_detail,
+            blocking=True,
         )
     )
 
@@ -457,12 +482,14 @@ def _build_requirement_checks(
                     if profile is not None
                     else f"Provider profile '{provider_id}' is missing from the benchmark provider YAML."
                 ),
+                blocking=True,
             )
         )
         if profile is None:
             continue
 
         missing_env = missing_required_env(profile)
+        credentials_blocking = mode in {"dry-run", "live"}
         checks.append(
             RequirementCheck(
                 label=f"Credentials for {provider_id}",
@@ -475,6 +502,7 @@ def _build_requirement_checks(
                         f"{', '.join(missing_env)}."
                     )
                 ),
+                blocking=credentials_blocking,
             )
         )
 
@@ -496,6 +524,7 @@ def _build_requirement_checks(
                         "summarizer/critic and keep deepseek_judge as judge-only."
                     )
                 ),
+                blocking=True,
             )
         )
 
@@ -517,6 +546,7 @@ def _build_requirement_checks(
                         "contestant is reproducible."
                     )
                 ),
+                blocking=mode in {"dry-run", "live"},
             )
         )
         if not model_pinned or skip_vllm_server_check:
@@ -530,6 +560,7 @@ def _build_requirement_checks(
                 label=f"Reachable vLLM server for {provider_id}",
                 satisfied=reachable,
                 detail=detail,
+                blocking=mode in {"dry-run", "live"},
             )
         )
         if reachable:
@@ -545,6 +576,7 @@ def _build_requirement_checks(
                             f"Served ids: {', '.join(model_ids)}."
                         )
                     ),
+                    blocking=mode in {"dry-run", "live"},
                 )
             )
 
@@ -556,10 +588,11 @@ def _build_budget_plan(args: argparse.Namespace) -> BudgetPlan:
     source_manifest = Path(str(args.source_manifest)).resolve()
     audit_path = Path(str(args.audit_path)).resolve()
     output_root = Path(str(args.output_root)).resolve()
+    provider_profiles_path = Path(str(args.provider_profiles)).resolve()
     contestants = _resolve_contestants(args)
     judge_provider = _resolve_judge_provider(args)
     max_samples = _resolve_max_samples(args)
-    profiles = _provider_index(Path(str(args.provider_profiles)).resolve())
+    profiles = _provider_index(provider_profiles_path)
     manifest_steps = _build_manifest_steps(
         dataset_manifest=dataset_manifest,
         source_manifest=source_manifest,
@@ -571,6 +604,7 @@ def _build_budget_plan(args: argparse.Namespace) -> BudgetPlan:
             judge_provider=judge_provider,
             dataset_manifest=dataset_manifest,
             output_root=output_root,
+            provider_profiles_path=provider_profiles_path,
             max_samples=max_samples,
             sample_seed=int(args.sample_seed),
             max_iterations=int(args.max_iterations),
@@ -578,6 +612,7 @@ def _build_budget_plan(args: argparse.Namespace) -> BudgetPlan:
         for contestant_provider in contestants
     )
     requirement_checks = _build_requirement_checks(
+        mode=str(args.mode),
         contestants=contestants,
         judge_provider=judge_provider,
         profiles=profiles,
@@ -610,7 +645,7 @@ def _print_plan(plan: BudgetPlan) -> None:
     print()
     print("Requirement checks:")
     for check in plan.requirement_checks:
-        status = "OK" if check.satisfied else "MISSING"
+        status = _requirement_status_label(check)
         print(f"- [{status}] {check.label}: {check.detail}")
     print()
     if plan.manifest_steps:
@@ -642,14 +677,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _print_plan(plan)
-    missing_checks = [check for check in plan.requirement_checks if not check.satisfied]
+    missing_checks = [
+        check
+        for check in plan.requirement_checks
+        if check.blocking and not check.satisfied
+    ]
     if missing_checks:
         print(
             f"\nCannot continue: {len(missing_checks)} prerequisite(s) are still missing."
         )
         return 1
 
+    later_checks = [
+        check
+        for check in plan.requirement_checks
+        if not check.blocking and not check.satisfied
+    ]
+
     if str(args.mode) == "validate":
+        if later_checks:
+            print(f"\nLater live-run requirements still pending: {len(later_checks)}.")
         print("\nValidation succeeded. No benchmark subprocesses were started.")
         return 0
 

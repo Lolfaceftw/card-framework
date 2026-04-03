@@ -772,6 +772,10 @@ four `execute` commands by hand.
 
 Validate prerequisites and print the exact commands without spending money:
 
+This pre-funding validate mode still exits cleanly before the wallets are
+funded: missing live-run API keys and the later `vllm_default` model pin are
+reported as later requirements instead of blocking the validation pass.
+
 ```powershell
 uv run python scripts/run_sporc_budget_sweep.py --mode validate --skip-vllm-server-check
 ```

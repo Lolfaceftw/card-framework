@@ -46,6 +46,49 @@ def test_build_budget_plan_defaults_to_live_budget_matrix(tmp_path: Path) -> Non
         step.command[step.command.index("--sample-seed") + 1] == "42"
         for step in plan.run_steps
     )
+    assert all("--provider-profiles" in step.command for step in plan.run_steps)
+
+
+def test_validate_mode_marks_live_credentials_as_later_requirements(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    for env_name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "CARD_FRAMEWORK_VLLM_MODEL",
+        "VLLM_MODEL",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    plan = module._build_budget_plan(
+        module._build_parser().parse_args(
+            [
+                "--dataset-manifest",
+                str(dataset_manifest),
+                "--skip-vllm-server-check",
+            ]
+        )
+    )
+
+    later_checks = [check for check in plan.requirement_checks if not check.blocking]
+    assert later_checks
+    later_by_label = {check.label: check for check in later_checks}
+    assert later_by_label["Credentials for openai_gpt_5_4_mini"].satisfied is False
+    assert (
+        later_by_label["Credentials for anthropic_claude_haiku_4_5"].satisfied is False
+    )
+    assert later_by_label["Credentials for deepseek_chat"].satisfied is False
+    assert (
+        later_by_label["Credentials for google_gemini_3_1_pro_preview_judge"].satisfied
+        is False
+    )
+    assert later_by_label["Pinned vLLM model for vllm_default"].satisfied is False
 
 
 def test_build_budget_plan_dry_run_defaults_to_deepseek_pair(tmp_path: Path) -> None:
@@ -67,6 +110,54 @@ def test_build_budget_plan_dry_run_defaults_to_deepseek_pair(tmp_path: Path) -> 
     assert (
         run_step.command[run_step.command.index("--judge-provider") + 1]
         == "deepseek_judge"
+    )
+
+
+def test_build_budget_plan_propagates_custom_provider_profiles_path(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    provider_profiles = (tmp_path / "profiles.yaml").resolve()
+    provider_profiles.write_text(
+        "providers:\n"
+        "  - id: deepseek_chat\n"
+        "    description: test\n"
+        "    required_env: [DEEPSEEK_API_KEY]\n"
+        "    llm:\n"
+        "      _target_: card_framework.providers.deepseek_provider.DeepSeekProvider\n"
+        "      api_key: $ENV{DEEPSEEK_API_KEY}\n"
+        "      model: deepseek-chat\n"
+        "      base_url: https://api.deepseek.com\n"
+        "  - id: deepseek_judge\n"
+        "    description: test\n"
+        "    required_env: [DEEPSEEK_API_KEY]\n"
+        "    llm:\n"
+        "      _target_: card_framework.providers.deepseek_provider.DeepSeekProvider\n"
+        "      api_key: $ENV{DEEPSEEK_API_KEY}\n"
+        "      model: deepseek-reasoner\n"
+        "      base_url: https://api.deepseek.com\n",
+        encoding="utf-8",
+    )
+
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "dry-run",
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--provider-profiles",
+            str(provider_profiles),
+        ]
+    )
+
+    plan = module._build_budget_plan(args)
+
+    run_step = plan.run_steps[0]
+    assert run_step.command[run_step.command.index("--provider-profiles") + 1] == str(
+        provider_profiles
     )
 
 
@@ -164,6 +255,36 @@ def test_main_validate_succeeds_for_deepseek_only_dry_run(
     assert exit_code == 0
 
 
+def test_main_validate_succeeds_for_default_prefunding_plan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    dataset_manifest.write_text('{"samples": []}', encoding="utf-8")
+    for env_name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "CARD_FRAMEWORK_VLLM_MODEL",
+        "VLLM_MODEL",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    exit_code = module.main(
+        [
+            "--mode",
+            "validate",
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--skip-vllm-server-check",
+        ]
+    )
+
+    assert exit_code == 0
+
+
 def test_invalid_existing_dataset_manifest_does_not_count_as_ready(
     tmp_path: Path,
     monkeypatch,
@@ -222,4 +343,35 @@ def test_invalid_budget_manifest_is_rebuilt_from_valid_full_manifest(
     assert (
         plan.manifest_steps[0].label
         == "Curate the <=3-speaker long-form budget manifest"
+    )
+
+
+def test_missing_custom_source_manifest_falls_back_to_generated_manifest_name(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    source_manifest = (tmp_path / "prepared_full" / "custom_name.json").resolve()
+
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--source-manifest",
+            str(source_manifest),
+        ]
+    )
+
+    plan = module._build_budget_plan(args)
+
+    prepare_step = plan.manifest_steps[0]
+    curate_step = plan.manifest_steps[1]
+    generated_manifest = str((source_manifest.parent / "manifest.json").resolve())
+    assert prepare_step.command[
+        prepare_step.command.index("--prepared-root") + 1
+    ] == str(source_manifest.parent)
+    assert (
+        curate_step.command[curate_step.command.index("--source-manifest") + 1]
+        == generated_manifest
     )
