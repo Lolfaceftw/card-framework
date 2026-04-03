@@ -146,6 +146,9 @@ _ANTHROPIC_PROVIDER_TARGET = (
 _GOOGLE_PROVIDER_TARGET = (
     "card_framework.providers.google_genai_provider.GoogleGenAIProvider"
 )
+_DEEPSEEK_PROVIDER_TARGET = (
+    "card_framework.providers.deepseek_provider.DeepSeekProvider"
+)
 _OPENAI_PROVIDER_TARGET = "card_framework.providers.openai_provider.OpenAIProvider"
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
@@ -1284,6 +1287,31 @@ def _prepare_provider_config(
         )
         return prepared
     return prepared
+
+
+def _validate_provider_role_constraints(
+    profile: Any,
+    *,
+    role: str,
+) -> None:
+    """Fail fast on provider-role pairings that cannot satisfy SPoRC tool loops."""
+    llm_config = getattr(profile, "llm_config", {})
+    if not isinstance(llm_config, dict):
+        return
+
+    provider_target = str(llm_config.get("_target_", "") or "").strip()
+    model_name = str(llm_config.get("model", "") or "").strip().lower()
+    if (
+        role in {"summarizer", "critic"}
+        and provider_target == _DEEPSEEK_PROVIDER_TARGET
+        and model_name.startswith("deepseek-reasoner")
+    ):
+        raise BenchmarkExecutionError(
+            f"Provider '{profile.provider_id}' cannot be used as the SPoRC {role} "
+            "because DeepSeek documents `deepseek-reasoner` as not supporting "
+            "function calling. Use `deepseek_chat` for summarizer/critic tool loops "
+            "and reserve `deepseek_judge` for judge-only or dry-run judging."
+        )
 
 
 def _resolve_override_target_seconds(args: argparse.Namespace) -> int | None:
@@ -3985,6 +4013,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             profiles,
             args.judge_provider or args.critic_provider or args.summarizer_provider,
         )
+        _validate_provider_role_constraints(judge_profile, role="judge")
         missing_env = missing_required_env(judge_profile)
         if missing_env:
             raise BenchmarkExecutionError(
@@ -4224,7 +4253,12 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
         profiles,
         args.judge_provider or args.critic_provider or args.summarizer_provider,
     )
-    for profile in (summarizer_profile, critic_profile, judge_profile):
+    for role_name, profile in (
+        ("summarizer", summarizer_profile),
+        ("critic", critic_profile),
+        ("judge", judge_profile),
+    ):
+        _validate_provider_role_constraints(profile, role=role_name)
         missing_env = missing_required_env(profile)
         if missing_env:
             raise BenchmarkExecutionError(

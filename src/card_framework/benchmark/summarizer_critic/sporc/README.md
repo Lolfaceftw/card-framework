@@ -765,6 +765,43 @@ Important behavior:
 
 ## Step 2: Run One Benchmark
 
+### Budget-plan wrapper
+
+For the April 2026 under-`$50` plan, use the repo wrapper instead of typing the
+four `execute` commands by hand.
+
+Validate prerequisites and print the exact commands without spending money:
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode validate --skip-vllm-server-check
+```
+
+Run a DeepSeek-only dry run before the funded sweep:
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode dry-run --skip-vllm-server-check
+```
+
+Run the full funded sweep after the provider wallets are ready:
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode live
+```
+
+The wrapper enforces the documented budget defaults:
+
+- `5m` preset only
+- `10` retained samples
+- `sample_seed=42`
+- `max_iterations=1`
+- transcript-only path
+- contestants: `openai_gpt_5_4_mini`, `anthropic_claude_haiku_4_5`, `deepseek_chat`, `vllm_default`
+- judge: `google_gemini_3_1_pro_preview_judge`
+
+It also fails fast if you try to use `deepseek-reasoner` as the SPoRC
+summarizer or critic, because DeepSeek's docs mark that model as not supporting
+function calling.
+
 Recommended transcript-only run:
 
 ```bash

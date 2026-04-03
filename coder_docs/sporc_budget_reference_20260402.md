@@ -26,6 +26,77 @@ Use these SPoRC benchmark provider ids from
 - Local open/open-weight contestant: `vllm_default`
 - Google judge: `google_gemini_3_1_pro_preview_judge`
 
+## Recommended wrapper commands
+
+The repo now includes `scripts/run_sporc_budget_sweep.py` to validate the plan,
+build the `<=3`-speaker long-form manifest when needed, and then launch one
+`execute` run per contestant.
+
+### 1. Validate the plan without spending money
+
+This prints the exact commands and checks the prerequisites only.
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode validate --skip-vllm-server-check
+```
+
+### 2. Low-cost dry run with DeepSeek only
+
+This uses `deepseek_chat` for the summarizer+critic tool loop and
+`deepseek_judge` (`deepseek-reasoner`) only as the judge. That split is
+intentional: DeepSeek's docs say `deepseek-reasoner` does **not** support
+function calling, so it is not safe as a SPoRC summarizer or critic contestant.
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode dry-run --skip-vllm-server-check
+```
+
+### 3. Full one-shot budget run after funding the wallets
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode live
+```
+
+The live wrapper expands into four transcript-only `execute` runs, all with:
+
+- `--duration-preset 5m`
+- `--max-samples 10`
+- `--sample-seed 42`
+- `--max-iterations 1`
+- `--embedding-mode disabled`
+
+If `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.json`
+does not exist yet, the wrapper first:
+
+1. prepares the full SPoRC dataset if needed, then
+2. runs `curate-longform --max-speakers 3` to create the exact budget manifest.
+
+## Operator requirements
+
+### Required now for `--mode validate`
+
+- repo dependencies installed via `uv`
+- benchmark provider profiles present at `src/card_framework/benchmark/provider_profiles.yaml`
+- either:
+  - the curated manifest already exists, or
+  - the prepared full manifest already exists, or
+  - `HF_ACCESS_TOKEN` or `HF_TOKEN` is set so the wrapper can prepare the full dataset
+
+### Required now for `--mode dry-run`
+
+- `DEEPSEEK_API_KEY`
+- everything listed under validate mode
+- if you include `vllm_default` in a custom dry run, set `CARD_FRAMEWORK_VLLM_MODEL` or `VLLM_MODEL`
+
+### Required later for `--mode live`
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `DEEPSEEK_API_KEY`
+- `GEMINI_API_KEY`
+- local vLLM server reachable at the configured `VLLM_URL`/`CARD_FRAMEWORK_VLLM_BASE_URL` when using `vllm_default`
+- `CARD_FRAMEWORK_VLLM_MODEL` or `VLLM_MODEL` pinned to the exact served open/open-weight model id
+
 For the local `vllm_default` contestant, also set `CARD_FRAMEWORK_VLLM_MODEL`
 or `VLLM_MODEL` to the exact served model id you want benchmarked. Without
 that pin, the local vLLM adapter falls back to the first model exposed by the

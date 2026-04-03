@@ -23,6 +23,7 @@ from card_framework.benchmark.summarizer_critic.sporc.runner import (
     _classify_sample_failure,
     _copy_sample_transcript,
     _prepare_provider_config,
+    _validate_provider_role_constraints,
     _compute_composite_score,
     _execute_sample,
     _evaluate_sample_preflight,
@@ -42,6 +43,7 @@ from card_framework.benchmark.summarizer_critic.sporc.runner import (
     _select_sample_shard,
     _summarize_results,
     _write_checkpoint_payload,
+    BenchmarkExecutionError,
     build_execute_parser,
     execute_benchmark,
 )
@@ -2414,3 +2416,38 @@ def test_prepare_provider_config_does_not_force_unsupported_gemini_3_pro_level()
     assert prepared["enable_thinking"] is False
     assert "thinking_level" not in prepared
     assert "thinking_budget" not in prepared
+
+
+def test_validate_provider_role_constraints_rejects_deepseek_reasoner_contestant() -> (
+    None
+):
+    profile = ProviderProfile(
+        provider_id="deepseek_judge",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.deepseek_provider.DeepSeekProvider",
+            "api_key": "test-key",
+            "model": "deepseek-reasoner",
+            "base_url": "https://api.deepseek.com",
+        },
+    )
+
+    with pytest.raises(
+        BenchmarkExecutionError, match="not supporting function calling"
+    ):
+        _validate_provider_role_constraints(profile, role="summarizer")
+
+
+def test_validate_provider_role_constraints_allows_deepseek_reasoner_judge() -> None:
+    profile = ProviderProfile(
+        provider_id="deepseek_judge",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.deepseek_provider.DeepSeekProvider",
+            "api_key": "test-key",
+            "model": "deepseek-reasoner",
+            "base_url": "https://api.deepseek.com",
+        },
+    )
+
+    _validate_provider_role_constraints(profile, role="judge")
