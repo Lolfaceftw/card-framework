@@ -19,6 +19,13 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
     SampleBenchmarkResult,
     SampleMetricBundle,
 )
+from card_framework.benchmark.summarizer_critic.sporc.cli import (
+    _load_execution_report as _real_load_execution_report,
+)
+from card_framework.benchmark.summarizer_critic.sporc.judge import SPoRCJudgeResult
+from card_framework.benchmark.summarizer_critic.sporc.runner import (
+    _SampleArtifactRecorder,
+)
 from card_framework.benchmark.types import ProviderProfile
 from card_framework.shared.paths import REPO_ROOT
 
@@ -348,3 +355,186 @@ def test_postprocess_revised_samples_are_not_selected_again(tmp_path: Path) -> N
     eligible = module._eligible_samples(report, set())
 
     assert eligible == []
+
+
+def test_revise_report_in_place_persists_postprocess_feedback_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    sample = _report_sample(tmp_path)
+    report = _report(tmp_path, sample)
+    report_path = Path(report.report_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("{}", encoding="utf-8")
+    manifest_path = Path(report.dataset_manifest_path)
+    transcript_path = (tmp_path / "transcript.json").resolve()
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "hello world from transcript",
+                        "start_time": 0,
+                        "end_time": 1000,
+                    }
+                ],
+                "metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    provider_profile = ProviderProfile(
+        provider_id="openai_gpt_5_4_mini",
+        description="test",
+        llm_config={"_target_": "provider"},
+        required_env=[],
+    )
+    judge_profile = ProviderProfile(
+        provider_id="google_gemini_3_1_pro_preview_judge",
+        description="test",
+        llm_config={"_target_": "provider"},
+        required_env=[],
+    )
+
+    class _RuntimeOrchestrator:
+        async def run_loop_with_diagnostics(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["initial_draft"].startswith("<summary>")
+            assert kwargs["initial_feedback"] == "Expand coverage."
+            return {
+                "converged": False,
+                "iterations_run": 1,
+                "max_iterations": 0,
+                "draft": '<summary><turn speaker="SPEAKER_00">Revised draft</turn></summary>',
+                "final_status": "summarizer_only",
+                "final_word_count": 2,
+                "final_estimated_seconds": 0.0,
+                "final_feedback": "",
+                "iteration_details": [],
+            }
+
+    class _EventCapture:
+        def count(self, name: str) -> int:
+            return 0
+
+    monkeypatch.setattr(module, "_load_execution_report", lambda path: report)
+    monkeypatch.setattr(
+        module, "ensure_compact_prepared_dataset_manifest", lambda path: path
+    )
+    monkeypatch.setattr(
+        module,
+        "load_prepared_dataset_manifest",
+        lambda path, include_samples=False: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_sample_lookup",
+        lambda manifest_path, sample_ids: {
+            "sample-a": PreparedBenchmarkSample(
+                sample_id="sample-a",
+                dataset="sporc_sample",
+                episode_key="episode-1",
+                transcript_path=str(transcript_path),
+                reference_summary="reference",
+                target_seconds=30,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "load_provider_profiles",
+        lambda path: {
+            "openai_gpt_5_4_mini": provider_profile,
+            "google_gemini_3_1_pro_preview_judge": judge_profile,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_find_provider_profile",
+        lambda profiles, provider_id: profiles[provider_id],
+    )
+    monkeypatch.setattr(
+        module, "_validate_provider_role_constraints", lambda profile, role: None
+    )
+    monkeypatch.setattr(module, "missing_required_env", lambda profile: [])
+    monkeypatch.setattr(
+        module,
+        "_load_base_config",
+        lambda path: OmegaConf.create({"audio": {}, "logging": {"enabled": False}}),
+    )
+    monkeypatch.setattr(
+        module, "_configure_benchmark_logging", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        module,
+        "_resolve_embedding_profile",
+        lambda base_cfg, embedding_mode: SimpleNamespace(embedding_id="disabled"),
+    )
+    monkeypatch.setattr(module, "_coerce_mapping", lambda value: {})
+    monkeypatch.setattr(
+        module,
+        "_build_stub_calibration",
+        lambda **kwargs: SimpleNamespace(estimate_text_seconds=lambda **kw: 30.0),
+    )
+    monkeypatch.setattr(module, "_prepare_provider_config", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        module,
+        "utc_now_iso",
+        lambda: "2026-04-03T20:30:00Z",
+    )
+
+    async def _fake_start_managed_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            orchestrator=_RuntimeOrchestrator(),
+            event_capture=_EventCapture(),
+            retrieval_enabled=False,
+            judge=SimpleNamespace(
+                evaluate=lambda **kw: SPoRCJudgeResult(
+                    status="ok",
+                    scores={
+                        "Factualness": 0.8,
+                        "Naturalness": 0.7,
+                        "Speaker Grammar Similarity": 0.6,
+                    },
+                    error_message=None,
+                )
+            ),
+            artifact_recorder=_SampleArtifactRecorder(run_root=report_path.parent),
+        )
+
+    async def _fake_stop_managed_runtime(runtime):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(module, "_start_managed_runtime", _fake_start_managed_runtime)
+    monkeypatch.setattr(module, "_stop_managed_runtime", _fake_stop_managed_runtime)
+
+    result = module.asyncio.run(
+        module._revise_report_in_place(
+            report_path=report_path,
+            provider_profiles_path=(tmp_path / "profiles.yaml").resolve(),
+            config_path=(tmp_path / "config.yaml").resolve(),
+            sample_filters=set(),
+            stream_output=False,
+        )
+    )
+
+    rewritten_report = _real_load_execution_report(report_path)
+    rewritten_sample = rewritten_report.samples[0]
+    diagnostics_payload = json.loads(
+        Path(rewritten_sample.loop_diagnostics_path or "").read_text(encoding="utf-8")
+    )
+    persisted_feedback = Path(
+        rewritten_sample.final_critic_feedback_path or ""
+    ).read_text(encoding="utf-8")
+
+    assert result["revised_sample_ids"] == ["sample-a"]
+    assert rewritten_sample.final_status == "post_critic_revision_applied"
+    assert diagnostics_payload["postprocess_revision_applied"] is True
+    assert diagnostics_payload["seed_feedback"] == "Expand coverage."
+    assert (
+        "No new critic pass was run after this salvage revision." in persisted_feedback
+    )
+    assert persisted_feedback.endswith("Expand coverage.")
