@@ -231,6 +231,8 @@ Default roots:
 - curated long-form manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json`
 - auto-generated compact execution manifest sibling: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.compact.json`
 - curated long-form audit: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_audit.json`
+- budget-plan max-3-speaker manifest: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.json`
+- budget-plan max-3-speaker audit: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_audit.json`
 - human sampling sessions: `artifacts/summarizer_critic_benchmark/sporc_human_sampling`
 - automatic LLM sampling runs: `artifacts/summarizer_critic_benchmark/sporc_llm_sampling`
 - shared embedding cache: `artifacts/summarizer_critic_benchmark/embedding_cache`
@@ -381,8 +383,13 @@ Curate a strict long-form multi-speaker manifest from the prepared full data:
 ```bash
 uv run python -m card_framework.benchmark.summarizer_critic.sporc curate-longform \
   --source-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/manifest.json" \
+  --output-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.json" \
+  --audit-path "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_audit.json" \
   --max-speakers 3
 ```
+
+Those explicit output paths match the budget wrapper and the April 2026
+under-`$50` benchmark plan.
 
 `curate-longform` uses the released SPoRC speaker-turn table as the diarized
 transcript source and keeps only episodes that satisfy all of these gates:
@@ -801,6 +808,9 @@ The wrapper enforces the documented budget defaults:
 - transcript-only path
 - contestants: `openai_gpt_5_4_mini`, `anthropic_claude_haiku_4_5`, `deepseek_chat`, `vllm_default`
 - judge: `google_gemini_3_1_pro_preview_judge`
+
+It rejects nonpositive `--max-iterations` values up front, because the
+underlying `execute` path treats them as unbounded.
 
 It also fails fast if you try to use `deepseek-reasoner` as the SPoRC
 summarizer or critic, because DeepSeek's docs mark that model as not supporting

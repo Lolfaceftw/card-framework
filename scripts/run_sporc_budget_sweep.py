@@ -177,9 +177,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-iterations",
-        type=int,
+        type=_positive_iteration_cap,
         default=1,
-        help="Summarizer-critic iteration cap for each execute run.",
+        help=(
+            "Summarizer-critic iteration cap for each execute run. Must stay positive "
+            "because non-positive execute values become unbounded."
+        ),
     )
     parser.add_argument(
         "--skip-vllm-server-check",
@@ -199,6 +202,19 @@ def _parse_provider_id_list(raw_value: str) -> tuple[str, ...]:
         provider_ids.append(provider_id)
         seen.add(provider_id)
     return tuple(provider_ids)
+
+
+def _positive_iteration_cap(raw_value: str) -> int:
+    try:
+        parsed = int(str(raw_value).strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            "--max-iterations must be a positive integer for the budget wrapper. "
+            "The underlying execute command treats non-positive values as unbounded."
+        )
+    return parsed
 
 
 def _default_contestants_for_mode(mode: str) -> tuple[str, ...]:

@@ -6,6 +6,8 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pytest
+
 from card_framework.shared.paths import REPO_ROOT
 
 
@@ -159,6 +161,13 @@ def test_build_budget_plan_propagates_custom_provider_profiles_path(
     assert run_step.command[run_step.command.index("--provider-profiles") + 1] == str(
         provider_profiles
     )
+
+
+def test_parser_rejects_nonpositive_max_iterations() -> None:
+    module = _load_module()
+
+    with pytest.raises(SystemExit):
+        module._build_parser().parse_args(["--max-iterations", "0"])
 
 
 def test_build_budget_plan_requires_hf_token_when_manifests_are_missing(

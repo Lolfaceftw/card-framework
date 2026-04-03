@@ -69,6 +69,9 @@ The live wrapper expands into four transcript-only `execute` runs, all with:
 - `--max-iterations 1`
 - `--embedding-mode disabled`
 
+The wrapper also rejects nonpositive `--max-iterations` values so a typo cannot
+silently turn the run into an unbounded loop.
+
 If `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.json`
 does not exist yet, the wrapper first:
 
