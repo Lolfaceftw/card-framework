@@ -32,6 +32,15 @@ The repo now includes `scripts/run_sporc_budget_sweep.py` to validate the plan,
 build the `<=3`-speaker long-form manifest when needed, and then launch one
 `execute` run per contestant.
 
+For real runs, the wrapper now:
+
+- runs provider `execute` jobs concurrently by default
+- streams verbose per-provider child output plus progress/heartbeat events to the terminal
+- writes a resumable wrapper session UUID plus per-provider execute checkpoints
+- keeps retrying retryable connection/startup failures until the provider comes back
+- restarts a provider run from scratch if retryable infra replacements polluted the intended retained sample cohort
+- prints the exact `--resume-session-id <uuid>` command on termination
+
 ### 1. Validate the plan without spending money
 
 This prints the exact commands and checks the prerequisites only.
@@ -57,6 +66,12 @@ $env:CARD_FRAMEWORK_VLLM_MODEL="Qwen/Qwen3.5-27B"
 uv run python scripts/run_sporc_budget_sweep.py --mode dry-run
 ```
 
+If you need to force serial execution instead of the new default concurrency:
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode live --max-concurrent-providers 1
+```
+
 ### 3. Full one-shot budget run after funding the wallets
 
 ```powershell
@@ -73,6 +88,10 @@ The live wrapper expands into four transcript-only `execute` runs, all with:
 
 The wrapper also rejects nonpositive `--max-iterations` values so a typo cannot
 silently turn the run into an unbounded loop.
+
+By default, the four provider runs are launched concurrently. Each child also
+gets verbose progress events/heartbeats plus a dedicated execute checkpoint so a
+wrapper interruption can resume the unfinished providers from their saved state.
 
 If `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.json`
 does not exist yet, the wrapper first:

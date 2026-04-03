@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
-from typing import Iterable
+import threading
+import time
+from types import FrameType
+from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+import uuid
 
 from card_framework.benchmark.matrix import (
     MatrixConfigError,
@@ -41,6 +48,7 @@ DEFAULT_BUDGET_AUDIT_PATH = (
 DEFAULT_BUDGET_OUTPUT_ROOT = (
     REPO_ROOT / "artifacts" / "summarizer_critic_benchmark" / "sporc_budget_runs"
 ).resolve()
+DEFAULT_SESSION_ROOT = (DEFAULT_BUDGET_OUTPUT_ROOT / "_sessions").resolve()
 DEFAULT_LIVE_CONTESTANTS = (
     "openai_gpt_5_4_mini",
     "anthropic_claude_haiku_4_5",
@@ -57,6 +65,28 @@ _DEEPSEEK_PROVIDER_TARGET = (
 )
 _DEEPSEEK_REASONER_MODEL_PREFIX = "deepseek-reasoner"
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
+_SESSION_STATE_VERSION = 1
+_RETRYABLE_CONNECTION_TOKENS = (
+    "connecterror",
+    "connecttimeout",
+    "connection refused",
+    "actively refused",
+    "connection reset by peer",
+    "connection aborted",
+    "software caused connection abort",
+    "all connection attempts failed",
+    "forcibly closed by the remote host",
+    "server not responding",
+    "health check failed",
+    "startup_unavailable",
+    "connection_unavailable",
+)
+_RETRYABLE_STEP_FINAL_STATUSES = {
+    "startup_unavailable",
+    "connection_unavailable",
+}
+_RUN_STEP_KIND = "run"
+_MANIFEST_STEP_KIND = "manifest"
 
 
 @dataclass(frozen=True)
@@ -73,8 +103,12 @@ class RequirementCheck:
 class PlanStep:
     """One subprocess step in the budget workflow."""
 
+    step_id: str
     label: str
     command: tuple[str, ...]
+    kind: str
+    provider_id: str = ""
+    checkpoint_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -87,9 +121,29 @@ class BudgetPlan:
     dataset_manifest: Path
     source_manifest: Path
     audit_path: Path
+    provider_profiles_path: Path
     manifest_steps: tuple[PlanStep, ...]
     run_steps: tuple[PlanStep, ...]
     requirement_checks: tuple[RequirementCheck, ...]
+
+
+@dataclass(frozen=True)
+class StepExecutionResult:
+    """One logged subprocess execution result."""
+
+    exit_code: int
+    output_lines: tuple[str, ...]
+    parsed_payloads: tuple[dict[str, object], ...]
+    stalled: bool = False
+
+
+@dataclass(frozen=True)
+class SessionContext:
+    """Persistent wrapper session metadata."""
+
+    session_id: str
+    state_path: Path
+    resume_command: str
 
 
 def _requirement_status_label(check: RequirementCheck) -> str:
@@ -115,6 +169,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "validate prints the exact plan and checks prerequisites without API "
             "calls. dry-run executes a local vLLM-backed validation pass. "
             "live executes the full budget plan."
+        ),
+    )
+    parser.add_argument(
+        "--resume-session-id",
+        default="",
+        help=(
+            "Resume a previously started dry-run/live wrapper session by UUID. "
+            "When provided, the wrapper reloads the original arguments and resumes "
+            "unfinished steps from the saved session state."
         ),
     )
     parser.add_argument(
@@ -190,6 +253,36 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the local /models probe for vllm_default after model pin validation.",
     )
+    parser.add_argument(
+        "--max-concurrent-providers",
+        type=int,
+        default=0,
+        help=(
+            "Maximum number of provider execute runs to launch in parallel. Use 0 to "
+            "run all provider steps concurrently by default."
+        ),
+    )
+    parser.add_argument(
+        "--connection-retry-backoff-seconds",
+        type=float,
+        default=15.0,
+        help="Initial backoff between retryable provider reconnect attempts.",
+    )
+    parser.add_argument(
+        "--connection-retry-max-backoff-seconds",
+        type=float,
+        default=120.0,
+        help="Maximum reconnect backoff for retryable provider failures.",
+    )
+    parser.add_argument(
+        "--provider-stall-seconds",
+        type=float,
+        default=900.0,
+        help=(
+            "Restart one provider child from checkpoint if it stops emitting logs or "
+            "heartbeats for this many seconds."
+        ),
+    )
     return parser
 
 
@@ -253,6 +346,7 @@ def _provider_index(provider_profiles_path: Path) -> dict[str, ProviderProfile]:
 
 def _build_prepare_full_dataset_command(source_manifest: Path) -> PlanStep:
     return PlanStep(
+        step_id="manifest:prepare_full_dataset",
         label="Prepare full SPoRC dataset manifest",
         command=(
             sys.executable,
@@ -264,6 +358,7 @@ def _build_prepare_full_dataset_command(source_manifest: Path) -> PlanStep:
             "--prepared-root",
             str(source_manifest.parent),
         ),
+        kind=_MANIFEST_STEP_KIND,
     )
 
 
@@ -274,6 +369,7 @@ def _build_curate_longform_command(
     audit_path: Path,
 ) -> PlanStep:
     return PlanStep(
+        step_id="manifest:curate_budget_manifest",
         label="Curate the <=3-speaker long-form budget manifest",
         command=(
             sys.executable,
@@ -289,6 +385,7 @@ def _build_curate_longform_command(
             "--max-speakers",
             "3",
         ),
+        kind=_MANIFEST_STEP_KIND,
     )
 
 
@@ -305,6 +402,7 @@ def _build_execute_command(
 ) -> PlanStep:
     contestant_output_root = (output_root / contestant_provider).resolve()
     return PlanStep(
+        step_id=f"run:{contestant_provider}",
         label=f"Run execute for contestant {contestant_provider}",
         command=(
             sys.executable,
@@ -335,6 +433,8 @@ def _build_execute_command(
             "--max-iterations",
             str(max_iterations),
         ),
+        kind=_RUN_STEP_KIND,
+        provider_id=contestant_provider,
     )
 
 
@@ -751,6 +851,7 @@ def _build_budget_plan(args: argparse.Namespace) -> BudgetPlan:
         dataset_manifest=dataset_manifest,
         source_manifest=source_manifest,
         audit_path=audit_path,
+        provider_profiles_path=provider_profiles_path,
         manifest_steps=manifest_steps,
         run_steps=run_steps,
         requirement_checks=requirement_checks,
@@ -759,6 +860,836 @@ def _build_budget_plan(args: argparse.Namespace) -> BudgetPlan:
 
 def _format_command(command: Iterable[str]) -> str:
     return subprocess.list2cmdline(list(command))
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _validate_session_id(raw_value: str) -> str:
+    normalized = str(raw_value or "").strip()
+    if not normalized:
+        raise MatrixConfigError("Session UUID cannot be empty.")
+    try:
+        return str(uuid.UUID(normalized))
+    except ValueError as exc:
+        raise MatrixConfigError(f"Invalid session UUID '{normalized}': {exc}") from exc
+
+
+def _session_dir(session_id: str) -> Path:
+    return (DEFAULT_SESSION_ROOT / session_id).resolve()
+
+
+def _session_state_path(session_id: str) -> Path:
+    return (_session_dir(session_id) / "session.json").resolve()
+
+
+def _resume_command(session_id: str) -> str:
+    return (
+        "uv run python scripts/run_sporc_budget_sweep.py --resume-session-id "
+        f"{session_id}"
+    )
+
+
+def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    temp_path.replace(path)
+
+
+def _step_checkpoint_path(session_id: str, step: PlanStep) -> str:
+    if step.kind != _RUN_STEP_KIND or not step.provider_id:
+        return ""
+    return str(
+        (
+            _session_dir(session_id)
+            / "checkpoints"
+            / f"{step.provider_id}.attempt-0.checkpoint.json"
+        ).resolve()
+    )
+
+
+def _fresh_retry_checkpoint_path(
+    *,
+    session_id: str,
+    step: PlanStep,
+    attempt_count: int,
+) -> str:
+    if step.kind != _RUN_STEP_KIND or not step.provider_id:
+        return ""
+    return str(
+        (
+            _session_dir(session_id)
+            / "checkpoints"
+            / f"{step.provider_id}.attempt-{attempt_count}.checkpoint.json"
+        ).resolve()
+    )
+
+
+def _build_session_payload(
+    *,
+    session_id: str,
+    requested_argv: list[str],
+    plan: BudgetPlan,
+) -> dict[str, object]:
+    steps_payload: dict[str, object] = {}
+    for step in (*plan.manifest_steps, *plan.run_steps):
+        steps_payload[step.step_id] = {
+            "step_id": step.step_id,
+            "label": step.label,
+            "kind": step.kind,
+            "provider_id": step.provider_id,
+            "checkpoint_path": _step_checkpoint_path(session_id, step),
+            "status": "pending",
+            "attempt_count": 0,
+            "last_exit_code": None,
+            "last_error": "",
+            "last_started_at_utc": "",
+            "last_completed_at_utc": "",
+            "last_command": "",
+            "report_path": "",
+            "run_id": "",
+            "resume_from_checkpoint": False,
+        }
+    now_iso = _utc_now_iso()
+    return {
+        "session_state_version": _SESSION_STATE_VERSION,
+        "session_id": session_id,
+        "created_at_utc": now_iso,
+        "updated_at_utc": now_iso,
+        "status": "pending",
+        "mode": plan.mode,
+        "requested_argv": list(requested_argv),
+        "resume_command": _resume_command(session_id),
+        "provider_profiles_path": str(plan.provider_profiles_path),
+        "dataset_manifest": str(plan.dataset_manifest),
+        "source_manifest": str(plan.source_manifest),
+        "audit_path": str(plan.audit_path),
+        "steps": steps_payload,
+    }
+
+
+def _load_session_payload(session_id: str) -> dict[str, object]:
+    state_path = _session_state_path(session_id)
+    if not state_path.exists():
+        raise MatrixConfigError(
+            f"No SPoRC budget wrapper session found for UUID {session_id}."
+        )
+    raw_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_payload, dict):
+        raise MatrixConfigError(
+            f"Invalid SPoRC budget wrapper session payload: {state_path}"
+        )
+    payload = {str(key): value for key, value in raw_payload.items()}
+    if int(payload.get("session_state_version", 0) or 0) != _SESSION_STATE_VERSION:
+        raise MatrixConfigError(
+            f"Unsupported SPoRC budget wrapper session version in {state_path}."
+        )
+    return payload
+
+
+def _resolve_session_context(
+    *,
+    resume_session_id: str,
+    plan: BudgetPlan,
+    requested_argv: list[str],
+) -> tuple[SessionContext | None, dict[str, object] | None, list[str]]:
+    if str(plan.mode) == "validate":
+        return None, None, requested_argv
+
+    normalized_resume_session_id = str(resume_session_id or "").strip()
+    if normalized_resume_session_id:
+        normalized_session_id = _validate_session_id(normalized_resume_session_id)
+        payload = _load_session_payload(normalized_session_id)
+        stored_argv = payload.get("requested_argv", [])
+        if not isinstance(stored_argv, list) or not all(
+            isinstance(item, str) for item in stored_argv
+        ):
+            raise MatrixConfigError(
+                f"Session {normalized_session_id} is missing its original wrapper arguments."
+            )
+        return (
+            SessionContext(
+                session_id=normalized_session_id,
+                state_path=_session_state_path(normalized_session_id),
+                resume_command=_resume_command(normalized_session_id),
+            ),
+            payload,
+            [str(item) for item in stored_argv],
+        )
+
+    new_session_id = str(uuid.uuid4())
+    return (
+        SessionContext(
+            session_id=new_session_id,
+            state_path=_session_state_path(new_session_id),
+            resume_command=_resume_command(new_session_id),
+        ),
+        None,
+        requested_argv,
+    )
+
+
+def _ensure_session_payload(
+    *,
+    session_context: SessionContext,
+    existing_payload: dict[str, object] | None,
+    plan: BudgetPlan,
+    requested_argv: list[str],
+) -> dict[str, object]:
+    if existing_payload is not None:
+        return existing_payload
+    payload = _build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=requested_argv,
+        plan=plan,
+    )
+    _atomic_write_json(session_context.state_path, payload)
+    return payload
+
+
+def _write_session_payload(
+    *,
+    session_context: SessionContext,
+    payload: dict[str, object],
+) -> None:
+    payload["updated_at_utc"] = _utc_now_iso()
+    _atomic_write_json(session_context.state_path, payload)
+
+
+def _update_session_status(
+    *,
+    session_context: SessionContext,
+    payload: dict[str, object],
+    status: str,
+) -> None:
+    payload["status"] = status
+    _write_session_payload(session_context=session_context, payload=payload)
+
+
+def _step_state(payload: dict[str, object], step: PlanStep) -> dict[str, object]:
+    raw_steps = payload.get("steps", {})
+    if not isinstance(raw_steps, dict):
+        raise MatrixConfigError(f"Session state is missing step '{step.step_id}'.")
+    step_mapping = {str(key): value for key, value in raw_steps.items()}
+    if step.step_id not in step_mapping:
+        raise MatrixConfigError(f"Session state is missing step '{step.step_id}'.")
+    raw_step = step_mapping[step.step_id]
+    if not isinstance(raw_step, dict):
+        raise MatrixConfigError(f"Session step '{step.step_id}' is malformed.")
+    return {str(key): value for key, value in raw_step.items()}
+
+
+def _step_completed(payload: dict[str, object], step: PlanStep) -> bool:
+    return str(_step_state(payload, step).get("status", "") or "") == "completed"
+
+
+def _materialize_step_command(
+    *,
+    step: PlanStep,
+    step_state: dict[str, object],
+) -> tuple[str, ...]:
+    command = list(step.command)
+    checkpoint_path = str(step_state.get("checkpoint_path", "") or "").strip()
+    if step.kind == _RUN_STEP_KIND:
+        if checkpoint_path:
+            command.extend(["--checkpoint-path", checkpoint_path])
+            if Path(checkpoint_path).exists():
+                command.append("--resume-from-checkpoint")
+        command.extend(["--emit-progress-events", "--emit-progress-heartbeats"])
+    return tuple(command)
+
+
+def _extract_report_payload(
+    parsed_payloads: tuple[dict[str, object], ...],
+) -> dict[str, object] | None:
+    for payload in reversed(parsed_payloads):
+        if "report_path" in payload and "status" in payload:
+            return payload
+    return None
+
+
+def _load_retryable_report_failure(report_path: str) -> tuple[bool, str]:
+    normalized_path = str(report_path or "").strip()
+    if not normalized_path:
+        return False, ""
+    path = Path(normalized_path)
+    if not path.exists():
+        return False, ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, ""
+    if not isinstance(payload, dict):
+        return False, ""
+    samples = payload.get("samples", [])
+    final_statuses = {
+        str(sample.get("final_status", "") or "").strip()
+        for sample in samples
+        if isinstance(sample, dict)
+    }
+    retryable_statuses = sorted(final_statuses & _RETRYABLE_STEP_FINAL_STATUSES)
+    if retryable_statuses:
+        return True, ", ".join(retryable_statuses)
+    return False, ""
+
+
+def _retry_strategy_for_step_result(
+    result: StepExecutionResult,
+) -> tuple[str | None, str]:
+    if result.stalled:
+        return "resume", "wrapper detected a stalled child process"
+    report_payload = _extract_report_payload(result.parsed_payloads)
+    if report_payload is not None:
+        retryable_report, reason = _load_retryable_report_failure(
+            str(report_payload.get("report_path", "") or "")
+        )
+        if retryable_report:
+            return "restart", f"report recorded retryable infra statuses: {reason}"
+    lowered_output = "\n".join(result.output_lines).lower()
+    if any(token in lowered_output for token in _RETRYABLE_CONNECTION_TOKENS):
+        return "resume", "child output reported a connection/startup failure"
+    return None, ""
+
+
+def _print_prefixed_log(prefix: str, message: str) -> None:
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}][{prefix}] {message}", flush=True)
+
+
+def _register_active_process(
+    *,
+    active_processes: dict[str, subprocess.Popen[str]],
+    process_lock: threading.Lock,
+    step_id: str,
+    process: subprocess.Popen[str],
+) -> None:
+    with process_lock:
+        active_processes[step_id] = process
+
+
+def _unregister_active_process(
+    *,
+    active_processes: dict[str, subprocess.Popen[str]],
+    process_lock: threading.Lock,
+    step_id: str,
+) -> None:
+    with process_lock:
+        active_processes.pop(step_id, None)
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10.0)
+
+
+def _terminate_active_processes(
+    *,
+    active_processes: dict[str, subprocess.Popen[str]],
+    process_lock: threading.Lock,
+) -> None:
+    with process_lock:
+        processes = list(active_processes.values())
+    for process in processes:
+        _terminate_process(process)
+
+
+def _run_logged_subprocess(
+    *,
+    step: PlanStep,
+    command: tuple[str, ...],
+    stall_seconds: float,
+    stop_event: threading.Event,
+    active_processes: dict[str, subprocess.Popen[str]],
+    process_lock: threading.Lock,
+) -> StepExecutionResult:
+    _print_prefixed_log(step.step_id, f"starting: {_format_command(command)}")
+    process = subprocess.Popen(
+        command,
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+    )
+    _register_active_process(
+        active_processes=active_processes,
+        process_lock=process_lock,
+        step_id=step.step_id,
+        process=process,
+    )
+
+    output_lines: list[str] = []
+    parsed_payloads: list[dict[str, object]] = []
+    output_lock = threading.Lock()
+    last_output_time = time.monotonic()
+
+    def _reader() -> None:
+        nonlocal last_output_time
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip("\r\n")
+            with output_lock:
+                output_lines.append(line)
+                last_output_time = time.monotonic()
+            _print_prefixed_log(step.step_id, line)
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                with output_lock:
+                    parsed_payloads.append(parsed)
+        process.stdout.close()
+
+    reader_thread = threading.Thread(
+        target=_reader, name=f"budget-step-{step.step_id}", daemon=True
+    )
+    reader_thread.start()
+    stalled = False
+    try:
+        while process.poll() is None:
+            if stop_event.is_set():
+                _terminate_process(process)
+                break
+            with output_lock:
+                idle_seconds = time.monotonic() - last_output_time
+            if stall_seconds > 0 and idle_seconds > stall_seconds:
+                stalled = True
+                _print_prefixed_log(
+                    step.step_id,
+                    f"no child output for {idle_seconds:.0f}s; terminating so the wrapper can resume from checkpoint",
+                )
+                _terminate_process(process)
+                break
+            time.sleep(1.0)
+        exit_code = int(process.wait())
+    finally:
+        reader_thread.join(timeout=5.0)
+        _unregister_active_process(
+            active_processes=active_processes,
+            process_lock=process_lock,
+            step_id=step.step_id,
+        )
+    return StepExecutionResult(
+        exit_code=exit_code,
+        output_lines=tuple(output_lines),
+        parsed_payloads=tuple(parsed_payloads),
+        stalled=stalled,
+    )
+
+
+def _sleep_with_stop(stop_event: threading.Event, seconds: float) -> bool:
+    deadline = time.monotonic() + max(0.0, seconds)
+    while time.monotonic() < deadline:
+        if stop_event.is_set():
+            return False
+        time.sleep(min(1.0, deadline - time.monotonic()))
+    return not stop_event.is_set()
+
+
+def _wait_for_vllm_reconnect(
+    *,
+    provider_id: str,
+    profile: ProviderProfile,
+    stop_event: threading.Event,
+    backoff_seconds: float,
+    max_backoff_seconds: float,
+) -> bool:
+    wait_seconds = max(1.0, backoff_seconds)
+    while not stop_event.is_set():
+        base_url, api_key, model_name = _resolve_vllm_runtime_details(profile)
+        reachable, detail, model_ids = _probe_openai_compatible_models(
+            base_url=base_url,
+            api_key=api_key,
+        )
+        if reachable and (not model_name or model_name in model_ids):
+            _print_prefixed_log(provider_id, f"connection probe recovered: {detail}")
+            return True
+        _print_prefixed_log(
+            provider_id,
+            f"still waiting for provider connection: {detail} retry_in={wait_seconds:.0f}s",
+        )
+        if not _sleep_with_stop(stop_event, wait_seconds):
+            return False
+        wait_seconds = min(
+            max(wait_seconds * 1.5, wait_seconds + 1.0), max_backoff_seconds
+        )
+    return False
+
+
+def _wait_for_retry_window(
+    *,
+    step: PlanStep,
+    plan: BudgetPlan,
+    profiles: dict[str, ProviderProfile],
+    stop_event: threading.Event,
+    backoff_seconds: float,
+    max_backoff_seconds: float,
+) -> bool:
+    if step.kind != _RUN_STEP_KIND:
+        return _sleep_with_stop(stop_event, backoff_seconds)
+    provider_ids = [step.provider_id]
+    if plan.judge_provider and plan.judge_provider not in provider_ids:
+        provider_ids.append(plan.judge_provider)
+    waited_for_vllm = False
+    for provider_id in provider_ids:
+        profile = profiles.get(provider_id)
+        if profile is None:
+            continue
+        provider_target = str(profile.llm_config.get("_target_", "") or "").strip()
+        if provider_target != _VLLM_PROVIDER_TARGET:
+            continue
+        waited_for_vllm = True
+        if not _wait_for_vllm_reconnect(
+            provider_id=provider_id,
+            profile=profile,
+            stop_event=stop_event,
+            backoff_seconds=backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+        ):
+            return False
+    if waited_for_vllm:
+        return True
+    _print_prefixed_log(
+        step.step_id,
+        f"waiting {backoff_seconds:.0f}s before retrying the provider connection",
+    )
+    return _sleep_with_stop(stop_event, backoff_seconds)
+
+
+def _update_step_state(
+    *,
+    session_context: SessionContext,
+    payload: dict[str, object],
+    state_lock: threading.Lock,
+    step: PlanStep,
+    **updates: object,
+) -> None:
+    with state_lock:
+        raw_steps = payload.get("steps", {})
+        if not isinstance(raw_steps, dict):
+            raise MatrixConfigError(f"Session state is missing step '{step.step_id}'.")
+        step_mapping = {str(key): value for key, value in raw_steps.items()}
+        raw_step = step_mapping.get(step.step_id)
+        if not isinstance(raw_step, dict):
+            raise MatrixConfigError(f"Session step '{step.step_id}' is malformed.")
+        step_payload = {str(key): value for key, value in raw_step.items()}
+        for key, value in updates.items():
+            step_payload[str(key)] = value
+        step_mapping[step.step_id] = step_payload
+        payload["steps"] = step_mapping
+        _write_session_payload(session_context=session_context, payload=payload)
+
+
+def _run_step_with_retries(
+    *,
+    step: PlanStep,
+    plan: BudgetPlan,
+    session_context: SessionContext,
+    session_payload: dict[str, object],
+    state_lock: threading.Lock,
+    stop_event: threading.Event,
+    active_processes: dict[str, subprocess.Popen[str]],
+    process_lock: threading.Lock,
+    profiles: dict[str, ProviderProfile],
+    args: argparse.Namespace,
+) -> int:
+    retry_backoff = max(1.0, float(args.connection_retry_backoff_seconds))
+    retry_max_backoff = max(
+        retry_backoff, float(args.connection_retry_max_backoff_seconds)
+    )
+    stall_seconds = max(0.0, float(args.provider_stall_seconds))
+    while not stop_event.is_set():
+        step_payload = _step_state(session_payload, step)
+        if str(step_payload.get("status", "") or "") == "completed":
+            return 0
+        command = _materialize_step_command(step=step, step_state=step_payload)
+        attempt_count = _coerce_int_or_zero(step_payload.get("attempt_count")) + 1
+        resume_from_checkpoint = (
+            step.kind == _RUN_STEP_KIND
+            and Path(str(step_payload.get("checkpoint_path", "") or "")).exists()
+        )
+        _update_step_state(
+            session_context=session_context,
+            payload=session_payload,
+            state_lock=state_lock,
+            step=step,
+            status="running",
+            attempt_count=attempt_count,
+            last_started_at_utc=_utc_now_iso(),
+            last_command=_format_command(command),
+            resume_from_checkpoint=resume_from_checkpoint,
+            last_error="",
+        )
+        result = _run_logged_subprocess(
+            step=step,
+            command=command,
+            stall_seconds=stall_seconds,
+            stop_event=stop_event,
+            active_processes=active_processes,
+            process_lock=process_lock,
+        )
+        report_payload = _extract_report_payload(result.parsed_payloads)
+        step_updates: dict[str, object] = {
+            "last_exit_code": result.exit_code,
+            "report_path": (
+                str(report_payload.get("report_path", "") or "")
+                if report_payload is not None
+                else str(step_payload.get("report_path", "") or "")
+            ),
+            "run_id": (
+                str(report_payload.get("run_id", "") or "")
+                if report_payload is not None
+                else str(step_payload.get("run_id", "") or "")
+            ),
+        }
+        retry_strategy, retry_reason = _retry_strategy_for_step_result(result)
+        if result.exit_code == 0 and retry_strategy is None:
+            _update_step_state(
+                session_context=session_context,
+                payload=session_payload,
+                state_lock=state_lock,
+                step=step,
+                status="completed",
+                last_completed_at_utc=_utc_now_iso(),
+                **step_updates,
+            )
+            return 0
+        if stop_event.is_set():
+            _update_step_state(
+                session_context=session_context,
+                payload=session_payload,
+                state_lock=state_lock,
+                step=step,
+                status="interrupted",
+                last_error="wrapper stop requested",
+                **step_updates,
+            )
+            return 130
+        if retry_strategy is None:
+            _update_step_state(
+                session_context=session_context,
+                payload=session_payload,
+                state_lock=state_lock,
+                step=step,
+                status="failed",
+                last_completed_at_utc=_utc_now_iso(),
+                last_error=(
+                    retry_reason or f"step exited with code {result.exit_code}"
+                ),
+                **step_updates,
+            )
+            return result.exit_code
+        if retry_strategy == "restart":
+            step_updates["checkpoint_path"] = _fresh_retry_checkpoint_path(
+                session_id=session_context.session_id,
+                step=step,
+                attempt_count=attempt_count,
+            )
+            step_updates["report_path"] = ""
+            step_updates["run_id"] = ""
+        _print_prefixed_log(
+            step.step_id,
+            f"retryable provider issue detected on attempt {attempt_count}: {retry_reason} "
+            f"retry_strategy={retry_strategy}",
+        )
+        _update_step_state(
+            session_context=session_context,
+            payload=session_payload,
+            state_lock=state_lock,
+            step=step,
+            status="retry_waiting",
+            last_error=retry_reason,
+            **step_updates,
+        )
+        if not _wait_for_retry_window(
+            step=step,
+            plan=plan,
+            profiles=profiles,
+            stop_event=stop_event,
+            backoff_seconds=retry_backoff,
+            max_backoff_seconds=retry_max_backoff,
+        ):
+            _update_step_state(
+                session_context=session_context,
+                payload=session_payload,
+                state_lock=state_lock,
+                step=step,
+                status="interrupted",
+                last_error="wrapper stop requested during retry wait",
+                **step_updates,
+            )
+            return 130
+        retry_backoff = min(
+            max(retry_backoff * 1.5, retry_backoff + 1.0), retry_max_backoff
+        )
+    return 130
+
+
+def _resolve_parallel_worker_count(args: argparse.Namespace, step_count: int) -> int:
+    configured_raw = getattr(args, "max_concurrent_providers", 0)
+    configured = int(configured_raw) if configured_raw else 0
+    if configured <= 0:
+        return max(step_count, 1)
+    return min(configured, max(step_count, 1))
+
+
+def _print_resume_banner(session_context: SessionContext) -> None:
+    print(f"Session UUID: {session_context.session_id}")
+    print(f"Resume command: {session_context.resume_command}")
+
+
+def _run_pending_steps(
+    *,
+    steps: tuple[PlanStep, ...],
+    plan: BudgetPlan,
+    session_context: SessionContext,
+    session_payload: dict[str, object],
+    state_lock: threading.Lock,
+    stop_event: threading.Event,
+    active_processes: dict[str, subprocess.Popen[str]],
+    process_lock: threading.Lock,
+    profiles: dict[str, ProviderProfile],
+    args: argparse.Namespace,
+    parallel: bool,
+) -> int:
+    pending_steps = [
+        step for step in steps if not _step_completed(session_payload, step)
+    ]
+    if not pending_steps:
+        return 0
+    if not parallel or len(pending_steps) == 1:
+        for step in pending_steps:
+            exit_code = _run_step_with_retries(
+                step=step,
+                plan=plan,
+                session_context=session_context,
+                session_payload=session_payload,
+                state_lock=state_lock,
+                stop_event=stop_event,
+                active_processes=active_processes,
+                process_lock=process_lock,
+                profiles=profiles,
+                args=args,
+            )
+            if exit_code != 0:
+                return exit_code
+        return 0
+
+    max_workers = _resolve_parallel_worker_count(args, len(pending_steps))
+    _print_prefixed_log(
+        session_context.session_id,
+        f"launching {len(pending_steps)} provider steps with max_concurrent_providers={max_workers}",
+    )
+    failure_exit_code = 0
+    with ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="sporc-budget"
+    ) as executor:
+        future_to_step: dict[Future[int], PlanStep] = {}
+        pending_iter = iter(pending_steps)
+
+        def _submit_next() -> None:
+            try:
+                next_step = next(pending_iter)
+            except StopIteration:
+                return
+            future = executor.submit(
+                _run_step_with_retries,
+                step=next_step,
+                plan=plan,
+                session_context=session_context,
+                session_payload=session_payload,
+                state_lock=state_lock,
+                stop_event=stop_event,
+                active_processes=active_processes,
+                process_lock=process_lock,
+                profiles=profiles,
+                args=args,
+            )
+            future_to_step[future] = next_step
+
+        for _ in range(min(max_workers, len(pending_steps))):
+            _submit_next()
+
+        while future_to_step:
+            done, _ = wait(tuple(future_to_step), return_when=FIRST_COMPLETED)
+            for future in done:
+                step = future_to_step.pop(future)
+                try:
+                    exit_code = int(future.result())
+                except Exception as exc:
+                    exit_code = 1
+                    _update_step_state(
+                        session_context=session_context,
+                        payload=session_payload,
+                        state_lock=state_lock,
+                        step=step,
+                        status="failed",
+                        last_completed_at_utc=_utc_now_iso(),
+                        last_error=str(exc),
+                    )
+                if exit_code != 0:
+                    failure_exit_code = exit_code
+                    stop_event.set()
+                    _terminate_active_processes(
+                        active_processes=active_processes,
+                        process_lock=process_lock,
+                    )
+                    break
+                if not stop_event.is_set():
+                    _submit_next()
+            if failure_exit_code != 0:
+                break
+    return failure_exit_code or (130 if stop_event.is_set() else 0)
+
+
+def _install_stop_signal_handlers(
+    *,
+    stop_event: threading.Event,
+    active_processes: dict[str, subprocess.Popen[str]],
+    process_lock: threading.Lock,
+) -> dict[int, Callable[[int, FrameType | None], Any] | int | None]:
+    previous_handlers: dict[
+        int, Callable[[int, FrameType | None], Any] | int | None
+    ] = {}
+
+    def _handler(signum: int, _frame: FrameType | None) -> None:
+        _print_prefixed_log(
+            "wrapper", f"received signal {signum}; stopping active children"
+        )
+        stop_event.set()
+        _terminate_active_processes(
+            active_processes=active_processes,
+            process_lock=process_lock,
+        )
+
+    for candidate in (
+        getattr(signal, "SIGINT", None),
+        getattr(signal, "SIGTERM", None),
+    ):
+        if candidate is None:
+            continue
+        previous_handlers[int(candidate)] = signal.getsignal(candidate)
+        signal.signal(candidate, _handler)
+    return previous_handlers
+
+
+def _restore_signal_handlers(
+    previous_handlers: dict[int, Callable[[int, FrameType | None], Any] | int | None],
+) -> None:
+    for signum, previous in previous_handlers.items():
+        signal.signal(signum, previous)
 
 
 def _print_plan(plan: BudgetPlan) -> None:
@@ -784,23 +1715,49 @@ def _print_plan(plan: BudgetPlan) -> None:
         print(f"  {_format_command(step.command)}")
 
 
-def _run_step(step: PlanStep) -> int:
-    print(f"\n==> {step.label}")
-    print(_format_command(step.command))
-    completed = subprocess.run(step.command, cwd=str(REPO_ROOT), check=False)
-    return int(completed.returncode)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(argv if argv is not None else sys.argv[1:])
+    preliminary_args = parser.parse_args(raw_argv)
+    effective_argv = list(raw_argv)
+    if str(getattr(preliminary_args, "resume_session_id", "") or "").strip():
+        try:
+            resume_payload = _load_session_payload(
+                _validate_session_id(preliminary_args.resume_session_id)
+            )
+        except MatrixConfigError as exc:
+            parser.error(str(exc))
+            return 2
+        stored_argv = resume_payload.get("requested_argv", [])
+        if not isinstance(stored_argv, list) or not all(
+            isinstance(item, str) for item in stored_argv
+        ):
+            parser.error(
+                f"Resume session {preliminary_args.resume_session_id} is missing its original wrapper arguments."
+            )
+            return 2
+        effective_argv = [str(item) for item in stored_argv]
+
+    args = parser.parse_args(effective_argv)
     try:
         plan = _build_budget_plan(args)
+        session_context, existing_session_payload, effective_argv = (
+            _resolve_session_context(
+                resume_session_id=str(
+                    getattr(preliminary_args, "resume_session_id", "") or ""
+                ),
+                plan=plan,
+                requested_argv=effective_argv,
+            )
+        )
     except MatrixConfigError as exc:
         parser.error(str(exc))
         return 2
 
     _print_plan(plan)
+    if session_context is not None:
+        print()
+        _print_resume_banner(session_context)
     missing_checks = [
         check
         for check in plan.requirement_checks
@@ -824,14 +1781,93 @@ def main(argv: list[str] | None = None) -> int:
         print("\nValidation succeeded. No benchmark subprocesses were started.")
         return 0
 
-    for step in (*plan.manifest_steps, *plan.run_steps):
-        exit_code = _run_step(step)
-        if exit_code != 0:
-            print(f"\nStopping after failed step '{step.label}' (exit {exit_code}).")
-            return exit_code
+    if session_context is None:
+        parser.error(
+            "Non-validate SPoRC budget runs require a wrapper session context."
+        )
+        return 2
 
-    print("\nBudget workflow completed successfully.")
-    return 0
+    session_payload = _ensure_session_payload(
+        session_context=session_context,
+        existing_payload=existing_session_payload,
+        plan=plan,
+        requested_argv=effective_argv,
+    )
+    profiles = _provider_index(plan.provider_profiles_path)
+    state_lock = threading.Lock()
+    process_lock = threading.Lock()
+    stop_event = threading.Event()
+    active_processes: dict[str, subprocess.Popen[str]] = {}
+    previous_handlers = _install_stop_signal_handlers(
+        stop_event=stop_event,
+        active_processes=active_processes,
+        process_lock=process_lock,
+    )
+    exit_code = 130
+    try:
+        _update_session_status(
+            session_context=session_context,
+            payload=session_payload,
+            status="running",
+        )
+        exit_code = _run_pending_steps(
+            steps=plan.manifest_steps,
+            plan=plan,
+            session_context=session_context,
+            session_payload=session_payload,
+            state_lock=state_lock,
+            stop_event=stop_event,
+            active_processes=active_processes,
+            process_lock=process_lock,
+            profiles=profiles,
+            args=args,
+            parallel=False,
+        )
+        if exit_code == 0:
+            exit_code = _run_pending_steps(
+                steps=plan.run_steps,
+                plan=plan,
+                session_context=session_context,
+                session_payload=session_payload,
+                state_lock=state_lock,
+                stop_event=stop_event,
+                active_processes=active_processes,
+                process_lock=process_lock,
+                profiles=profiles,
+                args=args,
+                parallel=True,
+            )
+    except KeyboardInterrupt:
+        stop_event.set()
+        _terminate_active_processes(
+            active_processes=active_processes,
+            process_lock=process_lock,
+        )
+        exit_code = 130
+    finally:
+        _restore_signal_handlers(previous_handlers)
+
+    final_status = (
+        "completed"
+        if exit_code == 0
+        else ("interrupted" if exit_code == 130 else "failed")
+    )
+    _update_session_status(
+        session_context=session_context,
+        payload=session_payload,
+        status=final_status,
+    )
+
+    if exit_code == 0:
+        print("\nBudget workflow completed successfully.")
+    elif exit_code == 130:
+        print(
+            "\nBudget workflow interrupted. Resume with the session UUID shown below."
+        )
+    else:
+        print("\nBudget workflow stopped after a non-retryable step failure.")
+    print(f"Resume command: {session_context.resume_command}")
+    return exit_code
 
 
 if __name__ == "__main__":

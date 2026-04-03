@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sys
+import threading
+import time
 
 import pytest
 
@@ -618,3 +622,481 @@ def test_invalid_custom_source_manifest_falls_back_to_generated_manifest_name(
         curate_step.command[curate_step.command.index("--source-manifest") + 1]
         == generated_manifest
     )
+
+
+def test_materialize_step_command_adds_checkpoint_and_verbose_progress_flags(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    checkpoint_path = (tmp_path / "provider.checkpoint.json").resolve()
+    checkpoint_path.write_text("{}", encoding="utf-8")
+    step = module.PlanStep(
+        step_id="run:test_provider",
+        label="Run execute for contestant test_provider",
+        command=("python", "-m", "demo", "execute"),
+        kind=module._RUN_STEP_KIND,
+        provider_id="test_provider",
+    )
+
+    command = module._materialize_step_command(
+        step=step,
+        step_state={"checkpoint_path": str(checkpoint_path)},
+    )
+
+    assert "--checkpoint-path" in command
+    assert str(checkpoint_path) in command
+    assert "--resume-from-checkpoint" in command
+    assert "--emit-progress-events" in command
+    assert "--emit-progress-heartbeats" in command
+
+
+def test_retryable_connection_failure_detects_report_retryable_statuses(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    report_path = (tmp_path / "report.json").resolve()
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "partial",
+                "samples": [
+                    {
+                        "sample_id": "sporc_00001_example",
+                        "final_status": "connection_unavailable",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = module.StepExecutionResult(
+        exit_code=1,
+        output_lines=("provider disconnected",),
+        parsed_payloads=(({"status": "partial", "report_path": str(report_path)}),),
+    )
+
+    retry_strategy, reason = module._retry_strategy_for_step_result(result)
+
+    assert retry_strategy == "restart"
+    assert "retryable infra statuses" in reason
+
+
+def test_run_step_with_retries_restarts_from_fresh_checkpoint_after_retryable_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    step = module.PlanStep(
+        step_id="run:vllm_default",
+        label="Run execute for contestant vllm_default",
+        command=("python", "-m", "demo", "execute"),
+        kind=module._RUN_STEP_KIND,
+        provider_id="vllm_default",
+    )
+    plan = module.BudgetPlan(
+        mode="dry-run",
+        contestants=("vllm_default",),
+        judge_provider="vllm_default",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=tmp_path / "profiles.yaml",
+        manifest_steps=(),
+        run_steps=(step,),
+        requirement_checks=(),
+    )
+    session_context = module.SessionContext(
+        session_id="00000000-0000-0000-0000-000000000003",
+        state_path=(
+            tmp_path
+            / "sessions"
+            / "00000000-0000-0000-0000-000000000003"
+            / "session.json"
+        ).resolve(),
+        resume_command="resume",
+    )
+    session_payload = module._build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=[],
+        plan=plan,
+    )
+    initial_checkpoint = session_payload["steps"][step.step_id]["checkpoint_path"]
+    observed_commands: list[tuple[str, ...]] = []
+
+    def _fake_run_logged_subprocess(**kwargs):
+        observed_commands.append(kwargs["command"])
+        if len(observed_commands) == 1:
+            report_path = (tmp_path / "retryable-report.json").resolve()
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "samples": [
+                            {
+                                "sample_id": "sporc_00001_example",
+                                "final_status": "connection_unavailable",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return module.StepExecutionResult(
+                exit_code=0,
+                output_lines=("first attempt",),
+                parsed_payloads=(
+                    ({"status": "completed", "report_path": str(report_path)}),
+                ),
+            )
+        return module.StepExecutionResult(
+            exit_code=0,
+            output_lines=("second attempt",),
+            parsed_payloads=(({"status": "completed", "report_path": ""}),),
+        )
+
+    monkeypatch.setattr(module, "_run_logged_subprocess", _fake_run_logged_subprocess)
+    monkeypatch.setattr(
+        module,
+        "_wait_for_retry_window",
+        lambda **kwargs: True,
+    )
+    exit_code = module._run_step_with_retries(
+        step=step,
+        plan=plan,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=threading.Lock(),
+        stop_event=threading.Event(),
+        active_processes={},
+        process_lock=threading.Lock(),
+        profiles={},
+        args=module._build_parser().parse_args([]),
+    )
+
+    assert exit_code == 0
+    assert len(observed_commands) == 2
+    assert "--resume-from-checkpoint" not in observed_commands[0]
+    assert "--resume-from-checkpoint" not in observed_commands[1]
+    assert str(initial_checkpoint) in observed_commands[0]
+    assert str(initial_checkpoint) not in observed_commands[1]
+
+
+def test_resolve_session_context_round_trips_original_arguments(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen/Qwen3.5-27B")
+    requested_argv = [
+        "--mode",
+        "dry-run",
+        "--dataset-manifest",
+        str(dataset_manifest),
+        "--skip-vllm-server-check",
+    ]
+    plan = module._build_budget_plan(module._build_parser().parse_args(requested_argv))
+
+    session_context, existing_payload, effective_argv = module._resolve_session_context(
+        resume_session_id="",
+        plan=plan,
+        requested_argv=requested_argv,
+    )
+
+    assert session_context is not None
+    payload = module._ensure_session_payload(
+        session_context=session_context,
+        existing_payload=existing_payload,
+        plan=plan,
+        requested_argv=effective_argv,
+    )
+    resumed_context, resumed_payload, resumed_argv = module._resolve_session_context(
+        resume_session_id=session_context.session_id,
+        plan=plan,
+        requested_argv=[],
+    )
+
+    assert payload["requested_argv"] == requested_argv
+    assert resumed_context is not None
+    assert resumed_payload is not None
+    assert resumed_context.session_id == session_context.session_id
+    assert resumed_argv == requested_argv
+
+
+def test_run_pending_steps_skips_completed_session_steps(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    step_one = module.PlanStep(
+        step_id="run:first",
+        label="First",
+        command=("python",),
+        kind=module._RUN_STEP_KIND,
+        provider_id="first",
+    )
+    step_two = module.PlanStep(
+        step_id="run:second",
+        label="Second",
+        command=("python",),
+        kind=module._RUN_STEP_KIND,
+        provider_id="second",
+    )
+    plan = module.BudgetPlan(
+        mode="live",
+        contestants=("first", "second"),
+        judge_provider="judge",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=tmp_path / "profiles.yaml",
+        manifest_steps=(),
+        run_steps=(step_one, step_two),
+        requirement_checks=(),
+    )
+    session_context = module.SessionContext(
+        session_id="00000000-0000-0000-0000-000000000001",
+        state_path=(
+            tmp_path
+            / "sessions"
+            / "00000000-0000-0000-0000-000000000001"
+            / "session.json"
+        ).resolve(),
+        resume_command="resume",
+    )
+    session_payload = module._build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=[],
+        plan=plan,
+    )
+    session_payload["steps"]["run:first"]["status"] = "completed"
+    called_steps: list[str] = []
+
+    def _fake_run_step_with_retries(**kwargs):
+        called_steps.append(kwargs["step"].step_id)
+        return 0
+
+    monkeypatch.setattr(module, "_run_step_with_retries", _fake_run_step_with_retries)
+    exit_code = module._run_pending_steps(
+        steps=plan.run_steps,
+        plan=plan,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=threading.Lock(),
+        stop_event=threading.Event(),
+        active_processes={},
+        process_lock=threading.Lock(),
+        profiles={},
+        args=module._build_parser().parse_args([]),
+        parallel=False,
+    )
+
+    assert exit_code == 0
+    assert called_steps == ["run:second"]
+
+
+def test_run_pending_steps_parallelizes_provider_work_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    step_one = module.PlanStep(
+        step_id="run:first",
+        label="First",
+        command=("python",),
+        kind=module._RUN_STEP_KIND,
+        provider_id="first",
+    )
+    step_two = module.PlanStep(
+        step_id="run:second",
+        label="Second",
+        command=("python",),
+        kind=module._RUN_STEP_KIND,
+        provider_id="second",
+    )
+    plan = module.BudgetPlan(
+        mode="live",
+        contestants=("first", "second"),
+        judge_provider="judge",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=tmp_path / "profiles.yaml",
+        manifest_steps=(),
+        run_steps=(step_one, step_two),
+        requirement_checks=(),
+    )
+    session_context = module.SessionContext(
+        session_id="00000000-0000-0000-0000-000000000002",
+        state_path=(
+            tmp_path
+            / "sessions"
+            / "00000000-0000-0000-0000-000000000002"
+            / "session.json"
+        ).resolve(),
+        resume_command="resume",
+    )
+    session_payload = module._build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=[],
+        plan=plan,
+    )
+    active_count = 0
+    max_active = 0
+    active_lock = threading.Lock()
+
+    def _fake_run_step_with_retries(**kwargs):
+        nonlocal active_count, max_active
+        with active_lock:
+            active_count += 1
+            max_active = max(max_active, active_count)
+        time.sleep(0.1)
+        with active_lock:
+            active_count -= 1
+        return 0
+
+    monkeypatch.setattr(module, "_run_step_with_retries", _fake_run_step_with_retries)
+    exit_code = module._run_pending_steps(
+        steps=plan.run_steps,
+        plan=plan,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=threading.Lock(),
+        stop_event=threading.Event(),
+        active_processes={},
+        process_lock=threading.Lock(),
+        profiles={},
+        args=module._build_parser().parse_args([]),
+        parallel=True,
+    )
+
+    assert exit_code == 0
+    assert max_active == 2
+
+
+def test_run_pending_steps_honors_max_concurrent_provider_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    step_one = module.PlanStep(
+        step_id="run:first",
+        label="First",
+        command=("python",),
+        kind=module._RUN_STEP_KIND,
+        provider_id="first",
+    )
+    step_two = module.PlanStep(
+        step_id="run:second",
+        label="Second",
+        command=("python",),
+        kind=module._RUN_STEP_KIND,
+        provider_id="second",
+    )
+    plan = module.BudgetPlan(
+        mode="live",
+        contestants=("first", "second"),
+        judge_provider="judge",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=tmp_path / "profiles.yaml",
+        manifest_steps=(),
+        run_steps=(step_one, step_two),
+        requirement_checks=(),
+    )
+    session_context = module.SessionContext(
+        session_id="00000000-0000-0000-0000-000000000004",
+        state_path=(
+            tmp_path
+            / "sessions"
+            / "00000000-0000-0000-0000-000000000004"
+            / "session.json"
+        ).resolve(),
+        resume_command="resume",
+    )
+    session_payload = module._build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=[],
+        plan=plan,
+    )
+    active_count = 0
+    max_active = 0
+    active_lock = threading.Lock()
+
+    def _fake_run_step_with_retries(**kwargs):
+        nonlocal active_count, max_active
+        with active_lock:
+            active_count += 1
+            max_active = max(max_active, active_count)
+        time.sleep(0.1)
+        with active_lock:
+            active_count -= 1
+        return 0
+
+    monkeypatch.setattr(module, "_run_step_with_retries", _fake_run_step_with_retries)
+    exit_code = module._run_pending_steps(
+        steps=plan.run_steps,
+        plan=plan,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=threading.Lock(),
+        stop_event=threading.Event(),
+        active_processes={},
+        process_lock=threading.Lock(),
+        profiles={},
+        args=module._build_parser().parse_args(["--max-concurrent-providers", "1"]),
+        parallel=True,
+    )
+
+    assert exit_code == 0
+    assert max_active == 1
+
+
+def test_main_prints_resume_command_when_interrupted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen/Qwen3.5-27B")
+    monkeypatch.setenv("VLLM_URL", "http://127.0.0.1:8000/v1")
+
+    def _fake_run_pending_steps(**kwargs):
+        return 130
+
+    monkeypatch.setattr(module, "_run_pending_steps", _fake_run_pending_steps)
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        exit_code = module.main(
+            [
+                "--mode",
+                "dry-run",
+                "--dataset-manifest",
+                str(dataset_manifest),
+                "--skip-vllm-server-check",
+            ]
+        )
+
+    assert exit_code == 130
+    assert "--resume-session-id" in captured.getvalue()

@@ -1,3 +1,7 @@
+### 2026-04-03T14:14:10.8463372+08:00 - SPoRC Budget Wrapper Must Run Provider Steps Concurrently And Resume Unfinished Providers By UUID
+- Problem: The budget wrapper originally launched provider `execute` runs strictly sequentially and stopped on the first nonzero exit. That made the funded sweep slower than necessary, gave poor terminal visibility, and lost useful wrapper-level state when the session was cancelled even though each execute child already had checkpoint support.
+- Solution: Run provider steps concurrently by default, stream verbose prefixed child logs plus progress heartbeats, classify retryable connection/startup failures and keep retrying them, and persist a wrapper-session UUID with per-provider checkpoint paths so interrupted sessions resume only the unfinished providers.
+
 ### 2026-04-03T14:14:10.8463372+08:00 - SPoRC Budget Prep Must Not Force vLLM Thinking Off For Local `Qwen/Qwen3.5-27B`
 - Problem: The SPoRC budget runner hard-disabled vLLM thinking for every local contestant, which overrode `Qwen/Qwen3.5-27B`'s intended reasoning mode even when the model was explicitly pinned through `CARD_FRAMEWORK_VLLM_MODEL` or `VLLM_MODEL`.
 - Solution: Keep the benchmark's vLLM timeout and reproducibility guards, but leave thinking enabled whenever the pinned local model resolves to `Qwen/Qwen3.5-27B`; keep the dry-run workflow local by driving `vllm_default` through the vLLM URL env vars.

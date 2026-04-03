@@ -780,6 +780,14 @@ Important behavior:
 For the April 2026 under-`$50` plan, use the repo wrapper instead of typing the
 four `execute` commands by hand.
 
+For non-validate runs, the wrapper now starts provider steps concurrently by
+default, streams verbose child output plus progress/heartbeat events to the
+terminal, keeps retrying retryable connection/startup failures until the
+provider comes back, restarts a provider from scratch when retryable infra
+replacements would otherwise change the retained sample cohort, and persists a
+wrapper-session UUID so interrupted runs can resume unfinished providers from
+their execute checkpoints.
+
 Validate prerequisites and print the exact commands without spending money:
 
 This pre-funding validate mode still exits cleanly before the wallets are
@@ -796,6 +804,18 @@ Run a local vLLM dry run before the funded sweep:
 $env:VLLM_URL="http://127.0.0.1:8000/v1"
 $env:CARD_FRAMEWORK_VLLM_MODEL="Qwen/Qwen3.5-27B"
 uv run python scripts/run_sporc_budget_sweep.py --mode dry-run
+```
+
+Resume an interrupted wrapper session from its printed UUID:
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --resume-session-id <uuid>
+```
+
+Force provider runs back to serial mode when needed:
+
+```powershell
+uv run python scripts/run_sporc_budget_sweep.py --mode live --max-concurrent-providers 1
 ```
 
 Run the full funded sweep after the provider wallets are ready:
