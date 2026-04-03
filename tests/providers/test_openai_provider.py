@@ -256,6 +256,85 @@ def test_chat_preserves_tool_history_as_response_items(monkeypatch) -> None:
     assert response.tool_calls is None
 
 
+def test_chat_keeps_auto_tool_feedback_as_user_messages(monkeypatch) -> None:
+    """Auto helper feedback must not become synthetic function_call_output items."""
+
+    def _create_impl(**kwargs: Any) -> _FakeResponse:
+        assert kwargs["input"] == [
+            {"role": "system", "content": "Summarizer"},
+            {"role": "assistant", "content": "draft"},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "add_speaker_message",
+                "arguments": '{"speaker_id":"SPEAKER_00","content":"hello"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": '{"line":1}',
+            },
+            {
+                "role": "user",
+                "content": (
+                    "[AUTO_TOOL_RESULT:estimate_duration]\n"
+                    "This helper was run automatically after your mutation. "
+                    "Review the JSON result and continue from it.\n"
+                    '{"total_estimated_seconds": 33.2}'
+                ),
+            },
+        ]
+        return _FakeResponse(
+            output=[
+                _FakeItem(
+                    type="message",
+                    content=[_FakeItem(type="output_text", text="done")],
+                )
+            ],
+            output_text="done",
+        )
+
+    _install_fake_openai(monkeypatch, _create_impl)
+    provider = OpenAIProvider(api_key="test-key", model="gpt-5.4-mini")
+
+    response = provider.chat(
+        messages=[
+            {"role": "system", "content": "Summarizer"},
+            {
+                "role": "assistant",
+                "content": "draft",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "add_speaker_message",
+                            "arguments": '{"speaker_id":"SPEAKER_00","content":"hello"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "add_speaker_message",
+                "tool_call_id": "call_1",
+                "content": '{"line":1}',
+            },
+            {
+                "role": "user",
+                "content": (
+                    "[AUTO_TOOL_RESULT:estimate_duration]\n"
+                    "This helper was run automatically after your mutation. "
+                    "Review the JSON result and continue from it.\n"
+                    '{"total_estimated_seconds": 33.2}'
+                ),
+            },
+        ]
+    )
+
+    assert response.content == "done"
+
+
 def test_generate_uses_reasoning_none_by_default(monkeypatch) -> None:
     """Default OpenAI generate calls should keep reasoning disabled."""
 

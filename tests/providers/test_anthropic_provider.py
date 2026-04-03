@@ -157,7 +157,10 @@ def test_chat_streams_thinking_content_and_tool_calls(monkeypatch) -> None:
     assert response.tool_calls is not None
     assert response.tool_calls[0].id == "call_1"
     assert response.tool_calls[0].function.name == "submit_samples"
-    assert response.tool_calls[0].function.arguments == '{"episode_key":"episode://sample"}'
+    assert (
+        response.tool_calls[0].function.arguments
+        == '{"episode_key":"episode://sample"}'
+    )
     assert requests[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert requests[0]["output_config"] == {"effort": "medium"}
     assert "temperature" not in requests[0]
@@ -205,6 +208,80 @@ def test_chat_falls_back_to_non_streaming_response(monkeypatch) -> None:
         == '{"episode_key": "episode://sample"}'
     )
     assert provider.last_response_details["response"]["stop_reason"] == "tool_use"
+
+
+def test_normalize_messages_keeps_auto_tool_feedback_as_text_not_tool_result() -> None:
+    """Auto helper feedback must not become synthetic Anthropic tool_result blocks."""
+    provider = AnthropicProvider(api_key="test-key")
+
+    _system, normalized_messages = provider._normalize_messages(
+        [
+            {"role": "system", "content": "Summarizer"},
+            {
+                "role": "assistant",
+                "content": "draft",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "add_speaker_message",
+                            "arguments": '{"speaker_id":"SPEAKER_00","content":"hello"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "add_speaker_message",
+                "tool_call_id": "call_1",
+                "content": '{"line":1}',
+            },
+            {
+                "role": "user",
+                "content": (
+                    "[AUTO_TOOL_RESULT:estimate_duration]\n"
+                    "This helper was run automatically after your mutation. "
+                    "Review the JSON result and continue from it.\n"
+                    '{"total_estimated_seconds": 33.2}'
+                ),
+            },
+        ]
+    )
+
+    assert normalized_messages == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "draft"},
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "add_speaker_message",
+                    "input": {"speaker_id": "SPEAKER_00", "content": "hello"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": '{"line":1}',
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "[AUTO_TOOL_RESULT:estimate_duration]\n"
+                        "This helper was run automatically after your mutation. "
+                        "Review the JSON result and continue from it.\n"
+                        '{"total_estimated_seconds": 33.2}'
+                    ),
+                },
+            ],
+        },
+    ]
 
 
 def test_provider_requires_installed_sdk(monkeypatch) -> None:

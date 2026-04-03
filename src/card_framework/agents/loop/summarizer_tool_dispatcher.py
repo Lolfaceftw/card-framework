@@ -1,4 +1,4 @@
-﻿"""Tool-dispatch helpers for the duration-aware summarizer loop."""
+"""Tool-dispatch helpers for the duration-aware summarizer loop."""
 
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ class SummarizerToolDispatcher:
 
         recent_fingerprints_raw = context_data.get("recent_line_edit_fingerprints", [])
         recent_fingerprints = (
-            list(recent_fingerprints_raw)
+            [item for item in recent_fingerprints_raw if isinstance(item, str)]
             if isinstance(recent_fingerprints_raw, list)
             else []
         )
@@ -364,34 +364,33 @@ class SummarizerToolDispatcher:
 
             if name in registry_mutation_tools and "error" not in result:
                 duration_result = await tool_registry.dispatch("estimate_duration", {})
-                if duration_result is None:
+                if not isinstance(duration_result, dict):
                     duration_result = {
                         "total_estimated_seconds": 0.0,
                         "budget": {"in_budget": False},
                     }
-                auto_duration_id = f"auto_duration_{tc.get('id', 'unknown')}"
-                self._append_tool_result(
+                raw_total_estimated_seconds = duration_result.get(
+                    "total_estimated_seconds", 0.0
+                )
+                try:
+                    total_estimated_seconds = float(raw_total_estimated_seconds)
+                except (TypeError, ValueError):
+                    total_estimated_seconds = 0.0
+                self._append_auto_tool_feedback(
                     messages=messages,
-                    tool_call_id=auto_duration_id,
                     name="estimate_duration",
                     result=duration_result,
                     event_name="estimate_duration (auto)",
-                    event_result=(
-                        f"Total: {float(duration_result.get('total_estimated_seconds', 0.0)):.3f}s"
-                    ),
+                    event_result=(f"Total: {total_estimated_seconds:.3f}s"),
                 )
-                turn_total_seconds = float(
-                    duration_result.get("total_estimated_seconds", 0.0)
-                )
+                turn_total_seconds = total_estimated_seconds
                 context_data["last_total_estimated_seconds"] = turn_total_seconds
 
                 count_result = await tool_registry.dispatch("count_words", {})
-                if count_result is None:
+                if not isinstance(count_result, dict):
                     count_result = {"total_word_count": 0}
-                auto_count_id = f"auto_count_{tc.get('id', 'unknown')}"
-                self._append_tool_result(
+                self._append_auto_tool_feedback(
                     messages=messages,
-                    tool_call_id=auto_count_id,
                     name="count_words",
                     result=count_result,
                     event_name="count_words (auto)",
@@ -401,7 +400,8 @@ class SummarizerToolDispatcher:
                     count_result.get("total_word_count", 0)
                 )
 
-                budget = duration_result.get("budget", {})
+                raw_budget = duration_result.get("budget", {})
+                budget = raw_budget if isinstance(raw_budget, dict) else {}
                 if bool(budget.get("in_budget", False)):
                     context_data["draft_ready_for_review"] = True
                     review_chat_max_tokens = coerce_positive_int(
@@ -421,11 +421,9 @@ class SummarizerToolDispatcher:
                     )
 
                     save_result = await tool_registry.dispatch("save_draft", {})
-                    if save_result is not None:
-                        save_id = f"auto_save_{tc.get('id', 'unknown')}"
-                        self._append_tool_result(
+                    if isinstance(save_result, dict):
+                        self._append_auto_tool_feedback(
                             messages=messages,
-                            tool_call_id=save_id,
                             name="save_draft",
                             result=save_result,
                             event_name="save_draft (auto)",
@@ -583,4 +581,35 @@ class SummarizerToolDispatcher:
             result=event_result or json.dumps(result, indent=2),
         )
 
+    def _append_auto_tool_feedback(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        name: str,
+        result: dict[str, Any],
+        event_name: str | None = None,
+        event_result: str | None = None,
+    ) -> None:
+        """Append auto-dispatched tool outputs as user feedback, not tool results.
 
+        OpenAI Responses and Anthropic tool APIs require each tool result to map to a
+        prior model-issued tool call. Auto-invoked helpers such as estimate_duration,
+        count_words, and save_draft are local loop conveniences, so their outputs must
+        be surfaced as ordinary user feedback instead of synthetic tool-result items.
+        """
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"[AUTO_TOOL_RESULT:{name}]\n"
+                    f"This helper was run automatically after your mutation. "
+                    f"Review the JSON result and continue from it.\n"
+                    f"{json.dumps(result)}"
+                ),
+            }
+        )
+        self.event_bus.publish(
+            "tool_result",
+            tool_name=event_name or name,
+            result=event_result or json.dumps(result, indent=2),
+        )
