@@ -153,6 +153,7 @@ _OPENAI_PROVIDER_TARGET = "card_framework.providers.openai_provider.OpenAIProvid
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPT_ONLY_CRITIC_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
+_QWEN_BUDGET_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
 _PROGRESS_EVENT_KEY = "sporc_progress_event"
 _STAGE_TIMEOUT_FINAL_STATUS = "stage_timeout"
 _STARTUP_UNAVAILABLE_FINAL_STATUS = "startup_unavailable"
@@ -1264,11 +1265,13 @@ def _prepare_provider_config(
     if provider_target != _VLLM_PROVIDER_TARGET:
         return prepared
 
+    model_name = str(prepared.get("model", "") or "")
+    vllm_budget_thinking_enabled = _vllm_budget_thinking_enabled(model_name)
     prepared["request_timeout_seconds"] = max(
         float(prepared.get("request_timeout_seconds", 0.0) or 0.0),
         _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS,
     )
-    prepared["enable_thinking"] = False
+    prepared["enable_thinking"] = vllm_budget_thinking_enabled
     existing_extra_body = prepared.get("extra_body")
     merged_extra_body = (
         dict(existing_extra_body) if isinstance(existing_extra_body, dict) else {}
@@ -1277,9 +1280,14 @@ def _prepare_provider_config(
     merged_chat_template_kwargs = (
         dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
     )
-    merged_chat_template_kwargs["enable_thinking"] = False
+    merged_chat_template_kwargs["enable_thinking"] = vllm_budget_thinking_enabled
     merged_extra_body["chat_template_kwargs"] = merged_chat_template_kwargs
     prepared["extra_body"] = merged_extra_body
+    if role == "judge" and vllm_budget_thinking_enabled:
+        prepared["request_timeout_seconds"] = max(
+            float(prepared.get("request_timeout_seconds", 0.0) or 0.0),
+            _QWEN_BUDGET_VLLM_REQUEST_TIMEOUT_SECONDS,
+        )
     if role == "critic" and transcript_only:
         prepared["request_timeout_seconds"] = max(
             float(prepared.get("request_timeout_seconds", 0.0) or 0.0),
@@ -1287,6 +1295,12 @@ def _prepare_provider_config(
         )
         return prepared
     return prepared
+
+
+def _vllm_budget_thinking_enabled(model_name: str) -> bool:
+    """Return whether the SPoRC budget path should keep vLLM thinking enabled."""
+    normalized = re.sub(r"[^a-z0-9]+", "", str(model_name or "").strip().lower())
+    return "qwen35" in normalized and "27b" in normalized
 
 
 def _validate_provider_role_constraints(

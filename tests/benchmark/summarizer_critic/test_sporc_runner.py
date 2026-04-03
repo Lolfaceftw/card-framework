@@ -1397,6 +1397,48 @@ def test_prepare_provider_config_preserves_existing_vllm_extra_body() -> None:
     }
 
 
+def test_prepare_provider_config_keeps_qwen_3_5_27b_vllm_thinking_enabled() -> None:
+    profile = ProviderProfile(
+        provider_id="vllm_default",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+            "model": "Qwen/Qwen3.5-27B",
+        },
+    )
+
+    prepared = _prepare_provider_config(
+        profile,
+        role="critic",
+        transcript_only=True,
+    )
+
+    assert prepared["request_timeout_seconds"] == 300.0
+    assert prepared["enable_thinking"] is True
+    assert prepared["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+def test_prepare_provider_config_applies_qwen_3_5_27b_vllm_judge_timeout() -> None:
+    profile = ProviderProfile(
+        provider_id="vllm_default",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+            "model": "Qwen/Qwen3.5-27B",
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="judge")
+
+    assert prepared["request_timeout_seconds"] == 300.0
+    assert prepared["enable_thinking"] is True
+    assert prepared["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
 def test_execute_benchmark_short_circuits_when_all_samples_fail_preflight(
     monkeypatch,
     tmp_path: Path,

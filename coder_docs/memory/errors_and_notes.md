@@ -1,3 +1,39 @@
+### 2026-04-03T14:14:10.8463372+08:00 - SPoRC Budget Prep Must Not Force vLLM Thinking Off For Local `Qwen/Qwen3.5-27B`
+- Problem: The SPoRC budget runner hard-disabled vLLM thinking for every local contestant, which overrode `Qwen/Qwen3.5-27B`'s intended reasoning mode even when the model was explicitly pinned through `CARD_FRAMEWORK_VLLM_MODEL` or `VLLM_MODEL`.
+- Solution: Keep the benchmark's vLLM timeout and reproducibility guards, but leave thinking enabled whenever the pinned local model resolves to `Qwen/Qwen3.5-27B`; keep the dry-run workflow local by driving `vllm_default` through the vLLM URL env vars.
+
+### 2026-04-03T12:42:50.3257692+08:00 - SPoRC Dry Runs Must Keep `deepseek-reasoner` Judge-Only Because DeepSeek Does Not Support Function Calling There
+- Problem: A cheap SPoRC dry-run temptation is to swap the whole summarizer-critic loop onto `deepseek-reasoner`, but DeepSeek's own reasoning-model docs state that `deepseek-reasoner` does not support function calling. The SPoRC summarizer and critic both rely on tool loops, so using `deepseek-reasoner` as a contestant would fail before the real funded run.
+- Solution: Fail fast when a SPoRC summarizer or critic provider resolves to `deepseek-reasoner`, keep `deepseek_chat` as the dry-run contestant, and reserve `deepseek_judge` / `deepseek-reasoner` for judge-only validation passes.
+
+### 2026-04-03T00:00:00+00:00 - Affect Analysis Must Chunk Long Transcript Segments On GPU Instead Of Feeding Multi-Minute Clips Directly To SER Models
+- Problem: The current `private_markets` stage-2 transcript had only `19` giant segments, including two segments longer than `26 minutes`. Feeding those full clips into `emotion2vec+` and `audEERING MSP-dim` on CUDA triggered immediate OOM failures even at batch size `1`.
+- Solution: Keep affect analysis GPU-capable by chunking long per-segment clips into bounded `30s` inference windows, aggregating chunk scores back to one segment-level record, disabling unused emotion2vec embedding extraction by default, and preserving smaller CUDA micro-batch retries when one bounded batch still OOMs.
+
+### 2026-04-03T00:00:00+00:00 - Nested CUDA IndexTTS Workers Must Strip The Parent `VIRTUAL_ENV`
+- Problem: Repeated stage-2 CUDA failures showed the warm IndexTTS worker dying immediately after logging only `warning: VIRTUAL_ENV=.venv does not match the project environment path ... and will be ignored`. The outer repo runtime was launched through `uv`, so the parent process inherited `VIRTUAL_ENV=.venv`; forwarding that unchanged into the nested `uv run --project src/card_framework/_vendor/index_tts ...` worker made the worker exit before it emitted the `ready` protocol payload.
+- Solution: Remove `VIRTUAL_ENV` from the nested worker environment while still prepending the repo `src/` path to `PYTHONPATH`, so the worker can boot the vendored IndexTTS project environment on CUDA without tripping the outer-venv mismatch path.
+
+### 2026-04-03T00:00:00+00:00 - Compose Runtime Containers Are Intentionally Re-Capped At 8 GiB RAM Plus 2 GiB Swap
+- Problem: The Docker runtime had been raised to `mem_limit: 16g` and `memswap_limit: 20g` for long-form stage-1 stability, but the current operator constraint is to keep the repo-local runtime containers hard-capped at `8 GiB` RAM plus `2 GiB` swap instead.
+- Solution: Restore the shared Compose cap to `mem_limit: 8g` and `memswap_limit: 10g`, and update all operator-facing Docker/config docs so the runtime contract stays explicit.
+
+### 2026-04-03T00:00:00+00:00 - CUDA IndexTTS Worker Startup Must Respect The 8 GiB VRAM Budget, Preserve Worker Logs, And Retry Once On CUDA
+- Problem: A recent Docker stage-2 live-draft run reached the first Summarizer `add_speaker_message` tool call, then died because the warm IndexTTS subprocess worker crashed during CUDA startup with only `IndexTTS subprocess worker exited unexpectedly` surfacing back into the agent loop.
+- Solution: Preserve recent worker stderr/stdout in the surfaced failure detail, close partially started workers on startup failure, enforce the repo's 8 GiB VRAM budget plus minimum free-VRAM headroom before launching the CUDA worker, and on one unexpected CUDA worker exit clear local CUDA allocator state and retry once on CUDA instead of silently falling back to CPU.
+
+### 2026-04-02T22:26:39.0772357+08:00 - Textual Execution Monitors Must Keep Wrapper Preflight Intact, Force Valid Stage-4 Defaults, And Filter Non-Errors Out Of Diagnostics
+- Problem: The first execution-monitor pass introduced three operator-facing regressions: interactive benchmark launches could bypass `setup_and_run` preflight/runtime bootstrap by running the benchmark command directly, default stage-4 launches could still fail because the frontend did not force `audio.interjector.enabled=true`, and the diagnostics pane showed harmless `Loading ...` / `Loaded ...` stderr status lines as if they were real errors.
+- Solution: Route monitored benchmark launches back through a hidden `setup_and_run` child request so the wrapper still owns benchmark-specific bootstrap, preserve stage-3 overrides and force the interjector on for stage-4 selections, and make the monitor classify logs so loading/status lines stay in the main timeline while only warnings and real failures enter diagnostics.
+
+### 2026-04-02T21:24:44.9948107+08:00 - Textual Path Suggestions Must Avoid Full Cross-Form Refreshes On Every Keystroke
+- Problem: The first inline path-suggestion pass refreshed every suggestion list, both launch previews, and the YAML config validation state on every input change. On real workspaces that turned the fzf-style path picker laggy because unrelated blank fields still rescanned directories and non-config keystrokes kept revalidating the whole config editor.
+- Solution: Skip directory scans for blank suggestion fields, cache directory snapshots by path plus mtime, refresh only the suggestion list tied to the changed input, and limit preview or config-status updates to the widgets that actually changed.
+
+### 2026-04-02T20:32:37.8107162+08:00 - Frontend Overhauls Must Preserve Non-Interactive Wrapper Defaults And Benchmark-Specific Bootstrap Gates
+- Problem: The new `setup_and_run` Textual frontend initially changed two wrapper contracts by accident: no-arg non-interactive Docker launches stopped falling back to `--help`, and benchmark launches reused one coarse preflight policy that could miss QMSum Git requirements or over-require FFmpeg for transcript-only paths.
+- Solution: Keep non-interactive no-arg Docker entrypoint launches on the legacy help path, and make frontend benchmark bootstrap decisions mode-aware: require Git for QMSum prepare-on-demand flows, require FFmpeg only for audio-producing benchmark paths, and keep the frontend as a presentation-layer change rather than a behavior change.
+
 ### 2026-04-02T19:17:42+08:00 - Reproducible SPoRC vLLM Budget Runs Must Pin The Local Model Id
 - Problem: The `vllm_default` benchmark profile only pointed at a local OpenAI-compatible endpoint and then accepted whichever model the server listed first at `/models`. That made the SPoRC budget-plan "local open/open-weight contestant" ambiguous and not reproducible across different vLLM hosts.
 - Solution: Let the vLLM provider accept an explicit `model`, honor `CARD_FRAMEWORK_VLLM_MODEL` / `VLLM_MODEL` benchmark overrides, validate that the requested id is actually served, and document that the SPoRC budget plan must set one of those env vars when using `vllm_default`.

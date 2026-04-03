@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Iterable
@@ -46,9 +47,9 @@ DEFAULT_LIVE_CONTESTANTS = (
     "deepseek_chat",
     "vllm_default",
 )
-DEFAULT_DRY_RUN_CONTESTANTS = ("deepseek_chat",)
+DEFAULT_DRY_RUN_CONTESTANTS = ("vllm_default",)
 DEFAULT_LIVE_JUDGE_PROVIDER = "google_gemini_3_1_pro_preview_judge"
-DEFAULT_DRY_RUN_JUDGE_PROVIDER = "deepseek_judge"
+DEFAULT_DRY_RUN_JUDGE_PROVIDER = "vllm_default"
 HF_ENV_NAMES = ("HF_ACCESS_TOKEN", "HF_TOKEN")
 VLLM_MODEL_ENV_NAMES = ("CARD_FRAMEWORK_VLLM_MODEL", "VLLM_MODEL")
 _DEEPSEEK_PROVIDER_TARGET = (
@@ -112,7 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="validate",
         help=(
             "validate prints the exact plan and checks prerequisites without API "
-            "calls. dry-run executes a low-cost DeepSeek-backed validation pass. "
+            "calls. dry-run executes a local vLLM-backed validation pass. "
             "live executes the full budget plan."
         ),
     )
@@ -149,7 +150,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "Optional comma-separated contestant provider ids. Defaults to the full "
-            "budget plan in live/validate mode and to deepseek_chat in dry-run mode."
+            "budget plan in live/validate mode and to vllm_default in dry-run mode."
         ),
     )
     parser.add_argument(
@@ -157,7 +158,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "Optional judge provider id. Defaults to google_gemini_3_1_pro_preview_judge "
-            "for live/validate and deepseek_judge for dry-run."
+            "for live/validate and vllm_default for dry-run."
         ),
     )
     parser.add_argument(
@@ -452,6 +453,11 @@ def _coerce_int_or_zero(raw_value: object) -> int:
     return 0
 
 
+def _vllm_budget_qwen_model(model_name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(model_name or "").strip().lower())
+    return "qwen35" in normalized and "27b" in normalized
+
+
 def _prepared_manifest_check(path: Path) -> tuple[bool, str]:
     if not path.exists():
         return False, f"Prepared manifest does not exist: {path}"
@@ -558,7 +564,7 @@ def _build_requirement_checks(
         )
     )
 
-    provider_ids = [*contestants, judge_provider]
+    provider_ids = tuple(dict.fromkeys([*contestants, judge_provider]))
     for provider_id in provider_ids:
         profile = profiles.get(provider_id)
         checks.append(
@@ -616,27 +622,57 @@ def _build_requirement_checks(
             )
         )
 
+    for provider_id in provider_ids:
+        profile = profiles.get(provider_id)
+        if profile is None:
+            continue
+
         provider_target = str(profile.llm_config.get("_target_", "") or "").strip()
         if provider_target != _VLLM_PROVIDER_TARGET:
             continue
         base_url, api_key, model_name = _resolve_vllm_runtime_details(profile)
         model_pinned = bool(model_name)
+        qwen_budget_model = _vllm_budget_qwen_model(model_name)
         checks.append(
             RequirementCheck(
                 label=f"Pinned vLLM model for {provider_id}",
                 satisfied=model_pinned,
                 detail=(
-                    f"Local vLLM contestant is pinned to served model '{model_name}'."
-                    if model_pinned
+                    (
+                        f"Local vLLM provider is pinned to served model '{model_name}' and "
+                        "will keep thinking enabled in the SPoRC budget path."
+                    )
+                    if model_pinned and qwen_budget_model
                     else (
-                        f"'{provider_id}' has no explicit model pin. Set "
-                        "CARD_FRAMEWORK_VLLM_MODEL or VLLM_MODEL before the budget run so the "
-                        "contestant is reproducible."
+                        f"Local vLLM provider is pinned to served model '{model_name}'."
+                        if model_pinned
+                        else (
+                            f"'{provider_id}' has no explicit model pin. Set "
+                            "CARD_FRAMEWORK_VLLM_MODEL or VLLM_MODEL before the budget run so the "
+                            "local run is reproducible."
+                        )
                     )
                 ),
                 blocking=mode in {"dry-run", "live"},
             )
         )
+        if mode == "dry-run" and model_pinned:
+            checks.append(
+                RequirementCheck(
+                    label=f"Qwen/Qwen3.5-27B dry-run model for {provider_id}",
+                    satisfied=qwen_budget_model,
+                    detail=(
+                        f"Dry-run vLLM provider '{provider_id}' is pinned to Qwen/Qwen3.5-27B."
+                        if qwen_budget_model
+                        else (
+                            f"Dry-run vLLM provider '{provider_id}' is pinned to '{model_name}', "
+                            "but the documented local dry-run path expects Qwen/Qwen3.5-27B so "
+                            "thinking stays enabled."
+                        )
+                    ),
+                    blocking=True,
+                )
+            )
         if not model_pinned or skip_vllm_server_check:
             continue
         reachable, detail, model_ids = _probe_openai_compatible_models(

@@ -1,6 +1,6 @@
 providers:
   - id: vllm_default
-    description: OpenAI-compatible vLLM endpoint running locally; pin the served model with CARD_FRAMEWORK_VLLM_MODEL or VLLM_MODEL for reproducible benchmark runs.
+    description: OpenAI-compatible vLLM endpoint running locally; pin the served model with CARD_FRAMEWORK_VLLM_MODEL or VLLM_MODEL for reproducible benchmark runs. The SPoRC budget path keeps thinking enabled when that pin resolves to Qwen/Qwen3.5-27B.
     required_env: []
     llm:
       _target_: card_framework.providers.vllm_provider.VLLMProvider

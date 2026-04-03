@@ -58,6 +58,7 @@ The benchmark also records:
 ```bash
 HF_ACCESS_TOKEN=...
 VLLM_URL=http://host:8000/v1
+CARD_FRAMEWORK_VLLM_MODEL=Qwen/Qwen3.5-27B
 ```
 
 The repository now auto-loads the root `.env` file on package import when it exists, without overriding variables that are already set in the shell.
@@ -68,7 +69,8 @@ It also mirrors common aliases automatically, including:
 - `VLLM_URL` -> `CARD_FRAMEWORK_VLLM_URL`, `CARD_FRAMEWORK_VLLM_BASE_URL`,
   `VLLM_BASE_URL`
 
-So for SPoRC benchmark runs, a root `.env` containing `HF_ACCESS_TOKEN` and `VLLM_URL` is enough.
+So for SPoRC benchmark runs, a root `.env` containing `HF_ACCESS_TOKEN`,
+`VLLM_URL`, and `CARD_FRAMEWORK_VLLM_MODEL` is enough.
 
 The benchmark runner also accepts the Hugging Face token through `HF_TOKEN`, so a common shell pattern is:
 
@@ -81,6 +83,7 @@ If you use a local `.env`, make sure it contains at least:
 ```bash
 HF_ACCESS_TOKEN=hf_xxx
 VLLM_URL=http://host:8000/v1
+CARD_FRAMEWORK_VLLM_MODEL=Qwen/Qwen3.5-27B
 ANTHROPIC_API_KEY=
 ```
 
@@ -787,10 +790,12 @@ reported as later requirements instead of blocking the validation pass.
 uv run python scripts/run_sporc_budget_sweep.py --mode validate --skip-vllm-server-check
 ```
 
-Run a DeepSeek-only dry run before the funded sweep:
+Run a local vLLM dry run before the funded sweep:
 
 ```powershell
-uv run python scripts/run_sporc_budget_sweep.py --mode dry-run --skip-vllm-server-check
+$env:VLLM_URL="http://127.0.0.1:8000/v1"
+$env:CARD_FRAMEWORK_VLLM_MODEL="Qwen/Qwen3.5-27B"
+uv run python scripts/run_sporc_budget_sweep.py --mode dry-run
 ```
 
 Run the full funded sweep after the provider wallets are ready:
@@ -812,6 +817,9 @@ The wrapper enforces the documented budget defaults:
 It rejects nonpositive `--max-iterations` values up front, because the
 underlying `execute` path treats them as unbounded.
 
+When `vllm_default` is pinned to `Qwen/Qwen3.5-27B`, the benchmark prep keeps
+vLLM thinking enabled for that local contestant instead of forcing it off.
+
 It also fails fast if you try to use `deepseek-reasoner` as the SPoRC
 summarizer or critic, because DeepSeek's docs mark that model as not supporting
 function calling.
@@ -819,7 +827,7 @@ function calling.
 Recommended transcript-only run:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
   --prepare-if-missing \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
@@ -831,7 +839,7 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 Run with a fixed duration preset:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
   --prepare-if-missing \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
@@ -845,7 +853,7 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 Run with an explicit target instead of a preset:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
   --prepare-if-missing \
   --transcript-only \
   --target-seconds-override 90 \
@@ -855,7 +863,7 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 Run the faithful audio path instead of transcript-only:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc execute \
   --prepare-if-missing \
   --summarizer-provider vllm_default \
   --critic-provider vllm_default \
@@ -888,7 +896,7 @@ uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep
 Run one preset for `10` examples:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode single \
   --duration-preset 5m \
   --max-samples 10 \
@@ -902,7 +910,7 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 Run all built-in presets for `10` examples each:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
   --max-samples 10 \
   --parallelism 0 \
@@ -916,7 +924,7 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 Run all presets concurrently with `3` worker children per seeded preset:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
   --max-samples 30 \
   --parallelism 0 \
@@ -931,7 +939,7 @@ HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework
 Run a custom subset such as `30s`, `1m`, and `5m` for `100` retained examples each:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
   --duration-presets "30s,1m,5m" \
   --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
@@ -987,7 +995,7 @@ Important behavior:
 If you already prepared or curated a subset manifest, pass it directly:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
   --duration-presets "30s,1m,5m" \
   --dataset-manifest "artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_manifest.json" \
@@ -1104,7 +1112,7 @@ For summarizer-only evaluation:
 For the duration-constraint study described in this repository, the most direct command shape is:
 
 ```bash
-HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
+HF_TOKEN="$HF_ACCESS_TOKEN" VLLM_URL="$VLLM_URL" CARD_FRAMEWORK_VLLM_MODEL="$CARD_FRAMEWORK_VLLM_MODEL" uv run python -m card_framework.benchmark.summarizer_critic.sporc duration-sweep \
   --mode batch-all \
   --max-samples 10 \
   --parallelism 0 \

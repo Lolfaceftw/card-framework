@@ -125,26 +125,42 @@ def test_validate_mode_marks_live_credentials_as_later_requirements(
     assert later_by_label["Pinned vLLM model for vllm_default"].satisfied is False
 
 
-def test_build_budget_plan_dry_run_defaults_to_deepseek_pair(tmp_path: Path) -> None:
+def test_build_budget_plan_dry_run_defaults_to_vllm_pair(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
     _write_prepared_manifest(dataset_manifest, budget_ready=True)
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen/Qwen3.5-27B")
 
     parser = module._build_parser()
     args = parser.parse_args(
-        ["--mode", "dry-run", "--dataset-manifest", str(dataset_manifest)]
+        [
+            "--mode",
+            "dry-run",
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--skip-vllm-server-check",
+        ]
     )
 
     plan = module._build_budget_plan(args)
 
-    assert plan.contestants == ("deepseek_chat",)
-    assert plan.judge_provider == "deepseek_judge"
+    assert plan.contestants == ("vllm_default",)
+    assert plan.judge_provider == "vllm_default"
     run_step = plan.run_steps[0]
     assert run_step.command[run_step.command.index("--max-samples") + 1] == "1"
     assert (
         run_step.command[run_step.command.index("--judge-provider") + 1]
-        == "deepseek_judge"
+        == "vllm_default"
     )
+    qwen_check = next(
+        check
+        for check in plan.requirement_checks
+        if check.label == "Qwen/Qwen3.5-27B dry-run model for vllm_default"
+    )
+    assert qwen_check.satisfied is True
 
 
 def test_build_budget_plan_propagates_custom_provider_profiles_path(
@@ -184,6 +200,10 @@ def test_build_budget_plan_propagates_custom_provider_profiles_path(
             str(dataset_manifest),
             "--provider-profiles",
             str(provider_profiles),
+            "--contestants",
+            "deepseek_chat",
+            "--judge-provider",
+            "deepseek_judge",
         ]
     )
 
@@ -245,7 +265,7 @@ def test_build_budget_plan_marks_vllm_pin_satisfied_when_env_model_is_set(
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
     _write_prepared_manifest(dataset_manifest, budget_ready=True)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen3-32B")
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen/Qwen3.5-27B")
 
     parser = module._build_parser()
     args = parser.parse_args(
@@ -268,7 +288,86 @@ def test_build_budget_plan_marks_vllm_pin_satisfied_when_env_model_is_set(
         if check.label == "Pinned vLLM model for vllm_default"
     )
     assert pin_check.satisfied is True
-    assert "Qwen3-32B" in pin_check.detail
+    assert "Qwen/Qwen3.5-27B" in pin_check.detail
+    qwen_check = next(
+        check
+        for check in plan.requirement_checks
+        if check.label == "Qwen/Qwen3.5-27B dry-run model for vllm_default"
+    )
+    assert qwen_check.satisfied is True
+
+
+def test_build_budget_plan_validates_vllm_judge_pin_when_judge_is_local(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen/Qwen3.5-27B")
+
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "dry-run",
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--contestants",
+            "deepseek_chat",
+            "--judge-provider",
+            "vllm_default",
+            "--skip-vllm-server-check",
+        ]
+    )
+
+    plan = module._build_budget_plan(args)
+
+    pin_check = next(
+        check
+        for check in plan.requirement_checks
+        if check.label == "Pinned vLLM model for vllm_default"
+    )
+    assert pin_check.satisfied is True
+    assert "Qwen/Qwen3.5-27B" in pin_check.detail
+    qwen_check = next(
+        check
+        for check in plan.requirement_checks
+        if check.label == "Qwen/Qwen3.5-27B dry-run model for vllm_default"
+    )
+    assert qwen_check.satisfied is True
+
+
+def test_build_budget_plan_dry_run_flags_non_qwen_vllm_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
+    _write_prepared_manifest(dataset_manifest, budget_ready=True)
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen3-32B")
+
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "dry-run",
+            "--dataset-manifest",
+            str(dataset_manifest),
+            "--skip-vllm-server-check",
+        ]
+    )
+
+    plan = module._build_budget_plan(args)
+
+    qwen_check = next(
+        check
+        for check in plan.requirement_checks
+        if check.label == "Qwen/Qwen3.5-27B dry-run model for vllm_default"
+    )
+    assert qwen_check.satisfied is False
+    assert "Qwen3-32B" in qwen_check.detail
 
 
 def test_build_budget_plan_handles_invalid_vllm_base_url_without_crashing(
@@ -340,14 +439,15 @@ def test_build_budget_plan_handles_invalid_vllm_base_url_without_crashing(
     )
 
 
-def test_main_validate_succeeds_for_deepseek_only_dry_run(
+def test_main_validate_succeeds_for_vllm_only_dry_run(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     module = _load_module()
     dataset_manifest = (tmp_path / "budget_manifest.json").resolve()
     _write_prepared_manifest(dataset_manifest, budget_ready=True)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("CARD_FRAMEWORK_VLLM_MODEL", "Qwen/Qwen3.5-27B")
+    monkeypatch.setenv("VLLM_URL", "http://127.0.0.1:8000/v1")
 
     exit_code = module.main(
         [
@@ -356,9 +456,10 @@ def test_main_validate_succeeds_for_deepseek_only_dry_run(
             "--dataset-manifest",
             str(dataset_manifest),
             "--contestants",
-            "deepseek_chat",
+            "vllm_default",
             "--judge-provider",
-            "deepseek_judge",
+            "vllm_default",
+            "--skip-vllm-server-check",
         ]
     )
 

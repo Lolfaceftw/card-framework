@@ -12,7 +12,7 @@ This note records the under-$50 benchmark plan discussed on 2026-04-02.
   - `gpt-5.4-mini` via OpenAI
   - `claude-haiku-4.5` via Anthropic
   - `deepseek-chat` = DeepSeek V3.2 non-thinking mode
-  - one local open/open-weight model, preferably `Qwen3-32B`, `Qwen3-14B`, or `Llama 4 Scout`
+  - one local open/open-weight model, pinned to your served `Qwen/Qwen3.5-27B` id on vLLM
 - Judge: `gemini-3.1-pro-preview`
 
 ## Repo provider-profile ids for this plan
@@ -44,15 +44,17 @@ validation failure.
 uv run python scripts/run_sporc_budget_sweep.py --mode validate --skip-vllm-server-check
 ```
 
-### 2. Low-cost dry run with DeepSeek only
+### 2. Zero-API dry run with local vLLM
 
-This uses `deepseek_chat` for the summarizer+critic tool loop and
-`deepseek_judge` (`deepseek-reasoner`) only as the judge. That split is
-intentional: DeepSeek's docs say `deepseek-reasoner` does **not** support
-function calling, so it is not safe as a SPoRC summarizer or critic contestant.
+This dry run uses `vllm_default` for the summarizer, critic, and judge so you
+can rehearse the whole benchmark path without spending API money. Set the vLLM
+endpoint through env and pin the served model id for your local
+`Qwen/Qwen3.5-27B` deployment.
 
 ```powershell
-uv run python scripts/run_sporc_budget_sweep.py --mode dry-run --skip-vllm-server-check
+$env:VLLM_URL="http://127.0.0.1:8000/v1"
+$env:CARD_FRAMEWORK_VLLM_MODEL="Qwen/Qwen3.5-27B"
+uv run python scripts/run_sporc_budget_sweep.py --mode dry-run
 ```
 
 ### 3. Full one-shot budget run after funding the wallets
@@ -91,9 +93,9 @@ does not exist yet, the wrapper first:
 
 ### Required now for `--mode dry-run`
 
-- `DEEPSEEK_API_KEY`
 - everything listed under validate mode
-- if you include `vllm_default` in a custom dry run, set `CARD_FRAMEWORK_VLLM_MODEL` or `VLLM_MODEL`
+- local vLLM server reachable at `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`, `CARD_FRAMEWORK_VLLM_BASE_URL`, or `VLLM_BASE_URL`
+- `CARD_FRAMEWORK_VLLM_MODEL` or `VLLM_MODEL` pinned to the exact served `Qwen/Qwen3.5-27B` id
 
 ### Required later for `--mode live`
 
@@ -112,7 +114,8 @@ server's `/models` endpoint.
 Budget-safety defaults in the benchmark path:
 
 - Gemini `gemini-3.1-pro-preview` judge keeps thinking enabled.
-- Other budget-plan contestants default to thinking disabled; custom Gemini 3 Pro contestant profiles may still fall back to provider defaults because Gemini does not support thinking-off there.
+- OpenAI, Anthropic, and DeepSeek API contestants keep thinking disabled.
+- The local `vllm_default` contestant keeps thinking enabled when the pinned model resolves to `Qwen/Qwen3.5-27B`.
 
 Why this design:
 
