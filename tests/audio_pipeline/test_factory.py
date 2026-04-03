@@ -1,8 +1,10 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 import pytest
 
-from card_framework.audio_pipeline.emotion.affect_analysis import TranscriptAffectAnalyzer
+from card_framework.audio_pipeline.emotion.affect_analysis import (
+    TranscriptAffectAnalyzer,
+)
 from card_framework.audio_pipeline.factory import (
     build_audio_to_script_orchestrator,
     build_interjector_orchestrator,
@@ -21,16 +23,34 @@ from card_framework.audio_pipeline.gateways.indextts_voice_clone_gateway import 
     IndexTTSVoiceCloneGateway,
 )
 from card_framework.audio_pipeline.gateways.demucs_gateway import DemucsSourceSeparator
-from card_framework.audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
+from card_framework.audio_pipeline.gateways.faster_whisper_gateway import (
+    FasterWhisperTranscriber,
+)
 from card_framework.audio_pipeline.gateways.fallback_gateways import (
     PassthroughSourceSeparator,
     SingleSpeakerDiarizer,
 )
-from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
-from card_framework.audio_pipeline.gateways.granite_speech_gateway import GraniteSpeechTranscriber
-from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
-from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
-from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
+from card_framework.audio_pipeline.gateways.audeering_affect_gateway import (
+    AudeeringMspDimAffectGateway,
+)
+from card_framework.audio_pipeline.gateways.emotion2vec_affect_gateway import (
+    Emotion2VecPlusAffectGateway,
+)
+from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import (
+    NemoSpeakerDiarizer,
+)
+from card_framework.audio_pipeline.gateways.granite_speech_gateway import (
+    GraniteSpeechTranscriber,
+)
+from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import (
+    PyannoteSpeakerDiarizer,
+)
+from card_framework.audio_pipeline.gateways.speaker_sample_gateway import (
+    FfmpegSpeakerSampleExporter,
+)
+from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import (
+    SortformerSpeakerDiarizer,
+)
 from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     SourceLinkedTurnEmotionResolutionStrategy,
 )
@@ -128,6 +148,15 @@ def test_factory_builds_transcript_affect_analyzer(tmp_path: Path) -> None:
     )
 
     assert isinstance(analyzer, TranscriptAffectAnalyzer)
+    assert isinstance(analyzer.categorical_provider, Emotion2VecPlusAffectGateway)
+    assert analyzer.categorical_provider.extract_embedding is False
+    assert analyzer.categorical_provider.max_chunk_duration_seconds == pytest.approx(
+        30.0
+    )
+    assert isinstance(analyzer.dimensional_provider, AudeeringMspDimAffectGateway)
+    assert analyzer.dimensional_provider.max_chunk_duration_seconds == pytest.approx(
+        30.0
+    )
 
 
 def test_factory_builds_turn_emotion_resolution_strategy() -> None:
@@ -554,9 +583,10 @@ def test_factory_builds_voice_clone_orchestrator_when_enabled(tmp_path: Path) ->
 
     assert orchestrator is not None
     assert isinstance(orchestrator.provider, PassthroughVoiceCloneGateway)
-    assert orchestrator.output_dir == (
-        tmp_path / "artifacts" / "audio_stage" / "voice_clone"
-    ).resolve()
+    assert (
+        orchestrator.output_dir
+        == (tmp_path / "artifacts" / "audio_stage" / "voice_clone").resolve()
+    )
     assert orchestrator.merge_segments is True
     assert orchestrator.merged_output_filename == "voice_cloned.wav"
 
@@ -594,9 +624,10 @@ def test_factory_builds_interjector_orchestrator_when_enabled(tmp_path: Path) ->
 
     assert orchestrator is not None
     assert isinstance(orchestrator.provider, PassthroughVoiceCloneGateway)
-    assert orchestrator.output_dir == (
-        tmp_path / "artifacts" / "audio_stage" / "interjector"
-    ).resolve()
+    assert (
+        orchestrator.output_dir
+        == (tmp_path / "artifacts" / "audio_stage" / "interjector").resolve()
+    )
     assert orchestrator.merged_output_filename == "voice_cloned_interjected.wav"
     assert orchestrator.timing_refinement_enabled is True
     assert orchestrator.fallback_anchor_realignment_enabled is False
@@ -656,15 +687,15 @@ def test_factory_builds_indextts_subprocess_provider_defaults(tmp_path: Path) ->
     assert provider.execution_backend == "subprocess"
     assert provider.stream_subprocess_output is True
     assert provider.num_beams == 1
-    assert provider.runner_project_dir == (
-        tmp_path / "src" / "card_framework" / "_vendor" / "index_tts"
-    ).resolve()
-    assert provider.cfg_path == (
-        tmp_path / "checkpoints" / "index_tts" / "config.yaml"
-    ).resolve()
-    assert provider.model_dir == (
-        tmp_path / "checkpoints" / "index_tts"
-    ).resolve()
+    assert (
+        provider.runner_project_dir
+        == (tmp_path / "src" / "card_framework" / "_vendor" / "index_tts").resolve()
+    )
+    assert (
+        provider.cfg_path
+        == (tmp_path / "checkpoints" / "index_tts" / "config.yaml").resolve()
+    )
+    assert provider.model_dir == (tmp_path / "checkpoints" / "index_tts").resolve()
 
 
 def test_factory_respects_indextts_stream_subprocess_override(tmp_path: Path) -> None:
@@ -750,8 +781,7 @@ def test_factory_builds_interjector_with_indextts_defaults(tmp_path: Path) -> No
     assert orchestrator is not None
     provider = orchestrator.provider
     assert isinstance(provider, IndexTTSVoiceCloneGateway)
-    assert provider.runner_project_dir == (
-        tmp_path / "src" / "card_framework" / "_vendor" / "index_tts"
-    ).resolve()
-
-
+    assert (
+        provider.runner_project_dir
+        == (tmp_path / "src" / "card_framework" / "_vendor" / "index_tts").resolve()
+    )

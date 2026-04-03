@@ -1,4 +1,4 @@
-﻿"""Composition root for audio pipeline adapters."""
+"""Composition root for audio pipeline adapters."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ from card_framework.audio_pipeline.emotion.affect_analysis import (
     TranscriptAffectAnalyzer,
 )
 from card_framework.audio_pipeline.audio_normalization import AudioNormalizationPolicy
-from card_framework.audio_pipeline.contracts import SourceSeparator, SpeakerDiarizer, SpeechTranscriber
+from card_framework.audio_pipeline.contracts import (
+    SourceSeparator,
+    SpeakerDiarizer,
+    SpeechTranscriber,
+)
 from card_framework.audio_pipeline.eta import (
     EtaUnitStageName,
     LinearStageEtaStrategy,
@@ -33,12 +37,24 @@ from card_framework.audio_pipeline.gateways.fallback_gateways import (
     PassthroughSourceSeparator,
     SingleSpeakerDiarizer,
 )
-from card_framework.audio_pipeline.gateways.faster_whisper_gateway import FasterWhisperTranscriber
-from card_framework.audio_pipeline.gateways.granite_speech_gateway import GraniteSpeechTranscriber
-from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import NemoSpeakerDiarizer
-from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import PyannoteSpeakerDiarizer
-from card_framework.audio_pipeline.gateways.speaker_sample_gateway import FfmpegSpeakerSampleExporter
-from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import SortformerSpeakerDiarizer
+from card_framework.audio_pipeline.gateways.faster_whisper_gateway import (
+    FasterWhisperTranscriber,
+)
+from card_framework.audio_pipeline.gateways.granite_speech_gateway import (
+    GraniteSpeechTranscriber,
+)
+from card_framework.audio_pipeline.gateways.nemo_diarizer_gateway import (
+    NemoSpeakerDiarizer,
+)
+from card_framework.audio_pipeline.gateways.pyannote_diarizer_gateway import (
+    PyannoteSpeakerDiarizer,
+)
+from card_framework.audio_pipeline.gateways.speaker_sample_gateway import (
+    FfmpegSpeakerSampleExporter,
+)
+from card_framework.audio_pipeline.gateways.sortformer_diarizer_gateway import (
+    SortformerSpeakerDiarizer,
+)
 from card_framework.audio_pipeline.interjector import (
     InterjectorOrchestrator,
     LLMInterjectionPlanner,
@@ -61,7 +77,9 @@ from card_framework.audio_pipeline.emotion.turn_emotion_resolution import (
     TurnEmotionResolutionConfig,
 )
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneProvider
-from card_framework.audio_pipeline.voice_clone_orchestrator import VoiceCloneOrchestrator
+from card_framework.audio_pipeline.voice_clone_orchestrator import (
+    VoiceCloneOrchestrator,
+)
 from card_framework.shared.llm_provider import LLMProvider
 
 
@@ -105,9 +123,7 @@ def build_audio_to_script_orchestrator(
         merge_gap_ms=int(audio_cfg.get("merge_gap_ms", 800)),
         default_speaker=str(audio_cfg.get("default_speaker", "SPEAKER_00")),
         eta_strategy=eta_strategy,
-        eta_update_interval_seconds=float(
-            eta_cfg.get("update_interval_seconds", 10.0)
-        ),
+        eta_update_interval_seconds=float(eta_cfg.get("update_interval_seconds", 10.0)),
         eta_progress_smoothing=eta_progress_smoothing,
         eta_overrun_factor=eta_overrun_factor,
         eta_headroom_seconds=eta_headroom_seconds,
@@ -132,7 +148,9 @@ def build_source_separator(audio_cfg: Mapping[str, Any]) -> SourceSeparator:
     )
 
 
-def build_speaker_sample_generator(audio_cfg: Mapping[str, Any]) -> SpeakerSampleGenerator:
+def build_speaker_sample_generator(
+    audio_cfg: Mapping[str, Any],
+) -> SpeakerSampleGenerator:
     """
     Build post-transcript speaker-sample generator from audio config mapping.
 
@@ -207,7 +225,9 @@ def build_speaker_sample_generator(audio_cfg: Mapping[str, Any]) -> SpeakerSampl
             Literal["export_shorter"],
             short_policy,
         ),
-        manifest_filename=str(speaker_samples_cfg.get("manifest_filename", "manifest.json")),
+        manifest_filename=str(
+            speaker_samples_cfg.get("manifest_filename", "manifest.json")
+        ),
     )
 
 
@@ -272,12 +292,16 @@ def build_transcript_affect_analyzer(
             or "neutral",
             urgent_emotions=tuple(
                 str(value).strip().lower()
-                for value in list(mapping_cfg.get("urgent_emotions", ["angry", "fearful"]))
+                for value in list(
+                    mapping_cfg.get("urgent_emotions", ["angry", "fearful"])
+                )
                 if str(value).strip()
             ),
             upbeat_emotions=tuple(
                 str(value).strip().lower()
-                for value in list(mapping_cfg.get("upbeat_emotions", ["happy", "surprised"]))
+                for value in list(
+                    mapping_cfg.get("upbeat_emotions", ["happy", "surprised"])
+                )
                 if str(value).strip()
             ),
             urgent_arousal_threshold=float(
@@ -303,9 +327,7 @@ def build_transcript_affect_analyzer(
                 positive_surprise_boost=float(
                     mapping_cfg.get("positive_surprise_boost", 0.35)
                 ),
-                negative_anger_bias=float(
-                    mapping_cfg.get("negative_anger_bias", 0.85)
-                ),
+                negative_anger_bias=float(mapping_cfg.get("negative_anger_bias", 0.85)),
                 negative_fear_bias=float(mapping_cfg.get("negative_fear_bias", 0.9)),
                 melancholic_bias=float(mapping_cfg.get("melancholic_bias", 0.7)),
                 disgust_bias=float(mapping_cfg.get("disgust_bias", 0.35)),
@@ -367,7 +389,9 @@ def build_voice_clone_orchestrator(
         provider=provider,
         output_dir=output_dir,
         fail_on_error=bool(voice_clone_cfg.get("fail_on_error", True)),
-        manifest_filename=str(voice_clone_cfg.get("manifest_filename", "manifest.json")),
+        manifest_filename=str(
+            voice_clone_cfg.get("manifest_filename", "manifest.json")
+        ),
         merge_segments=bool(voice_clone_cfg.get("merge_segments", True)),
         merged_output_filename=str(
             voice_clone_cfg.get("merged_output_filename", "voice_cloned.wav")
@@ -418,9 +442,7 @@ def build_summary_turn_emotion_linker(
             require_emotion_vector=bool(
                 linking_cfg.get("require_emotion_vector", True)
             ),
-            apply_indextts_bias=bool(
-                linking_cfg.get("apply_indextts_bias", False)
-            ),
+            apply_indextts_bias=bool(linking_cfg.get("apply_indextts_bias", False)),
             max_sum=float(
                 linking_cfg.get(
                     "max_sum",
@@ -448,21 +470,15 @@ def build_turn_emotion_resolution_strategy(
     )
     if isinstance(raw_fallback_order, str):
         fallback_order = tuple(
-            step.strip()
-            for step in raw_fallback_order.split(",")
-            if step.strip()
+            step.strip() for step in raw_fallback_order.split(",") if step.strip()
         )
     else:
         fallback_order = tuple(
-            str(step).strip()
-            for step in list(raw_fallback_order)
-            if str(step).strip()
+            str(step).strip() for step in list(raw_fallback_order) if str(step).strip()
         )
     return SourceLinkedTurnEmotionResolutionStrategy(
         config=TurnEmotionResolutionConfig(
-            prelink_enabled=bool(
-                summary_turn_emotion_cfg.get("prelink_enabled", True)
-            ),
+            prelink_enabled=bool(summary_turn_emotion_cfg.get("prelink_enabled", True)),
             strategy_name=str(
                 summary_turn_emotion_cfg.get("prelink_strategy", "source_linked")
             ).strip()
@@ -560,9 +576,7 @@ def build_interjector_orchestrator(
         merged_output_normalization=_build_audio_normalization_policy(
             _as_mapping(interjector_cfg.get("normalization", {}))
         ),
-        timing_refinement_enabled=bool(
-            timing_refinement_cfg.get("enabled", True)
-        ),
+        timing_refinement_enabled=bool(timing_refinement_cfg.get("enabled", True)),
         fallback_anchor_realignment_enabled=bool(
             timing_refinement_cfg.get("fallback_anchor_realignment_enabled", True)
         ),
@@ -580,36 +594,26 @@ def build_interjector_orchestrator(
         trim_leading_silence_preserve_ms=int(
             leading_silence_trim_cfg.get("preserve_ms", 5)
         ),
-        echo_pacing_fit_enabled=bool(
-            echo_pacing_fit_cfg.get("enabled", True)
-        ),
+        echo_pacing_fit_enabled=bool(echo_pacing_fit_cfg.get("enabled", True)),
         echo_pacing_timing_backend=str(
             echo_pacing_fit_cfg.get("timing_backend", "faster_whisper_native")
         ),
-        echo_pacing_model_name=str(
-            echo_pacing_fit_cfg.get("model_name", "tiny.en")
-        ),
-        echo_pacing_device=str(
-            echo_pacing_fit_cfg.get("device", "cpu")
-        ),
+        echo_pacing_model_name=str(echo_pacing_fit_cfg.get("model_name", "tiny.en")),
+        echo_pacing_device=str(echo_pacing_fit_cfg.get("device", "cpu")),
         echo_pacing_compute_type_cpu=str(
             echo_pacing_fit_cfg.get("compute_type_cpu", "int8")
         ),
         echo_pacing_compute_type_cuda=str(
             echo_pacing_fit_cfg.get("compute_type_cuda", "int8_float16")
         ),
-        echo_pacing_beam_size=int(
-            echo_pacing_fit_cfg.get("beam_size", 1)
-        ),
+        echo_pacing_beam_size=int(echo_pacing_fit_cfg.get("beam_size", 1)),
         echo_pacing_target_host_fill_ratio=float(
             echo_pacing_fit_cfg.get("target_host_fill_ratio", 0.95)
         ),
         echo_pacing_min_overflow_ratio=float(
             echo_pacing_fit_cfg.get("min_overflow_ratio", 1.05)
         ),
-        echo_pacing_max_tempo=float(
-            echo_pacing_fit_cfg.get("max_tempo", 1.75)
-        ),
+        echo_pacing_max_tempo=float(echo_pacing_fit_cfg.get("max_tempo", 1.75)),
         echo_pacing_min_phrase_match_similarity=float(
             echo_pacing_fit_cfg.get("min_phrase_match_similarity", 0.75)
         ),
@@ -674,12 +678,8 @@ def _build_separator(
             timeout_seconds=int(separation_cfg.get("timeout_seconds", 1800)),
             max_retries=int(retry_cfg.get("attempts", 2)),
             retry_base_seconds=float(retry_cfg.get("base_delay_seconds", 1.0)),
-            window_length_seconds=int(
-                separation_cfg.get("window_length_seconds", 600)
-            ),
-            window_context_seconds=int(
-                separation_cfg.get("window_context_seconds", 5)
-            ),
+            window_length_seconds=int(separation_cfg.get("window_length_seconds", 600)),
+            window_context_seconds=int(separation_cfg.get("window_context_seconds", 5)),
             cuda_window_length_seconds=_optional_int(
                 separation_cfg.get("cuda_window_length_seconds", 180)
             ),
@@ -695,9 +695,7 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
     forced_alignment_cfg = _as_mapping(asr_cfg.get("forced_alignment", {}))
     if provider == "granite_speech":
         return GraniteSpeechTranscriber(
-            model_name=str(
-                asr_cfg.get("model", "ibm-granite/granite-4.0-1b-speech")
-            ),
+            model_name=str(asr_cfg.get("model", "ibm-granite/granite-4.0-1b-speech")),
             language=(str(asr_cfg.get("language", "en")).strip() or "en"),
             chunk_length_seconds=int(asr_cfg.get("chunk_length_seconds", 25)),
             chunk_overlap_seconds=int(asr_cfg.get("chunk_overlap_seconds", 1)),
@@ -721,19 +719,11 @@ def _build_transcriber(*, asr_cfg: Mapping[str, Any]) -> SpeechTranscriber:
             beam_size=int(asr_cfg.get("beam_size", 5)),
             vad_filter=bool(asr_cfg.get("vad_filter", True)),
             batch_size=int(asr_cfg.get("batch_size", 8)),
-            language=(
-                str(asr_cfg.get("language", "")).strip() or None
-            ),
+            language=(str(asr_cfg.get("language", "")).strip() or None),
             suppress_numerals=bool(asr_cfg.get("suppress_numerals", False)),
-            enable_forced_alignment=bool(
-                forced_alignment_cfg.get("enabled", True)
-            ),
-            require_forced_alignment=bool(
-                forced_alignment_cfg.get("required", True)
-            ),
-            forced_alignment_batch_size=int(
-                forced_alignment_cfg.get("batch_size", 8)
-            ),
+            enable_forced_alignment=bool(forced_alignment_cfg.get("enabled", True)),
+            require_forced_alignment=bool(forced_alignment_cfg.get("required", True)),
+            forced_alignment_batch_size=int(forced_alignment_cfg.get("batch_size", 8)),
             forced_alignment_max_audio_duration_seconds=_optional_int(
                 forced_alignment_cfg.get("max_audio_duration_seconds", 3600)
             ),
@@ -776,7 +766,9 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
                 diarization_cfg.get("nemo_long_audio_fallback_device", "cpu")
             ),
             vad_onset=_configured_float(diarization_cfg.get("vad_onset"), default=0.8),
-            vad_offset=_configured_float(diarization_cfg.get("vad_offset"), default=0.6),
+            vad_offset=_configured_float(
+                diarization_cfg.get("vad_offset"), default=0.6
+            ),
             vad_pad_onset=_configured_float(
                 diarization_cfg.get("vad_pad_onset"),
                 default=0.1,
@@ -812,12 +804,8 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
                     "pyannote/speaker-diarization-community-1",
                 )
             ),
-            auth_token=(
-                str(pyannote_cfg.get("auth_token", "")).strip() or None
-            ),
-            auth_token_env=str(
-                pyannote_cfg.get("auth_token_env", "HUGGINGFACE_TOKEN")
-            ),
+            auth_token=(str(pyannote_cfg.get("auth_token", "")).strip() or None),
+            auth_token_env=str(pyannote_cfg.get("auth_token_env", "HUGGINGFACE_TOKEN")),
             use_exclusive_diarization=bool(
                 pyannote_cfg.get("use_exclusive_diarization", True)
             ),
@@ -833,8 +821,7 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
                 )
             ),
             checkpoint_path=(
-                str(sortformer_offline_cfg.get("checkpoint_path", "")).strip()
-                or None
+                str(sortformer_offline_cfg.get("checkpoint_path", "")).strip() or None
             ),
             streaming_mode=False,
             batch_size=int(sortformer_offline_cfg.get("batch_size", 1)),
@@ -848,8 +835,7 @@ def _build_diarizer(*, diarization_cfg: Mapping[str, Any]) -> SpeakerDiarizer:
                 )
             ),
             checkpoint_path=(
-                str(sortformer_streaming_cfg.get("checkpoint_path", "")).strip()
-                or None
+                str(sortformer_streaming_cfg.get("checkpoint_path", "")).strip() or None
             ),
             streaming_mode=True,
             batch_size=int(sortformer_streaming_cfg.get("batch_size", 1)),
@@ -928,8 +914,11 @@ def _build_categorical_affect_provider(
             batch_size=int(affect_cfg.get("batch_size", 4)),
             hub=str(affect_cfg.get("hub", "hf")),
             granularity=str(affect_cfg.get("granularity", "utterance")),
-            extract_embedding=bool(affect_cfg.get("extract_embedding", True)),
+            extract_embedding=bool(affect_cfg.get("extract_embedding", False)),
             disable_update_check=bool(affect_cfg.get("disable_update_check", True)),
+            max_chunk_duration_seconds=float(
+                affect_cfg.get("max_chunk_duration_seconds", 30.0)
+            ),
         )
     raise ValueError(
         "audio.affect_analysis.categorical.provider must be 'emotion2vec_plus'."
@@ -955,6 +944,9 @@ def _build_dimensional_affect_provider(
             device=resolved_device,
             use_fp16=bool(affect_cfg.get("use_fp16", True)),
             batch_size=int(affect_cfg.get("batch_size", 4)),
+            max_chunk_duration_seconds=float(
+                affect_cfg.get("max_chunk_duration_seconds", 30.0)
+            ),
         )
     raise ValueError(
         "audio.affect_analysis.dimensional.provider must be 'audeering_msp_dim'."
@@ -998,9 +990,7 @@ def _validate_eta_adaptive_config(
     if min_multiplier <= 0:
         raise ValueError("audio.eta.adaptive.min_multiplier must be > 0.")
     if max_multiplier < min_multiplier:
-        raise ValueError(
-            "audio.eta.adaptive.max_multiplier must be >= min_multiplier."
-        )
+        raise ValueError("audio.eta.adaptive.max_multiplier must be >= min_multiplier.")
 
 
 def _resolve_unit_stage_defaults(
@@ -1028,7 +1018,9 @@ def _validate_eta_dynamic_config(
 ) -> None:
     """Validate runtime dynamic ETA tuning parameters."""
     if not 0.0 < progress_smoothing <= 1.0:
-        raise ValueError("audio.eta.dynamic.progress_smoothing must be within (0.0, 1.0].")
+        raise ValueError(
+            "audio.eta.dynamic.progress_smoothing must be within (0.0, 1.0]."
+        )
     if overrun_factor <= 1.0:
         raise ValueError("audio.eta.dynamic.overrun_factor must be > 1.0.")
     if headroom_seconds < 0:
@@ -1044,9 +1036,7 @@ def build_voice_clone_provider(
     voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
     provider = str(voice_clone_cfg.get("provider", "indextts")).strip().lower()
     if provider == "indextts":
-        execution_backend = str(
-            voice_clone_cfg.get("execution_backend", "subprocess")
-        )
+        execution_backend = str(voice_clone_cfg.get("execution_backend", "subprocess"))
         default_runner_project_dir = _default_vendor_index_tts_dir(project_root)
         runner_project_dir = resolve_path(
             str(
@@ -1090,9 +1080,7 @@ def build_voice_clone_provider(
             temperature=float(voice_clone_cfg.get("temperature", 0.8)),
             length_penalty=float(voice_clone_cfg.get("length_penalty", 0.0)),
             num_beams=int(voice_clone_cfg.get("num_beams", 1)),
-            repetition_penalty=float(
-                voice_clone_cfg.get("repetition_penalty", 10.0)
-            ),
+            repetition_penalty=float(voice_clone_cfg.get("repetition_penalty", 10.0)),
             max_mel_tokens=int(voice_clone_cfg.get("max_mel_tokens", 1500)),
             execution_backend=execution_backend,
             runner_project_dir=runner_project_dir,
@@ -1134,9 +1122,7 @@ def _build_audio_normalization_policy(
 
 def _default_vendor_index_tts_dir(project_root: Path) -> Path:
     """Return the default vendored IndexTTS source directory for one project root."""
-    return (
-        project_root / "src" / "card_framework" / "_vendor" / "index_tts"
-    ).resolve()
+    return (project_root / "src" / "card_framework" / "_vendor" / "index_tts").resolve()
 
 
 def _default_index_tts_checkpoints_dir(
@@ -1147,5 +1133,3 @@ def _default_index_tts_checkpoints_dir(
     """Return the default IndexTTS checkpoints directory for one project root."""
     del runner_project_dir
     return (project_root / "checkpoints" / "index_tts").resolve()
-
-
