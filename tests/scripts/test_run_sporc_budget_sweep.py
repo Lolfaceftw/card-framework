@@ -219,11 +219,12 @@ def test_build_budget_plan_propagates_custom_provider_profiles_path(
     )
 
 
-def test_parser_rejects_nonpositive_max_iterations() -> None:
+def test_parser_accepts_zero_max_iterations() -> None:
     module = _load_module()
 
-    with pytest.raises(SystemExit):
-        module._build_parser().parse_args(["--max-iterations", "0"])
+    args = module._build_parser().parse_args(["--max-iterations", "0"])
+
+    assert args.max_iterations == 0
 
 
 def test_build_budget_plan_requires_hf_token_when_manifests_are_missing(
@@ -681,6 +682,36 @@ def test_retryable_connection_failure_detects_report_retryable_statuses(
     assert "retryable infra statuses" in reason
 
 
+def test_retryable_connection_failure_ignores_mixed_status_reports(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    report_path = (tmp_path / "report.json").resolve()
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "partial",
+                "samples": [
+                    {
+                        "sample_id": "sporc_00001_example",
+                        "final_status": "connection_unavailable",
+                    },
+                    {
+                        "sample_id": "sporc_00002_example",
+                        "final_status": "max_iterations_reached",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    retryable, reason = module._load_retryable_report_failure(str(report_path))
+
+    assert retryable is False
+    assert reason == ""
+
+
 def test_run_step_with_retries_restarts_from_fresh_checkpoint_after_retryable_report(
     tmp_path: Path,
     monkeypatch,
@@ -782,6 +813,458 @@ def test_run_step_with_retries_restarts_from_fresh_checkpoint_after_retryable_re
     assert "--resume-from-checkpoint" not in observed_commands[1]
     assert str(initial_checkpoint) in observed_commands[0]
     assert str(initial_checkpoint) not in observed_commands[1]
+
+
+def test_run_step_with_retries_hydrates_resume_report_and_reuses_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    output_root = (tmp_path / "runs" / "deepseek_chat").resolve()
+    step = module.PlanStep(
+        step_id="run:deepseek_chat",
+        label="Run execute for contestant deepseek_chat",
+        command=(
+            "python",
+            "-m",
+            "demo",
+            "execute",
+            "--output-root",
+            str(output_root),
+        ),
+        kind=module._RUN_STEP_KIND,
+        provider_id="deepseek_chat",
+    )
+    plan = module.BudgetPlan(
+        mode="live",
+        contestants=("deepseek_chat",),
+        judge_provider="judge",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=tmp_path / "profiles.yaml",
+        manifest_steps=(),
+        run_steps=(step,),
+        requirement_checks=(),
+    )
+    session_context = module.SessionContext(
+        session_id="00000000-0000-0000-0000-000000000005",
+        state_path=(
+            tmp_path
+            / "sessions"
+            / "00000000-0000-0000-0000-000000000005"
+            / "session.json"
+        ).resolve(),
+        resume_command="resume",
+    )
+    session_payload = module._build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=[],
+        plan=plan,
+    )
+    checkpoint_path = Path(session_payload["steps"][step.step_id]["checkpoint_path"])
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text("{}", encoding="utf-8")
+    report_path = (output_root / "20260403T080044Z_pid1" / "report.json").resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "generated_at_utc": "2026-04-03T08:07:50.687705+00:00",
+                "run_id": "20260403T080044Z_pid1",
+                "checkpoint_path": str(checkpoint_path),
+                "samples": [
+                    {
+                        "sample_id": "sporc_00001_example",
+                        "final_status": "max_iterations_reached",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    observed_commands: list[tuple[str, ...]] = []
+
+    def _fake_run_logged_subprocess(**kwargs):
+        observed_commands.append(kwargs["command"])
+        return module.StepExecutionResult(
+            exit_code=0,
+            output_lines=("resume",),
+            parsed_payloads=(),
+        )
+
+    monkeypatch.setattr(module, "_run_logged_subprocess", _fake_run_logged_subprocess)
+    exit_code = module._run_step_with_retries(
+        step=step,
+        plan=plan,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=threading.Lock(),
+        stop_event=threading.Event(),
+        active_processes={},
+        process_lock=threading.Lock(),
+        profiles={},
+        args=module._build_parser().parse_args([]),
+    )
+
+    step_state = session_payload["steps"][step.step_id]
+    assert exit_code == 0
+    assert len(observed_commands) == 1
+    assert str(checkpoint_path) in observed_commands[0]
+    assert "--resume-from-checkpoint" in observed_commands[0]
+    assert step_state["report_path"] == str(report_path)
+    assert step_state["run_id"] == "20260403T080044Z_pid1"
+
+
+def test_run_step_with_retries_preserves_mixed_resume_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    output_root = (tmp_path / "runs" / "vllm_default").resolve()
+    step = module.PlanStep(
+        step_id="run:vllm_default",
+        label="Run execute for contestant vllm_default",
+        command=(
+            "python",
+            "-m",
+            "demo",
+            "execute",
+            "--output-root",
+            str(output_root),
+        ),
+        kind=module._RUN_STEP_KIND,
+        provider_id="vllm_default",
+    )
+    plan = module.BudgetPlan(
+        mode="live",
+        contestants=("vllm_default",),
+        judge_provider="judge",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=tmp_path / "profiles.yaml",
+        manifest_steps=(),
+        run_steps=(step,),
+        requirement_checks=(),
+    )
+    session_context = module.SessionContext(
+        session_id="00000000-0000-0000-0000-000000000007",
+        state_path=(
+            tmp_path
+            / "sessions"
+            / "00000000-0000-0000-0000-000000000007"
+            / "session.json"
+        ).resolve(),
+        resume_command="resume",
+    )
+    session_payload = module._build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=[],
+        plan=plan,
+    )
+    checkpoint_path = Path(session_payload["steps"][step.step_id]["checkpoint_path"])
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text("{}", encoding="utf-8")
+    report_path = (output_root / "20260403T080044Z_pid1" / "report.json").resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "generated_at_utc": "2026-04-03T08:10:07.637732+00:00",
+                "run_id": "20260403T080044Z_pid1",
+                "checkpoint_path": str(checkpoint_path),
+                "samples": [
+                    {
+                        "sample_id": "sporc_00001_example",
+                        "final_status": "connection_unavailable",
+                    },
+                    {
+                        "sample_id": "sporc_00002_example",
+                        "final_status": "max_iterations_reached",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    observed_commands: list[tuple[str, ...]] = []
+
+    def _fake_run_logged_subprocess(**kwargs):
+        observed_commands.append(kwargs["command"])
+        return module.StepExecutionResult(
+            exit_code=0,
+            output_lines=("resume",),
+            parsed_payloads=(),
+        )
+
+    monkeypatch.setattr(module, "_run_logged_subprocess", _fake_run_logged_subprocess)
+    exit_code = module._run_step_with_retries(
+        step=step,
+        plan=plan,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=threading.Lock(),
+        stop_event=threading.Event(),
+        active_processes={},
+        process_lock=threading.Lock(),
+        profiles={},
+        args=module._build_parser().parse_args([]),
+    )
+
+    step_state = session_payload["steps"][step.step_id]
+    assert exit_code == 0
+    assert len(observed_commands) == 1
+    assert str(checkpoint_path) in observed_commands[0]
+    assert "--resume-from-checkpoint" in observed_commands[0]
+    assert step_state["checkpoint_path"] == str(checkpoint_path)
+    assert step_state["report_path"] == str(report_path)
+
+
+def test_run_step_with_retries_discards_retryable_resume_checkpoint_before_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    output_root = (tmp_path / "runs" / "openai_gpt_5_4_mini").resolve()
+    step = module.PlanStep(
+        step_id="run:openai_gpt_5_4_mini",
+        label="Run execute for contestant openai_gpt_5_4_mini",
+        command=(
+            "python",
+            "-m",
+            "demo",
+            "execute",
+            "--output-root",
+            str(output_root),
+        ),
+        kind=module._RUN_STEP_KIND,
+        provider_id="openai_gpt_5_4_mini",
+    )
+    plan = module.BudgetPlan(
+        mode="live",
+        contestants=("openai_gpt_5_4_mini",),
+        judge_provider="judge",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=tmp_path / "profiles.yaml",
+        manifest_steps=(),
+        run_steps=(step,),
+        requirement_checks=(),
+    )
+    session_context = module.SessionContext(
+        session_id="00000000-0000-0000-0000-000000000006",
+        state_path=(
+            tmp_path
+            / "sessions"
+            / "00000000-0000-0000-0000-000000000006"
+            / "session.json"
+        ).resolve(),
+        resume_command="resume",
+    )
+    session_payload = module._build_session_payload(
+        session_id=session_context.session_id,
+        requested_argv=[],
+        plan=plan,
+    )
+    initial_checkpoint = Path(session_payload["steps"][step.step_id]["checkpoint_path"])
+    initial_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    initial_checkpoint.write_text("{}", encoding="utf-8")
+    session_payload["steps"][step.step_id]["attempt_count"] = 1
+    report_path = (output_root / "20260403T080044Z_pid1" / "report.json").resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "generated_at_utc": "2026-04-03T08:13:33.677251+00:00",
+                "run_id": "20260403T080044Z_pid1",
+                "checkpoint_path": str(initial_checkpoint),
+                "samples": [
+                    {
+                        "sample_id": "sporc_00001_example",
+                        "final_status": "startup_unavailable",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    observed_commands: list[tuple[str, ...]] = []
+
+    def _fake_run_logged_subprocess(**kwargs):
+        observed_commands.append(kwargs["command"])
+        return module.StepExecutionResult(
+            exit_code=0,
+            output_lines=("restart",),
+            parsed_payloads=(),
+        )
+
+    monkeypatch.setattr(module, "_run_logged_subprocess", _fake_run_logged_subprocess)
+    exit_code = module._run_step_with_retries(
+        step=step,
+        plan=plan,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=threading.Lock(),
+        stop_event=threading.Event(),
+        active_processes={},
+        process_lock=threading.Lock(),
+        profiles={},
+        args=module._build_parser().parse_args([]),
+    )
+
+    step_state = session_payload["steps"][step.step_id]
+    assert exit_code == 0
+    assert len(observed_commands) == 1
+    assert str(initial_checkpoint) not in observed_commands[0]
+    assert "--resume-from-checkpoint" not in observed_commands[0]
+    assert step_state["checkpoint_path"] != str(initial_checkpoint)
+    assert step_state["report_path"] == ""
+    assert step_state["run_id"] == ""
+    assert str(step_state["checkpoint_path"]) in str(step_state["last_command"])
+
+
+def test_collect_session_budget_profile_tracks_contestant_and_judge_costs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "DEFAULT_SESSION_ROOT", (tmp_path / "sessions").resolve()
+    )
+    output_root = (tmp_path / "runs" / "openai_gpt_5_4_mini").resolve()
+    step = module.PlanStep(
+        step_id="run:openai_gpt_5_4_mini",
+        label="Run execute for contestant openai_gpt_5_4_mini",
+        command=(
+            "python",
+            "-m",
+            "demo",
+            "execute",
+            "--output-root",
+            str(output_root),
+        ),
+        kind=module._RUN_STEP_KIND,
+        provider_id="openai_gpt_5_4_mini",
+    )
+    plan = module.BudgetPlan(
+        mode="live",
+        contestants=("openai_gpt_5_4_mini",),
+        judge_provider="google_gemini_3_1_pro_preview_judge",
+        dataset_manifest=tmp_path / "dataset.json",
+        source_manifest=tmp_path / "source.json",
+        audit_path=tmp_path / "audit.json",
+        provider_profiles_path=module.DEFAULT_PROVIDER_PROFILES_PATH,
+        manifest_steps=(),
+        run_steps=(step,),
+        requirement_checks=(),
+    )
+    session_payload = module._build_session_payload(
+        session_id="00000000-0000-0000-0000-000000000010",
+        requested_argv=[],
+        plan=plan,
+    )
+    run_root = (output_root / "20260403T091350Z_pid1").resolve()
+    report_path = (run_root / "report.json").resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "generated_at_utc": "2026-04-03T09:13:50+00:00",
+                "run_id": "20260403T091350Z_pid1",
+                "samples": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_payload["steps"][step.step_id]["report_path"] = str(report_path)
+    session_payload["steps"][step.step_id]["run_id"] = "20260403T091350Z_pid1"
+    summarizer_call = (
+        run_root / "samples" / "sample-a" / "llm" / "summarizer" / "call_001.json"
+    )
+    summarizer_call.parent.mkdir(parents=True, exist_ok=True)
+    summarizer_call.write_text(
+        json.dumps(
+            {
+                "operation": "chat",
+                "messages": [
+                    {"role": "system", "content": "You are the summarizer."},
+                    {"role": "user", "content": "Summarize the transcript."},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "save_draft",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+                "max_tokens": 256,
+                "response": {"content": "summary"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    judge_call = run_root / "samples" / "sample-a" / "llm" / "judge" / "call_001.json"
+    judge_call.parent.mkdir(parents=True, exist_ok=True)
+    judge_call.write_text(
+        json.dumps(
+            {
+                "operation": "generate",
+                "system_prompt": "You are the judge.",
+                "user_prompt": "Score this summary.",
+                "max_tokens": 64,
+                "response_text": '{"Factualness": 1.0}',
+            }
+        ),
+        encoding="utf-8",
+    )
+    rate_limited_call = (
+        run_root / "samples" / "sample-a" / "llm" / "summarizer" / "call_002.json"
+    )
+    rate_limited_call.write_text(
+        json.dumps(
+            {
+                "operation": "chat",
+                "messages": [{"role": "user", "content": "retry me"}],
+                "error": "Error code: 429 - Please try again in 7.309s.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    budget_profile = module._collect_session_budget_profile(
+        plan=plan,
+        session_payload=session_payload,
+        profiles=module._provider_index(module.DEFAULT_PROVIDER_PROFILES_PATH),
+    )
+
+    openai_profile = budget_profile["providers"]["openai_gpt_5_4_mini"]
+    judge_profile = budget_profile["providers"]["google_gemini_3_1_pro_preview_judge"]
+    assert openai_profile["roles"] == {"summarizer": 2}
+    assert judge_profile["roles"] == {"judge": 1}
+    assert (
+        openai_profile["attempted_input_tokens"]
+        > openai_profile["billable_input_tokens"]
+    )
+    assert openai_profile["estimated_cost_usd"] > 0.0
+    assert judge_profile["estimated_cost_usd"] > 0.0
+    assert budget_profile["total_estimated_cost_usd"] == pytest.approx(
+        openai_profile["estimated_cost_usd"] + judge_profile["estimated_cost_usd"],
+        abs=1e-9,
+    )
 
 
 def test_resolve_session_context_round_trips_original_arguments(

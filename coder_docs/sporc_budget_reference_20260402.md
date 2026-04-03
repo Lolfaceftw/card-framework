@@ -7,7 +7,7 @@ This note records the under-$50 benchmark plan discussed on 2026-04-02.
 - Dataset: `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.json`
 - Sample selection: first 10 samples from deterministic seeded ranking with `sample_seed=42`, using `sha256(f"42:{sample_id}")`
 - Preset: `5m` only
-- Max iterations: `1`
+- Max iterations: `0` for the funded wrapper default, with an optional low-cost postprocess revision pass later
 - Contestants:
   - `gpt-5.4-mini` via OpenAI
   - `claude-haiku-4.5` via Anthropic
@@ -38,7 +38,13 @@ For real runs, the wrapper now:
 - streams verbose per-provider child output plus progress/heartbeat events to the terminal
 - writes a resumable wrapper session UUID plus per-provider execute checkpoints
 - keeps retrying retryable connection/startup failures until the provider comes back
+- honors provider-advised `429` cooldown windows before retrying same-sample infra failures, so funded retries do not immediately burn against the same TPM window
+- keeps a rate-limited sample on the same candidate until quota recovers instead of spending replacement slots on repeated OpenAI-style `429` startup failures
+- resumes checkpointed `rate_limit_wait` samples in place after interruption instead of converting them into `resume_interrupted_sample` replacements
+- checkpoints the partial draft built so far and resumes the same OpenAI sample from that saved draft after a `429`, instead of rebuilding the summarizer loop from scratch on every retry
 - restarts a provider run from scratch if retryable infra replacements polluted the intended retained sample cohort
+- rehydrates missing provider `report_path` / `run_id` metadata on resume and discards interrupted checkpoints whose discovered report only captured retryable startup/connection failures
+- writes `_sessions/<uuid>/budget_profile.json` plus in-terminal summaries that estimate visible-token lower-bound spend across contestants and the shared judge while the run is still in flight
 - prints the exact `--resume-session-id <uuid>` command on termination
 
 ### 1. Validate the plan without spending money
@@ -83,15 +89,44 @@ The live wrapper expands into four transcript-only `execute` runs, all with:
 - `--duration-preset 5m`
 - `--max-samples 10`
 - `--sample-seed 42`
-- `--max-iterations 1`
+- `--max-iterations 0`
 - `--embedding-mode disabled`
 
-The wrapper also rejects nonpositive `--max-iterations` values so a typo cannot
-silently turn the run into an unbounded loop.
+The wrapper now interprets `--max-iterations` as critic-feedback budget:
+
+- `0` = summarizer only
+- `1` = summarizer -> critic -> summarizer
+- `2` = summarizer -> critic -> summarizer -> critic -> summarizer
+
+The budget wrapper accepts `0` directly and still rejects negative values so a
+typo cannot silently turn the run into an unbounded loop.
+
+If a funded run already stopped at `max_iterations_reached`, you can add the
+missing final revision cheaply in place instead of rerunning the whole loop:
+
+```powershell
+uv run python scripts/run_sporc_post_critic_revision.py --session-id <uuid>
+```
+
+That helper reuses each affected sample's saved `summary.xml` and
+`critic_feedback.txt`, runs one extra summarizer-only revision seeded from that
+feedback, reruns the judge, and rewrites the original execute report.
 
 By default, the four provider runs are launched concurrently. Each child also
 gets verbose progress events/heartbeats plus a dedicated execute checkpoint so a
 wrapper interruption can resume the unfinished providers from their saved state.
+If the wrapper was cancelled after a provider child already wrote its
+`report.json`, the next `--resume-session-id <uuid>` run now recovers that
+report metadata automatically. Healthy partial providers resume from their saved
+checkpoint, while providers whose last discovered report only contains retryable
+startup/connection failures are restarted from a fresh checkpoint instead of
+replaying poisoned state.
+
+The wrapper also refreshes a session-local `budget_profile.json` after step
+completions, failures, and retry waits. That profile estimates visible-token
+lower-bound spend from the persisted `call_XXX.json` trace artifacts and the
+pricing snapshot recorded below, so it is useful for operator profiling but not
+guaranteed to match provider billing exactly.
 
 If `artifacts/summarizer_critic_benchmark/datasets/sporc/prepared_full/benchmark_longform_15k_max3_manifest.json`
 does not exist yet, the wrapper first:
@@ -206,9 +241,10 @@ For each selected sample, the estimate simulated the actual transcript-only summ
   - auto `count_words`
   - auto `save_draft` once in budget
   - final `finalize_draft()`
-- critic loop for `max_iterations=1` includes:
-  - `run_deterministic_checks(...)`
-  - `submit_verdict(...)`
+- critic loop for `max_iterations=0` includes no critic call during the funded wrapper run
+- optional postprocess salvage for capped runs adds:
+  - one critic-guided summarizer revision seeded from the saved `critic_feedback.txt`
+  - one judge rerun against the revised summary XML
 - judge loop includes one rendered judge request against the full transcript and final summary XML
 
 ### 4. Token estimation rule
@@ -263,4 +299,4 @@ Google judge cost was added once per contestant, including the local open/open-w
 1. These numbers are best treated as a **visible-token lower-bound estimate**.
 2. The repo defaults enable thinking/reasoning in several providers, including Anthropic and Google, so real billed usage can exceed this estimate.
 3. This plan assumes the open/open-weight contestant runs locally. If it is moved to a paid API, the budget changes materially.
-4. This reference is for the `5m`-only, `max_iterations=1`, `10 samples` plan. It does not apply to the earlier multi-preset or multi-iteration scenarios.
+4. This reference is for the `5m`-only, `max_iterations=0`, `10 samples` funded-wrapper plan, with the optional postprocess revision helper available afterward for capped runs that need one more cheap summarizer pass.

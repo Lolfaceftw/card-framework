@@ -1,10 +1,11 @@
-﻿"""Summarizer-critic orchestration for duration-aware convergence."""
+"""Summarizer-critic orchestration for duration-aware convergence."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 import json
 from pathlib import Path
+import re
 import time
 from typing import TypedDict
 
@@ -80,9 +81,7 @@ class Orchestrator:
         self.retrieval_port = retrieval_port
         self.summarizer_port = summarizer_port
         self.critic_port = critic_port
-        self.retrieval_namespace = (
-            str(retrieval_namespace or "").strip() or "default"
-        )
+        self.retrieval_namespace = str(retrieval_namespace or "").strip() or "default"
         self.timeouts = {**self._DEFAULT_TIMEOUTS, **(timeouts or {})}
         self.agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
@@ -227,23 +226,41 @@ class Orchestrator:
         duration_tolerance_ratio: float,
         transcript: TranscriptLike | None = None,
         full_transcript_text: str = "",
+        speaker_samples_manifest_path: Path | None = None,
+        draft_audio_state_path: Path | None = None,
+        feedback: str = "",
+        previous_draft: str = "",
+        loop_context: str = "",
+        announce: bool = True,
     ) -> str:
-        """Run a single summarizer pass without critic feedback iterations."""
-        self.event_bus.publish(
-            "system_message", "Running single-pass summarizer stage..."
-        )
+        """Run one summarizer pass, optionally seeded by prior critic feedback."""
+        if announce:
+            self.event_bus.publish(
+                "system_message", "Running single-pass summarizer stage..."
+            )
         summarizer_timeout = self._resolve_stage_timeout(
             "summarizer",
             full_transcript_text,
             target_seconds=target_seconds,
+            live_draft_audio_requested=draft_audio_state_path is not None,
         )
         summarizer_task = SummarizerTaskRequest(
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
             retrieval_port=self.retrieval_port,
-            feedback="",
-            previous_draft="",
-            loop_context="",
+            speaker_samples_manifest_path=(
+                str(speaker_samples_manifest_path)
+                if speaker_samples_manifest_path is not None
+                else ""
+            ),
+            draft_audio_state_path=(
+                str(draft_audio_state_path)
+                if draft_audio_state_path is not None
+                else ""
+            ),
+            feedback=feedback,
+            previous_draft=previous_draft if feedback else "",
+            loop_context=loop_context,
             full_transcript=full_transcript_text,
             transcript_payload=(
                 coerce_transcript(transcript).to_payload()
@@ -288,6 +305,12 @@ class Orchestrator:
         except Exception as exc:
             raise RuntimeError("Critic returned invalid JSON response.") from exc
 
+    @staticmethod
+    def _draft_word_count(draft: str) -> int:
+        """Approximate one XML draft's word count without re-running the critic."""
+        text = re.sub(r"<[^>]+>", " ", str(draft or ""))
+        return len([token for token in text.split() if token])
+
     async def run_loop_with_diagnostics(
         self,
         target_seconds: int,
@@ -299,18 +322,16 @@ class Orchestrator:
         loop_memory_context: Mapping[str, str] | None = None,
         speaker_samples_manifest_path: Path | None = None,
         draft_audio_state_path: Path | None = None,
+        initial_draft: str = "",
+        initial_feedback: str = "",
     ) -> LoopDiagnostics:
         """Run the loop and return structured per-iteration diagnostics."""
-        feedback = ""
-        draft = ""
+        feedback = str(initial_feedback or "")
+        draft = str(initial_draft or "")
         transcript_payload = (
-            coerce_transcript(transcript).to_payload()
-            if transcript is not None
-            else {}
+            coerce_transcript(transcript).to_payload() if transcript is not None else {}
         )
         iteration_details: list[IterationDiagnostic] = []
-        last_word_count = 0
-        last_estimated_seconds = 0.0
         loop_memory = SummarizerLoopMemory(
             target_seconds=target_seconds,
             duration_tolerance_ratio=duration_tolerance_ratio,
@@ -352,12 +373,16 @@ class Orchestrator:
         max_iterations_label = (
             "unbounded" if max_iterations is None else str(max_iterations)
         )
+        max_summarizer_passes_label = (
+            "unbounded" if max_iterations is None else str(max_iterations + 1)
+        )
         iteration = 0
-        while max_iterations is None or iteration < max_iterations:
+        critic_iterations_run = 0
+        while True:
             iteration += 1
             self.event_bus.publish(
                 "system_message",
-                f"--- Iteration {iteration}/{max_iterations_label} ---",
+                f"--- Iteration {iteration}/{max_summarizer_passes_label} ---",
             )
             self.event_bus.publish(
                 "orchestrator_iteration_started",
@@ -399,6 +424,59 @@ class Orchestrator:
             )
             summarizer_latency = round(time.perf_counter() - summarizer_started, 3)
 
+            if max_iterations is not None and critic_iterations_run >= max_iterations:
+                final_word_count = self._draft_word_count(draft)
+                final_status = (
+                    "summarizer_only"
+                    if max_iterations == 0
+                    else "max_iterations_reached"
+                )
+                iteration_details.append(
+                    {
+                        "iteration": iteration,
+                        "summarizer_latency_seconds": summarizer_latency,
+                        "critic_latency_seconds": 0.0,
+                        "critic_status": "not_run",
+                        "critic_word_count": final_word_count,
+                        "critic_estimated_seconds": 0.0,
+                        "critic_feedback": feedback,
+                        "unresolved_issue_count": 0,
+                        "persisted_issue_signatures": [],
+                        "stagnation_detected": False,
+                        "repeated_remedy_detected": False,
+                        "repeated_remedy_signatures": [],
+                    }
+                )
+                if max_iterations > 0:
+                    self.event_bus.publish(
+                        "error_message",
+                        (
+                            f"Max iterations ({max_iterations_label}) reached after the "
+                            "final summarizer-only revision."
+                        ),
+                    )
+                self.event_bus.publish(
+                    "orchestrator_iteration_completed",
+                    iteration=iteration,
+                    converged=False,
+                    critic_status="not_run",
+                    word_count=final_word_count,
+                    estimated_seconds=0.0,
+                    summarizer_latency_seconds=summarizer_latency,
+                    critic_latency_seconds=0.0,
+                )
+                return {
+                    "converged": False,
+                    "iterations_run": iteration,
+                    "max_iterations": max_iterations,
+                    "draft": draft,
+                    "final_status": final_status,
+                    "final_word_count": final_word_count,
+                    "final_estimated_seconds": 0.0,
+                    "final_feedback": feedback,
+                    "iteration_details": iteration_details,
+                }
+
             critic_task = CriticTaskRequest(
                 draft=draft,
                 target_seconds=target_seconds,
@@ -422,6 +500,7 @@ class Orchestrator:
                 },
             )
             critic_latency = round(time.perf_counter() - critic_started, 3)
+            critic_iterations_run += 1
 
             try:
                 critic_verdict = CriticTaskResponse.model_validate_json(
@@ -517,8 +596,6 @@ class Orchestrator:
             word_count = critic_verdict.word_count
             estimated_seconds = float(critic_verdict.estimated_seconds)
             critic_feedback = critic_verdict.feedback
-            last_word_count = word_count
-            last_estimated_seconds = estimated_seconds
             unresolved_issue_count = 0
             persisted_issue_signatures: list[str] = []
             stagnation_detected = False
@@ -641,19 +718,3 @@ class Orchestrator:
                 summarizer_latency_seconds=summarizer_latency,
                 critic_latency_seconds=critic_latency,
             )
-
-        self.event_bus.publish(
-            "error_message", f"Max iterations ({max_iterations_label}) reached."
-        )
-        return {
-            "converged": False,
-            "iterations_run": iteration,
-            "max_iterations": max_iterations,
-            "draft": draft,
-            "final_status": "max_iterations_reached",
-            "final_word_count": last_word_count,
-            "final_estimated_seconds": last_estimated_seconds,
-            "final_feedback": feedback,
-            "iteration_details": iteration_details,
-        }
-

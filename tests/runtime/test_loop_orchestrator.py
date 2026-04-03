@@ -56,7 +56,9 @@ def test_run_summarizer_once_returns_agent_output() -> None:
         )
     )
     assert result == "<summary>ok</summary>"
-    assert sent_task_payloads[0].transcript_payload["segments"][0]["emotion_vector"] == [
+    assert sent_task_payloads[0].transcript_payload["segments"][0][
+        "emotion_vector"
+    ] == [
         0.1,
         0.0,
         0.0,
@@ -387,11 +389,15 @@ def test_run_loop_restores_persisted_repeated_remedy_history_across_runs(
 
 
 def test_run_loop_with_diagnostics_preserves_last_draft_at_max_iterations() -> None:
+    summarizer_calls = 0
+
     async def _fake_send_task(
         port, task_data, timeout=120.0, max_retries=3, metadata=None
     ):
+        nonlocal summarizer_calls
         del task_data, timeout, max_retries, metadata
         if port == 9010:
+            summarizer_calls += 1
             return "<summary>draft</summary>"
         if port == 9011:
             return (
@@ -420,8 +426,114 @@ def test_run_loop_with_diagnostics_preserves_last_draft_at_max_iterations() -> N
     assert diagnostics["converged"] is False
     assert diagnostics["final_status"] == "max_iterations_reached"
     assert diagnostics["draft"] == "<summary>draft</summary>"
-    assert diagnostics["final_word_count"] == 58
-    assert diagnostics["final_estimated_seconds"] == 220.0
+    assert diagnostics["iterations_run"] == 2
+    assert diagnostics["final_word_count"] == 1
+    assert diagnostics["final_estimated_seconds"] == 0.0
+    assert diagnostics["final_feedback"] == "Need stronger coverage."
+    assert summarizer_calls == 2
+    assert len(diagnostics["iteration_details"]) == 2
+    assert diagnostics["iteration_details"][-1]["critic_status"] == "not_run"
+
+
+def test_run_loop_with_diagnostics_supports_zero_max_iterations() -> None:
+    critic_calls = 0
+
+    async def _fake_send_task(
+        port, task_data, timeout=120.0, max_retries=3, metadata=None
+    ):
+        nonlocal critic_calls
+        del task_data, timeout, max_retries, metadata
+        if port == 9010:
+            return "<summary>draft</summary>"
+        if port == 9011:
+            critic_calls += 1
+            return '{"status":"pass","word_count":72,"estimated_seconds":300.0,"feedback":"ok"}'
+        raise AssertionError(f"Unexpected port: {port}")
+
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
+
+    diagnostics = asyncio.run(
+        orchestrator.run_loop_with_diagnostics(
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
+            max_iterations=0,
+            full_transcript_text="",
+        )
+    )
+
+    assert diagnostics["converged"] is False
+    assert diagnostics["iterations_run"] == 1
+    assert diagnostics["final_status"] == "summarizer_only"
+    assert diagnostics["draft"] == "<summary>draft</summary>"
+    assert diagnostics["final_word_count"] == 1
+    assert diagnostics["final_estimated_seconds"] == 0.0
+    assert critic_calls == 0
+    assert diagnostics["iteration_details"] == [
+        {
+            "iteration": 1,
+            "summarizer_latency_seconds": diagnostics["iteration_details"][0][
+                "summarizer_latency_seconds"
+            ],
+            "critic_latency_seconds": 0.0,
+            "critic_status": "not_run",
+            "critic_word_count": 1,
+            "critic_estimated_seconds": 0.0,
+            "critic_feedback": "",
+            "unresolved_issue_count": 0,
+            "persisted_issue_signatures": [],
+            "stagnation_detected": False,
+            "repeated_remedy_detected": False,
+            "repeated_remedy_signatures": [],
+        }
+    ]
+
+
+def test_run_loop_with_diagnostics_seeds_initial_draft_into_first_summarizer_call() -> (
+    None
+):
+    observed_summarizer_tasks = []
+
+    async def _fake_send_task(
+        port, task_data, timeout=120.0, max_retries=3, metadata=None
+    ):
+        del timeout, max_retries, metadata
+        if port == 9010:
+            observed_summarizer_tasks.append(task_data)
+            return "<summary>revised draft</summary>"
+        if port == 9011:
+            return (
+                '{"status":"pass","word_count":72,'
+                '"estimated_seconds":300.0,'
+                '"feedback":"ok"}'
+            )
+        raise AssertionError(f"Unexpected port: {port}")
+
+    orchestrator = Orchestrator(
+        retrieval_port=9012,
+        summarizer_port=9010,
+        critic_port=9011,
+        agent_client=_FakeAgentClient(_fake_send_task),
+    )
+
+    diagnostics = asyncio.run(
+        orchestrator.run_loop_with_diagnostics(
+            target_seconds=300,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            full_transcript_text="",
+            initial_draft='<summary><turn speaker="SPEAKER_00">Saved draft</turn></summary>',
+            initial_feedback="Resume the saved draft after provider rate limiting.",
+        )
+    )
+
+    assert diagnostics["converged"] is True
+    assert observed_summarizer_tasks[0].previous_draft.startswith("<summary>")
+    assert observed_summarizer_tasks[0].feedback.startswith("Resume the saved draft")
 
 
 def test_run_loop_supports_unbounded_iterations_until_pass() -> None:

@@ -17,12 +17,16 @@ import pytest
 from card_framework.benchmark.summarizer_critic.sporc.runner import (
     _ArtifactCaptureLLMProvider,
     _ArtifactCaptureResponseCallback,
+    _BenchmarkProgressTracker,
     _canonical_speaker_label,
     _claim_next_shared_sample_id,
     _build_preflight_failed_result,
     _classify_sample_failure,
     _copy_sample_transcript,
+    _extract_rate_limit_retry_after_seconds,
+    _maybe_wait_for_rate_limit_retry,
     _prepare_provider_config,
+    _run_sample_with_retries,
     _validate_provider_role_constraints,
     _compute_composite_score,
     _execute_sample,
@@ -55,6 +59,7 @@ from card_framework.benchmark.summarizer_critic.sporc.config import (
 from card_framework.benchmark.summarizer_critic.sporc.judge import SPoRCJudgeResult
 from card_framework.benchmark.types import EmbeddingProfile, ProviderProfile
 from card_framework.shared.llm_provider import LLMProvider, Message
+from card_framework.shared.summary_xml import parse_summary_xml
 
 
 def _sample(
@@ -278,6 +283,8 @@ class _StubOrchestrator:
         full_transcript_text: str,
         speaker_samples_manifest_path: Path | None,
         draft_audio_state_path: Path | None,
+        initial_draft: str = "",
+        initial_feedback: str = "",
     ) -> dict[str, object]:
         del (
             target_seconds,
@@ -286,6 +293,8 @@ class _StubOrchestrator:
             full_transcript_text,
             speaker_samples_manifest_path,
             draft_audio_state_path,
+            initial_draft,
+            initial_feedback,
         )
         return {
             "draft": "plain summary output",
@@ -309,6 +318,8 @@ class _FailingStubOrchestrator(_StubOrchestrator):
         full_transcript_text: str,
         speaker_samples_manifest_path: Path | None,
         draft_audio_state_path: Path | None,
+        initial_draft: str = "",
+        initial_feedback: str = "",
     ) -> dict[str, object]:
         del (
             target_seconds,
@@ -317,6 +328,8 @@ class _FailingStubOrchestrator(_StubOrchestrator):
             full_transcript_text,
             speaker_samples_manifest_path,
             draft_audio_state_path,
+            initial_draft,
+            initial_feedback,
         )
         raise RuntimeError("retrieval cleanup retry")
 
@@ -471,6 +484,25 @@ def test_sample_artifact_recorder_writes_hierarchical_llm_traces(
     )
 
 
+def test_sample_artifact_recorder_continues_call_indices_when_reusing_sample_dir(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    sample = _sample("sample-a")
+    sample_root = (
+        run_root / "samples" / sample.sample_id / "llm" / "summarizer"
+    ).resolve()
+    sample_root.mkdir(parents=True, exist_ok=True)
+    (sample_root / "call_003.json").write_text("{}", encoding="utf-8")
+    recorder = _SampleArtifactRecorder(run_root=run_root)
+
+    recorder.activate_sample(sample=sample, target_seconds=60)
+    recorder.begin_stream(role="summarizer", agent_name="Summarizer")
+    recorder.record_call(role="summarizer", payload={"response": "ok"})
+
+    assert (sample_root / "call_004.json").exists()
+
+
 def test_execute_sample_persists_artifact_paths_in_result(tmp_path: Path) -> None:
     transcript_path = tmp_path / "sample.transcript.json"
     _write_transcript(
@@ -496,6 +528,8 @@ def test_execute_sample_persists_artifact_paths_in_result(tmp_path: Path) -> Non
             sample=sample,
             target_seconds=30,
             preloaded_transcript=None,
+            resume_draft_xml="",
+            resume_feedback="",
             orchestrator=_StubOrchestrator(),
             event_capture=_StubEventCapture(),
             retrieval_enabled=False,
@@ -567,6 +601,8 @@ def test_execute_sample_clears_retrieval_namespace_after_success(
             sample=sample,
             target_seconds=30,
             preloaded_transcript=None,
+            resume_draft_xml="",
+            resume_feedback="",
             orchestrator=orchestrator,
             event_capture=_StubEventCapture(),
             retrieval_enabled=True,
@@ -604,6 +640,8 @@ def test_execute_sample_clears_retrieval_namespace_after_failure(
             sample=sample,
             target_seconds=30,
             preloaded_transcript=None,
+            resume_draft_xml="",
+            resume_feedback="",
             orchestrator=orchestrator,
             event_capture=_StubEventCapture(),
             retrieval_enabled=True,
@@ -1148,7 +1186,7 @@ def test_shared_sample_queue_manifest_catalog_loads_only_claimed_sample(
 
 def test_normalize_max_iterations_maps_non_positive_values_to_none() -> None:
     assert _normalize_max_iterations(None) is None
-    assert _normalize_max_iterations(0) is None
+    assert _normalize_max_iterations(0) == 0
     assert _normalize_max_iterations(-1) is None
     assert _normalize_max_iterations(4) == 4
 
@@ -1221,6 +1259,16 @@ def test_classify_sample_failure_maps_connection_reset_and_refused_messages_to_c
 
     assert final_status == "connection_unavailable"
     assert expected_fragment in error_message
+
+
+def test_extract_rate_limit_retry_after_seconds_parses_provider_hints() -> None:
+    assert _extract_rate_limit_retry_after_seconds(
+        "Error code: 429 - Please try again in 7.309s."
+    ) == pytest.approx(7.309)
+    assert _extract_rate_limit_retry_after_seconds(
+        "rate_limit_exceeded; retry after 278ms"
+    ) == pytest.approx(0.278)
+    assert _extract_rate_limit_retry_after_seconds("connection refused") is None
 
 
 def test_compute_composite_score_uses_only_three_judge_dimensions() -> None:
@@ -1364,9 +1412,8 @@ def test_prepare_provider_config_applies_transcript_only_critic_overrides() -> N
     )
 
     assert prepared["request_timeout_seconds"] == 300.0
-    assert prepared["enable_thinking"] is False
     assert prepared["extra_body"] == {
-        "chat_template_kwargs": {"enable_thinking": False}
+        "chat_template_kwargs": {"enable_thinking": prepared["enable_thinking"]}
     }
 
 
@@ -1387,12 +1434,11 @@ def test_prepare_provider_config_preserves_existing_vllm_extra_body() -> None:
 
     prepared = _prepare_provider_config(profile)
 
-    assert prepared["enable_thinking"] is False
     assert prepared["extra_body"] == {
         "top_k": 20,
         "chat_template_kwargs": {
             "foo": "bar",
-            "enable_thinking": False,
+            "enable_thinking": prepared["enable_thinking"],
         },
     }
 
@@ -1810,6 +1856,199 @@ def test_execute_benchmark_resumes_checkpoint_and_marks_orphaned_sample_failed(
     assert len(checkpoint_payload["completed_results"]) == 3
 
 
+def test_execute_benchmark_resumes_rate_limited_waiting_sample_without_replacement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    transcript_a = tmp_path / "a.transcript.json"
+    transcript_b = tmp_path / "b.transcript.json"
+    _write_transcript(transcript_a, text=" ".join(["word"] * 124))
+    _write_transcript(transcript_b, text=" ".join(["word"] * 124))
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sporc_sample",
+                "sporc_dataset_id": "blitt/SPoRC",
+                "dataset_variant": "sample",
+                "episode_data_path": str(tmp_path / "episode.jsonl.gz"),
+                "turn_data_path": str(tmp_path / "turn.jsonl.gz"),
+                "sample_count": 2,
+                "samples": [
+                    {
+                        "sample_id": "a",
+                        "dataset": "sporc_sample",
+                        "episode_key": "a.mp3",
+                        "transcript_path": str(transcript_a),
+                        "reference_summary": "reference a",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                    {
+                        "sample_id": "b",
+                        "dataset": "sporc_sample",
+                        "episode_key": "b.mp3",
+                        "transcript_path": str(transcript_b),
+                        "reference_summary": "reference b",
+                        "target_seconds": 30,
+                        "metadata": {},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "checkpoint_version": 1,
+                "run_id": "resume-rate-limit-run",
+                "dataset_manifest_path": str(manifest_path.resolve()),
+                "dataset_variant": "sample",
+                "duration_preset": "",
+                "override_target_seconds": None,
+                "transcript_only": True,
+                "sample_seed": None,
+                "sample_order": ["a", "b"],
+                "completed_results": [asdict(_completed_result("a"))],
+                "active_sample": {
+                    "sample_index": 2,
+                    "sample_count": 2,
+                    "sample_id": "b",
+                    "target_seconds": 30,
+                    "stage": "rate_limit_wait",
+                    "resume_without_failure": True,
+                    "resume_draft_xml": (
+                        '<summary><turn speaker="SPEAKER_00">Saved draft</turn></summary>'
+                    ),
+                    "resume_draft_snapshot": [
+                        {
+                            "line": 1,
+                            "turn_id": "turn-1",
+                            "speaker_id": "SPEAKER_00",
+                            "content": "Saved draft",
+                            "emo_preset": "neutral",
+                            "emotion_vector": None,
+                            "emotion_vector_source": "",
+                            "source_segment_indices": [0],
+                            "source_segment_weights": [1.0],
+                        }
+                    ],
+                    "rate_limit_wait_seconds": 9.309,
+                    "rate_limit_error": "Error code: 429 - rate_limit_exceeded.",
+                    "rate_limit_retry_count": 3,
+                    "elapsed_sample_seconds": 42.5,
+                    "last_activity_age_seconds": 5.0,
+                },
+                "resume_count": 0,
+                "recovered_stall_count": 0,
+                "updated_at_utc": "2026-03-15T04:30:00+00:00",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    parser = argparse.ArgumentParser()
+    build_execute_parser(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-manifest",
+            str(manifest_path),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--transcript-only",
+            "--max-samples",
+            "2",
+            "--checkpoint-path",
+            str(checkpoint_path),
+            "--resume-from-checkpoint",
+        ]
+    )
+    provider_profile = _benchmark_provider_profile()
+    embedding_profile = _disabled_embedding_profile()
+    start_calls: list[bool] = []
+    stop_calls: list[str] = []
+    observed_resume_drafts: list[str] = []
+
+    async def _fake_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        start_calls.append(bool(kwargs["force_dynamic_ports"]))
+        return SimpleNamespace(
+            orchestrator=object(),
+            judge=object(),
+            event_capture=object(),
+            artifact_recorder=_SampleArtifactRecorder(run_root=kwargs["run_root"]),
+            retrieval_enabled=False,
+            shared_agent_client=object(),
+            servers=[],
+            retrieval_port=5001,
+            summarizer_port=5002,
+            critic_port=5003,
+        )
+
+    async def _fake_stop_runtime(runtime):  # type: ignore[no-untyped-def]
+        if runtime is not None:
+            stop_calls.append("stopped")
+
+    async def _fake_execute_sample(**kwargs):  # type: ignore[no-untyped-def]
+        observed_resume_drafts.append(str(kwargs.get("resume_draft_xml", "") or ""))
+        return _completed_result("b")
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._load_base_config",
+        lambda path: _benchmark_base_cfg(tmp_path),
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.load_provider_profiles",
+        lambda path: [provider_profile],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._find_provider_profile",
+        lambda profiles, provider_id: provider_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.missing_required_env",
+        lambda profile: [],
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._resolve_embedding_profile",
+        lambda base_cfg, embedding_mode: embedding_profile,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _fake_start_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._stop_managed_runtime",
+        _fake_stop_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._execute_sample",
+        _fake_execute_sample,
+    )
+
+    report = execute_benchmark(args)
+
+    assert report.run_id == "resume-rate-limit-run"
+    assert report.status == "completed"
+    assert report.resumed_from_checkpoint is True
+    assert report.resume_count == 1
+    assert [sample.sample_id for sample in report.samples] == ["a", "b"]
+    assert report.samples[1].status == "completed"
+    assert report.samples[1].final_status == "pass"
+    assert report.samples[1].replacement_reason is None
+    assert start_calls == [False]
+    assert stop_calls == ["stopped"]
+    resumed_turns = parse_summary_xml(observed_resume_drafts[0])
+    assert [turn.text for turn in resumed_turns] == ["Saved draft"]
+
+    checkpoint_payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint_payload["active_sample"] is None
+    assert len(checkpoint_payload["completed_results"]) == 2
+
+
 def test_write_checkpoint_payload_retries_transient_permission_error(
     monkeypatch,
     tmp_path: Path,
@@ -1999,6 +2238,615 @@ def test_execute_benchmark_continues_after_failed_sample_and_rebuilds_runtime(
     assert report.samples[1].status == "completed"
     assert start_calls == [False, True]
     assert len(stop_calls) == 2
+
+
+def test_run_sample_with_retries_waits_before_retrying_rate_limited_sample(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sample = _sample("sample-a")
+    runtime_factory_calls: list[bool] = []
+    stopped_runtimes: list[str] = []
+    sleep_calls: list[float] = []
+    execute_results = [
+        _failed_result(sample.sample_id),
+        _completed_result(sample.sample_id),
+    ]
+    execute_results[0].final_status = "startup_unavailable"
+    execute_results[
+        0
+    ].error_message = (
+        "Error code: 429 - rate_limit_exceeded. Please try again in 7.309s."
+    )
+
+    async def _fake_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        runtime_factory_calls.append(bool(kwargs["force_dynamic_ports"]))
+        return SimpleNamespace(
+            orchestrator=object(),
+            judge=object(),
+            event_capture=object(),
+            artifact_recorder=_SampleArtifactRecorder(run_root=kwargs["run_root"]),
+            retrieval_enabled=False,
+            shared_agent_client=object(),
+            servers=[],
+            retrieval_port=5001,
+            summarizer_port=5002,
+            critic_port=5003,
+        )
+
+    async def _fake_stop_runtime(runtime):  # type: ignore[no-untyped-def]
+        if runtime is not None:
+            stopped_runtimes.append("stopped")
+
+    async def _fake_execute_sample(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return execute_results.pop(0)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _fake_start_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._stop_managed_runtime",
+        _fake_stop_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._execute_sample",
+        _fake_execute_sample,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    result, runtime, force_dynamic_ports = asyncio.run(
+        _run_sample_with_retries(
+            sample=sample,
+            target_seconds=sample.target_seconds,
+            preloaded_transcript=None,
+            runtime=None,
+            progress_tracker=None,
+            args=argparse.Namespace(force_download_audio=False),
+            run_root=tmp_path / "run",
+            base_cfg=OmegaConf.create({}),
+            summarizer_provider_config={},
+            critic_provider_config={},
+            judge_provider_config={},
+            embedding_profile=EmbeddingProfile("disabled", "disabled", {}),
+            transcript_only=True,
+            calibration=SimpleNamespace(),
+            voice_clone_orchestrator=None,
+            logging_enabled=False,
+            force_dynamic_ports=False,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            benchmark_audio_cfg={},
+        )
+    )
+
+    assert result.status == "completed"
+    assert runtime is not None
+    assert force_dynamic_ports is False
+    assert runtime_factory_calls == [False, True]
+    assert stopped_runtimes == ["stopped"]
+    assert sleep_calls == [pytest.approx(9.309, abs=0.001)]
+
+
+def test_run_sample_with_retries_keeps_same_sample_across_many_rate_limits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sample = _sample("sample-a")
+    runtime_factory_calls: list[bool] = []
+    stopped_runtimes: list[str] = []
+    sleep_calls: list[float] = []
+    execute_results = []
+    for retry_after in ("7.309s", "1.250s", "550ms"):
+        failed_result = _failed_result(sample.sample_id)
+        failed_result.final_status = "startup_unavailable"
+        failed_result.error_message = (
+            f"Error code: 429 - rate_limit_exceeded. Please try again in {retry_after}."
+        )
+        execute_results.append(failed_result)
+    execute_results.append(_completed_result(sample.sample_id))
+
+    async def _fake_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        runtime_factory_calls.append(bool(kwargs["force_dynamic_ports"]))
+        return SimpleNamespace(
+            orchestrator=object(),
+            judge=object(),
+            event_capture=object(),
+            artifact_recorder=_SampleArtifactRecorder(run_root=kwargs["run_root"]),
+            retrieval_enabled=False,
+            shared_agent_client=object(),
+            servers=[],
+            retrieval_port=5001,
+            summarizer_port=5002,
+            critic_port=5003,
+        )
+
+    async def _fake_stop_runtime(runtime):  # type: ignore[no-untyped-def]
+        if runtime is not None:
+            stopped_runtimes.append("stopped")
+
+    async def _fake_execute_sample(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return execute_results.pop(0)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _fake_start_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._stop_managed_runtime",
+        _fake_stop_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._execute_sample",
+        _fake_execute_sample,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    result, runtime, force_dynamic_ports = asyncio.run(
+        _run_sample_with_retries(
+            sample=sample,
+            target_seconds=sample.target_seconds,
+            preloaded_transcript=None,
+            runtime=None,
+            progress_tracker=None,
+            args=argparse.Namespace(force_download_audio=False),
+            run_root=tmp_path / "run",
+            base_cfg=OmegaConf.create({}),
+            summarizer_provider_config={},
+            critic_provider_config={},
+            judge_provider_config={},
+            embedding_profile=EmbeddingProfile("disabled", "disabled", {}),
+            transcript_only=True,
+            calibration=SimpleNamespace(),
+            voice_clone_orchestrator=None,
+            logging_enabled=False,
+            force_dynamic_ports=False,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            benchmark_audio_cfg={},
+        )
+    )
+
+    assert result.status == "completed"
+    assert runtime is not None
+    assert force_dynamic_ports is False
+    assert runtime_factory_calls == [False, True, True, True]
+    assert stopped_runtimes == ["stopped", "stopped", "stopped"]
+    assert sleep_calls == [
+        pytest.approx(9.309, abs=0.001),
+        pytest.approx(5.0, abs=0.001),
+        pytest.approx(5.0, abs=0.001),
+    ]
+
+
+def test_maybe_wait_for_rate_limit_retry_preserves_resume_marker_on_cancellation(
+    monkeypatch,
+) -> None:
+    tracker = _BenchmarkProgressTracker(
+        args=argparse.Namespace(emit_progress_heartbeats=False),
+        duration_preset="5m",
+        persist_callback=None,
+    )
+    tracker.activate_sample(
+        sample_index=1,
+        sample_count=10,
+        sample_id="sample-a",
+        target_seconds=300,
+    )
+
+    async def _cancelled_sleep(seconds: float) -> None:
+        del seconds
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.asyncio.sleep",
+        _cancelled_sleep,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            _maybe_wait_for_rate_limit_retry(
+                sample_id="sample-a",
+                error_message=(
+                    "Error code: 429 - rate_limit_exceeded. Please try again in 7.309s."
+                ),
+                progress_tracker=tracker,
+            )
+        )
+
+    snapshot = tracker.active_sample_snapshot()
+    assert snapshot is not None
+    assert snapshot["stage"] == "rate_limit_wait"
+    assert snapshot["resume_without_failure"] is True
+    assert snapshot["rate_limit_retry_count"] == 1
+    assert snapshot["rate_limit_wait_seconds"] == pytest.approx(9.309, abs=0.001)
+
+
+def test_progress_tracker_captures_resumable_draft_from_mutations() -> None:
+    tracker = _BenchmarkProgressTracker(
+        args=argparse.Namespace(emit_progress_heartbeats=False),
+        duration_preset="5m",
+        persist_callback=None,
+    )
+    tracker.activate_sample(
+        sample_index=1,
+        sample_count=10,
+        sample_id="sample-a",
+        target_seconds=300,
+    )
+
+    tracker._on_tool_invocation(
+        "add_speaker_message",
+        {"speaker_id": "SPEAKER_00", "content": "Hello there"},
+    )
+    tracker._on_tool_result(
+        "add_speaker_message",
+        json.dumps(
+            {
+                "line": 1,
+                "turn_id": "turn-1",
+                "emo_preset": "neutral",
+                "emotion_vector": None,
+                "emotion_vector_source": "",
+                "source_segment_indices": [0],
+                "source_segment_weights": [1.0],
+            }
+        ),
+    )
+    tracker._on_tool_invocation(
+        "add_speaker_message",
+        {"speaker_id": "SPEAKER_01", "content": "General Kenobi"},
+    )
+    tracker._on_tool_result(
+        "add_speaker_message",
+        json.dumps(
+            {
+                "line": 2,
+                "turn_id": "turn-2",
+                "emo_preset": "neutral",
+                "emotion_vector": None,
+                "emotion_vector_source": "",
+                "source_segment_indices": [1],
+                "source_segment_weights": [1.0],
+            }
+        ),
+    )
+    tracker._on_tool_invocation(
+        "edit_message",
+        {"line": 2, "new_content": "General Kenobi!"},
+    )
+    tracker._on_tool_result(
+        "edit_message",
+        json.dumps(
+            {
+                "line": 2,
+                "turn_id": "turn-2",
+                "new_emo_preset": "neutral",
+                "new_emotion_vector": None,
+                "new_emotion_vector_source": "",
+                "new_source_segment_indices": [1],
+                "new_source_segment_weights": [1.0],
+                "changed": True,
+            }
+        ),
+    )
+
+    resume_draft_xml = tracker.current_resume_draft_xml()
+    turns = parse_summary_xml(resume_draft_xml)
+
+    assert [turn.speaker for turn in turns] == ["SPEAKER_00", "SPEAKER_01"]
+    assert [turn.text for turn in turns] == ["Hello there", "General Kenobi!"]
+
+
+def test_run_sample_with_retries_reuses_saved_partial_draft_after_rate_limit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sample = _sample("sample-a")
+    tracker = _BenchmarkProgressTracker(
+        args=argparse.Namespace(emit_progress_heartbeats=False),
+        duration_preset="5m",
+        persist_callback=None,
+    )
+    tracker.activate_sample(
+        sample_index=1,
+        sample_count=10,
+        sample_id=sample.sample_id,
+        target_seconds=sample.target_seconds,
+    )
+    observed_resume_drafts: list[str] = []
+    observed_resume_feedback: list[str] = []
+    sleep_calls: list[float] = []
+
+    async def _fake_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            orchestrator=object(),
+            judge=object(),
+            event_capture=object(),
+            artifact_recorder=_SampleArtifactRecorder(run_root=kwargs["run_root"]),
+            retrieval_enabled=False,
+            shared_agent_client=object(),
+            servers=[],
+            retrieval_port=5001,
+            summarizer_port=5002,
+            critic_port=5003,
+        )
+
+    async def _fake_stop_runtime(runtime):  # type: ignore[no-untyped-def]
+        del runtime
+
+    async def _fake_execute_sample(**kwargs):  # type: ignore[no-untyped-def]
+        observed_resume_drafts.append(str(kwargs.get("resume_draft_xml", "") or ""))
+        observed_resume_feedback.append(str(kwargs.get("resume_feedback", "") or ""))
+        if len(observed_resume_drafts) == 1:
+            tracker._on_tool_invocation(
+                "add_speaker_message",
+                {"speaker_id": "SPEAKER_00", "content": "Saved partial draft"},
+            )
+            tracker._on_tool_result(
+                "add_speaker_message",
+                json.dumps(
+                    {
+                        "line": 1,
+                        "turn_id": "turn-1",
+                        "emo_preset": "neutral",
+                        "emotion_vector": None,
+                        "emotion_vector_source": "",
+                        "source_segment_indices": [0],
+                        "source_segment_weights": [1.0],
+                    }
+                ),
+            )
+            failed = _failed_result(sample.sample_id)
+            failed.final_status = "startup_unavailable"
+            failed.error_message = (
+                "Error code: 429 - rate_limit_exceeded. Please try again in 7.309s."
+            )
+            return failed
+        return _completed_result(sample.sample_id)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _fake_start_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._stop_managed_runtime",
+        _fake_stop_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._execute_sample",
+        _fake_execute_sample,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    result, runtime, force_dynamic_ports = asyncio.run(
+        _run_sample_with_retries(
+            sample=sample,
+            target_seconds=sample.target_seconds,
+            preloaded_transcript=None,
+            runtime=None,
+            progress_tracker=tracker,
+            args=argparse.Namespace(force_download_audio=False),
+            run_root=tmp_path / "run",
+            base_cfg=OmegaConf.create({}),
+            summarizer_provider_config={},
+            critic_provider_config={},
+            judge_provider_config={},
+            embedding_profile=EmbeddingProfile("disabled", "disabled", {}),
+            transcript_only=True,
+            calibration=SimpleNamespace(),
+            voice_clone_orchestrator=None,
+            logging_enabled=False,
+            force_dynamic_ports=False,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            benchmark_audio_cfg={},
+        )
+    )
+
+    assert result.status == "completed"
+    assert runtime is not None
+    assert force_dynamic_ports is False
+    assert observed_resume_drafts[0] == ""
+    resumed_turns = parse_summary_xml(observed_resume_drafts[1])
+    assert [turn.text for turn in resumed_turns] == ["Saved partial draft"]
+    assert "provider rate limiting" in observed_resume_feedback[1]
+    assert sleep_calls == [pytest.approx(9.309, abs=0.001)]
+
+
+def test_run_sample_with_retries_uses_generic_resume_feedback_without_rate_limit_history(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sample = _sample("sample-a")
+    tracker = _BenchmarkProgressTracker(
+        args=argparse.Namespace(emit_progress_heartbeats=False),
+        duration_preset="5m",
+        persist_callback=None,
+    )
+    tracker.activate_sample(
+        sample_index=1,
+        sample_count=10,
+        sample_id=sample.sample_id,
+        target_seconds=sample.target_seconds,
+    )
+    tracker.restore_resume_state(
+        {
+            "resume_draft_xml": '<summary><turn speaker="SPEAKER_00">Saved draft</turn></summary>',
+            "rate_limit_retry_count": 0,
+        }
+    )
+    observed_resume_feedback: list[str] = []
+
+    async def _fake_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            orchestrator=object(),
+            judge=object(),
+            event_capture=object(),
+            artifact_recorder=_SampleArtifactRecorder(run_root=kwargs["run_root"]),
+            retrieval_enabled=False,
+            shared_agent_client=object(),
+            servers=[],
+            retrieval_port=5001,
+            summarizer_port=5002,
+            critic_port=5003,
+        )
+
+    async def _fake_execute_sample(**kwargs):  # type: ignore[no-untyped-def]
+        observed_resume_feedback.append(str(kwargs.get("resume_feedback", "") or ""))
+        return _completed_result(sample.sample_id)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _fake_start_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._execute_sample",
+        _fake_execute_sample,
+    )
+
+    result, runtime, force_dynamic_ports = asyncio.run(
+        _run_sample_with_retries(
+            sample=sample,
+            target_seconds=sample.target_seconds,
+            preloaded_transcript=None,
+            runtime=None,
+            progress_tracker=tracker,
+            args=argparse.Namespace(force_download_audio=False),
+            run_root=tmp_path / "run",
+            base_cfg=OmegaConf.create({}),
+            summarizer_provider_config={},
+            critic_provider_config={},
+            judge_provider_config={},
+            embedding_profile=EmbeddingProfile("disabled", "disabled", {}),
+            transcript_only=True,
+            calibration=SimpleNamespace(),
+            voice_clone_orchestrator=None,
+            logging_enabled=False,
+            force_dynamic_ports=False,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            benchmark_audio_cfg={},
+        )
+    )
+
+    assert result.status == "completed"
+    assert runtime is not None
+    assert force_dynamic_ports is False
+    assert "provider rate limiting" not in observed_resume_feedback[0]
+    assert "interrupted before critic review" in observed_resume_feedback[0]
+
+
+def test_run_sample_with_retries_keeps_same_sample_across_startup_rate_limits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sample = _sample("sample-a")
+    runtime_factory_calls: list[bool] = []
+    sleep_calls: list[float] = []
+    start_failures = [
+        RuntimeError(
+            "A2A task startup finished in state=failed: Error code: 429 - "
+            "rate_limit_exceeded. Please try again in 7.309s."
+        ),
+        RuntimeError(
+            "A2A task startup finished in state=failed: Error code: 429 - "
+            "rate_limit_exceeded. Please try again in 600ms."
+        ),
+        None,
+    ]
+
+    async def _fake_start_runtime(**kwargs):  # type: ignore[no-untyped-def]
+        runtime_factory_calls.append(bool(kwargs["force_dynamic_ports"]))
+        next_failure = start_failures.pop(0)
+        if next_failure is not None:
+            raise next_failure
+        return SimpleNamespace(
+            orchestrator=object(),
+            judge=object(),
+            event_capture=object(),
+            artifact_recorder=_SampleArtifactRecorder(run_root=kwargs["run_root"]),
+            retrieval_enabled=False,
+            shared_agent_client=object(),
+            servers=[],
+            retrieval_port=5001,
+            summarizer_port=5002,
+            critic_port=5003,
+        )
+
+    async def _fake_execute_sample(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return _completed_result(sample.sample_id)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._start_managed_runtime",
+        _fake_start_runtime,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner._execute_sample",
+        _fake_execute_sample,
+    )
+    monkeypatch.setattr(
+        "card_framework.benchmark.summarizer_critic.sporc.runner.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    result, runtime, force_dynamic_ports = asyncio.run(
+        _run_sample_with_retries(
+            sample=sample,
+            target_seconds=sample.target_seconds,
+            preloaded_transcript=None,
+            runtime=None,
+            progress_tracker=None,
+            args=argparse.Namespace(force_download_audio=False),
+            run_root=tmp_path / "run",
+            base_cfg=OmegaConf.create({}),
+            summarizer_provider_config={},
+            critic_provider_config={},
+            judge_provider_config={},
+            embedding_profile=EmbeddingProfile("disabled", "disabled", {}),
+            transcript_only=True,
+            calibration=SimpleNamespace(),
+            voice_clone_orchestrator=None,
+            logging_enabled=False,
+            force_dynamic_ports=False,
+            duration_tolerance_ratio=0.05,
+            max_iterations=1,
+            benchmark_audio_cfg={},
+        )
+    )
+
+    assert result.status == "completed"
+    assert runtime is not None
+    assert force_dynamic_ports is False
+    assert runtime_factory_calls == [False, True, True]
+    assert sleep_calls == [
+        pytest.approx(9.309, abs=0.001),
+        pytest.approx(5.0, abs=0.001),
+    ]
 
 
 def test_build_execute_parser_accepts_sample_seed() -> None:
@@ -2360,9 +3208,8 @@ def test_prepare_provider_config_applies_judge_specific_vllm_overrides() -> None
 
     prepared = _prepare_provider_config(profile, role="judge")
 
-    assert prepared["enable_thinking"] is False
     assert prepared["extra_body"] == {
-        "chat_template_kwargs": {"enable_thinking": False}
+        "chat_template_kwargs": {"enable_thinking": prepared["enable_thinking"]}
     }
 
 

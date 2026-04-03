@@ -64,6 +64,13 @@ _DEEPSEEK_PROVIDER_TARGET = (
     "card_framework.providers.deepseek_provider.DeepSeekProvider"
 )
 _DEEPSEEK_REASONER_MODEL_PREFIX = "deepseek-reasoner"
+_OPENAI_PROVIDER_TARGET = "card_framework.providers.openai_provider.OpenAIProvider"
+_ANTHROPIC_PROVIDER_TARGET = (
+    "card_framework.providers.anthropic_provider.AnthropicProvider"
+)
+_GOOGLE_PROVIDER_TARGET = (
+    "card_framework.providers.google_genai_provider.GoogleGenAIProvider"
+)
 _VLLM_PROVIDER_TARGET = "card_framework.providers.vllm_provider.VLLMProvider"
 _SESSION_STATE_VERSION = 1
 _RETRYABLE_CONNECTION_TOKENS = (
@@ -87,6 +94,7 @@ _RETRYABLE_STEP_FINAL_STATUSES = {
 }
 _RUN_STEP_KIND = "run"
 _MANIFEST_STEP_KIND = "manifest"
+_BUDGET_RATE_REFERENCE = "coder_docs/sporc_budget_reference_20260402.md"
 
 
 @dataclass(frozen=True)
@@ -241,11 +249,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-iterations",
-        type=_positive_iteration_cap,
-        default=1,
+        type=_nonnegative_iteration_cap,
+        default=0,
         help=(
-            "Summarizer-critic iteration cap for each execute run. Must stay positive "
-            "because non-positive execute values become unbounded."
+            "Critic-feedback budget for each execute run. 0 keeps the wrapper on a "
+            "single summarizer pass, 1 means summarizer -> critic -> summarizer, and "
+            "larger values add more critic-guided revisions."
         ),
     )
     parser.add_argument(
@@ -298,15 +307,16 @@ def _parse_provider_id_list(raw_value: str) -> tuple[str, ...]:
     return tuple(provider_ids)
 
 
-def _positive_iteration_cap(raw_value: str) -> int:
+def _nonnegative_iteration_cap(raw_value: str) -> int:
     try:
         parsed = int(str(raw_value).strip())
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
-    if parsed <= 0:
+    if parsed < 0:
         raise argparse.ArgumentTypeError(
-            "--max-iterations must be a positive integer for the budget wrapper. "
-            "The underlying execute command treats non-positive values as unbounded."
+            "--max-iterations must be a nonnegative integer for the budget wrapper. "
+            "Use 0 for summarizer-only or omit the flag at the execute layer for an "
+            "unbounded critic-feedback budget."
         )
     return parsed
 
@@ -551,6 +561,22 @@ def _coerce_int_or_zero(raw_value: object) -> int:
         except ValueError:
             return 0
     return 0
+
+
+def _coerce_float_or_zero(raw_value: object) -> float:
+    if isinstance(raw_value, bool):
+        return float(raw_value)
+    if isinstance(raw_value, int | float):
+        return float(raw_value)
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return 0.0
+        try:
+            return float(stripped)
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 def _vllm_budget_qwen_model(model_name: str) -> bool:
@@ -1112,6 +1138,92 @@ def _extract_report_payload(
     return None
 
 
+def _load_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {str(key): value for key, value in payload.items()}
+
+
+def _step_output_root(step: PlanStep) -> Path | None:
+    command = list(step.command)
+    try:
+        output_root_index = command.index("--output-root")
+    except ValueError:
+        return None
+    if output_root_index + 1 >= len(command):
+        return None
+    return Path(command[output_root_index + 1]).expanduser().resolve()
+
+
+def _report_sort_timestamp(path: Path, payload: dict[str, object]) -> float:
+    raw_generated_at = str(payload.get("generated_at_utc", "") or "").strip()
+    if raw_generated_at:
+        try:
+            return datetime.fromisoformat(raw_generated_at).timestamp()
+        except ValueError:
+            pass
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _discover_resume_report_for_step(
+    *,
+    step: PlanStep,
+    step_state: dict[str, object],
+) -> tuple[Path | None, dict[str, object] | None]:
+    if step.kind != _RUN_STEP_KIND:
+        return None, None
+    output_root = _step_output_root(step)
+    if output_root is None or not output_root.exists():
+        return None, None
+    checkpoint_path = str(step_state.get("checkpoint_path", "") or "").strip()
+    run_id = str(step_state.get("run_id", "") or "").strip()
+    candidates: list[tuple[int, float, Path, dict[str, object]]] = []
+    for report_path in output_root.rglob("report.json"):
+        payload = _load_json_object(report_path)
+        if payload is None:
+            continue
+        score = 0
+        if (
+            checkpoint_path
+            and str(payload.get("checkpoint_path", "") or "").strip() == checkpoint_path
+        ):
+            score += 2
+        if run_id and str(payload.get("run_id", "") or "").strip() == run_id:
+            score += 1
+        candidates.append(
+            (
+                score,
+                _report_sort_timestamp(report_path, payload),
+                report_path.resolve(),
+                payload,
+            )
+        )
+    if not candidates:
+        return None, None
+    if checkpoint_path:
+        checkpoint_matches = [
+            candidate for candidate in candidates if candidate[0] >= 2
+        ]
+        if checkpoint_matches:
+            candidates = checkpoint_matches
+    elif run_id:
+        run_matches = [candidate for candidate in candidates if candidate[0] >= 1]
+        if run_matches:
+            candidates = run_matches
+    _score, _timestamp, selected_path, selected_payload = max(
+        candidates,
+        key=lambda item: (item[0], item[1], str(item[2])),
+    )
+    return selected_path, selected_payload
+
+
 def _load_retryable_report_failure(report_path: str) -> tuple[bool, str]:
     normalized_path = str(report_path or "").strip()
     if not normalized_path:
@@ -1131,10 +1243,395 @@ def _load_retryable_report_failure(report_path: str) -> tuple[bool, str]:
         for sample in samples
         if isinstance(sample, dict)
     }
+    non_retryable_statuses = sorted(
+        status
+        for status in final_statuses
+        if status and status not in _RETRYABLE_STEP_FINAL_STATUSES
+    )
+    if non_retryable_statuses:
+        return False, ""
     retryable_statuses = sorted(final_statuses & _RETRYABLE_STEP_FINAL_STATUSES)
     if retryable_statuses:
         return True, ", ".join(retryable_statuses)
     return False, ""
+
+
+def _repair_incomplete_run_step_state(
+    *,
+    step: PlanStep,
+    session_context: SessionContext,
+    session_payload: dict[str, object],
+    state_lock: threading.Lock,
+) -> tuple[dict[str, object], str]:
+    step_state = _step_state(session_payload, step)
+    if step.kind != _RUN_STEP_KIND:
+        return step_state, ""
+    if str(step_state.get("status", "") or "") == "completed":
+        return step_state, ""
+
+    report_path = str(step_state.get("report_path", "") or "").strip()
+    run_id = str(step_state.get("run_id", "") or "").strip()
+    discovered_report_path: Path | None = None
+    discovered_payload: dict[str, object] | None = None
+    if not report_path or not Path(report_path).exists() or not run_id:
+        discovered_report_path, discovered_payload = _discover_resume_report_for_step(
+            step=step,
+            step_state=step_state,
+        )
+    updates: dict[str, object] = {}
+    if discovered_report_path is not None and discovered_payload is not None:
+        hydrated_report_path = str(discovered_report_path)
+        hydrated_run_id = str(discovered_payload.get("run_id", "") or "").strip()
+        if hydrated_report_path and hydrated_report_path != report_path:
+            updates["report_path"] = hydrated_report_path
+        if hydrated_run_id and hydrated_run_id != run_id:
+            updates["run_id"] = hydrated_run_id
+        report_path = hydrated_report_path or report_path
+        run_id = hydrated_run_id or run_id
+
+    retryable_report, retryable_reason = _load_retryable_report_failure(report_path)
+    note = ""
+    if retryable_report:
+        current_checkpoint = str(step_state.get("checkpoint_path", "") or "").strip()
+        next_attempt = max(_coerce_int_or_zero(step_state.get("attempt_count")), 1)
+        replacement_checkpoint = _fresh_retry_checkpoint_path(
+            session_id=session_context.session_id,
+            step=step,
+            attempt_count=next_attempt,
+        )
+        if replacement_checkpoint and replacement_checkpoint != current_checkpoint:
+            updates["checkpoint_path"] = replacement_checkpoint
+        updates["report_path"] = ""
+        updates["run_id"] = ""
+        updates["resume_from_checkpoint"] = False
+        updates["last_error"] = (
+            "discarded checkpoint before resume after retryable report statuses: "
+            f"{retryable_reason}"
+        )
+        note = (
+            "discarded the previous checkpoint before resume because the latest report "
+            f"recorded retryable statuses: {retryable_reason}"
+        )
+    elif discovered_report_path is not None:
+        note = (
+            "hydrated resume metadata from the latest provider report so resume can "
+            "continue from the cancelled checkpoint"
+        )
+
+    if updates:
+        _update_step_state(
+            session_context=session_context,
+            payload=session_payload,
+            state_lock=state_lock,
+            step=step,
+            **updates,
+        )
+        step_state = _step_state(session_payload, step)
+    return step_state, note
+
+
+def _estimate_visible_token_count(payload: object) -> float:
+    if payload in (None, "", [], {}):
+        return 0.0
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return round(len(serialized) / 4.0, 1)
+
+
+def _resolve_budget_pricing(
+    provider_id: str,
+    profiles: dict[str, ProviderProfile],
+) -> dict[str, object] | None:
+    normalized_provider_id = str(provider_id or "").strip()
+    if not normalized_provider_id:
+        return None
+    profile = profiles.get(normalized_provider_id)
+    if profile is None:
+        if normalized_provider_id == "vllm_default":
+            return {
+                "input_usd_per_million": 0.0,
+                "output_usd_per_million": 0.0,
+                "pricing_reference": "local_vllm_zero_api_spend",
+            }
+        return None
+    resolved = resolve_provider_config(profile)
+    provider_target = str(resolved.get("_target_", "") or "").strip()
+    model_name = str(resolved.get("model", "") or "").strip().lower()
+    if provider_target == _VLLM_PROVIDER_TARGET:
+        return {
+            "input_usd_per_million": 0.0,
+            "output_usd_per_million": 0.0,
+            "pricing_reference": "local_vllm_zero_api_spend",
+        }
+    if provider_target == _OPENAI_PROVIDER_TARGET and model_name.startswith(
+        "gpt-5.4-mini"
+    ):
+        return {
+            "input_usd_per_million": 0.75,
+            "output_usd_per_million": 4.5,
+            "pricing_reference": _BUDGET_RATE_REFERENCE,
+        }
+    if provider_target == _ANTHROPIC_PROVIDER_TARGET and model_name.startswith(
+        "claude-haiku-4-5"
+    ):
+        return {
+            "input_usd_per_million": 1.0,
+            "output_usd_per_million": 5.0,
+            "pricing_reference": _BUDGET_RATE_REFERENCE,
+        }
+    if provider_target == _GOOGLE_PROVIDER_TARGET and model_name.startswith(
+        "gemini-3.1-pro-preview"
+    ):
+        return {
+            "input_usd_per_million": 2.0,
+            "output_usd_per_million": 12.0,
+            "pricing_reference": _BUDGET_RATE_REFERENCE,
+        }
+    if provider_target == _DEEPSEEK_PROVIDER_TARGET and model_name.startswith(
+        "deepseek-chat"
+    ):
+        return {
+            "input_usd_per_million": 0.28,
+            "output_usd_per_million": 0.42,
+            "pricing_reference": _BUDGET_RATE_REFERENCE,
+        }
+    return None
+
+
+def _step_run_root(
+    *,
+    step: PlanStep,
+    step_state: dict[str, object],
+) -> Path | None:
+    report_path = str(step_state.get("report_path", "") or "").strip()
+    if report_path:
+        resolved_report_path = Path(report_path).expanduser().resolve()
+        if resolved_report_path.exists():
+            return resolved_report_path.parent
+    run_id = str(step_state.get("run_id", "") or "").strip()
+    output_root = _step_output_root(step)
+    if output_root is not None and run_id:
+        candidate = (output_root / run_id).resolve()
+        if candidate.exists():
+            return candidate
+    discovered_report_path, _ = _discover_resume_report_for_step(
+        step=step,
+        step_state=step_state,
+    )
+    if discovered_report_path is not None:
+        return discovered_report_path.parent
+    return None
+
+
+def _call_request_token_estimate(call_payload: dict[str, object]) -> float:
+    operation = str(call_payload.get("operation", "") or "").strip()
+    if operation == "generate":
+        request_payload = {
+            "system_prompt": call_payload.get("system_prompt"),
+            "user_prompt": call_payload.get("user_prompt"),
+            "max_tokens": call_payload.get("max_tokens"),
+        }
+    else:
+        request_payload = {
+            "messages": call_payload.get("messages"),
+            "tools": call_payload.get("tools"),
+            "tool_choice": call_payload.get("tool_choice"),
+            "max_tokens": call_payload.get("max_tokens"),
+        }
+    return _estimate_visible_token_count(request_payload)
+
+
+def _call_response_token_estimate(call_payload: dict[str, object]) -> float:
+    if "response_text" in call_payload:
+        return _estimate_visible_token_count(call_payload.get("response_text"))
+    if "response" in call_payload:
+        return _estimate_visible_token_count(call_payload.get("response"))
+    return 0.0
+
+
+def _is_nonbillable_trace_error(call_payload: dict[str, object]) -> bool:
+    error_message = str(call_payload.get("error", "") or "").strip().lower()
+    if not error_message:
+        return False
+    if "rate limit" in error_message or "error code: 429" in error_message:
+        return True
+    if "connection refused" in error_message or "connecttimeout" in error_message:
+        return True
+    return False
+
+
+def _merge_budget_bucket(
+    *,
+    aggregate: dict[str, Any],
+    provider_id: str,
+    role: str,
+    input_tokens: float,
+    output_tokens: float,
+    billable: bool,
+    pricing: dict[str, object] | None,
+) -> None:
+    bucket_value = aggregate.setdefault(
+        provider_id,
+        {
+            "provider_id": provider_id,
+            "call_count": 0,
+            "roles": {},
+            "attempted_input_tokens": 0.0,
+            "attempted_output_tokens": 0.0,
+            "billable_input_tokens": 0.0,
+            "billable_output_tokens": 0.0,
+            "estimated_cost_usd": 0.0,
+            "pricing": pricing,
+        },
+    )
+    bucket = bucket_value if isinstance(bucket_value, dict) else aggregate[provider_id]
+    bucket["call_count"] = int(bucket.get("call_count", 0) or 0) + 1
+    roles = bucket.get("roles")
+    if not isinstance(roles, dict):
+        roles = {}
+        bucket["roles"] = roles
+    roles[role] = int(roles.get(role, 0) or 0) + 1
+    bucket["attempted_input_tokens"] = round(
+        float(bucket.get("attempted_input_tokens", 0.0) or 0.0) + input_tokens,
+        1,
+    )
+    bucket["attempted_output_tokens"] = round(
+        float(bucket.get("attempted_output_tokens", 0.0) or 0.0) + output_tokens,
+        1,
+    )
+    if not billable:
+        return
+    bucket["billable_input_tokens"] = round(
+        float(bucket.get("billable_input_tokens", 0.0) or 0.0) + input_tokens,
+        1,
+    )
+    bucket["billable_output_tokens"] = round(
+        float(bucket.get("billable_output_tokens", 0.0) or 0.0) + output_tokens,
+        1,
+    )
+    if pricing is None:
+        return
+    bucket["estimated_cost_usd"] = round(
+        _coerce_float_or_zero(bucket.get("estimated_cost_usd", 0.0))
+        + (input_tokens / 1_000_000.0)
+        * _coerce_float_or_zero(pricing.get("input_usd_per_million", 0.0))
+        + (output_tokens / 1_000_000.0)
+        * _coerce_float_or_zero(pricing.get("output_usd_per_million", 0.0)),
+        6,
+    )
+
+
+def _collect_session_budget_profile(
+    *,
+    plan: BudgetPlan,
+    session_payload: dict[str, object],
+    profiles: dict[str, ProviderProfile],
+) -> dict[str, object]:
+    aggregate: dict[str, Any] = {}
+    for step in plan.run_steps:
+        step_state = _step_state(session_payload, step)
+        run_root = _step_run_root(step=step, step_state=step_state)
+        if run_root is None or not run_root.exists():
+            continue
+        for call_path in run_root.rglob("call_*.json"):
+            call_payload = _load_json_object(call_path)
+            if call_payload is None:
+                continue
+            role = call_path.parent.name
+            provider_id = plan.judge_provider if role == "judge" else step.provider_id
+            input_tokens = _call_request_token_estimate(call_payload)
+            output_tokens = _call_response_token_estimate(call_payload)
+            _merge_budget_bucket(
+                aggregate=aggregate,
+                provider_id=provider_id,
+                role=role,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                billable=not _is_nonbillable_trace_error(call_payload),
+                pricing=_resolve_budget_pricing(provider_id, profiles),
+            )
+    providers = {
+        provider_id: aggregate[provider_id]
+        for provider_id in sorted(aggregate)
+        if isinstance(aggregate[provider_id], dict)
+    }
+    total_estimated_cost_usd = round(
+        sum(
+            float(provider.get("estimated_cost_usd", 0.0) or 0.0)
+            for provider in providers.values()
+        ),
+        6,
+    )
+    total_attempted_input_tokens = round(
+        sum(
+            float(provider.get("attempted_input_tokens", 0.0) or 0.0)
+            for provider in providers.values()
+        ),
+        1,
+    )
+    total_attempted_output_tokens = round(
+        sum(
+            float(provider.get("attempted_output_tokens", 0.0) or 0.0)
+            for provider in providers.values()
+        ),
+        1,
+    )
+    return {
+        "generated_at_utc": _utc_now_iso(),
+        "pricing_reference": _BUDGET_RATE_REFERENCE,
+        "token_estimation_method": "visible_json_chars_div_4_lower_bound",
+        "providers": providers,
+        "total_attempted_input_tokens": total_attempted_input_tokens,
+        "total_attempted_output_tokens": total_attempted_output_tokens,
+        "total_estimated_cost_usd": total_estimated_cost_usd,
+    }
+
+
+def _refresh_session_budget_profile(
+    *,
+    plan: BudgetPlan,
+    session_context: SessionContext,
+    session_payload: dict[str, object],
+    state_lock: threading.Lock,
+    profiles: dict[str, ProviderProfile],
+) -> dict[str, object]:
+    budget_profile = _collect_session_budget_profile(
+        plan=plan,
+        session_payload=session_payload,
+        profiles=profiles,
+    )
+    with state_lock:
+        session_payload["budget_profile"] = budget_profile
+        _write_session_payload(session_context=session_context, payload=session_payload)
+    _atomic_write_json(
+        _session_dir(session_context.session_id) / "budget_profile.json", budget_profile
+    )
+    return budget_profile
+
+
+def _print_budget_profile_summary(budget_profile: dict[str, object]) -> None:
+    providers = budget_profile.get("providers", {})
+    if not isinstance(providers, dict) or not providers:
+        return
+    provider_mapping: dict[str, Any] = {
+        str(key): value for key, value in providers.items()
+    }
+    total_cost = _coerce_float_or_zero(
+        budget_profile.get("total_estimated_cost_usd", 0.0)
+    )
+    parts = [f"total_est=${total_cost:.4f}"]
+    for provider_id, raw_bucket in sorted(provider_mapping.items()):
+        if not isinstance(raw_bucket, dict):
+            continue
+        parts.append(
+            f"{provider_id}:${_coerce_float_or_zero(raw_bucket.get('estimated_cost_usd', 0.0)):.4f}"
+        )
+    _print_prefixed_log("budget", " | ".join(parts))
 
 
 def _retry_strategy_for_step_result(
@@ -1410,6 +1907,14 @@ def _run_step_with_retries(
         retry_backoff, float(args.connection_retry_max_backoff_seconds)
     )
     stall_seconds = max(0.0, float(args.provider_stall_seconds))
+    _, repair_note = _repair_incomplete_run_step_state(
+        step=step,
+        session_context=session_context,
+        session_payload=session_payload,
+        state_lock=state_lock,
+    )
+    if repair_note:
+        _print_prefixed_log(step.step_id, repair_note)
     while not stop_event.is_set():
         step_payload = _step_state(session_payload, step)
         if str(step_payload.get("status", "") or "") == "completed":
@@ -1465,6 +1970,15 @@ def _run_step_with_retries(
                 last_completed_at_utc=_utc_now_iso(),
                 **step_updates,
             )
+            _print_budget_profile_summary(
+                _refresh_session_budget_profile(
+                    plan=plan,
+                    session_context=session_context,
+                    session_payload=session_payload,
+                    state_lock=state_lock,
+                    profiles=profiles,
+                )
+            )
             return 0
         if stop_event.is_set():
             _update_step_state(
@@ -1475,6 +1989,15 @@ def _run_step_with_retries(
                 status="interrupted",
                 last_error="wrapper stop requested",
                 **step_updates,
+            )
+            _print_budget_profile_summary(
+                _refresh_session_budget_profile(
+                    plan=plan,
+                    session_context=session_context,
+                    session_payload=session_payload,
+                    state_lock=state_lock,
+                    profiles=profiles,
+                )
             )
             return 130
         if retry_strategy is None:
@@ -1489,6 +2012,15 @@ def _run_step_with_retries(
                     retry_reason or f"step exited with code {result.exit_code}"
                 ),
                 **step_updates,
+            )
+            _print_budget_profile_summary(
+                _refresh_session_budget_profile(
+                    plan=plan,
+                    session_context=session_context,
+                    session_payload=session_payload,
+                    state_lock=state_lock,
+                    profiles=profiles,
+                )
             )
             return result.exit_code
         if retry_strategy == "restart":
@@ -1513,6 +2045,15 @@ def _run_step_with_retries(
             last_error=retry_reason,
             **step_updates,
         )
+        _print_budget_profile_summary(
+            _refresh_session_budget_profile(
+                plan=plan,
+                session_context=session_context,
+                session_payload=session_payload,
+                state_lock=state_lock,
+                profiles=profiles,
+            )
+        )
         if not _wait_for_retry_window(
             step=step,
             plan=plan,
@@ -1529,6 +2070,15 @@ def _run_step_with_retries(
                 status="interrupted",
                 last_error="wrapper stop requested during retry wait",
                 **step_updates,
+            )
+            _print_budget_profile_summary(
+                _refresh_session_budget_profile(
+                    plan=plan,
+                    session_context=session_context,
+                    session_payload=session_payload,
+                    state_lock=state_lock,
+                    profiles=profiles,
+                )
             )
             return 130
         retry_backoff = min(

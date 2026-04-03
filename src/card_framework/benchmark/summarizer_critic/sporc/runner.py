@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 import uuid
 
@@ -127,6 +127,7 @@ from card_framework.shared.summary_xml import (
     DEFAULT_EMO_PRESET,
     SummaryTurn,
     parse_summary_xml,
+    serialize_summary_turns,
 )
 
 _SOURCE_AUDIO_TIMEOUT = (10.0, 300.0)
@@ -188,6 +189,27 @@ _AGENT_CLIENT_MAX_KEEPALIVE_CONNECTIONS = 20
 _AGENT_CLIENT_MAX_CONNECTIONS = 100
 _AGENT_CLIENT_KEEPALIVE_EXPIRY_SECONDS = 30.0
 _AGENT_CLIENT_POOL_TIMEOUT_SECONDS = 5.0
+_RATE_LIMIT_RETRY_AFTER_PATTERN = re.compile(
+    r"(?:try again in|retry after)\s*(?P<value>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>milliseconds?|ms|seconds?|secs?|s)",
+    re.IGNORECASE,
+)
+_RATE_LIMIT_BACKOFF_MIN_SECONDS = 5.0
+_RATE_LIMIT_BACKOFF_MAX_SECONDS = 300.0
+_RATE_LIMIT_BACKOFF_BUFFER_SECONDS = 2.0
+_RATE_LIMIT_WAIT_STAGE = "rate_limit_wait"
+_GENERIC_RESUME_FEEDBACK = (
+    "The prior draft was interrupted before critic review. Continue from the "
+    "saved draft instead of restarting. Preserve the working lines, add or "
+    "edit only what is still needed to land within the duration target, then "
+    "finalize once the draft is ready."
+)
+_RATE_LIMIT_RESUME_FEEDBACK = (
+    "The prior draft was interrupted by provider rate limiting before critic "
+    "review. Continue from the saved draft instead of restarting. Preserve the "
+    "working lines, add or edit only what is still needed to land within the "
+    "duration target, then finalize once the draft is ready."
+)
 
 
 @dataclass(slots=True)
@@ -343,6 +365,15 @@ class _SampleArtifactRecorder:
         }
         for directory in (sample_root, final_dir, llm_root, *llm_dirs.values()):
             directory.mkdir(parents=True, exist_ok=True)
+        call_counts: defaultdict[str, int] = defaultdict(int)
+        for role, directory in llm_dirs.items():
+            existing_indices = [
+                int(match.group(1))
+                for call_path in directory.glob("call_*.json")
+                if (match := re.fullmatch(r"call_(\d+)\.json", call_path.name))
+            ]
+            if existing_indices:
+                call_counts[role] = max(existing_indices)
         with self._lock:
             self._active_sample = _SampleArtifactState(
                 sample_id=sample.sample_id,
@@ -354,7 +385,7 @@ class _SampleArtifactRecorder:
                 target_seconds=target_seconds,
                 dataset=sample.dataset,
                 episode_key=sample.episode_key,
-                call_counts=defaultdict(int),
+                call_counts=call_counts,
                 recorded_call_paths=defaultdict(list),
                 pending_calls={},
             )
@@ -732,6 +763,7 @@ class _BenchmarkProgressTracker:
         self._stop_event = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
         self._active_sample: dict[str, Any] | None = None
+        self._pending_mutation: dict[str, Any] | None = None
         self._subscriptions: list[tuple[str, Callable[..., Any]]] = []
 
     def subscribe(self) -> None:
@@ -741,7 +773,8 @@ class _BenchmarkProgressTracker:
             ("a2a_call_retry", self._on_a2a_activity),
             ("a2a_call_succeeded", self._on_a2a_activity),
             ("orchestrator_iteration_started", self._on_iteration_started),
-            ("tool_invocation", self._on_activity),
+            ("tool_invocation", self._on_tool_invocation),
+            ("tool_result", self._on_tool_result),
             ("status_message", self._on_activity),
         ]
         for event_name, callback in subscriptions:
@@ -817,13 +850,16 @@ class _BenchmarkProgressTracker:
                 "last_activity_monotonic": now_monotonic,
                 "elapsed_sample_seconds": 0.0,
                 "last_activity_age_seconds": 0.0,
+                "rate_limit_retry_count": 0,
             }
+            self._pending_mutation = None
         self._persist()
 
     def clear_active_sample(self) -> None:
         """Clear the currently active sample after a terminal result."""
         with self._lock:
             self._active_sample = None
+            self._pending_mutation = None
         self._persist()
 
     def active_sample_snapshot(self) -> dict[str, Any] | None:
@@ -832,6 +868,113 @@ class _BenchmarkProgressTracker:
             if self._active_sample is None:
                 return None
             return self._snapshot_locked()
+
+    def mark_rate_limit_wait(self, *, wait_seconds: float, error_message: str) -> None:
+        """Persist one provider-quota wait so resume can retry the same sample."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            now_monotonic = time.monotonic()
+            self._active_sample["last_activity_monotonic"] = now_monotonic
+            self._active_sample["last_activity_utc"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            self._active_sample["stage"] = _RATE_LIMIT_WAIT_STAGE
+            self._active_sample["resume_without_failure"] = True
+            self._active_sample["rate_limit_wait_seconds"] = round(wait_seconds, 3)
+            self._active_sample["rate_limit_error"] = str(error_message or "")
+            self._active_sample["rate_limit_retry_count"] = (
+                int(self._active_sample.get("rate_limit_retry_count", 0) or 0) + 1
+            )
+        self._persist()
+
+    def current_resume_draft_xml(self) -> str:
+        """Return the latest resumable draft XML for the active sample."""
+        with self._lock:
+            if self._active_sample is None:
+                return ""
+            return str(self._active_sample.get("resume_draft_xml", "") or "").strip()
+
+    def current_resume_feedback(self) -> str:
+        """Return the correct resume instruction for the active sample."""
+        with self._lock:
+            if self._active_sample is None:
+                return ""
+            resume_draft_xml = str(
+                self._active_sample.get("resume_draft_xml", "") or ""
+            ).strip()
+            if not resume_draft_xml:
+                return ""
+            rate_limit_retry_count = int(
+                self._active_sample.get("rate_limit_retry_count", 0) or 0
+            )
+            if rate_limit_retry_count > 0:
+                return _RATE_LIMIT_RESUME_FEEDBACK
+            return _GENERIC_RESUME_FEEDBACK
+
+    def restore_resume_state(self, active_sample: dict[str, Any]) -> None:
+        """Seed resumable draft metadata from one checkpointed active sample."""
+        resume_draft_xml = str(active_sample.get("resume_draft_xml", "") or "").strip()
+        raw_snapshot = active_sample.get("resume_draft_snapshot")
+        resume_snapshot = (
+            [dict(message) for message in raw_snapshot if isinstance(message, dict)]
+            if isinstance(raw_snapshot, list)
+            else []
+        )
+        if not resume_snapshot and resume_draft_xml:
+            try:
+                resume_snapshot = [
+                    {
+                        "line": index,
+                        "turn_id": str(
+                            getattr(turn, "turn_id", None) or uuid.uuid4().hex
+                        ),
+                        "speaker_id": turn.speaker,
+                        "content": turn.text,
+                        "emo_preset": turn.emo_preset,
+                        "emotion_vector": (
+                            turn.emotion_vector.to_list()
+                            if turn.emotion_vector is not None
+                            else None
+                        ),
+                        "emotion_vector_source": turn.emotion_vector_source,
+                        "source_segment_indices": list(turn.source_segment_indices),
+                        "source_segment_weights": list(turn.source_segment_weights),
+                    }
+                    for index, turn in enumerate(
+                        parse_summary_xml(resume_draft_xml), start=1
+                    )
+                ]
+            except ValueError:
+                resume_snapshot = []
+        with self._lock:
+            if self._active_sample is None:
+                return
+            if resume_snapshot:
+                self._replace_resume_snapshot_locked(resume_snapshot)
+            elif resume_draft_xml:
+                self._active_sample["resume_draft_xml"] = resume_draft_xml
+            self._active_sample["rate_limit_retry_count"] = int(
+                active_sample.get("rate_limit_retry_count", 0) or 0
+            )
+        self._persist()
+
+    def clear_rate_limit_wait(self) -> None:
+        """Drop transient provider-quota wait markers after the retry window ends."""
+        with self._lock:
+            if self._active_sample is None:
+                return
+            now_monotonic = time.monotonic()
+            self._active_sample["last_activity_monotonic"] = now_monotonic
+            self._active_sample["last_activity_utc"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            if self._active_sample.get("stage") == _RATE_LIMIT_WAIT_STAGE:
+                self._active_sample["stage"] = "sample_retry"
+            self._active_sample.pop("resume_without_failure", None)
+            self._active_sample.pop("rate_limit_wait_seconds", None)
+            self._active_sample.pop("rate_limit_error", None)
+        self._persist()
 
     def snapshot_heartbeat_payload(self) -> dict[str, Any] | None:
         """Return the payload for one machine-readable heartbeat event."""
@@ -881,6 +1024,221 @@ class _BenchmarkProgressTracker:
         if self._persist_callback is None:
             return
         self._persist_callback()
+
+    @staticmethod
+    def _normalize_snapshot_lines(
+        snapshot: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for index, message in enumerate(snapshot, start=1):
+            normalized.append({**message, "line": index})
+        return normalized
+
+    @staticmethod
+    def _snapshot_to_xml(snapshot: list[dict[str, Any]]) -> str:
+        return serialize_summary_turns(
+            [
+                SummaryTurn(
+                    speaker=str(message.get("speaker_id", "UNKNOWN") or "UNKNOWN"),
+                    text=str(message.get("content", "") or ""),
+                    emo_preset=str(
+                        message.get("emo_preset", DEFAULT_EMO_PRESET)
+                        or DEFAULT_EMO_PRESET
+                    ),
+                    emotion_vector=message.get("emotion_vector"),
+                    emotion_vector_source=str(
+                        message.get("emotion_vector_source", "") or ""
+                    ).strip(),
+                    source_segment_indices=tuple(
+                        int(value)
+                        for value in list(message.get("source_segment_indices", []))
+                    ),
+                    source_segment_weights=tuple(
+                        float(value)
+                        for value in list(message.get("source_segment_weights", []))
+                    ),
+                )
+                for message in snapshot
+            ]
+        )
+
+    def _replace_resume_snapshot_locked(self, snapshot: list[dict[str, Any]]) -> None:
+        assert self._active_sample is not None
+        normalized_snapshot = self._normalize_snapshot_lines(snapshot)
+        self._active_sample["resume_draft_snapshot"] = normalized_snapshot
+        self._active_sample["resume_draft_xml"] = self._snapshot_to_xml(
+            normalized_snapshot
+        ).strip()
+
+    def _apply_mutation_result_locked(
+        self, tool_name: str, result_payload: dict[str, Any]
+    ) -> None:
+        assert self._active_sample is not None
+        current_snapshot = list(
+            self._active_sample.get("resume_draft_snapshot", []) or []
+        )
+        pending_mutation = dict(self._pending_mutation or {})
+        if tool_name in {"save_draft", "finalize_draft"}:
+            raw_messages = result_payload.get("messages")
+            if isinstance(raw_messages, list):
+                snapshot = [
+                    dict(message)
+                    for message in raw_messages
+                    if isinstance(message, dict)
+                ]
+                self._replace_resume_snapshot_locked(snapshot)
+            return
+        if tool_name == "add_speaker_message":
+            if "error" in result_payload or pending_mutation.get("name") != tool_name:
+                return
+            arguments = pending_mutation.get("arguments", {})
+            if not isinstance(arguments, dict):
+                return
+            current_snapshot.append(
+                {
+                    "line": int(result_payload.get("line", len(current_snapshot) + 1)),
+                    "turn_id": str(
+                        result_payload.get("turn_id", "") or uuid.uuid4().hex
+                    ),
+                    "speaker_id": str(arguments.get("speaker_id", "") or "UNKNOWN"),
+                    "content": str(arguments.get("content", "") or ""),
+                    "emo_preset": str(
+                        result_payload.get(
+                            "emo_preset",
+                            arguments.get("emo_preset", DEFAULT_EMO_PRESET),
+                        )
+                        or DEFAULT_EMO_PRESET
+                    ),
+                    "emotion_vector": result_payload.get(
+                        "emotion_vector",
+                        arguments.get("emotion_vector"),
+                    ),
+                    "emotion_vector_source": str(
+                        result_payload.get("emotion_vector_source", "") or ""
+                    ).strip(),
+                    "source_segment_indices": [
+                        int(value)
+                        for value in list(
+                            result_payload.get("source_segment_indices", []) or []
+                        )
+                    ],
+                    "source_segment_weights": [
+                        float(value)
+                        for value in list(
+                            result_payload.get("source_segment_weights", []) or []
+                        )
+                    ],
+                }
+            )
+            self._replace_resume_snapshot_locked(current_snapshot)
+            return
+        if tool_name == "edit_message":
+            if "error" in result_payload or pending_mutation.get("name") != tool_name:
+                return
+            arguments = pending_mutation.get("arguments", {})
+            if not isinstance(arguments, dict):
+                return
+            try:
+                line = int(arguments.get("line"))
+            except (TypeError, ValueError):
+                return
+            index = line - 1
+            if index < 0 or index >= len(current_snapshot):
+                return
+            existing = dict(current_snapshot[index])
+            existing["content"] = str(
+                arguments.get("new_content", existing.get("content", "")) or ""
+            )
+            existing["emo_preset"] = str(
+                result_payload.get(
+                    "new_emo_preset",
+                    existing.get("emo_preset", DEFAULT_EMO_PRESET),
+                )
+                or DEFAULT_EMO_PRESET
+            )
+            existing["emotion_vector"] = result_payload.get(
+                "new_emotion_vector",
+                existing.get("emotion_vector"),
+            )
+            existing["emotion_vector_source"] = str(
+                result_payload.get(
+                    "new_emotion_vector_source",
+                    existing.get("emotion_vector_source", ""),
+                )
+                or ""
+            ).strip()
+            existing["source_segment_indices"] = [
+                int(value)
+                for value in list(
+                    result_payload.get(
+                        "new_source_segment_indices",
+                        existing.get("source_segment_indices", []),
+                    )
+                    or []
+                )
+            ]
+            existing["source_segment_weights"] = [
+                float(value)
+                for value in list(
+                    result_payload.get(
+                        "new_source_segment_weights",
+                        existing.get("source_segment_weights", []),
+                    )
+                    or []
+                )
+            ]
+            current_snapshot[index] = existing
+            self._replace_resume_snapshot_locked(current_snapshot)
+            return
+        if tool_name == "remove_message":
+            if "error" in result_payload or pending_mutation.get("name") != tool_name:
+                return
+            arguments = pending_mutation.get("arguments", {})
+            if not isinstance(arguments, dict):
+                return
+            try:
+                line = int(arguments.get("line"))
+            except (TypeError, ValueError):
+                return
+            index = line - 1
+            if index < 0 or index >= len(current_snapshot):
+                return
+            current_snapshot.pop(index)
+            self._replace_resume_snapshot_locked(current_snapshot)
+
+    def _on_tool_invocation(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        self._mark_activity()
+        with self._lock:
+            if self._active_sample is None:
+                return
+            if tool_name in {"add_speaker_message", "edit_message", "remove_message"}:
+                self._pending_mutation = {
+                    "name": tool_name,
+                    "arguments": deepcopy(arguments),
+                }
+
+    def _on_tool_result(self, tool_name: str, result: str) -> None:
+        self._mark_activity()
+        normalized_tool_name = str(tool_name or "").strip()
+        if normalized_tool_name.endswith(" (auto)"):
+            normalized_tool_name = normalized_tool_name.removesuffix(" (auto)")
+        try:
+            result_payload = json.loads(result)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(result_payload, dict):
+            return
+        with self._lock:
+            if self._active_sample is None:
+                return
+            self._apply_mutation_result_locked(normalized_tool_name, result_payload)
+            if normalized_tool_name in {
+                "add_speaker_message",
+                "edit_message",
+                "remove_message",
+            }:
+                self._pending_mutation = None
+        self._persist()
 
     def _on_a2a_call_started(
         self,
@@ -936,7 +1294,7 @@ def _resolve_orchestrator_timeouts(args: argparse.Namespace) -> dict[str, float 
 def _normalize_max_iterations(raw_value: int | None) -> int | None:
     if raw_value is None:
         return None
-    if int(raw_value) <= 0:
+    if int(raw_value) < 0:
         return None
     return int(raw_value)
 
@@ -1063,6 +1421,79 @@ def _classify_sample_failure(exc: Exception) -> tuple[str, str]:
     if "timed out" in lowered or "timeout" in lowered:
         return _STAGE_TIMEOUT_FINAL_STATUS, message
     return "execution_error", message
+
+
+def _extract_rate_limit_retry_after_seconds(message: str) -> float | None:
+    """Parse one provider-suggested cooldown window from a rate-limit error."""
+    text = str(message or "").strip()
+    lowered = text.lower()
+    if (
+        "rate limit" not in lowered
+        and "rate_limit_exceeded" not in lowered
+        and "error code: 429" not in lowered
+        and "status code 429" not in lowered
+    ):
+        return None
+    match = _RATE_LIMIT_RETRY_AFTER_PATTERN.search(text)
+    if match is None:
+        return _RATE_LIMIT_BACKOFF_MIN_SECONDS
+    value = float(match.group("value"))
+    unit = str(match.group("unit") or "").strip().lower()
+    if unit.startswith("ms") or unit.startswith("millisecond"):
+        return max(0.0, value / 1000.0)
+    return max(0.0, value)
+
+
+def _rate_limit_retry_backoff_seconds(message: str) -> float | None:
+    """Return one bounded async cooldown for provider 429 retry handling."""
+    retry_after_seconds = _extract_rate_limit_retry_after_seconds(message)
+    if retry_after_seconds is None:
+        return None
+    return min(
+        max(
+            retry_after_seconds + _RATE_LIMIT_BACKOFF_BUFFER_SECONDS,
+            _RATE_LIMIT_BACKOFF_MIN_SECONDS,
+        ),
+        _RATE_LIMIT_BACKOFF_MAX_SECONDS,
+    )
+
+
+async def _maybe_wait_for_rate_limit_retry(
+    *,
+    sample_id: str,
+    error_message: str,
+    progress_tracker: _BenchmarkProgressTracker | None,
+) -> float | None:
+    """Honor provider-advised 429 cooldowns before retrying one sample."""
+    wait_seconds = _rate_limit_retry_backoff_seconds(error_message)
+    if wait_seconds is None:
+        return None
+    if progress_tracker is not None:
+        progress_tracker.mark_rate_limit_wait(
+            wait_seconds=wait_seconds,
+            error_message=error_message,
+        )
+    event_bus.publish(
+        "status_message",
+        (
+            f"Provider rate limit hit for {sample_id}; waiting {wait_seconds:.1f}s "
+            "before retrying the same sample so provider quota pressure does not "
+            "consume the retained benchmark cohort."
+        ),
+    )
+    await asyncio.sleep(wait_seconds)
+    if progress_tracker is not None:
+        progress_tracker.clear_rate_limit_wait()
+    return wait_seconds
+
+
+def _active_sample_should_retry_on_resume(active_sample: dict[str, Any]) -> bool:
+    """Return whether one interrupted active sample should be retried in place."""
+    if bool(active_sample.get("resume_without_failure", False)):
+        return True
+    if str(active_sample.get("resume_draft_xml", "") or "").strip():
+        return True
+    return str(active_sample.get("stage", "") or "").strip() == _RATE_LIMIT_WAIT_STAGE
 
 
 def _build_failed_result(
@@ -1972,6 +2403,32 @@ def _mark_shared_sample_completed(
                 datetime.now(timezone.utc).isoformat(),
                 sample_id,
             ),
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
+def _release_shared_sample_claim(
+    connection: sqlite3.Connection,
+    *,
+    sample_id: str,
+) -> None:
+    """Return one interrupted claimed sample to the pending queue."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            UPDATE sample_queue
+            SET status = 'pending',
+                owner_label = NULL,
+                owner_pid = NULL,
+                updated_at_utc = ?
+            WHERE sample_id = ?
+              AND status = 'claimed'
+            """,
+            (datetime.now(timezone.utc).isoformat(), sample_id),
         )
         connection.execute("COMMIT")
     except Exception:
@@ -3301,6 +3758,8 @@ async def _execute_sample(
     sample: PreparedBenchmarkSample,
     target_seconds: int,
     preloaded_transcript: Transcript | None,
+    resume_draft_xml: str,
+    resume_feedback: str,
     orchestrator: Orchestrator,
     event_capture: EventCapture,
     retrieval_enabled: bool,
@@ -3315,6 +3774,7 @@ async def _execute_sample(
     voice_clone_orchestrator: Any | None,
     force_download_audio: bool,
     infra_retry_attempts: int = 0,
+    diagnostics_overrides: Mapping[str, Any] | None = None,
 ) -> SampleBenchmarkResult:
     sample_started = time.perf_counter()
     retrieval_before = event_capture.count("retrieval_stats")
@@ -3326,8 +3786,10 @@ async def _execute_sample(
     archived_voice_clone_manifest: Path | None = None
     archived_voice_clone_merged_audio: Path | None = None
     diagnostics: dict[str, Any] | None = None
+    diagnostics_payload: dict[str, Any] | None = None
     candidate_summary = ""
     artifact_recorder.activate_sample(sample=sample, target_seconds=target_seconds)
+    normalized_resume_draft_xml = str(resume_draft_xml or "").strip()
 
     async def _clear_retrieval_namespace() -> None:
         if retrieval_enabled:
@@ -3377,10 +3839,21 @@ async def _execute_sample(
             full_transcript_text=full_transcript_text,
             speaker_samples_manifest_path=speaker_samples_manifest_path,
             draft_audio_state_path=draft_audio_state_path,
+            initial_draft=normalized_resume_draft_xml,
+            initial_feedback=(resume_feedback if normalized_resume_draft_xml else ""),
         )
-        candidate_summary = str(diagnostics.get("draft", "")).strip()
+        diagnostics_payload = dict(diagnostics)
+        if diagnostics_overrides is not None:
+            diagnostics_payload.update(
+                {
+                    str(key): value
+                    for key, value in diagnostics_overrides.items()
+                    if key is not None
+                }
+            )
+        candidate_summary = str(diagnostics_payload.get("draft", "")).strip()
         candidate_seconds = float(
-            diagnostics.get("final_estimated_seconds", 0.0) or 0.0
+            diagnostics_payload.get("final_estimated_seconds", 0.0) or 0.0
         )
         if (
             candidate_summary
@@ -3473,9 +3946,9 @@ async def _execute_sample(
             status="completed" if candidate_summary else "failed",
             target_seconds=target_seconds,
             candidate_seconds=round(candidate_seconds, 3),
-            converged=bool(diagnostics.get("converged", False)),
-            iterations_run=int(diagnostics.get("iterations_run", 0)),
-            final_status=str(diagnostics.get("final_status", "unknown")),
+            converged=bool(diagnostics_payload.get("converged", False)),
+            iterations_run=int(diagnostics_payload.get("iterations_run", 0)),
+            final_status=str(diagnostics_payload.get("final_status", "unknown")),
             duration_seconds=duration_seconds,
             retrieval_events=max(0, retrieval_after - retrieval_before),
             tool_invocations=max(0, tool_after - tool_before),
@@ -3572,7 +4045,7 @@ async def _execute_sample(
     try:
         artifact_paths = artifact_recorder.finalize_sample(
             result=result,
-            diagnostics=diagnostics,
+            diagnostics=diagnostics_payload,
             candidate_summary=candidate_summary,
         )
         if artifact_paths is not None:
@@ -3599,6 +4072,7 @@ async def _run_sample_with_retries(
     target_seconds: int,
     preloaded_transcript: Transcript | None,
     runtime: _ManagedBenchmarkRuntime | None,
+    progress_tracker: _BenchmarkProgressTracker | None,
     args: argparse.Namespace,
     run_root: Path,
     base_cfg: Any,
@@ -3618,6 +4092,16 @@ async def _run_sample_with_retries(
     """Run one sample with bounded infra retries before replacement."""
     infra_retry_attempts = 0
     while True:
+        resume_draft_xml = (
+            progress_tracker.current_resume_draft_xml()
+            if progress_tracker is not None
+            else ""
+        )
+        resume_feedback = (
+            progress_tracker.current_resume_feedback()
+            if progress_tracker is not None
+            else (_GENERIC_RESUME_FEEDBACK if resume_draft_xml else "")
+        )
         if runtime is None:
             try:
                 runtime = await _start_managed_runtime(
@@ -3639,6 +4123,14 @@ async def _run_sample_with_retries(
                 final_status, error_message = _classify_sample_failure(exc)
                 if final_status not in _RETRYABLE_INFRA_FINAL_STATUSES:
                     raise
+                rate_limit_wait = await _maybe_wait_for_rate_limit_retry(
+                    sample_id=sample.sample_id,
+                    error_message=error_message,
+                    progress_tracker=progress_tracker,
+                )
+                if rate_limit_wait is not None:
+                    force_dynamic_ports = True
+                    continue
                 infra_retry_attempts += 1
                 if infra_retry_attempts <= _SAMPLE_INFRA_RETRY_LIMIT:
                     event_bus.publish(
@@ -3666,6 +4158,8 @@ async def _run_sample_with_retries(
             sample=sample,
             target_seconds=target_seconds,
             preloaded_transcript=preloaded_transcript,
+            resume_draft_xml=resume_draft_xml,
+            resume_feedback=resume_feedback,
             orchestrator=runtime.orchestrator,
             event_capture=runtime.event_capture,
             retrieval_enabled=runtime.retrieval_enabled,
@@ -3684,6 +4178,16 @@ async def _run_sample_with_retries(
             result.final_status in _RETRYABLE_INFRA_FINAL_STATUSES
             and infra_retry_attempts < _SAMPLE_INFRA_RETRY_LIMIT
         ):
+            await _stop_managed_runtime(runtime)
+            runtime = None
+            rate_limit_wait = await _maybe_wait_for_rate_limit_retry(
+                sample_id=sample.sample_id,
+                error_message=str(result.error_message or result.final_status),
+                progress_tracker=progress_tracker,
+            )
+            if rate_limit_wait is not None:
+                force_dynamic_ports = True
+                continue
             infra_retry_attempts += 1
             event_bus.publish(
                 "status_message",
@@ -3693,8 +4197,6 @@ async def _run_sample_with_retries(
                     f"{result.error_message or result.final_status}"
                 ),
             )
-            await _stop_managed_runtime(runtime)
-            runtime = None
             force_dynamic_ports = True
             continue
         if infra_retry_attempts:
@@ -4389,6 +4891,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
     progress_tracker.subscribe()
     progress_tracker.start()
     _persist_checkpoint()
+    resumable_active_samples: dict[str, dict[str, Any]] = {}
 
     if resumed_from_checkpoint:
         active_sample_payload = checkpoint_payload.get("active_sample")
@@ -4399,78 +4902,97 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
             if active_sample_id and active_sample_id not in results_by_sample_id:
                 resumed_sample = _load_candidate_sample(active_sample_id)
                 if resumed_sample is not None:
-                    active_target_seconds = _resolve_sample_target_seconds(
-                        resumed_sample,
-                        args,
-                    )
-                    resume_failure_reason = str(
-                        getattr(args, "resume_failure_reason", "")
-                        or _RESUME_FAILURE_DEFAULT_STATUS
-                    ).strip()
-                    if not resume_failure_reason:
-                        resume_failure_reason = _RESUME_FAILURE_DEFAULT_STATUS
-                    resumed_failure = _finalize_result_target_membership(
-                        _build_resume_failure_result(
-                            sample=resumed_sample,
-                            target_seconds=active_target_seconds,
-                            reason=resume_failure_reason,
-                            active_sample=active_sample_payload,
+                    if _active_sample_should_retry_on_resume(active_sample_payload):
+                        resumable_active_samples[active_sample_id] = dict(
+                            active_sample_payload
                         )
-                    )
-                    results_by_sample_id[active_sample_id] = resumed_failure
-                    if resume_failure_reason == _SWEEP_STALL_FINAL_STATUS:
-                        recovered_stall_count += 1
-                    if shared_sample_queue_connection is not None:
-                        _mark_shared_sample_completed(
-                            shared_sample_queue_connection,
-                            sample_id=active_sample_id,
-                            final_status=resumed_failure.final_status,
-                            counts_toward_target=resumed_failure.counts_toward_target,
-                            replacement_reason=resumed_failure.replacement_reason,
+                        if shared_sample_queue_connection is not None:
+                            _release_shared_sample_claim(
+                                shared_sample_queue_connection,
+                                sample_id=active_sample_id,
+                            )
+                        event_bus.publish(
+                            "status_message",
+                            (
+                                f"Resuming active sample {active_sample_id} from a preserved "
+                                "provider rate-limit wait instead of recording a replacement."
+                            ),
                         )
-                    _persist_checkpoint()
-                    final_report = _write_execution_report_snapshot(
-                        run_root=run_root,
-                        run_id=run_id,
-                        dataset_manifest=dataset_manifest,
-                        summarizer_provider=summarizer_profile.provider_id,
-                        critic_provider=critic_profile.provider_id,
-                        judge_provider=judge_profile.provider_id,
-                        embedding_mode=embedding_profile.embedding_id,
-                        sample_order=sample_order,
-                        results_by_sample_id=results_by_sample_id,
-                        duration_tolerance_ratio=duration_tolerance_ratio,
-                        transcript_only=transcript_only,
-                        duration_preset=duration_preset,
-                        override_target_seconds=override_target_seconds,
-                        sample_seed=sample_seed,
-                        target_sample_count=target_sample_count,
-                        checkpoint_path=checkpoint_path,
-                        resumed_from_checkpoint=resumed_from_checkpoint,
-                        resume_count=resume_count,
-                        sample_shard_index=sample_shard_index,
-                        sample_shard_count=sample_shard_count,
-                    )
-                    _emit_progress_event(
-                        args,
-                        event="sample_done",
-                        duration_preset=str(duration_preset or "dataset_default"),
-                        payload={
-                            "sample_index": min(
-                                _count_target_results(results_by_sample_id) + 1,
-                                max(target_sample_count, 1),
-                            ),
-                            "sample_count": target_sample_count,
-                            "sample_id": active_sample_id,
-                            "final_status": resumed_failure.final_status,
-                            "counts_toward_target": resumed_failure.counts_toward_target,
-                            "composite": round(resumed_failure.metrics.composite, 4),
-                            "duration_seconds": round(
-                                resumed_failure.duration_seconds,
-                                3,
-                            ),
-                        },
-                    )
+                    else:
+                        active_target_seconds = _resolve_sample_target_seconds(
+                            resumed_sample,
+                            args,
+                        )
+                        resume_failure_reason = str(
+                            getattr(args, "resume_failure_reason", "")
+                            or _RESUME_FAILURE_DEFAULT_STATUS
+                        ).strip()
+                        if not resume_failure_reason:
+                            resume_failure_reason = _RESUME_FAILURE_DEFAULT_STATUS
+                        resumed_failure = _finalize_result_target_membership(
+                            _build_resume_failure_result(
+                                sample=resumed_sample,
+                                target_seconds=active_target_seconds,
+                                reason=resume_failure_reason,
+                                active_sample=active_sample_payload,
+                            )
+                        )
+                        results_by_sample_id[active_sample_id] = resumed_failure
+                        if resume_failure_reason == _SWEEP_STALL_FINAL_STATUS:
+                            recovered_stall_count += 1
+                        if shared_sample_queue_connection is not None:
+                            _mark_shared_sample_completed(
+                                shared_sample_queue_connection,
+                                sample_id=active_sample_id,
+                                final_status=resumed_failure.final_status,
+                                counts_toward_target=resumed_failure.counts_toward_target,
+                                replacement_reason=resumed_failure.replacement_reason,
+                            )
+                        _persist_checkpoint()
+                        final_report = _write_execution_report_snapshot(
+                            run_root=run_root,
+                            run_id=run_id,
+                            dataset_manifest=dataset_manifest,
+                            summarizer_provider=summarizer_profile.provider_id,
+                            critic_provider=critic_profile.provider_id,
+                            judge_provider=judge_profile.provider_id,
+                            embedding_mode=embedding_profile.embedding_id,
+                            sample_order=sample_order,
+                            results_by_sample_id=results_by_sample_id,
+                            duration_tolerance_ratio=duration_tolerance_ratio,
+                            transcript_only=transcript_only,
+                            duration_preset=duration_preset,
+                            override_target_seconds=override_target_seconds,
+                            sample_seed=sample_seed,
+                            target_sample_count=target_sample_count,
+                            checkpoint_path=checkpoint_path,
+                            resumed_from_checkpoint=resumed_from_checkpoint,
+                            resume_count=resume_count,
+                            sample_shard_index=sample_shard_index,
+                            sample_shard_count=sample_shard_count,
+                        )
+                        _emit_progress_event(
+                            args,
+                            event="sample_done",
+                            duration_preset=str(duration_preset or "dataset_default"),
+                            payload={
+                                "sample_index": min(
+                                    _count_target_results(results_by_sample_id) + 1,
+                                    max(target_sample_count, 1),
+                                ),
+                                "sample_count": target_sample_count,
+                                "sample_id": active_sample_id,
+                                "final_status": resumed_failure.final_status,
+                                "counts_toward_target": resumed_failure.counts_toward_target,
+                                "composite": round(
+                                    resumed_failure.metrics.composite, 4
+                                ),
+                                "duration_seconds": round(
+                                    resumed_failure.duration_seconds,
+                                    3,
+                                ),
+                            },
+                        )
 
     event_bus.publish(
         "status_message",
@@ -4574,6 +5096,9 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                 sample_id=sample.sample_id,
                 target_seconds=active_target_seconds,
             )
+            resume_active_sample = resumable_active_samples.pop(sample.sample_id, None)
+            if resume_active_sample is not None:
+                progress_tracker.restore_resume_state(resume_active_sample)
             _emit_progress_event(
                 args,
                 event="sample_start",
@@ -4635,6 +5160,7 @@ async def _run_benchmark_async(args: argparse.Namespace) -> BenchmarkExecutionRe
                     target_seconds=active_target_seconds,
                     preloaded_transcript=preloaded_transcript,
                     runtime=runtime,
+                    progress_tracker=progress_tracker,
                     args=args,
                     run_root=run_root,
                     base_cfg=base_cfg,
@@ -4833,7 +5359,11 @@ def build_execute_parser(parser: argparse.ArgumentParser) -> None:
         "--max-iterations",
         type=int,
         default=None,
-        help="Optional iteration cap. Omit for unbounded iterations.",
+        help=(
+            "Optional critic-feedback budget. 0 runs summarizer-only, 1 runs "
+            "summarizer -> critic -> summarizer, and larger values add more "
+            "critic-guided revision passes. Omit for unbounded iterations."
+        ),
     )
     parser.add_argument(
         "--summarizer-timeout-seconds",

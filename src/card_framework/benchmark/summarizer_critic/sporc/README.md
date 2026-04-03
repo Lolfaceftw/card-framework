@@ -49,6 +49,16 @@ The benchmark also records:
 - tool invocations,
 - per-sample artifacts and aggregate markdown/JSON reports.
 
+When a provider returns an explicit `429` cooldown window, `execute` now keeps
+retrying the same sample after that wait instead of burning replacement slots on
+repeated `startup_unavailable` outcomes. If the process is interrupted while the
+sample is waiting on provider quota, the checkpoint marks that sample as safe to
+retry in place on resume rather than converting it into a
+`resume_interrupted_sample` replacement. The runner now also mirrors the
+incremental draft mutations into checkpoint state so a quota-bound OpenAI sample
+resumes from its saved partial draft on the next retry or resume, instead of
+restarting the summarizer loop from an empty registry every time.
+
 ## Prerequisites
 
 1. Install dependencies with `uv`.
@@ -786,7 +796,17 @@ terminal, keeps retrying retryable connection/startup failures until the
 provider comes back, restarts a provider from scratch when retryable infra
 replacements would otherwise change the retained sample cohort, and persists a
 wrapper-session UUID so interrupted runs can resume unfinished providers from
-their execute checkpoints.
+their execute checkpoints. Resume also rehydrates missing provider report
+metadata from the execute output roots, so healthy partial providers continue
+from the cancelled checkpoint while providers whose discovered report only shows
+retryable startup/connection failures are restarted from a fresh checkpoint.
+When a provider returns a `429` with an explicit `try again in ...` hint, the
+execute retry loop now waits for that cooldown before retrying the same sample
+so funded runs do not waste retries against the same TPM window. The wrapper
+also refreshes `_sessions/<uuid>/budget_profile.json` and prints a compact
+session budget line from the persisted `call_XXX.json` traces so you can profile
+visible-token lower-bound spend across contestants and the shared judge during a
+live run.
 
 Validate prerequisites and print the exact commands without spending money:
 
@@ -829,13 +849,33 @@ The wrapper enforces the documented budget defaults:
 - `5m` preset only
 - `10` retained samples
 - `sample_seed=42`
-- `max_iterations=1`
+- `max_iterations=0`
 - transcript-only path
 - contestants: `openai_gpt_5_4_mini`, `anthropic_claude_haiku_4_5`, `deepseek_chat`, `vllm_default`
 - judge: `google_gemini_3_1_pro_preview_judge`
 
-It rejects nonpositive `--max-iterations` values up front, because the
-underlying `execute` path treats them as unbounded.
+The wrapper now treats `--max-iterations` as a critic-feedback budget instead of
+the old summarize+critic pair count:
+
+- `0` = summarizer only
+- `1` = summarizer -> critic -> summarizer
+- `2` = summarizer -> critic -> summarizer -> critic -> summarizer
+
+The wrapper accepts `0` directly and keeps negative values invalid so the
+budget-safe wrapper never turns a typo into an unbounded execute run.
+
+If a funded wrapper run already stopped at `max_iterations_reached`, you can now
+salvage the missing extra summarizer pass plus judge rerun in place without
+relaunching the whole execute loop:
+
+```powershell
+uv run python scripts/run_sporc_post_critic_revision.py --session-id <uuid>
+```
+
+That helper reuses the saved `summary.xml`, `critic_feedback.txt`, and sample
+artifacts from the existing execute report, runs exactly one more
+critic-guided summarizer pass with `max_iterations=0`, reruns only the judge,
+and rewrites the existing report artifacts in place.
 
 When `vllm_default` is pinned to `Qwen/Qwen3.5-27B`, the benchmark prep keeps
 vLLM thinking enabled for that local contestant instead of forcing it off.
@@ -1059,6 +1099,14 @@ is `qwen3_4b`, so enabling embeddings now points SPoRC sweeps at
 `Qwen/Qwen3-Embedding-4B` unless you change `selection.embedding`. The default
 Qwen profile is tuned for the measured Windows RTX 3060 sweet spot:
 `batch_size=1`, `max_seq_length=384`, and `attention_implementation=eager`.
+
+`--max-iterations` semantics now mean critic-feedback budget:
+
+- `0` keeps one summarizer pass and skips critic calls entirely
+- `1` runs one critic pass and then one final critic-guided summarizer revision
+- `2+` keeps alternating critic and summarizer until the budget is spent
+- negative values still map to unbounded only on the lower-level `execute`
+  contract; the budget wrapper does not allow them
 
 ## Sweep Analysis
 
