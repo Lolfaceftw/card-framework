@@ -37,8 +37,8 @@ hosts the preferred service is `setup-and-run-gpu` under the `gpu` profile.
   volumes so Linux virtual environments do not pollute the host checkout.
 - Hugging Face and uv caches are also stored in named volumes so repeated runs
   reuse downloaded assets.
-- Both runtime services inherit `mem_limit: 16g` and `memswap_limit: 20g`, so
-  the container stays capped at about `16 GB` of RAM with about `4 GB` of swap.
+- Both runtime services inherit `mem_limit: 8g` and `memswap_limit: 10g`, so
+  the container stays capped at about `8 GB` of RAM with about `2 GB` of swap.
 - The Compose services force `linux/amd64` so the runtime matches the Linux
   x86_64 path that NeMo supports upstream. On Apple Silicon that means Docker
   runs under emulation, so expect slower startup.
@@ -51,7 +51,13 @@ Build the runtime image:
 docker compose build setup-and-run
 ```
 
-Show the wrapper help:
+Open the default Textual operator UI on an interactive terminal:
+
+```bash
+docker compose run --rm setup-and-run
+```
+
+Show the wrapper help explicitly:
 
 ```bash
 docker compose run --rm setup-and-run --help
@@ -162,10 +168,16 @@ Linux container automatically.
 - Relative paths such as `audio.wav`, `transcript.json`, and `summary.xml`
   resolve relative to the mounted repo checkout because the container runs from
   `/workspace/card-framework`.
+- With the default no-arg interactive Compose invocation, `setup_and_run` now
+  opens the Textual operator UI instead of printing help. Non-interactive no-arg
+  Docker launches still fall back to `--help`. After you choose a workflow, the
+  same Textual experience stays up as an execution monitor while the selected
+  wrapper or benchmark child command runs, with separate stage/progress/ETA
+  status plus a filtered diagnostics tab for real warnings and failures.
 - The GPU profile is intentionally separate so CPU hosts do not fail on `gpus:
   all`.
-- The container-side resource cap is set in `compose.yml` to about `16 GB` RAM
-  plus `4 GB` swap (`mem_limit: 16g`, `memswap_limit: 20g`).
+- The container-side resource cap is set in `compose.yml` to about `8 GB` RAM
+  plus `2 GB` swap (`mem_limit: 8g`, `memswap_limit: 10g`).
 - Very long stage-1 runs also respect
   `audio.asr.forced_alignment.max_audio_duration_seconds` (default `3600`).
   When the vocals audio exceeds that ceiling, the runtime skips CTC word

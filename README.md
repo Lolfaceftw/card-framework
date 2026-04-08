@@ -159,6 +159,7 @@ Other important locations:
 ```bash
 uv sync --dev
 docker compose build setup-and-run
+docker compose run --rm setup-and-run
 docker compose run --rm setup-and-run --help
 uv run python -m card_framework.cli.main --help
 uv run python -m card_framework.cli.setup_and_run --help
@@ -191,13 +192,21 @@ uv run python -m card_framework.cli.calibrate
 Prefer the Docker Compose path for repo-local runtime launches. If Docker can
 expose CUDA, use `docker compose --profile gpu run --rm setup-and-run-gpu ...`;
 otherwise use `setup-and-run`. Both runtime services are capped in
-`compose.yml` at about `16 GB` RAM plus `4 GB` swap.
+`compose.yml` at about `8 GB` RAM plus `2 GB` swap.
 
 Running `uv run python -m card_framework.cli.setup_and_run` with no explicit
-run inputs now opens an interactive menu by default. Use that menu to choose
-the run mode, pick the LLM/embedding profiles, toggle voice clone/interjector
-stages, and provide audio, transcript, summary, or resume inputs. Pass
-`--no-menu` when you want the old flag-only behavior directly.
+run inputs now opens a Textual frontend by default on an interactive terminal.
+The same is now true for `docker compose run --rm setup-and-run` and
+`docker compose --profile gpu run --rm setup-and-run-gpu` when those commands
+are run interactively without explicit arguments. The frontend lets operators
+choose run modes, jump directly to stages 2-4, resume sessions, edit the
+active config YAML with integrated live YAML syntax highlighting, type audio
+paths directly, pick supported audio or transcript paths from inline fuzzy suggestions,
+and
+launch the supported benchmark entrypoints without changing the underlying
+runtime logic. Non-interactive no-arg Docker launches still fall back to
+`--help` instead of trying to prompt. Pass `--no-menu` when you want the old
+flag-only behavior directly.
 
 Repeating `--audio-path` now runs a sequential stage-1 batch sweep. By
 default each input writes its own isolated artifacts under
@@ -247,8 +256,8 @@ The repository now includes a Docker operator path centered on
 - The Compose services bind-mount the repo checkout, reuse `conf/config.yaml`
   and `.env`, and isolate the Linux `.venv` directories into Docker volumes so
   the host checkout does not get container-built virtual environments.
-- The Compose services are capped at about `16 GB` RAM plus `4 GB` swap through
-  `mem_limit: 16g` and `memswap_limit: 20g`.
+- The Compose services are capped at about `8 GB` RAM plus `2 GB` swap through
+  `mem_limit: 8g` and `memswap_limit: 10g`.
 - For real run validation, do not rely only on the terminal stream; inspect
   persisted logs and sample RAM plus GPU telemetry too.
 

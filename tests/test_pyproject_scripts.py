@@ -41,6 +41,7 @@ def test_pyproject_declares_cross_platform_packaged_cpu_metadata() -> None:
     assert "Operating System :: POSIX :: Linux" in classifiers
     assert "Operating System :: MacOS :: MacOS X" in classifiers
     assert "nemo-toolkit[asr]>=2.4.0; sys_platform == 'linux'" in dependencies
+    assert "textual[syntax]>=8.0.2" in dependencies
     assert uv_sources["torch"] == [
         {
             "index": "pytorch-cu126",

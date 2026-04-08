@@ -50,3 +50,7 @@ third_party/index_tts/
 
 # Local research workspaces and exports
 research/*
+!research/4-6-26 Report/
+research/4-6-26 Report/*
+!research/4-6-26 Report/.gitignore
+!research/4-6-26 Report/main.tex

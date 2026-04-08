@@ -1,4 +1,4 @@
-﻿"""IndexTTS-backed voice-cloning gateway."""
+"""IndexTTS-backed voice-cloning gateway."""
 
 from __future__ import annotations
 
@@ -19,14 +19,25 @@ from typing import Any
 
 from card_framework.audio_pipeline.emotion.emotion_vectors import EmotionVector
 from card_framework.audio_pipeline.eta import StageProgressCallback, StageProgressUpdate
-from card_framework.audio_pipeline.errors import DependencyMissingError, NonRetryableAudioStageError
-from card_framework.audio_pipeline.runtime import release_torch_device_memory_with_reporting
+from card_framework.audio_pipeline.errors import (
+    DependencyMissingError,
+    NonRetryableAudioStageError,
+)
+from card_framework.audio_pipeline.runtime import (
+    release_torch_device_memory_with_reporting,
+)
 from card_framework.audio_pipeline.voice_clone_contracts import VoiceCloneProvider
+from card_framework.shared.events import event_bus
 
 _INDEXTTS_PROTOCOL_PREFIX = "__INDEXTTS_JSON__"
 _INDEXTTS_READY_TIMEOUT_SECONDS = 600.0
 _INDEXTTS_PROTOCOL_POLL_SECONDS = 0.2
 _INDEXTTS_LOG_TAIL_LINE_LIMIT = 80
+_INDEXTTS_CUDA_STARTUP_MIN_FREE_MEMORY_MB = 6000
+_INDEXTTS_CUDA_VRAM_BUDGET_MB = 8192
+_INDEXTTS_CUDA_STARTUP_EXPECTED_WORKER_DELTA_MB = 6600
+_INDEXTTS_CUDA_STARTUP_WAIT_SECONDS = 90.0
+_INDEXTTS_CUDA_STARTUP_POLL_SECONDS = 5.0
 _CONSOLE_SAFE_TRANSLATIONS = str.maketrans(
     {
         "\u2192": "->",
@@ -55,8 +66,19 @@ class _IndexTTSRuntimeKey:
     stream_subprocess_output: bool
 
 
+@dataclass(slots=True, frozen=True)
+class _CudaMemorySnapshot:
+    """Describe one coarse CUDA memory snapshot from nvidia-smi."""
+
+    free_mb: int
+    total_mb: int
+    used_mb: int
+
+
 _SHARED_INPROCESS_MODELS: dict[_IndexTTSRuntimeKey, object] = {}
-_SHARED_SUBPROCESS_WORKERS: dict[_IndexTTSRuntimeKey, "_PersistentIndexTTSSubprocessWorker"] = {}
+_SHARED_SUBPROCESS_WORKERS: dict[
+    _IndexTTSRuntimeKey, "_PersistentIndexTTSSubprocessWorker"
+] = {}
 _SHARED_INPROCESS_EMO_VECTOR_CACHE: dict[
     _IndexTTSRuntimeKey,
     dict[str, tuple[float, ...]],
@@ -82,6 +104,7 @@ class _PersistentIndexTTSSubprocessWorker:
         uv_executable: str,
         stream_output: bool,
     ) -> None:
+        self._device = str(device).strip().lower() or "cpu"
         self._stream_output = stream_output
         self._response_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._log_tail: deque[str] = deque(maxlen=_INDEXTTS_LOG_TAIL_LINE_LIMIT)
@@ -123,19 +146,21 @@ class _PersistentIndexTTSSubprocessWorker:
             daemon=True,
         )
         self._reader_thread.start()
-        ready_payload = self._wait_for_protocol_message(
-            expected_type="ready",
-            timeout_seconds=_INDEXTTS_READY_TIMEOUT_SECONDS,
-        )
-        if not bool(ready_payload.get("ok", False)):
-            detail = self._format_failure_detail(
-                str(ready_payload.get("error", "")).strip()
+        try:
+            ready_payload = self._wait_for_protocol_message(
+                expected_type="ready",
+                timeout_seconds=_INDEXTTS_READY_TIMEOUT_SECONDS,
             )
+            if not bool(ready_payload.get("ok", False)):
+                detail = self._format_failure_detail(
+                    str(ready_payload.get("error", "")).strip()
+                )
+                raise NonRetryableAudioStageError(
+                    f"IndexTTS subprocess worker failed to initialize: {detail}"
+                )
+        except Exception:
             self.close()
-            raise NonRetryableAudioStageError(
-                "IndexTTS subprocess worker failed to initialize: "
-                f"{detail}"
-            )
+            raise
 
     def synthesize(
         self,
@@ -187,10 +212,14 @@ class _PersistentIndexTTSSubprocessWorker:
         if not bool(response.get("ok", False)):
             detail = self._format_failure_detail(str(response.get("error", "")).strip())
             raise NonRetryableAudioStageError(
-                "IndexTTS subprocess synthesis failed: "
-                f"{detail}"
+                f"IndexTTS subprocess synthesis failed: {detail}"
             )
         return output_audio_path
+
+    @property
+    def device(self) -> str:
+        """Return the actual worker device."""
+        return self._device
 
     def close(self) -> None:
         """Terminate the worker process and free its cached model state."""
@@ -241,8 +270,7 @@ class _PersistentIndexTTSSubprocessWorker:
         except OSError as exc:
             detail = self._format_failure_detail(str(exc))
             raise NonRetryableAudioStageError(
-                "Failed to communicate with IndexTTS subprocess worker: "
-                f"{detail}"
+                f"Failed to communicate with IndexTTS subprocess worker: {detail}"
             ) from exc
 
     def _wait_for_protocol_message(
@@ -271,20 +299,21 @@ class _PersistentIndexTTSSubprocessWorker:
                 if self._process.poll() is not None:
                     detail = self._format_failure_detail("")
                     raise NonRetryableAudioStageError(
-                        "IndexTTS subprocess worker exited unexpectedly: "
-                        f"{detail}"
+                        f"IndexTTS subprocess worker exited unexpectedly: {detail}"
                     )
                 continue
             payload_type = str(payload.get("type", "")).strip()
             if payload_type == "process_exit":
                 detail = self._format_failure_detail("")
                 raise NonRetryableAudioStageError(
-                    "IndexTTS subprocess worker exited unexpectedly: "
-                    f"{detail}"
+                    f"IndexTTS subprocess worker exited unexpectedly: {detail}"
                 )
             if payload_type != expected_type:
                 continue
-            if request_id is not None and str(payload.get("request_id", "")) != request_id:
+            if (
+                request_id is not None
+                and str(payload.get("request_id", "")) != request_id
+            ):
                 continue
             return payload
 
@@ -345,10 +374,15 @@ class _PersistentIndexTTSSubprocessWorker:
         """Build a compact operator-facing detail string for worker failures."""
         normalized_error = error_message.strip()
         log_tail = "\n".join(self._log_tail).strip()
+        streamed_suffix = "\nSee streamed subprocess output above for full context."
         if self._stream_output:
+            if normalized_error and log_tail and normalized_error not in log_tail:
+                return f"{normalized_error}\nRecent subprocess output:\n{log_tail}{streamed_suffix}"
+            if log_tail:
+                return f"Recent subprocess output:\n{log_tail}{streamed_suffix}"
             if normalized_error:
-                return f"{normalized_error} See streamed subprocess output above."
-            return "See streamed subprocess output above."
+                return f"{normalized_error}{streamed_suffix}"
+            return streamed_suffix.lstrip()
         if normalized_error and log_tail and normalized_error not in log_tail:
             return f"{normalized_error}\n{log_tail}"
         if normalized_error:
@@ -409,12 +443,13 @@ def _build_persistent_worker_env(
 ) -> dict[str, str]:
     """Ensure nested workers can import the repo-local ``card_framework`` package."""
     environment = dict(existing_env or os.environ)
+    environment.pop("VIRTUAL_ENV", None)
     source_root_text = str(source_root.resolve())
     current_entries = [
         entry for entry in environment.get("PYTHONPATH", "").split(os.pathsep) if entry
     ]
-    if source_root_text not in current_entries:
-        environment["PYTHONPATH"] = os.pathsep.join([source_root_text, *current_entries])
+    current_entries = [entry for entry in current_entries if entry != source_root_text]
+    environment["PYTHONPATH"] = os.pathsep.join([source_root_text, *current_entries])
     return environment
 
 
@@ -458,8 +493,7 @@ def _validate_runner_project_dir(*, runner_project_dir: Path | None) -> Path:
     resolved_project_dir = runner_project_dir.resolve()
     if not resolved_project_dir.exists() or not resolved_project_dir.is_dir():
         raise NonRetryableAudioStageError(
-            "IndexTTS runner project directory does not exist: "
-            f"{resolved_project_dir}"
+            f"IndexTTS runner project directory does not exist: {resolved_project_dir}"
         )
     return resolved_project_dir
 
@@ -470,6 +504,67 @@ def _normalize_emo_text(emo_text: str | None) -> str | None:
         return None
     normalized = emo_text.strip()
     return normalized or None
+
+
+def _looks_retryable_subprocess_crash(error: Exception) -> bool:
+    """Return whether one subprocess failure should retry on CPU once."""
+    lowered = str(error).strip().lower()
+    return (
+        "worker exited unexpectedly" in lowered
+        or "timed out waiting for indextts subprocess worker response" in lowered
+    )
+
+
+def _format_one_line_error(error: Exception) -> str:
+    """Collapse one exception into a compact single-line detail."""
+    parts = [line.strip() for line in str(error).splitlines() if line.strip()]
+    if not parts:
+        return error.__class__.__name__
+    return " ".join(parts)
+
+
+def _query_cuda_memory_snapshot() -> _CudaMemorySnapshot | None:
+    """Return coarse free/used VRAM data from nvidia-smi when available."""
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free,memory.total,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            continue
+        try:
+            free_mb = int(parts[0])
+            total_mb = int(parts[1])
+            used_mb = int(parts[2])
+        except ValueError:
+            continue
+        if total_mb <= 0 or free_mb < 0 or used_mb < 0:
+            continue
+        return _CudaMemorySnapshot(
+            free_mb=free_mb,
+            total_mb=total_mb,
+            used_mb=used_mb,
+        )
+    return None
 
 
 def _release_inprocess_model(
@@ -601,6 +696,13 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
     normalize_emotion_vector: bool = True
     emotion_vector_apply_bias: bool = True
     emotion_vector_max_sum: float = 0.8
+    cuda_startup_min_free_memory_mb: int = _INDEXTTS_CUDA_STARTUP_MIN_FREE_MEMORY_MB
+    cuda_vram_budget_mb: int = _INDEXTTS_CUDA_VRAM_BUDGET_MB
+    cuda_startup_expected_worker_delta_mb: int = (
+        _INDEXTTS_CUDA_STARTUP_EXPECTED_WORKER_DELTA_MB
+    )
+    cuda_startup_wait_seconds: float = _INDEXTTS_CUDA_STARTUP_WAIT_SECONDS
+    cuda_startup_poll_seconds: float = _INDEXTTS_CUDA_STARTUP_POLL_SECONDS
 
     def synthesize(
         self,
@@ -710,8 +812,7 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             del result
         except Exception as exc:
             raise NonRetryableAudioStageError(
-                "IndexTTS synthesis failed for output "
-                f"{output_audio_path}."
+                f"IndexTTS synthesis failed for output {output_audio_path}."
             ) from exc
 
         if not output_audio_path.exists():
@@ -731,20 +832,49 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
     ) -> Path:
         """Run synthesis via a persistent ``uv run --project`` worker."""
         worker = self._get_or_init_subprocess_worker()
-        rendered_path = worker.synthesize(
-            reference_audio_path=reference_audio_path,
-            text=text,
-            output_audio_path=output_audio_path,
-            emo_text=emo_text,
-            emotion_vector=self._normalize_provider_emotion_vector(emotion_vector),
-            verbose=self.verbose,
-            max_text_tokens_per_segment=self.max_text_tokens_per_segment,
-            generation_kwargs=self._generation_kwargs(),
+        normalized_emotion_vector = self._normalize_provider_emotion_vector(
+            emotion_vector
         )
+        try:
+            rendered_path = worker.synthesize(
+                reference_audio_path=reference_audio_path,
+                text=text,
+                output_audio_path=output_audio_path,
+                emo_text=emo_text,
+                emotion_vector=normalized_emotion_vector,
+                verbose=self.verbose,
+                max_text_tokens_per_segment=self.max_text_tokens_per_segment,
+                generation_kwargs=self._generation_kwargs(),
+            )
+        except NonRetryableAudioStageError as exc:
+            if not self._should_retry_subprocess_on_cuda(
+                attempted_device=worker.device,
+                error=exc,
+            ):
+                raise
+            self._evict_cached_subprocess_worker(expected_worker=worker)
+            self._publish_subprocess_cuda_retry(
+                attempted_device=worker.device,
+                error=exc,
+            )
+            self._prepare_cuda_worker_retry()
+            worker = self._get_or_init_subprocess_worker(
+                device_override=worker.device,
+                allow_cuda_retry=False,
+            )
+            rendered_path = worker.synthesize(
+                reference_audio_path=reference_audio_path,
+                text=text,
+                output_audio_path=output_audio_path,
+                emo_text=emo_text,
+                emotion_vector=normalized_emotion_vector,
+                verbose=self.verbose,
+                max_text_tokens_per_segment=self.max_text_tokens_per_segment,
+                generation_kwargs=self._generation_kwargs(),
+            )
         if not rendered_path.exists():
             raise NonRetryableAudioStageError(
-                "IndexTTS subprocess completed without output file: "
-                f"{rendered_path}"
+                f"IndexTTS subprocess completed without output file: {rendered_path}"
             )
         return rendered_path
 
@@ -851,7 +981,12 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             max_sum=self.emotion_vector_max_sum,
         )
 
-    def _get_or_init_subprocess_worker(self) -> _PersistentIndexTTSSubprocessWorker:
+    def _get_or_init_subprocess_worker(
+        self,
+        *,
+        device_override: str | None = None,
+        allow_cuda_retry: bool = True,
+    ) -> _PersistentIndexTTSSubprocessWorker:
         """Lazily initialize and share one warm subprocess worker per config."""
         cfg_path = self.cfg_path.resolve()
         model_dir = self.model_dir.resolve()
@@ -860,27 +995,215 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             runner_project_dir=self.runner_project_dir
         )
         key = self._runtime_key()
+        requested_device = str(device_override or self.device).strip().lower() or "cpu"
         with _SHARED_RUNTIME_LOCK:
             cached_worker = _SHARED_SUBPROCESS_WORKERS.get(key)
-            if cached_worker is not None and cached_worker.is_alive():
+            if (
+                cached_worker is not None
+                and cached_worker.is_alive()
+                and (
+                    device_override is None or cached_worker.device == requested_device
+                )
+            ):
                 return cached_worker
             if cached_worker is not None:
                 cached_worker.close()
-            cached_worker = _PersistentIndexTTSSubprocessWorker(
-                cfg_path=cfg_path,
-                model_dir=model_dir,
-                device=self.device,
-                use_fp16=self.use_fp16,
-                use_cuda_kernel=self.use_cuda_kernel,
-                use_deepspeed=self.use_deepspeed,
-                use_accel=self.use_accel,
-                use_torch_compile=self.use_torch_compile,
-                runner_project_dir=runner_project_dir,
-                uv_executable=self.uv_executable,
-                stream_output=self.stream_subprocess_output,
-            )
+            try:
+                cached_worker = self._build_subprocess_worker(
+                    cfg_path=cfg_path,
+                    model_dir=model_dir,
+                    runner_project_dir=runner_project_dir,
+                    device=requested_device,
+                )
+            except NonRetryableAudioStageError as exc:
+                if not allow_cuda_retry or not self._should_retry_subprocess_on_cuda(
+                    attempted_device=requested_device,
+                    error=exc,
+                ):
+                    raise
+                self._publish_subprocess_cuda_retry(
+                    attempted_device=requested_device,
+                    error=exc,
+                )
+                self._prepare_cuda_worker_retry()
+                cached_worker = self._build_subprocess_worker(
+                    cfg_path=cfg_path,
+                    model_dir=model_dir,
+                    runner_project_dir=runner_project_dir,
+                    device=requested_device,
+                )
             _SHARED_SUBPROCESS_WORKERS[key] = cached_worker
             return cached_worker
+
+    def _build_subprocess_worker(
+        self,
+        *,
+        cfg_path: Path,
+        model_dir: Path,
+        runner_project_dir: Path,
+        device: str,
+    ) -> _PersistentIndexTTSSubprocessWorker:
+        """Construct one warm worker using the requested device profile."""
+        self._wait_for_cuda_worker_headroom(device=device)
+        return _PersistentIndexTTSSubprocessWorker(
+            cfg_path=cfg_path,
+            model_dir=model_dir,
+            device=device,
+            use_fp16=self.use_fp16,
+            use_cuda_kernel=self.use_cuda_kernel,
+            use_deepspeed=self.use_deepspeed,
+            use_accel=self.use_accel,
+            use_torch_compile=self.use_torch_compile,
+            runner_project_dir=runner_project_dir,
+            uv_executable=self.uv_executable,
+            stream_output=self.stream_subprocess_output,
+        )
+
+    def _should_retry_subprocess_on_cuda(
+        self,
+        *,
+        attempted_device: str,
+        error: Exception,
+    ) -> bool:
+        """Retry one unexpected CUDA worker crash on the same device."""
+        return (
+            attempted_device.strip().lower() == "cuda"
+            and _looks_retryable_subprocess_crash(error)
+        )
+
+    def _publish_subprocess_cuda_retry(
+        self,
+        *,
+        attempted_device: str,
+        error: Exception,
+    ) -> None:
+        """Tell operators when the warm worker is retried on CUDA."""
+        event_bus.publish(
+            "system_message",
+            (
+                "IndexTTS subprocess worker failed on "
+                f"device='{attempted_device}'. Clearing local CUDA state and "
+                f"retrying once on CUDA. Reason: {_format_one_line_error(error)}"
+            ),
+        )
+
+    def _prepare_cuda_worker_retry(self) -> None:
+        """Best-effort cleanup before retrying a crashed CUDA worker."""
+        release_torch_device_memory_with_reporting(
+            device="cuda",
+            description="IndexTTS subprocess retry preparation",
+        )
+
+    def _snapshot_satisfies_cuda_startup_constraints(
+        self,
+        *,
+        snapshot: _CudaMemorySnapshot,
+    ) -> bool:
+        """Return whether one VRAM snapshot satisfies the startup budget."""
+        minimum_free_mb = int(max(self.cuda_startup_min_free_memory_mb, 0))
+        if snapshot.free_mb < minimum_free_mb:
+            return False
+        budget_mb = int(max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0))
+        expected_delta_mb = int(max(self.cuda_startup_expected_worker_delta_mb, 0))
+        if budget_mb <= 0:
+            return True
+        return snapshot.used_mb + expected_delta_mb <= budget_mb
+
+    def _format_cuda_startup_constraint_detail(
+        self,
+        *,
+        snapshot: _CudaMemorySnapshot,
+    ) -> str:
+        """Render one operator-facing VRAM-budget detail string."""
+        budget_mb = int(max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0))
+        expected_delta_mb = int(max(self.cuda_startup_expected_worker_delta_mb, 0))
+        predicted_total_mb = snapshot.used_mb + expected_delta_mb
+        return (
+            f"used={snapshot.used_mb} MiB, free={snapshot.free_mb} MiB, "
+            f"total={snapshot.total_mb} MiB, predicted_worker_total~={predicted_total_mb} MiB, "
+            f"budget<={budget_mb} MiB, need_free>={int(max(self.cuda_startup_min_free_memory_mb, 0))} MiB"
+        )
+
+    def _wait_for_cuda_worker_headroom(self, *, device: str) -> None:
+        """Wait briefly for enough free VRAM before starting a CUDA worker."""
+        if device.strip().lower() != "cuda":
+            return
+        minimum_free_mb = int(max(self.cuda_startup_min_free_memory_mb, 0))
+        budget_mb = int(max(self.cuda_vram_budget_mb, 0))
+        if minimum_free_mb <= 0 and budget_mb <= 0:
+            return
+        snapshot = _query_cuda_memory_snapshot()
+        if snapshot is None:
+            raise NonRetryableAudioStageError(
+                "Unable to query NVIDIA GPU memory before starting IndexTTS on CUDA. "
+                "Ensure nvidia-smi is available and retry."
+            )
+        if self._snapshot_satisfies_cuda_startup_constraints(snapshot=snapshot):
+            return
+        release_torch_device_memory_with_reporting(
+            device="cuda",
+            description="IndexTTS subprocess startup preparation",
+        )
+        snapshot = _query_cuda_memory_snapshot()
+        if snapshot is None:
+            raise NonRetryableAudioStageError(
+                "Unable to query NVIDIA GPU memory after preparing IndexTTS CUDA startup. "
+                "Ensure nvidia-smi is available and retry."
+            )
+        if self._snapshot_satisfies_cuda_startup_constraints(snapshot=snapshot):
+            return
+        wait_seconds = max(float(self.cuda_startup_wait_seconds), 0.0)
+        poll_seconds = max(float(self.cuda_startup_poll_seconds), 0.1)
+        event_bus.publish(
+            "system_message",
+            (
+                "Waiting for IndexTTS CUDA VRAM budget/headroom before startup "
+                f"({self._format_cuda_startup_constraint_detail(snapshot=snapshot)})."
+            ),
+        )
+        deadline = time.monotonic() + wait_seconds
+        latest_snapshot = snapshot
+        while time.monotonic() < deadline:
+            time.sleep(poll_seconds)
+            snapshot = _query_cuda_memory_snapshot()
+            if snapshot is None:
+                raise NonRetryableAudioStageError(
+                    "Lost NVIDIA GPU memory telemetry while waiting to start "
+                    "IndexTTS on CUDA. Ensure nvidia-smi is available and retry."
+                )
+            latest_snapshot = snapshot
+            if self._snapshot_satisfies_cuda_startup_constraints(snapshot=snapshot):
+                event_bus.publish(
+                    "system_message",
+                    (
+                        "Detected enough IndexTTS CUDA VRAM budget/headroom to continue "
+                        f"startup ({self._format_cuda_startup_constraint_detail(snapshot=snapshot)})."
+                    ),
+                )
+                return
+        raise NonRetryableAudioStageError(
+            "Insufficient CUDA VRAM budget/headroom to start IndexTTS. "
+            f"{self._format_cuda_startup_constraint_detail(snapshot=latest_snapshot)}. "
+            "Reduce concurrent CUDA workloads and retry."
+        )
+
+    def _evict_cached_subprocess_worker(
+        self,
+        *,
+        expected_worker: _PersistentIndexTTSSubprocessWorker | None = None,
+    ) -> None:
+        """Remove one cached worker so the next request recreates it."""
+        key = self._runtime_key()
+        cached_worker: _PersistentIndexTTSSubprocessWorker | None = None
+        with _SHARED_RUNTIME_LOCK:
+            existing_worker = _SHARED_SUBPROCESS_WORKERS.get(key)
+            if existing_worker is None:
+                return
+            if expected_worker is not None and existing_worker is not expected_worker:
+                return
+            cached_worker = _SHARED_SUBPROCESS_WORKERS.pop(key, None)
+        if cached_worker is not None:
+            cached_worker.close()
 
     def _runtime_key(self) -> _IndexTTSRuntimeKey:
         """Build the stable cache key for this gateway configuration."""
@@ -904,5 +1227,3 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             uv_executable=self.uv_executable,
             stream_subprocess_output=self.stream_subprocess_output,
         )
-
-

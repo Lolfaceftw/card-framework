@@ -49,7 +49,7 @@ dependencies = [
     "nltk>=3.8.1",
     "deepmultilingualpunctuation",
     "tiktoken",
-    "textual",
+    "textual[syntax]>=8.0.2",
     "unidecode",
     "uv>=0.10.0",
     "python-dotenv>=1.2.2",

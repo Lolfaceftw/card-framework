@@ -300,3 +300,81 @@ Google judge cost was added once per contestant, including the local open/open-w
 2. The repo defaults enable thinking/reasoning in several providers, including Anthropic and Google, so real billed usage can exceed this estimate.
 3. This plan assumes the open/open-weight contestant runs locally. If it is moved to a paid API, the budget changes materially.
 4. This reference is for the `5m`-only, `max_iterations=0`, `10 samples` funded-wrapper plan, with the optional postprocess revision helper available afterward for capped runs that need one more cheap summarizer pass.
+
+## Final retained-cohort result snapshot after postprocess salvage (2026-04-03)
+
+The funded session `8ed6bf66-727a-40a0-a9e6-361918ebff40` was eventually brought
+back to a clean retained cohort for all four providers. Every provider ended
+with `10/10` retained completed samples after retrying the OpenAI salvage sample
+that was temporarily blocked by `429` TPM pressure.
+
+### Final provider table
+
+| Rank | Provider | Retained | Completed | Failed | Direct Pass | Postprocess Revised | Factualness | Naturalness | Speaker Grammar | Composite |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `anthropic_claude_haiku_4_5` | 10 | 10 | 0 | 7 | 3 | 0.5830 | 0.7580 | 0.4660 | 0.6023 |
+| 2 | `deepseek_chat` | 10 | 10 | 0 | 2 | 8 | 0.8160 | 0.4160 | 0.4920 | 0.5746 |
+| 3 | `vllm_default` | 10 | 10 | 0 | 0 | 10 | 0.3406 | 0.6330 | 0.5920 | 0.5219 |
+| 4 | `openai_gpt_5_4_mini` | 10 | 10 | 0 | 5 | 5 | 0.7240 | 0.5483 | 0.2763 | 0.5162 |
+
+### Overall retained-cohort average
+
+| Retained Total | Completed | Failed | Mean Factualness | Mean Naturalness | Mean Speaker Grammar | Mean Composite |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 40 | 40 | 0 | 0.6159 | 0.5888 | 0.4566 | 0.5538 |
+
+### Interpretation: strengths and weaknesses by provider
+
+#### `anthropic_claude_haiku_4_5`
+
+- Strength: best overall composite and best naturalness (`0.7580`)
+- Strength: strong direct-pass rate (`7/10`) without needing much salvage
+- Weakness: only mid-pack on factualness (`0.5830`)
+- Weakness: speaker-grammar fidelity is acceptable but not category-leading
+
+Working interpretation: Anthropic won this run mainly by sounding the most
+natural and consistently readable, not by being the most transcript-grounded.
+
+#### `deepseek_chat`
+
+- Strength: best factualness by a wide margin (`0.8160`)
+- Strength: good composite ceiling when a sample lands cleanly
+- Weakness: weakest naturalness (`0.4160`)
+- Weakness: revised samples were much weaker than the two direct-pass samples
+
+Working interpretation: DeepSeek behaved like the most content-faithful model,
+but often paid for that with stiffer, less natural delivery.
+
+#### `openai_gpt_5_4_mini`
+
+- Strength: second-best factualness (`0.7240`)
+- Strength: some very strong individual samples when content and tone aligned
+- Weakness: worst speaker-grammar similarity by far (`0.2763`)
+- Weakness: high variance; the revised half of the cohort underperformed the
+  direct-pass half
+
+Working interpretation: GPT-5.4 mini did not mainly lose on factual grounding.
+It lost because this benchmark weights speaker grammar equally with factualness
+and naturalness, and OpenAI repeatedly produced summaries that were judged as
+poor matches for speaker-specific grammar/register even when the content itself
+was mostly grounded.
+
+#### `vllm_default`
+
+- Strength: best speaker-grammar similarity (`0.5920`)
+- Strength: second-best naturalness (`0.6330`)
+- Strength: lowest variance of the four providers in this run
+- Weakness: worst factualness by far (`0.3406`)
+- Weakness: every retained sample needed the postprocess revision path
+
+Working interpretation: the local Qwen/vLLM setup was best at reproducing the
+surface feel of the speakers, but worst at staying tightly grounded to the
+underlying transcript facts.
+
+### Short summary
+
+- Anthropic won by sounding the most natural.
+- DeepSeek won factual grounding.
+- vLLM won speaker-style fidelity.
+- OpenAI landed in an awkward middle: good factualness, decent naturalness, but
+  very weak speaker-grammar matching, which pulled its composite below vLLM.

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 import sqlite3
 import sys
 from types import SimpleNamespace
+from typing import cast
 
 import card_framework.cli.setup_and_run as setup_and_run
 import pytest
+from card_framework.cli.frontend_models import BenchmarkLaunchRequest, FrontendResult
 from card_framework.runtime.pipeline_sessions import PipelineSessionStore
 from card_framework.runtime.pipeline_sessions import PipelineResumePlan
 from card_framework.shared.perf import report_loading_duration
@@ -39,16 +42,34 @@ def test_build_run_overrides_uses_explicit_output_root(
 
     overrides = setup_and_run.build_run_overrides(run_id="run123")
 
-    assert f"audio.work_dir={output_root.joinpath('audio_stage').resolve().as_posix()}" in overrides
+    assert (
+        f"audio.work_dir={output_root.joinpath('audio_stage').resolve().as_posix()}"
+        in overrides
+    )
     assert (
         f"audio.eta.store_path={output_root.joinpath('audio_stage', 'eta_history.sqlite3').resolve().as_posix()}"
         in overrides
     )
-    assert f"audio.output_transcript_path={output_root.joinpath('transcript.json').resolve().as_posix()}" in overrides
-    assert f"transcript_path={output_root.joinpath('transcript.json').resolve().as_posix()}" in overrides
-    assert f"audio.voice_clone.runner_project_dir={runner_dir.resolve().as_posix()}" in overrides
-    assert f"audio.voice_clone.cfg_path={checkpoints_dir.joinpath('config.yaml').resolve().as_posix()}" in overrides
-    assert f"audio.voice_clone.model_dir={checkpoints_dir.resolve().as_posix()}" in overrides
+    assert (
+        f"audio.output_transcript_path={output_root.joinpath('transcript.json').resolve().as_posix()}"
+        in overrides
+    )
+    assert (
+        f"transcript_path={output_root.joinpath('transcript.json').resolve().as_posix()}"
+        in overrides
+    )
+    assert (
+        f"audio.voice_clone.runner_project_dir={runner_dir.resolve().as_posix()}"
+        in overrides
+    )
+    assert (
+        f"audio.voice_clone.cfg_path={checkpoints_dir.joinpath('config.yaml').resolve().as_posix()}"
+        in overrides
+    )
+    assert (
+        f"audio.voice_clone.model_dir={checkpoints_dir.resolve().as_posix()}"
+        in overrides
+    )
     assert "session.enabled=true" in overrides
     assert "session.session_id=run123" in overrides
     assert (
@@ -186,12 +207,183 @@ def test_apply_interactive_menu_selection_enables_duration_sweep_defaults() -> N
     assert updated.duration_presets == "30s,1m,5m"
 
 
+def test_build_textual_pipeline_expected_stages_covers_runtime_phases() -> None:
+    selection = setup_and_run.InteractiveMenuSelection(
+        mode="stage1_single",
+        overrides=(
+            "audio.voice_clone.enabled=true",
+            "audio.interjector.enabled=true",
+        ),
+    )
+
+    assert setup_and_run.build_textual_pipeline_expected_stages(selection) == (
+        "Source separation",
+        "Transcription",
+        "Diarization",
+        "Speaker samples",
+        "Summarizer & Critic",
+        "Voice cloning",
+        "Interjection",
+    )
+
+
+def test_build_textual_pipeline_expected_stages_for_stage_four_only() -> None:
+    selection = setup_and_run.InteractiveMenuSelection(mode="stage4_interjector")
+
+    assert setup_and_run.build_textual_pipeline_expected_stages(selection) == (
+        "Interjection",
+    )
+
+
+def test_build_textual_pipeline_expected_stages_handles_deferred_speaker_samples() -> (
+    None
+):
+    selection = setup_and_run.InteractiveMenuSelection(
+        mode="stage2_transcript",
+        overrides=(
+            "audio.voice_clone.enabled=true",
+            "audio.interjector.enabled=false",
+            "audio.speaker_samples.defer_until_voice_clone=true",
+        ),
+    )
+
+    assert setup_and_run.build_textual_pipeline_expected_stages(selection) == (
+        "Summarizer & Critic",
+        "Speaker samples",
+        "Voice cloning",
+    )
+
+
+def test_build_textual_pipeline_expected_stages_uses_resume_stage() -> None:
+    selection = setup_and_run.InteractiveMenuSelection(
+        mode="resume_session",
+        resume_session="session-123",
+    )
+
+    assert setup_and_run.build_textual_pipeline_expected_stages(
+        selection,
+        resume_stage="stage-4",
+    ) == ("Interjection",)
+
+
+def test_build_textual_setup_and_run_command_replays_selected_args(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Textual monitor runs should replay wrapper args through a child command."""
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    args = setup_and_run.parse_args(
+        [
+            "--audio-path",
+            "episode-a.mp3",
+            "--audio-path",
+            "episode-b.mp3",
+            "--duration-sweep",
+            "--duration-presets",
+            "30s,1m",
+            "--override",
+            "selection.llm=deepseek_chat",
+            "--setup-only",
+            "--uv-executable",
+            "uvx",
+            "--git-executable",
+            "gitx",
+            "--workspace-root",
+            str(tmp_path),
+            "--output-root",
+            "outputs",
+            "--config-file",
+            str(tmp_path / "config.yaml"),
+        ]
+    )
+
+    command = setup_and_run.build_textual_setup_and_run_command(args)
+
+    assert command[:6] == (
+        "uvx",
+        "run",
+        "python",
+        "-u",
+        "-m",
+        "card_framework.cli.setup_and_run",
+    )
+    assert "--no-menu" in command
+    assert command.count("--audio-path") == 2
+    assert "--duration-sweep" in command
+    assert "--duration-presets" in command
+    assert "30s,1m" in command
+    assert "selection.llm=deepseek_chat" in command
+    assert "--setup-only" in command
+    assert "--workspace-root" in command
+    assert "--output-root" in command
+    assert "--config-file" in command
+
+
+def test_build_textual_benchmark_command_wraps_request_inside_setup_and_run(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Textual benchmark monitoring should preserve wrapper preflight behavior."""
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    args = setup_and_run.parse_args(
+        [
+            "--uv-executable",
+            "uvx",
+            "--git-executable",
+            "gitx",
+            "--skip-repo-update",
+            "--force-sync",
+            "--force-model-download",
+            "--workspace-root",
+            str(tmp_path),
+        ]
+    )
+    request = BenchmarkLaunchRequest(
+        kind="sporc_benchmark",
+        command=(
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "card_framework.benchmark.summarizer_critic.sporc",
+            "execute",
+        ),
+        description="Run SPoRC summarizer-critic benchmark",
+    )
+
+    command = setup_and_run.build_textual_benchmark_command(request=request, args=args)
+
+    assert command[:6] == (
+        "uvx",
+        "run",
+        "python",
+        "-u",
+        "-m",
+        "card_framework.cli.setup_and_run",
+    )
+    assert "--frontend-benchmark-request-json" in command
+    assert "--skip-repo-update" in command
+    assert "--force-sync" in command
+    assert "--force-model-download" in command
+    payload = command[command.index("--frontend-benchmark-request-json") + 1]
+    decoded = setup_and_run.deserialize_frontend_benchmark_request(payload)
+    assert decoded == request
+
+
 def test_resolve_transcript_metadata_path_uses_workspace_root(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     """Resolve transcript metadata paths relative to the workspace root."""
-    manifest_path = tmp_path / "artifacts" / "audio_stage" / "runs" / "r1" / "speaker_samples" / "manifest.json"
+    manifest_path = (
+        tmp_path
+        / "artifacts"
+        / "audio_stage"
+        / "runs"
+        / "r1"
+        / "speaker_samples"
+        / "manifest.json"
+    )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text('{"artifacts": []}\n', encoding="utf-8")
     transcript_path = tmp_path / "transcript.json"
@@ -223,7 +415,9 @@ def test_run_pipeline_uses_output_root_for_packaged_mode(
 ) -> None:
     """Run the child main module from the explicit output root in packaged mode."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("audio:\n  voice_clone:\n    enabled: false\n", encoding="utf-8")
+    config_path.write_text(
+        "audio:\n  voice_clone:\n    enabled: false\n", encoding="utf-8"
+    )
     output_root = tmp_path / "outputs"
 
     monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", tmp_path)
@@ -242,7 +436,9 @@ def test_run_pipeline_uses_output_root_for_packaged_mode(
 
     monkeypatch.setattr(setup_and_run.subprocess, "run", _fake_subprocess_run)
 
-    setup_and_run.run_pipeline(uv_executable="uv", overrides=["orchestrator.target_seconds=180"])
+    setup_and_run.run_pipeline(
+        uv_executable="uv", overrides=["orchestrator.target_seconds=180"]
+    )
 
     assert recorded["cwd"] == str(output_root.resolve())
     assert recorded["check"] is False
@@ -262,7 +458,9 @@ def test_run_pipeline_raises_keyboard_interrupt_for_exit_code_130(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("audio:\n  voice_clone:\n    enabled: false\n", encoding="utf-8")
+    config_path.write_text(
+        "audio:\n  voice_clone:\n    enabled: false\n", encoding="utf-8"
+    )
 
     monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(setup_and_run, "OUTPUT_ROOT", tmp_path)
@@ -298,13 +496,20 @@ def test_build_resume_overrides_retargets_stage_three_inputs(tmp_path: Path) -> 
         artifacts={
             "transcript_path": str(tmp_path / "session.transcript.json"),
             "session_summary_path": str(tmp_path / "summary.xml"),
-            "voice_clone_manifest_path": str(tmp_path / "voice_clone" / "manifest.json"),
+            "voice_clone_manifest_path": str(
+                tmp_path / "voice_clone" / "manifest.json"
+            ),
             "interjector_manifest_path": str(
                 tmp_path / "interjector" / "interjector_manifest.json"
             ),
         },
         options={"voice_clone_enabled": True, "interjector_enabled": False},
-        stage_validity={"stage-1": True, "stage-2": True, "stage-3": False, "stage-4": False},
+        stage_validity={
+            "stage-1": True,
+            "stage-2": True,
+            "stage-3": False,
+            "stage-4": False,
+        },
         last_error="",
         last_exit_reason="paused",
     )
@@ -312,7 +517,10 @@ def test_build_resume_overrides_retargets_stage_three_inputs(tmp_path: Path) -> 
     overrides = setup_and_run.build_resume_overrides(plan)
 
     assert "pipeline.start_stage=stage-3" in overrides
-    assert f"transcript_path={plan.artifacts['transcript_path'].replace(chr(92), '/')}" in overrides
+    assert (
+        f"transcript_path={plan.artifacts['transcript_path'].replace(chr(92), '/')}"
+        in overrides
+    )
     assert (
         f"pipeline.final_summary_path={plan.artifacts['session_summary_path'].replace(chr(92), '/')}"
         in overrides
@@ -398,7 +606,7 @@ def test_main_auto_menu_applies_runtime_selection_overrides(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Default interactive launches should route through the setup menu."""
+    """Default interactive launches should route through the Textual frontend."""
     monkeypatch.chdir(tmp_path)
     audio_path = tmp_path / "episode.mp3"
     audio_path.write_bytes(b"ID3")
@@ -406,15 +614,18 @@ def test_main_auto_menu_applies_runtime_selection_overrides(
     monkeypatch.setattr(setup_and_run, "is_interactive_console", lambda: True)
     monkeypatch.setattr(
         setup_and_run,
-        "run_interactive_menu",
-        lambda: setup_and_run.InteractiveMenuSelection(
-            mode="stage1_single",
-            audio_paths=(str(audio_path),),
-            output_root="menu_outputs",
-            overrides=(
-                "selection.llm=anthropic_claude_opus",
-                "selection.embedding=disabled",
-                "audio.voice_clone.enabled=false",
+        "launch_interactive_frontend",
+        lambda **_: FrontendResult(
+            action="pipeline",
+            pipeline_selection=setup_and_run.InteractiveMenuSelection(
+                mode="stage1_single",
+                audio_paths=(str(audio_path),),
+                output_root="menu_outputs",
+                overrides=(
+                    "selection.llm=anthropic_claude_opus",
+                    "selection.embedding=disabled",
+                    "audio.voice_clone.enabled=false",
+                ),
             ),
         ),
     )
@@ -491,6 +702,425 @@ def test_main_auto_menu_applies_runtime_selection_overrides(
         item == f"audio.audio_path={audio_path.resolve().as_posix()}"
         for item in recorded["overrides"]
     )
+
+
+def test_main_textual_pipeline_selection_runs_inside_textual_monitor(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Interactive Textual pipeline launches should replay through the monitor."""
+    monkeypatch.chdir(tmp_path)
+    audio_path = tmp_path / "episode.mp3"
+    audio_path.write_bytes(b"ID3")
+    monkeypatch.setattr(setup_and_run, "is_interactive_console", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "launch_interactive_frontend",
+        lambda **_: FrontendResult(
+            action="pipeline",
+            pipeline_selection=setup_and_run.InteractiveMenuSelection(
+                mode="stage1_single",
+                audio_paths=(str(audio_path),),
+                output_root="monitor_outputs",
+                overrides=("selection.llm=deepseek_chat",),
+            ),
+            ui_mode="textual",
+        ),
+    )
+    recorded: dict[str, object] = {}
+
+    def _fake_launch_textual_execution_monitor(**kwargs) -> int:
+        recorded.update(kwargs)
+        return 12
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "launch_textual_execution_monitor",
+        _fake_launch_textual_execution_monitor,
+    )
+
+    exit_code = setup_and_run.main([])
+
+    assert exit_code == 12
+    assert recorded["title"] == "setup_and_run"
+    command = cast(tuple[str, ...], recorded["command"])
+    assert "--no-menu" in command
+    assert "--audio-path" in command
+    assert str(audio_path) in command
+    assert "selection.llm=deepseek_chat" in command
+    summary_lines = cast(tuple[str, ...], recorded["summary_lines"])
+    assert any(line.startswith("Workflow:") for line in summary_lines)
+    assert recorded["cwd"] == tmp_path.resolve()
+
+
+def test_main_textual_benchmark_request_runs_inside_textual_monitor(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Interactive Textual benchmark launches should stay inside the monitor."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_and_run, "is_interactive_console", lambda: True)
+    request = BenchmarkLaunchRequest(
+        kind="sporc_benchmark",
+        command=(
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "card_framework.benchmark.summarizer_critic.sporc",
+            "execute",
+        ),
+        description="Run SPoRC summarizer-critic benchmark",
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "launch_interactive_frontend",
+        lambda **_: FrontendResult(
+            action="benchmark",
+            benchmark_request=request,
+            ui_mode="textual",
+        ),
+    )
+    recorded: dict[str, object] = {}
+
+    def _fake_launch_textual_execution_monitor(**kwargs) -> int:
+        recorded.update(kwargs)
+        return 7
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "launch_textual_execution_monitor",
+        _fake_launch_textual_execution_monitor,
+    )
+
+    exit_code = setup_and_run.main([])
+
+    assert exit_code == 7
+    assert recorded["title"] == request.description
+    command = cast(tuple[str, ...], recorded["command"])
+    assert command[:6] == (
+        "uv",
+        "run",
+        "python",
+        "-u",
+        "-m",
+        "card_framework.cli.setup_and_run",
+    )
+    assert "--frontend-benchmark-request-json" in command
+    payload = command[command.index("--frontend-benchmark-request-json") + 1]
+    assert setup_and_run.deserialize_frontend_benchmark_request(payload) == request
+    summary_lines = cast(tuple[str, ...], recorded["summary_lines"])
+    assert any(line.startswith("Workflow:") for line in summary_lines)
+    assert recorded["cwd"] == tmp_path.resolve()
+
+
+def test_main_frontend_benchmark_request_runs_command_and_returns_exit_code(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Frontend benchmark launches should bypass pipeline bootstrap and run directly."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_and_run, "is_interactive_console", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "launch_interactive_frontend",
+        lambda **_: FrontendResult(
+            action="benchmark",
+            benchmark_request=BenchmarkLaunchRequest(
+                kind="sporc_benchmark",
+                command=(
+                    "uv",
+                    "run",
+                    "python",
+                    "-m",
+                    "card_framework.benchmark.summarizer_critic.sporc",
+                    "execute",
+                ),
+                description="Run SPoRC summarizer-critic benchmark",
+            ),
+        ),
+    )
+    recorded: dict[str, object] = {}
+
+    def _fake_run_frontend_benchmark_request(
+        *,
+        request,
+        uv_executable,
+        git_executable,
+        skip_repo_update=False,
+        force_sync=False,
+        force_model_download=False,
+    ) -> int:
+        recorded["command"] = tuple(request.command)
+        recorded["uv_executable"] = uv_executable
+        recorded["git_executable"] = git_executable
+        recorded["skip_repo_update"] = skip_repo_update
+        recorded["force_sync"] = force_sync
+        recorded["force_model_download"] = force_model_download
+        return 7
+
+    monkeypatch.setattr(
+        setup_and_run,
+        "run_frontend_benchmark_request",
+        _fake_run_frontend_benchmark_request,
+    )
+
+    exit_code = setup_and_run.main([])
+
+    assert exit_code == 7
+    assert recorded["command"] == (
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "card_framework.benchmark.summarizer_critic.sporc",
+        "execute",
+    )
+    assert recorded["uv_executable"] == "uv"
+    assert recorded["git_executable"] == "git"
+    assert recorded["skip_repo_update"] is False
+    assert recorded["force_sync"] is False
+    assert recorded["force_model_download"] is False
+
+
+def test_run_frontend_benchmark_request_prepares_voice_clone_runtime_when_needed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Voice-clone benchmark launches should run wrapper preflight before execution."""
+    monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        setup_and_run,
+        "check_prerequisites",
+        lambda **kwargs: calls.append(("preflight", kwargs)),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "report_loading_duration",
+        lambda *args, **kwargs: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **kwargs: (
+            calls.append(("repo", kwargs))
+            or setup_and_run.RepoSyncResult(
+                cloned=False,
+                updated=False,
+                pull_skipped_dirty=False,
+                lfs_pulled=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **kwargs: calls.append(("sync", kwargs)) or (),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **kwargs: (
+            calls.append(("model", kwargs))
+            or setup_and_run.ModelProvisionResult(downloaded=False, source="existing")
+        ),
+    )
+    monkeypatch.setattr(
+        setup_and_run.subprocess,
+        "run",
+        lambda *args, **kwargs: (
+            calls.append(("subprocess", kwargs)) or SimpleNamespace(returncode=0)
+        ),
+    )
+
+    calls: list[tuple[str, object]] = []
+    request = BenchmarkLaunchRequest(
+        kind="summary_matrix",
+        command=("uv", "run", "python", "-m", "card_framework.cli.run_summary_matrix"),
+        description="Run summary matrix experiment",
+    )
+
+    exit_code = setup_and_run.run_frontend_benchmark_request(
+        request=request,
+        uv_executable="uv",
+        git_executable="git",
+    )
+
+    assert exit_code == 0
+    assert [name for name, _payload in calls] == [
+        "preflight",
+        "repo",
+        "sync",
+        "model",
+        "subprocess",
+    ]
+
+
+def test_run_frontend_benchmark_request_requires_git_for_qmsum_prepare_if_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """QMSum prepare-on-demand launches should keep Git in wrapper preflight."""
+    monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", tmp_path)
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(
+        setup_and_run,
+        "check_prerequisites",
+        lambda **kwargs: recorded.setdefault("preflight", kwargs),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: False)
+    monkeypatch.setattr(
+        setup_and_run.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+
+    request = BenchmarkLaunchRequest(
+        kind="qmsum_benchmark",
+        command=(
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "card_framework.benchmark.summarizer_critic",
+            "execute",
+            "--prepare-if-missing",
+        ),
+        description="Run QMSum summarizer-critic benchmark",
+    )
+
+    exit_code = setup_and_run.run_frontend_benchmark_request(
+        request=request,
+        uv_executable="uv",
+        git_executable="git",
+    )
+
+    assert exit_code == 0
+    assert recorded["preflight"] == {
+        "uv_executable": "uv",
+        "git_executable": "git",
+        "require_git": True,
+        "require_ffmpeg": False,
+    }
+
+
+def test_run_frontend_benchmark_request_skips_ffmpeg_for_transcript_only_sporc(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Transcript-only SPoRC launches should not require ffmpeg preflight."""
+    monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", tmp_path)
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(
+        setup_and_run,
+        "check_prerequisites",
+        lambda **kwargs: recorded.setdefault("preflight", kwargs),
+    )
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: False)
+    monkeypatch.setattr(
+        setup_and_run.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+
+    request = BenchmarkLaunchRequest(
+        kind="sporc_benchmark",
+        command=(
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "card_framework.benchmark.summarizer_critic.sporc",
+            "execute",
+            "--transcript-only",
+        ),
+        description="Run SPoRC summarizer-critic benchmark",
+    )
+
+    exit_code = setup_and_run.run_frontend_benchmark_request(
+        request=request,
+        uv_executable="uv",
+        git_executable="git",
+    )
+
+    assert exit_code == 0
+    assert recorded["preflight"] == {
+        "uv_executable": "uv",
+        "git_executable": "git",
+        "require_git": False,
+        "require_ffmpeg": False,
+    }
+
+
+def test_run_frontend_benchmark_request_forwards_bootstrap_control_flags(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Benchmark bootstrap controls should survive the interactive wrapper path."""
+    monkeypatch.setattr(setup_and_run, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(setup_and_run, "check_prerequisites", lambda **_: None)
+    monkeypatch.setattr(setup_and_run, "is_repo_checkout_runtime", lambda: True)
+    monkeypatch.setattr(
+        setup_and_run,
+        "report_loading_duration",
+        lambda *args, **kwargs: contextlib.nullcontext(),
+    )
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_repo",
+        lambda **kwargs: (
+            recorded.setdefault("repo", kwargs)
+            or setup_and_run.RepoSyncResult(
+                cloned=False,
+                updated=False,
+                pull_skipped_dirty=False,
+                lfs_pulled=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "smart_sync_projects",
+        lambda **kwargs: recorded.setdefault("sync", kwargs) or (),
+    )
+    monkeypatch.setattr(
+        setup_and_run,
+        "ensure_indextts_model",
+        lambda **kwargs: (
+            recorded.setdefault("model", kwargs)
+            or setup_and_run.ModelProvisionResult(downloaded=False, source="existing")
+        ),
+    )
+    monkeypatch.setattr(
+        setup_and_run.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+    request = BenchmarkLaunchRequest(
+        kind="summary_matrix",
+        command=("uv", "run", "python", "-m", "card_framework.cli.run_summary_matrix"),
+        description="Run summary matrix experiment",
+    )
+
+    exit_code = setup_and_run.run_frontend_benchmark_request(
+        request=request,
+        uv_executable="uv",
+        git_executable="git",
+        skip_repo_update=True,
+        force_sync=True,
+        force_model_download=True,
+    )
+
+    assert exit_code == 0
+    assert recorded["repo"] == {"git_executable": "git", "skip_update": True}
+    assert recorded["sync"] == {
+        "uv_executable": "uv",
+        "force_sync": True,
+        "include_index_tts": True,
+    }
+    assert recorded["model"] == {"uv_executable": "uv", "force_download": True}
 
 
 def test_main_batch_audio_runs_use_isolated_output_roots(
@@ -751,9 +1381,7 @@ def test_main_duration_sweep_reuses_first_episode_transcript_for_later_presets(
         ]
     )
 
-    sweep_root = (
-        tmp_path / "artifacts" / "pipeline_duration_sweeps" / "20260321_150500"
-    )
+    sweep_root = tmp_path / "artifacts" / "pipeline_duration_sweeps" / "20260321_150500"
     manifest_path = sweep_root / "duration_sweep_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
@@ -810,7 +1438,9 @@ def test_main_duration_sweep_skips_existing_preset_outputs(
         "<SPEAKER_00>Thirty</SPEAKER_00>\n",
         encoding="utf-8",
     )
-    speaker_manifest = preset_30_root / "audio_stage" / "speaker_samples" / "manifest.json"
+    speaker_manifest = (
+        preset_30_root / "audio_stage" / "speaker_samples" / "manifest.json"
+    )
     speaker_manifest.parent.mkdir(parents=True, exist_ok=True)
     speaker_manifest.write_text('{"artifacts": []}\n', encoding="utf-8")
     (preset_30_root / "transcript.json").write_text(
@@ -937,9 +1567,10 @@ def test_main_duration_sweep_skips_existing_preset_outputs(
     assert pipeline_calls[0]["start_stage"] == "stage-2"
     assert pipeline_calls[0]["target_seconds"] == 300
     assert Path(pipeline_calls[0]["output_root"]) == episode_root / "5m"
-    assert pipeline_calls[0]["transcript_override"] == (
-        preset_30_root / "transcript.json"
-    ).resolve().as_posix()
+    assert (
+        pipeline_calls[0]["transcript_override"]
+        == (preset_30_root / "transcript.json").resolve().as_posix()
+    )
     assert [run["status"] for run in manifest["runs"]] == ["skipped", "skipped", "ok"]
     assert [run["duration_preset"] for run in manifest["runs"]] == [
         "30s",
@@ -1363,7 +1994,11 @@ def test_batch_run_preserves_bootstrap_error_when_session_store_reopen_fails(
     )
     monkeypatch.setattr(setup_and_run, "run_calibration", lambda **_: None)
     monkeypatch.setattr(setup_and_run, "print_summary", lambda **_: None)
-    monkeypatch.setattr(setup_and_run, "write_batch_manifest", lambda **_: tmp_path / "batch_manifest.json")
+    monkeypatch.setattr(
+        setup_and_run,
+        "write_batch_manifest",
+        lambda **_: tmp_path / "batch_manifest.json",
+    )
     monkeypatch.setattr(setup_and_run, "print_batch_summary", lambda **_: None)
 
     def _fake_resolve_repo_backed_boolean_override(

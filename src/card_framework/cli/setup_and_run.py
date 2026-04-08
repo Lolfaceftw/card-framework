@@ -15,6 +15,17 @@ import sys
 from typing import Any, Literal, Mapping, Sequence, TypeAlias, cast
 from uuid import uuid4
 
+from card_framework.cli.frontend_models import (
+    BenchmarkKind,
+    BenchmarkLaunchRequest,
+    FrontendResult,
+    InteractiveMenuSelection,
+)
+from card_framework.cli.frontend_services import (
+    describe_benchmark_request,
+    describe_pipeline_selection,
+    load_frontend_defaults,
+)
 from card_framework.runtime.bootstrap import ensure_index_tts_runtime
 from card_framework.runtime.pipeline_sessions import (
     PipelineResumePlan,
@@ -31,6 +42,7 @@ from card_framework.shared.runtime_layout import resolve_runtime_layout
 
 MAIN_MODULE = "card_framework.cli.main"
 CALIBRATE_MODULE = "card_framework.cli.calibrate"
+SETUP_AND_RUN_MODULE = "card_framework.cli.setup_and_run"
 DEFAULT_CONFIG_PATH: Path | None = None
 INDEX_TTS_DIR: Path | None = None
 INDEX_TTS_CHECKPOINTS_DIR: Path | None = None
@@ -59,15 +71,6 @@ VOICE_CLONE_REQUIRED_REPO_PATHS = (
     "src/card_framework/_vendor/index_tts/uv.lock",
 )
 PipelineStartStage: TypeAlias = Literal["stage-1", "stage-2", "stage-3", "stage-4"]
-InteractiveMenuMode: TypeAlias = Literal[
-    "stage1_single",
-    "stage1_batch",
-    "stage1_batch_duration_sweep",
-    "stage2_transcript",
-    "stage3_summary",
-    "resume_session",
-    "setup_only",
-]
 DEFAULT_DURATION_SWEEP_PRESET_LABELS = ("30s", "1m", "5m")
 DURATION_SWEEP_PRESET_SECONDS = {
     "30s": 30,
@@ -142,21 +145,6 @@ class ModelProvisionResult:
     source: str
 
 
-@dataclass(slots=True, frozen=True)
-class InteractiveMenuSelection:
-    """Represent one interactive setup-and-run menu result."""
-
-    mode: InteractiveMenuMode
-    audio_paths: tuple[str, ...] = ()
-    duration_presets: tuple[str, ...] = ()
-    transcript_path: str | None = None
-    voiceclone_from_summary: str | None = None
-    resume_session: str | None = None
-    output_root: str | None = None
-    setup_only: bool = False
-    overrides: tuple[str, ...] = ()
-
-
 def _emit_setup_status(message: str) -> None:
     """Emit one operator-facing setup status line to stderr."""
     print(message, file=sys.stderr, flush=True)
@@ -180,16 +168,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--menu",
         action="store_true",
         help=(
-            "Force the interactive setup menu even when explicit run inputs were "
-            "already supplied."
+            "Force the interactive setup frontend even when explicit run inputs "
+            "were already supplied."
         ),
     )
     menu_group.add_argument(
         "--no-menu",
         action="store_true",
         help=(
-            "Skip the interactive setup menu and use only CLI flags plus the "
-            "existing auto-stage behavior."
+            "Skip the interactive setup frontend and use only CLI flags plus "
+            "the existing auto-stage behavior."
         ),
     )
     parser.add_argument(
@@ -277,6 +265,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--workspace-root", help=argparse.SUPPRESS)
     parser.add_argument("--output-root", help=argparse.SUPPRESS)
     parser.add_argument("--config-file", help=argparse.SUPPRESS)
+    parser.add_argument("--frontend-benchmark-request-json", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -320,7 +309,9 @@ def has_explicit_output_root() -> bool:
 
 def resolve_setup_state_path() -> Path:
     """Return the per-workspace setup-state JSON path."""
-    return (resolve_workspace_root() / "artifacts" / "bootstrap" / "setup_state.json").resolve()
+    return (
+        resolve_workspace_root() / "artifacts" / "bootstrap" / "setup_state.json"
+    ).resolve()
 
 
 def resolve_pipeline_session_store_path() -> Path:
@@ -332,7 +323,9 @@ def resolve_pipeline_session_store_path() -> Path:
 
 def resolve_pipeline_session_root(session_id: str) -> Path:
     """Return the artifact root used for one pipeline session UUID."""
-    return (resolve_output_root() / "artifacts" / "pipeline_sessions" / session_id).resolve()
+    return (
+        resolve_output_root() / "artifacts" / "pipeline_sessions" / session_id
+    ).resolve()
 
 
 def resolve_pipeline_session_summary_path(session_id: str) -> Path:
@@ -533,7 +526,10 @@ def check_prerequisites(
             ),
         )
 
-    required_paths: list[Path] = [Path(__file__).with_name("main.py"), resolve_repo_config_path()]
+    required_paths: list[Path] = [
+        Path(__file__).with_name("main.py"),
+        resolve_repo_config_path(),
+    ]
     if require_git:
         index_tts_dir = resolve_index_tts_dir()
         required_paths.extend(
@@ -549,8 +545,7 @@ def check_prerequisites(
         raise BootstrapError(
             step="preflight",
             message=(
-                "Runtime is missing required path(s): "
-                f"{', '.join(missing_paths)}."
+                f"Runtime is missing required path(s): {', '.join(missing_paths)}."
             ),
         )
 
@@ -562,7 +557,9 @@ def build_tool_guidance(missing_tools: Sequence[str]) -> str:
         "git": "Install Git and ensure `git` is on PATH: https://git-scm.com/downloads",
         "ffmpeg": "Install FFmpeg and add it to PATH: https://ffmpeg.org/download.html",
     }
-    guidance_parts = [guidance_map[tool] for tool in missing_tools if tool in guidance_map]
+    guidance_parts = [
+        guidance_map[tool] for tool in missing_tools if tool in guidance_map
+    ]
     return " ".join(guidance_parts)
 
 
@@ -762,9 +759,7 @@ def resolve_batch_output_root(
         batch_root = output_root.resolve()
     else:
         batch_root = _ensure_unique_directory_path(
-            (
-                workspace_root / "artifacts" / "pipeline_batches" / batch_id
-            ).resolve()
+            (workspace_root / "artifacts" / "pipeline_batches" / batch_id).resolve()
         )
     batch_root.mkdir(parents=True, exist_ok=True)
     return batch_id, batch_root
@@ -786,20 +781,14 @@ def parse_duration_sweep_presets(raw_value: str | None) -> tuple[str, ...]:
     if raw_value is None:
         return DEFAULT_DURATION_SWEEP_PRESET_LABELS
     labels = [
-        item.strip().lower()
-        for item in str(raw_value).split(",")
-        if item.strip()
+        item.strip().lower() for item in str(raw_value).split(",") if item.strip()
     ]
     if not labels:
         raise BootstrapError(
             step="input",
             message="At least one duration preset is required for --duration-sweep.",
         )
-    invalid = [
-        label
-        for label in labels
-        if label not in DURATION_SWEEP_PRESET_SECONDS
-    ]
+    invalid = [label for label in labels if label not in DURATION_SWEEP_PRESET_SECONDS]
     if invalid:
         raise BootstrapError(
             step="input",
@@ -844,7 +833,9 @@ def resolve_duration_sweep_episode_output_root(
     index: int,
 ) -> Path:
     """Return the deterministic per-episode directory inside a duration sweep."""
-    return (sweep_root / f"{index:03d}_{_slugify_batch_audio_name(audio_path)}").resolve()
+    return (
+        sweep_root / f"{index:03d}_{_slugify_batch_audio_name(audio_path)}"
+    ).resolve()
 
 
 def resolve_duration_sweep_preset_output_root(
@@ -988,9 +979,13 @@ def resolve_audio_input(path_value: str) -> Path:
     if not candidate.is_absolute():
         candidate = (resolve_workspace_root() / candidate).resolve()
     if not candidate.exists():
-        raise BootstrapError(step="input", message=f"Audio path does not exist: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"Audio path does not exist: {candidate}"
+        )
     if not candidate.is_file():
-        raise BootstrapError(step="input", message=f"Audio path is not a file: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"Audio path is not a file: {candidate}"
+        )
     return candidate
 
 
@@ -1041,9 +1036,13 @@ def resolve_path_input(path_value: str, *, field_name: str) -> Path:
     if not candidate.is_absolute():
         candidate = (resolve_workspace_root() / candidate).resolve()
     if not candidate.exists():
-        raise BootstrapError(step="input", message=f"{field_name} does not exist: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"{field_name} does not exist: {candidate}"
+        )
     if not candidate.is_file():
-        raise BootstrapError(step="input", message=f"{field_name} is not a file: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"{field_name} is not a file: {candidate}"
+        )
     return candidate
 
 
@@ -1056,9 +1055,13 @@ def resolve_directory_input(path_value: str, *, field_name: str) -> Path:
     if not candidate.is_absolute():
         candidate = (Path.cwd() / candidate).resolve()
     if not candidate.exists():
-        raise BootstrapError(step="input", message=f"{field_name} does not exist: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"{field_name} does not exist: {candidate}"
+        )
     if not candidate.is_dir():
-        raise BootstrapError(step="input", message=f"{field_name} is not a directory: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"{field_name} is not a directory: {candidate}"
+        )
     return candidate
 
 
@@ -1076,15 +1079,32 @@ def resolve_file_input(
     if not candidate.is_absolute():
         candidate = (base_dir / candidate).resolve()
     if not candidate.exists():
-        raise BootstrapError(step="input", message=f"{field_name} does not exist: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"{field_name} does not exist: {candidate}"
+        )
     if not candidate.is_file():
-        raise BootstrapError(step="input", message=f"{field_name} is not a file: {candidate}")
+        raise BootstrapError(
+            step="input", message=f"{field_name} is not a file: {candidate}"
+        )
     return candidate
 
 
 def is_interactive_console() -> bool:
     """Return whether the current invocation can safely prompt a human operator."""
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def has_explicit_cli_run_inputs(args: argparse.Namespace) -> bool:
+    """Return whether explicit CLI flags already define a run path."""
+    return any(
+        (
+            bool(getattr(args, "audio_path", ())),
+            bool(getattr(args, "voiceclone_from_summary", None)),
+            bool(getattr(args, "resume_session", None)),
+            bool(getattr(args, "override", ())),
+            bool(getattr(args, "setup_only", False)),
+        )
+    )
 
 
 def should_launch_interactive_menu(args: argparse.Namespace) -> bool:
@@ -1095,15 +1115,7 @@ def should_launch_interactive_menu(args: argparse.Namespace) -> bool:
         return True
     if not is_interactive_console():
         return False
-    return not any(
-        (
-            bool(getattr(args, "audio_path", ())),
-            bool(getattr(args, "voiceclone_from_summary", None)),
-            bool(getattr(args, "resume_session", None)),
-            bool(getattr(args, "override", ())),
-            bool(getattr(args, "setup_only", False)),
-        )
-    )
+    return not has_explicit_cli_run_inputs(args)
 
 
 def _profile_display_name(profile_name: str) -> str:
@@ -1184,9 +1196,13 @@ def _prompt_menu_choice(
         table.add_column(style="bold cyan", no_wrap=True)
         table.add_column(style="white")
         for index, (_value, label) in enumerate(options, start=1):
-            option_style = "bold bright_white" if index - 1 == default_index else "white"
+            option_style = (
+                "bold bright_white" if index - 1 == default_index else "white"
+            )
             default_note = " [dim](default)[/dim]" if index - 1 == default_index else ""
-            table.add_row(f"{index}.", f"[{option_style}]{label}[/{option_style}]{default_note}")
+            table.add_row(
+                f"{index}.", f"[{option_style}]{label}[/{option_style}]{default_note}"
+            )
         console.print(
             Panel.fit(
                 table,
@@ -1283,7 +1299,9 @@ def _build_profile_choice_options(
     options: list[tuple[str, str]] = [("__keep_current__", keep_current_label)]
     if include_default_stage_option:
         options.append(("default", default_stage_label))
-    for profile_name in resolve_repo_config_child_keys(key_path=("profiles", profile_group)):
+    for profile_name in resolve_repo_config_child_keys(
+        key_path=("profiles", profile_group)
+    ):
         options.append((profile_name, _profile_display_name(profile_name)))
     return options
 
@@ -1403,7 +1421,10 @@ def run_interactive_menu() -> InteractiveMenuSelection:
             options=[
                 ("config_default", "Keep per-stage selections from config"),
                 ("shared_for_all", "Use the shared LLM for all stages"),
-                ("custom", "Choose summarizer, critic, and interjector profiles separately"),
+                (
+                    "custom",
+                    "Choose summarizer, critic, and interjector profiles separately",
+                ),
             ],
             default_index=stage_strategy_default_index,
         )
@@ -1517,9 +1538,7 @@ def run_interactive_menu() -> InteractiveMenuSelection:
             field_name="Source audio path",
         )
         audio_paths = (
-            (str(optional_audio_path),)
-            if optional_audio_path is not None
-            else ()
+            (str(optional_audio_path),) if optional_audio_path is not None else ()
         )
         return InteractiveMenuSelection(
             mode="stage2_transcript",
@@ -1559,9 +1578,7 @@ def apply_interactive_menu_selection(
     args.audio_path = list(selection.audio_paths)
     args.duration_sweep = bool(selection.duration_presets)
     args.duration_presets = (
-        ",".join(selection.duration_presets)
-        if selection.duration_presets
-        else None
+        ",".join(selection.duration_presets) if selection.duration_presets else None
     )
     args.voiceclone_from_summary = selection.voiceclone_from_summary
     args.resume_session = selection.resume_session
@@ -1572,9 +1589,470 @@ def apply_interactive_menu_selection(
         args.override = list(args.override) + [
             f"transcript_path={_path_for_override(Path(selection.transcript_path))}"
         ]
+    if selection.mode == "stage4_interjector":
+        if selection.voiceclone_from_summary is None:
+            raise BootstrapError(
+                step="input",
+                message="Stage-4 frontend selection requires a summary XML path.",
+            )
+        if selection.voice_clone_manifest_path is None:
+            raise BootstrapError(
+                step="input",
+                message="Stage-4 frontend selection requires a voice-clone manifest path.",
+            )
+        args.voiceclone_from_summary = None
+        args.override = list(args.override) + [
+            "pipeline.start_stage=stage-4",
+            f"pipeline.final_summary_path={_path_for_override(Path(selection.voiceclone_from_summary))}",
+            f"pipeline.voice_clone_manifest_path={_path_for_override(Path(selection.voice_clone_manifest_path))}",
+        ]
     if selection.overrides:
         args.override = list(args.override) + list(selection.overrides)
     return args
+
+
+def launch_interactive_frontend(*, uv_executable: str) -> FrontendResult:
+    """Launch the default interactive frontend with a legacy fallback path."""
+    try:
+        from card_framework.cli.textual_frontend import run_textual_frontend
+
+        defaults = load_frontend_defaults(
+            config_path=resolve_repo_config_path(),
+            workspace_root=resolve_workspace_root(),
+        )
+        return run_textual_frontend(defaults=defaults, uv_executable=uv_executable)
+    except Exception as exc:
+        _emit_setup_status(
+            "Textual frontend unavailable; falling back to the legacy prompt menu. "
+            f"Reason: {exc}"
+        )
+        return FrontendResult(
+            action="pipeline",
+            pipeline_selection=run_interactive_menu(),
+        )
+
+
+def serialize_frontend_benchmark_request(request: BenchmarkLaunchRequest) -> str:
+    """Serialize one benchmark request for a monitored wrapper child process."""
+    return json.dumps(
+        {
+            "kind": request.kind,
+            "command": list(request.command),
+            "description": request.description,
+        },
+        separators=(",", ":"),
+    )
+
+
+def deserialize_frontend_benchmark_request(payload: str) -> BenchmarkLaunchRequest:
+    """Deserialize one benchmark request passed through the wrapper CLI."""
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise BootstrapError(
+            step="input",
+            message="Frontend benchmark request payload must be a JSON object.",
+        )
+    kind = str(data.get("kind", "")).strip()
+    description = str(data.get("description", "")).strip()
+    raw_command = data.get("command", ())
+    if not kind or not description or not isinstance(raw_command, list):
+        raise BootstrapError(
+            step="input",
+            message="Frontend benchmark request payload is missing required fields.",
+        )
+    command = tuple(str(part) for part in raw_command if str(part).strip())
+    if not command:
+        raise BootstrapError(
+            step="input",
+            message="Frontend benchmark request payload did not contain a command.",
+        )
+    return BenchmarkLaunchRequest(
+        kind=cast(BenchmarkKind, kind),
+        command=command,
+        description=description,
+    )
+
+
+def build_textual_setup_and_run_command(args: argparse.Namespace) -> tuple[str, ...]:
+    """Build a non-interactive child command for Textual-monitored wrapper runs."""
+    uv_executable = str(getattr(args, "uv_executable", "uv")).strip() or "uv"
+    git_executable = str(getattr(args, "git_executable", "git")).strip() or "git"
+    if is_repo_checkout_runtime():
+        command: list[str] = [
+            uv_executable,
+            "run",
+            "python",
+            "-u",
+            "-m",
+            SETUP_AND_RUN_MODULE,
+        ]
+    else:
+        command = [sys.executable, "-u", "-m", SETUP_AND_RUN_MODULE]
+    command.append("--no-menu")
+    for audio_path in getattr(args, "audio_path", ()) or ():
+        command.extend(["--audio-path", str(audio_path)])
+    if bool(getattr(args, "duration_sweep", False)):
+        command.append("--duration-sweep")
+    duration_presets = getattr(args, "duration_presets", None)
+    if duration_presets:
+        command.extend(["--duration-presets", str(duration_presets)])
+    voiceclone_from_summary = getattr(args, "voiceclone_from_summary", None)
+    if voiceclone_from_summary:
+        command.extend(["--voiceclone-from-summary", str(voiceclone_from_summary)])
+    resume_session = getattr(args, "resume_session", None)
+    if resume_session:
+        command.extend(["--resume-session", str(resume_session)])
+    for override in getattr(args, "override", ()) or ():
+        command.extend(["--override", str(override)])
+    if bool(getattr(args, "setup_only", False)):
+        command.append("--setup-only")
+    if bool(getattr(args, "skip_repo_update", False)):
+        command.append("--skip-repo-update")
+    if bool(getattr(args, "force_sync", False)):
+        command.append("--force-sync")
+    if bool(getattr(args, "force_model_download", False)):
+        command.append("--force-model-download")
+    command.extend(["--uv-executable", uv_executable])
+    command.extend(["--git-executable", git_executable])
+    workspace_root = getattr(args, "workspace_root", None)
+    if workspace_root:
+        command.extend(["--workspace-root", str(workspace_root)])
+    output_root = getattr(args, "output_root", None)
+    if output_root:
+        command.extend(["--output-root", str(output_root)])
+    config_file = getattr(args, "config_file", None)
+    if config_file:
+        command.extend(["--config-file", str(config_file)])
+    if bool(getattr(args, "skip_repo_update", False)):
+        command.append("--skip-repo-update")
+    if bool(getattr(args, "force_sync", False)):
+        command.append("--force-sync")
+    if bool(getattr(args, "force_model_download", False)):
+        command.append("--force-model-download")
+    return tuple(command)
+
+
+def launch_textual_execution_monitor(
+    *,
+    title: str,
+    summary_lines: Sequence[str],
+    expected_stages: Sequence[str] = (),
+    command: Sequence[str],
+    cwd: Path,
+) -> int:
+    """Run one child command inside the Textual execution monitor."""
+    try:
+        from card_framework.cli.textual_monitor import (
+            TextualMonitorRequest,
+            run_textual_monitor,
+        )
+
+        return run_textual_monitor(
+            request=TextualMonitorRequest(
+                title=title,
+                summary_lines=tuple(summary_lines),
+                expected_stages=tuple(expected_stages),
+                command=tuple(command),
+                cwd=cwd,
+                env_overrides={"PYTHONUNBUFFERED": "1"},
+            )
+        )
+    except Exception as exc:
+        _emit_setup_status(
+            "Textual execution monitor unavailable; falling back to direct child run. "
+            f"Reason: {exc}"
+        )
+        completed = subprocess.run(
+            list(command),
+            cwd=str(cwd),
+            check=False,
+            text=True,
+        )
+        if completed.returncode == 130:
+            raise KeyboardInterrupt
+        return int(completed.returncode)
+
+
+def _selection_override_bool(
+    selection: InteractiveMenuSelection,
+    *,
+    key: str,
+    default: bool,
+) -> bool:
+    """Resolve one boolean override from the frontend selection payload."""
+    prefix = f"{key}="
+    for override in reversed(selection.overrides):
+        if not override.startswith(prefix):
+            continue
+        value = override.split("=", 1)[1].strip().lower()
+        return value in {"1", "true", "yes", "on"}
+    return default
+
+
+def build_textual_pipeline_expected_stages(
+    selection: InteractiveMenuSelection,
+    *,
+    resume_stage: PipelineStartStage | None = None,
+) -> tuple[str, ...]:
+    """Return the operator-facing runtime stage checklist for one selection."""
+    if selection.setup_only:
+        return ("Setup",)
+    voice_clone_enabled = _selection_override_bool(
+        selection,
+        key="audio.voice_clone.enabled",
+        default=resolve_repo_config_boolean(
+            key_path=("audio", "voice_clone", "enabled"),
+            fallback=True,
+        ),
+    )
+    interjector_enabled = _selection_override_bool(
+        selection,
+        key="audio.interjector.enabled",
+        default=resolve_repo_config_boolean(
+            key_path=("audio", "interjector", "enabled"),
+            fallback=False,
+        ),
+    )
+    defer_speaker_samples = _selection_override_bool(
+        selection,
+        key="audio.speaker_samples.defer_until_voice_clone",
+        default=resolve_repo_config_boolean(
+            key_path=("audio", "speaker_samples", "defer_until_voice_clone"),
+            fallback=False,
+        ),
+    )
+    effective_mode = selection.mode
+    if selection.mode == "resume_session":
+        if resume_stage == "stage-4":
+            effective_mode = "stage4_interjector"
+        elif resume_stage == "stage-3":
+            effective_mode = "stage3_summary"
+        elif resume_stage == "stage-2":
+            effective_mode = "stage2_transcript"
+        else:
+            effective_mode = "stage1_single"
+    stages: list[str] = []
+    if effective_mode in {
+        "stage1_single",
+        "stage1_batch",
+        "stage1_batch_duration_sweep",
+    }:
+        stages.extend(["Source separation", "Transcription", "Diarization"])
+    if effective_mode in {
+        "stage1_single",
+        "stage1_batch",
+        "stage1_batch_duration_sweep",
+        "stage2_transcript",
+    }:
+        if defer_speaker_samples:
+            stages.append("Summarizer & Critic")
+        else:
+            stages.extend(["Speaker samples", "Summarizer & Critic"])
+        if voice_clone_enabled:
+            if defer_speaker_samples:
+                stages.append("Speaker samples")
+            stages.append("Voice cloning")
+            if interjector_enabled:
+                stages.append("Interjection")
+    elif effective_mode == "stage3_summary":
+        stages.append("Voice cloning")
+    elif effective_mode == "stage4_interjector":
+        stages.append("Interjection")
+    deduped: list[str] = []
+    for stage in stages:
+        if stage not in deduped:
+            deduped.append(stage)
+    return tuple(deduped)
+
+
+def run_textual_pipeline_selection(
+    *,
+    args: argparse.Namespace,
+    selection: InteractiveMenuSelection,
+) -> int:
+    """Run one selected pipeline workflow inside the Textual execution monitor."""
+    resume_stage: PipelineStartStage | None = None
+    if selection.mode == "resume_session" and selection.resume_session:
+        try:
+            session_store = PipelineSessionStore(resolve_pipeline_session_store_path())
+            resume_stage = session_store.compute_resume_plan(
+                session_id=str(selection.resume_session).strip()
+            ).resume_stage
+        except Exception as exc:
+            _emit_setup_status(
+                "Textual resume-stage detection unavailable; using the full checklist. "
+                f"Reason: {exc}"
+            )
+    return launch_textual_execution_monitor(
+        title="setup_and_run",
+        summary_lines=describe_pipeline_selection(selection),
+        expected_stages=build_textual_pipeline_expected_stages(
+            selection,
+            resume_stage=resume_stage,
+        ),
+        command=build_textual_setup_and_run_command(args),
+        cwd=resolve_workspace_root(),
+    )
+
+
+def build_textual_benchmark_command(
+    *,
+    request: BenchmarkLaunchRequest,
+    args: argparse.Namespace,
+) -> tuple[str, ...]:
+    """Build a monitored wrapper child command for one benchmark request."""
+    uv_executable = str(getattr(args, "uv_executable", "uv")).strip() or "uv"
+    git_executable = str(getattr(args, "git_executable", "git")).strip() or "git"
+    if is_repo_checkout_runtime():
+        command: list[str] = [
+            uv_executable,
+            "run",
+            "python",
+            "-u",
+            "-m",
+            SETUP_AND_RUN_MODULE,
+        ]
+    else:
+        command = [sys.executable, "-u", "-m", SETUP_AND_RUN_MODULE]
+    command.extend(
+        [
+            "--no-menu",
+            "--uv-executable",
+            uv_executable,
+            "--git-executable",
+            git_executable,
+            "--frontend-benchmark-request-json",
+            serialize_frontend_benchmark_request(request),
+        ]
+    )
+    workspace_root = getattr(args, "workspace_root", None)
+    if workspace_root:
+        command.extend(["--workspace-root", str(workspace_root)])
+    output_root = getattr(args, "output_root", None)
+    if output_root:
+        command.extend(["--output-root", str(output_root)])
+    config_file = getattr(args, "config_file", None)
+    if config_file:
+        command.extend(["--config-file", str(config_file)])
+    if bool(getattr(args, "skip_repo_update", False)):
+        command.append("--skip-repo-update")
+    if bool(getattr(args, "force_sync", False)):
+        command.append("--force-sync")
+    if bool(getattr(args, "force_model_download", False)):
+        command.append("--force-model-download")
+    return tuple(command)
+
+
+def run_textual_benchmark_request(
+    *,
+    request: BenchmarkLaunchRequest,
+    args: argparse.Namespace,
+) -> int:
+    """Run one selected benchmark workflow inside the Textual execution monitor."""
+    return launch_textual_execution_monitor(
+        title=request.description,
+        summary_lines=describe_benchmark_request(request),
+        expected_stages=("Benchmark preflight", "Benchmark run"),
+        command=build_textual_benchmark_command(request=request, args=args),
+        cwd=resolve_workspace_root(),
+    )
+
+
+def _frontend_benchmark_needs_ffmpeg(request: BenchmarkLaunchRequest) -> bool:
+    """Return whether the selected benchmark path needs ffmpeg preflight checks."""
+    if request.kind == "summary_matrix":
+        return True
+    if request.kind == "sporc_benchmark":
+        return "--transcript-only" not in request.command
+    if request.kind == "sporc_duration_sweep":
+        return "--enable-voice-clone" in request.command
+    return False
+
+
+def _frontend_benchmark_needs_git(request: BenchmarkLaunchRequest) -> bool:
+    """Return whether the selected benchmark path needs Git preflight checks."""
+    if _frontend_benchmark_needs_voice_clone_runtime(request):
+        return True
+    if request.kind == "qmsum_benchmark":
+        return (
+            "--prepare-if-missing" in request.command
+            or "--force-download-dataset" in request.command
+        )
+    return False
+
+
+def _frontend_benchmark_needs_voice_clone_runtime(
+    request: BenchmarkLaunchRequest,
+) -> bool:
+    """Return whether the benchmark launch path needs the IndexTTS runtime."""
+    if request.kind == "summary_matrix":
+        return True
+    if request.kind == "sporc_benchmark":
+        return "--transcript-only" not in request.command
+    if request.kind == "sporc_duration_sweep":
+        return "--enable-voice-clone" in request.command
+    return False
+
+
+def run_frontend_benchmark_request(
+    *,
+    request: BenchmarkLaunchRequest,
+    uv_executable: str,
+    git_executable: str,
+    skip_repo_update: bool = False,
+    force_sync: bool = False,
+    force_model_download: bool = False,
+) -> int:
+    """Run one benchmark command emitted by the interactive frontend."""
+    needs_voice_clone_runtime = _frontend_benchmark_needs_voice_clone_runtime(request)
+    print("[1/3] Benchmark preflight")
+    check_prerequisites(
+        uv_executable=uv_executable,
+        git_executable=git_executable,
+        require_git=_frontend_benchmark_needs_git(request),
+        require_ffmpeg=_frontend_benchmark_needs_ffmpeg(request),
+    )
+    print("[2/3] Benchmark runtime preparation")
+    if is_repo_checkout_runtime():
+        if needs_voice_clone_runtime:
+            with report_loading_duration(
+                "vendored IndexTTS runtime",
+                reporter=_emit_setup_status,
+            ):
+                ensure_indextts_repo(
+                    git_executable=git_executable,
+                    skip_update=skip_repo_update,
+                )
+        with report_loading_duration(
+            "runtime dependency sync",
+            reporter=_emit_setup_status,
+        ):
+            smart_sync_projects(
+                uv_executable=uv_executable,
+                force_sync=force_sync,
+                include_index_tts=needs_voice_clone_runtime,
+            )
+        if needs_voice_clone_runtime:
+            with report_loading_duration(
+                "IndexTTS model provisioning",
+                reporter=_emit_setup_status,
+            ):
+                ensure_indextts_model(
+                    uv_executable=uv_executable,
+                    force_download=force_model_download,
+                )
+    else:
+        print("[skip] Repo runtime preparation not needed.")
+    print("[3/3] Running benchmark")
+    result = subprocess.run(
+        list(request.command),
+        cwd=str(resolve_workspace_root()),
+        check=False,
+        text=True,
+    )
+    if result.returncode == 130:
+        raise KeyboardInterrupt
+    return int(result.returncode)
 
 
 def normalize_cli_overrides(raw_overrides: Sequence[str]) -> tuple[str, ...]:
@@ -1679,8 +2157,7 @@ def validate_duration_sweep_inputs(
         raise BootstrapError(
             step="input",
             message=(
-                "--duration-sweep cannot be combined with "
-                "--voiceclone-from-summary."
+                "--duration-sweep cannot be combined with --voiceclone-from-summary."
             ),
         )
     if str(resume_session or "").strip():
@@ -1750,8 +2227,7 @@ def validate_batch_audio_inputs(
         raise BootstrapError(
             step="input",
             message=(
-                "Batch --audio-path runs cannot be combined with "
-                "--resume-session."
+                "Batch --audio-path runs cannot be combined with --resume-session."
             ),
         )
     if _has_override_key(pass_through_overrides, "pipeline.start_stage"):
@@ -1760,8 +2236,7 @@ def validate_batch_audio_inputs(
             raise BootstrapError(
                 step="input",
                 message=(
-                    "Batch --audio-path runs only support "
-                    "pipeline.start_stage=stage-1."
+                    "Batch --audio-path runs only support pipeline.start_stage=stage-1."
                 ),
             )
     managed_override_keys = (
@@ -1974,7 +2449,9 @@ def _replace_or_append_override(
 def _remove_override_key(*, overrides: list[str], key: str) -> None:
     """Remove every override assignment for one key."""
     prefix = f"{key}="
-    overrides[:] = [override for override in overrides if not override.startswith(prefix)]
+    overrides[:] = [
+        override for override in overrides if not override.startswith(prefix)
+    ]
 
 
 def resolve_repo_config_boolean(
@@ -2194,11 +2671,15 @@ def resolve_start_stage(overrides: Sequence[str]) -> PipelineStartStage:
     Raises:
         BootstrapError: If the effective stage value is invalid.
     """
-    start_stage = _resolve_last_override_value(
-        overrides=overrides,
-        key="pipeline.start_stage",
-        default="stage-1",
-    ).strip().lower()
+    start_stage = (
+        _resolve_last_override_value(
+            overrides=overrides,
+            key="pipeline.start_stage",
+            default="stage-1",
+        )
+        .strip()
+        .lower()
+    )
     if start_stage not in {"stage-1", "stage-2", "stage-3", "stage-4"}:
         raise BootstrapError(
             step="input",
@@ -2206,7 +2687,7 @@ def resolve_start_stage(overrides: Sequence[str]) -> PipelineStartStage:
                 "pipeline.start_stage must be one of: "
                 "stage-1, stage-2, stage-3, stage-4."
             ),
-    )
+        )
     return cast(PipelineStartStage, start_stage)
 
 
@@ -2381,7 +2862,10 @@ def build_run_overrides(
         ).resolve()
     else:
         eta_store_path = (
-            resolve_workspace_root() / "artifacts" / "audio_stage" / "eta_history.sqlite3"
+            resolve_workspace_root()
+            / "artifacts"
+            / "audio_stage"
+            / "eta_history.sqlite3"
         ).resolve()
     overrides = [
         f"pipeline.start_stage={start_stage}",
@@ -2413,10 +2897,7 @@ def build_run_overrides(
                     "audio.voice_clone.cfg_path="
                     f"{_path_for_override(checkpoints_dir / 'config.yaml')}"
                 ),
-                (
-                    "audio.voice_clone.model_dir="
-                    f"{_path_for_override(checkpoints_dir)}"
-                ),
+                (f"audio.voice_clone.model_dir={_path_for_override(checkpoints_dir)}"),
             ]
         )
     else:
@@ -2928,7 +3409,9 @@ def _find_reusable_duration_sweep_transcript(
         if not candidate.is_file():
             continue
         try:
-            transcript_source_audio_path = resolve_transcript_source_audio_path(candidate)
+            transcript_source_audio_path = resolve_transcript_source_audio_path(
+                candidate
+            )
         except BootstrapError:
             continue
         if (
@@ -3550,7 +4033,11 @@ def run_audio_duration_sweep(
             manifest_path=manifest_path,
             run_results=run_results,
         )
-        return 0 if all(result.get("status") in {"ok", "skipped"} for result in run_results) else 1
+        return (
+            0
+            if all(result.get("status") in {"ok", "skipped"} for result in run_results)
+            else 1
+        )
     finally:
         OUTPUT_ROOT = original_output_root
 
@@ -3638,7 +4125,9 @@ def run_audio_batch(
                     )
                 )
 
-                session_store = PipelineSessionStore(resolve_pipeline_session_store_path())
+                session_store = PipelineSessionStore(
+                    resolve_pipeline_session_store_path()
+                )
                 session_store.create_or_replace_session(
                     session_id=run_id,
                     requested_start_stage="stage-1",
@@ -3817,12 +4306,16 @@ def print_summary(
     run_work_dir = Path(resolved_artifacts["work_dir"]).resolve()
     transcript_path = Path(resolved_artifacts["transcript_path"]).resolve()
     speaker_manifest = run_work_dir / "speaker_samples" / "manifest.json"
-    voice_clone_manifest = Path(resolved_artifacts["voice_clone_manifest_path"]).resolve()
+    voice_clone_manifest = Path(
+        resolved_artifacts["voice_clone_manifest_path"]
+    ).resolve()
     interjector_manifest = Path(
         resolved_artifacts["interjector_manifest_path"]
     ).resolve()
     session_summary_path = Path(
-        resolved_artifacts.get("session_summary_path", transcript_path.parent / "summary.xml")
+        resolved_artifacts.get(
+            "session_summary_path", transcript_path.parent / "summary.xml"
+        )
     ).resolve()
 
     print(f"session_id: {run_id}")
@@ -3862,13 +4355,56 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.menu and not is_interactive_console():
         print("[input] --menu requires an interactive terminal.")
         return 1
+    frontend_benchmark_request: BenchmarkLaunchRequest | None = None
+    if args.frontend_benchmark_request_json:
+        frontend_benchmark_request = deserialize_frontend_benchmark_request(
+            str(args.frontend_benchmark_request_json)
+        )
     if should_launch_interactive_menu(args):
-        args = apply_interactive_menu_selection(args, run_interactive_menu())
+        frontend_result = launch_interactive_frontend(
+            uv_executable=str(args.uv_executable).strip() or "uv"
+        )
+        if frontend_result.action == "cancel":
+            return 0
+        if frontend_result.action == "benchmark":
+            if frontend_result.benchmark_request is None:
+                print(
+                    "[input] Interactive frontend did not provide a benchmark command."
+                )
+                return 1
+            frontend_benchmark_request = frontend_result.benchmark_request
+        if frontend_result.pipeline_selection is None:
+            if frontend_benchmark_request is None:
+                print(
+                    "[input] Interactive frontend did not provide a pipeline selection."
+                )
+                return 1
+        if frontend_benchmark_request is None:
+            if frontend_result.pipeline_selection is None:
+                print(
+                    "[input] Interactive frontend did not provide a pipeline selection."
+                )
+                return 1
+            args = apply_interactive_menu_selection(
+                args, frontend_result.pipeline_selection
+            )
+            if frontend_result.ui_mode == "textual":
+                return run_textual_pipeline_selection(
+                    args=args,
+                    selection=frontend_result.pipeline_selection,
+                )
+        elif frontend_result.ui_mode == "textual":
+            return run_textual_benchmark_request(
+                request=frontend_benchmark_request,
+                args=args,
+            )
         output_root = workspace_root
         if args.output_root:
             output_root_candidate = Path(args.output_root).expanduser()
             if not output_root_candidate.is_absolute():
-                output_root_candidate = (workspace_root / output_root_candidate).resolve()
+                output_root_candidate = (
+                    workspace_root / output_root_candidate
+                ).resolve()
             output_root = output_root_candidate.resolve()
     OUTPUT_ROOT = output_root if args.output_root else None
     raw_audio_paths = tuple(args.audio_path or [])
@@ -3880,6 +4416,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     resume_plan: PipelineResumePlan | None = None
 
     try:
+        if frontend_benchmark_request is not None:
+            return run_frontend_benchmark_request(
+                request=frontend_benchmark_request,
+                uv_executable=str(args.uv_executable).strip() or "uv",
+                git_executable=str(args.git_executable).strip() or "git",
+                skip_repo_update=bool(args.skip_repo_update),
+                force_sync=bool(args.force_sync),
+                force_model_download=bool(args.force_model_download),
+            )
         pass_through_overrides = normalize_cli_overrides(args.override)
         if args.duration_presets and not args.duration_sweep:
             raise BootstrapError(
@@ -4016,7 +4561,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             require_git=synthesis_enabled,
             require_ffmpeg=ffmpeg_required,
         )
-        records.append(StepRecord(name="preflight", status="ok", detail="Tools and paths validated."))
+        records.append(
+            StepRecord(
+                name="preflight", status="ok", detail="Tools and paths validated."
+            )
+        )
 
         print("[2/6] IndexTTS repository sync")
         if synthesis_enabled:
@@ -4033,7 +4582,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"pull_skipped_dirty={repo_result.pull_skipped_dirty}, "
                 f"lfs_pulled={repo_result.lfs_pulled}"
             )
-            records.append(StepRecord(name="repo_sync", status="ok", detail=repo_detail))
+            records.append(
+                StepRecord(name="repo_sync", status="ok", detail=repo_detail)
+            )
         else:
             records.append(
                 StepRecord(
@@ -4095,7 +4646,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             model_detail = (
                 f"downloaded={model_result.downloaded}, source={model_result.source}"
             )
-            records.append(StepRecord(name="model_download", status="ok", detail=model_detail))
+            records.append(
+                StepRecord(name="model_download", status="ok", detail=model_detail)
+            )
         else:
             records.append(
                 StepRecord(
@@ -4213,7 +4766,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             records.append(StepRecord(name="input", status="ok", detail=input_detail))
         elif cli_audio_path is not None:
             resolved_audio_path = resolve_audio_input(cli_audio_path)
-            overrides.append(f"audio.audio_path={_path_for_override(resolved_audio_path)}")
+            overrides.append(
+                f"audio.audio_path={_path_for_override(resolved_audio_path)}"
+            )
             records.append(
                 StepRecord(
                     name="input",
@@ -4232,7 +4787,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else None
             )
             if resolved_audio_path is not None:
-                detail_suffix = "from transcript metadata for stage-2 speaker-sample inference"
+                detail_suffix = (
+                    "from transcript metadata for stage-2 speaker-sample inference"
+                )
             else:
                 resolved_audio_path = _discover_existing_audio_path()
                 if resolved_audio_path is not None:
@@ -4240,7 +4797,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if resolved_audio_path is None:
                 resolved_audio_path = prompt_or_validate_audio_path(None)
                 detail_suffix = "required for stage-2 speaker-sample inference"
-            overrides.append(f"audio.audio_path={_path_for_override(resolved_audio_path)}")
+            overrides.append(
+                f"audio.audio_path={_path_for_override(resolved_audio_path)}"
+            )
             records.append(
                 StepRecord(
                     name="input",

@@ -20,4 +20,3 @@ WORKDIR /workspace/card-framework
 COPY docker/setup_and_run_entrypoint.py /usr/local/bin/card-framework-docker-entrypoint.py
 
 ENTRYPOINT ["python", "/usr/local/bin/card-framework-docker-entrypoint.py"]
-CMD ["--help"]

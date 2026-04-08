@@ -71,15 +71,25 @@ Adding `--duration-sweep` changes that wrapper flow into a per-episode preset
 sweep for `30s`, `1m`, and `5m`. Each episode boots once, later presets reuse
 the cached transcript from stage-2, and completed preset folders are reused on
 reruns. The sweep ledger is written to `duration_sweep_manifest.json`.
-When the wrapper starts without explicit run inputs, it now opens an
-interactive menu by default so operators can choose the run mode, select LLM
-and embedding profiles, and provide audio, transcript, summary, or resume
-inputs. Pass `--no-menu` to skip that menu. The shared runtime profiles now
-also include `selection.llm=anthropic_claude_opus`, which uses
-`ANTHROPIC_API_KEY` for `claude-opus-4-6`.
+When the wrapper starts without explicit run inputs, it now opens a Textual
+operator UI by default so operators can choose the run mode, jump directly to
+stages 2-4, select LLM and embedding profiles, provide audio, transcript,
+summary, voice-clone-manifest, or resume inputs, edit the active YAML config
+with integrated syntax highlighting, type common file paths directly with
+inline fuzzy suggestions, and then stay inside a Textual execution monitor
+while the selected pipeline or benchmark command runs. That monitor now keeps a
+separate current-stage indicator, a progress bar, live ETA text when the child
+runtime reports one, a stage checklist, a latest-agent panel for the most
+recent Summarizer/Critic reasoning and content, non-progress logs, and a
+filtered diagnostics view that excludes routine `Loading ...` / `Loaded ...`
+status chatter. Progress and ETA updates now stay in the progress area instead
+of spamming the terminal log view.
+Pass `--no-menu` to skip that frontend. The shared runtime profiles now also include
+`selection.llm=anthropic_claude_opus`, which uses `ANTHROPIC_API_KEY` for
+`claude-opus-4-6`.
 
 For the full container workflow and Windows + NeMo guidance, see
-[`coder_docs/docker_workflow.md`](./coder_docs/docker_workflow.md).
+[`coder_docs/docker_workflow.md`](../coder_docs/docker_workflow.md).
 
 ## Session Resume
 

@@ -11,6 +11,8 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     """Run setup_and_run from the mounted repository checkout."""
     resolved_argv = list(sys.argv[1:] if argv is None else argv)
+    if not resolved_argv and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        resolved_argv = ["--help"]
     repo_dir = Path(
         os.environ.get("CARD_FRAMEWORK_REPO_DIR", "/workspace/card-framework")
     ).resolve()

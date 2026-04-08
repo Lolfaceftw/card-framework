@@ -14,8 +14,8 @@ x-setup-and-run-base: &setup-and-run-base
     PYTHONUNBUFFERED: "1"
     TRANSFORMERS_CACHE: /root/.cache/huggingface/transformers
   shm_size: "8gb"
-  mem_limit: "16g"
-  memswap_limit: "20g"
+  mem_limit: "8g"
+  memswap_limit: "10g"
   stdin_open: true
   tty: true
   volumes:
@@ -24,8 +24,6 @@ x-setup-and-run-base: &setup-and-run-base
     - card-framework-index-tts-venv:/workspace/card-framework/src/card_framework/_vendor/index_tts/.venv
     - card-framework-uv-cache:/root/.cache/uv
     - card-framework-hf-cache:/root/.cache/huggingface
-  command:
-    - --help
 
 services:
   setup-and-run:
