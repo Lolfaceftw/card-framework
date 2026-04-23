@@ -23,21 +23,21 @@
 
 \setbeamercolor{structure}{fg=cardblue}
 \setbeamercolor{title}{fg=cardblue}
+\setbeamercolor{subtitle}{fg=cardgray}
 \setbeamercolor{frametitle}{fg=cardblue,bg=cardlight}
 \setbeamercolor{block title}{fg=white,bg=cardblue}
 \setbeamercolor{block body}{bg=black!3}
+\setbeamercolor{author in head/foot}{fg=cardgray,bg=cardlight}
+\setbeamercolor{date in head/foot}{fg=white,bg=cardblue}
 
 \newcolumntype{Y}{>{\RaggedRight\arraybackslash}X}
 \newcommand{\framebibtext}{}
 \newcommand{\setframebib}[1]{\gdef\framebibtext{#1}}
-\addtobeamertemplate{frametitle}{}{
-  \vspace{-0.35em}\setframebib{}
-}
 \setbeamertemplate{footline}{%
   \leavevmode%
   \hbox{%
     \begin{beamercolorbox}[wd=.88\paperwidth,ht=6.2ex,dp=1.8ex,leftskip=.9em,rightskip=.8em]{author in head/foot}%
-      {\tiny\color{cardgray}\framebibtext}
+      {\tiny\textbf{References: }\framebibtext}
     \end{beamercolorbox}%
     \begin{beamercolorbox}[wd=.12\paperwidth,ht=6.2ex,dp=1.8ex,center]{date in head/foot}%
       {\scriptsize\insertframenumber}
@@ -54,11 +54,21 @@
 \begin{document}
 
 \begin{frame}
-  \titlepage
-  \setframebib{[4] Agustin et al., \textit{CARD: Constraint-aware Audio Resynthesis and Distillation}, current IEEE manuscript draft, 2026.}
+\setframebib{[4] Agustin et al., \textit{CARD}, IEEE manuscript draft, 2026.}
+  \vspace{1.1cm}
+  {\usebeamerfont{title}\color{cardblue}\LARGE\inserttitle\par}
+  \vspace{0.4cm}
+  {\usebeamerfont{subtitle}\large\insertsubtitle\par}
+  \vspace{1.0cm}
+  {\large\insertauthor\par}
+  \vspace{0.4cm}
+  {\normalsize\insertinstitute\par}
+  \vspace{0.6cm}
+  {\normalsize\insertdate\par}
 \end{frame}
 
 \begin{frame}{Outline}
+\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \small
 \begin{enumerate}
   \item Abstract
@@ -70,10 +80,10 @@
   \item Discussion
   \item Conclusion and Recommendation
 \end{enumerate}
-\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
 \begin{frame}{Abstract}
+\setframebib{[1] Litterer et al., SPoRC, ACL 2025. \quad [4] Agustin et al., \textit{CARD}, 2026. \quad [7] Listener-response log, Apr. 2026.}
 \small
 Long-form podcasts are rich in information, but they are also difficult to consume quickly. This study addresses that gap through \textbf{CARD}, a framework that shortens multi-speaker audio while trying to keep the conversation understandable, speaker-grounded, and natural to listen to [4].
 
@@ -85,10 +95,10 @@ Long-form podcasts are rich in information, but they are also difficult to consu
   \item Human evaluation is already underway, but the listener study is still incomplete, so this presentation reports only \textbf{current response progress and score trends}, not final claims [7].
 \end{itemize}
 \end{block}
-\setframebib{[1] Litterer et al., ``Mapping the Podcast Ecosystem with the Structured Podcast Research Corpus,'' ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [7] Internal listener-response log, Apr. 2026.}
 \end{frame}
 
 \begin{frame}{Introduction}
+\setframebib{[1] Litterer et al., SPoRC, ACL 2025. \quad [4] Agustin et al., \textit{CARD}, 2026.}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
 \column{0.56\textwidth}
@@ -112,10 +122,10 @@ The project is trying to make podcast listening more efficient without reducing 
   \draw[-{Latex[length=2mm]},thick,cardblue] (pain) -- (goal);
 \end{tikzpicture}
 \end{columns}
-\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
 \begin{frame}{Review of Related Work}
+\setframebib{[2] Zheng et al., baseline podcast summarization, 2020. \quad [3] Xiao et al., PodAgent, 2025. \quad [5] Kang and Roy, audio-prompted summarization, 2024.}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
 \column{0.62\textwidth}
@@ -137,10 +147,10 @@ Podcast generation & Systems can synthesize podcast-like dialogue from text [3].
 \end{itemize}
 \end{block}
 \end{columns}
-\setframebib{[2] Zheng et al., ``A Baseline Analysis for Podcast Abstractive Summarization,'' 2020. \quad [3] Xiao et al., ``PodAgent,'' ACL Findings, 2025. \quad [5] Kang and Roy, ``Prompting LLMs with Audio for Speech Summarization,'' 2024.}
 \end{frame}
 
 \begin{frame}{Problem Statement \& Objectives}
+\setframebib{[4] Agustin et al., \textit{CARD}, 2026.}
 \small
 \begin{block}{Main problem}
 Existing summarization approaches do not handle the full trade-off between \textbf{time compression} and \textbf{audio fidelity} well enough for conversational podcasts [4].
@@ -162,10 +172,10 @@ Keep speakers recognizable by grounding resynthesis on source-linked references 
 Improve realism by repairing backchannels and overlap timing instead of leaving them fully unconstrained.
 \end{block}
 \end{columns}
-\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
 \begin{frame}{Methodology}
+\setframebib{[4] Agustin et al., \textit{CARD}, 2026.}
 \small
 \begin{center}
 \begin{tikzpicture}[font=\scriptsize,node distance=2.8mm]
@@ -185,10 +195,10 @@ Improve realism by repairing backchannels and overlap timing instead of leaving 
 
 \vspace{0.3em}
 The current implementation already supports the full four-stage flow, and the reporting now separates benchmark-side text quality from end-to-end listening quality so that the claims stay realistic [4].
-\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
 \begin{frame}{Results: matched provider benchmark on 10 retained samples each}
+\setframebib{[1] Litterer et al., SPoRC, 2025. \quad [4] Agustin et al., \textit{CARD}, 2026. \quad [9] OpenAI GPT-5 mini, 2026. \quad [10] Anthropic Haiku 4.5, 2025. \quad [11] DeepSeek-V3, 2024. \quad [12] Qwen3 report, 2025.}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
 \column{0.62\textwidth}
@@ -229,10 +239,10 @@ The current implementation already supports the full four-stage flow, and the re
 \end{itemize}
 \end{block}
 \end{columns}
-\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [9] OpenAI, ``GPT-5 mini Model,'' 2026. \quad [10] Anthropic, ``Claude 4.5 Haiku,'' 2025. \quad [11] DeepSeek-AI, ``DeepSeek-V3 Technical Report,'' 2024. \quad [12] Yang et al., ``Qwen3 Technical Report,'' 2025.}
 \end{frame}
 
 \begin{frame}{Results: trend across 30s, 1min, and 5min benchmark settings}
+\setframebib{[1] Litterer et al., SPoRC, 2025. \quad [4] Agustin et al., \textit{CARD}, 2026.}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
 \column{0.60\textwidth}
@@ -268,18 +278,18 @@ The current implementation already supports the full four-stage flow, and the re
 \end{itemize}
 \end{block}
 \end{columns}
-\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
 \begin{frame}{Results: current human-evaluation progress}
+\setframebib{[7] Internal listener-response log, Apr. 2026.}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
-\column{0.40\textwidth}
+\column{0.38\textwidth}
 \centering
 \begin{tikzpicture}
 \begin{axis}[
   width=\linewidth,
-  height=4.6cm,
+  height=3.8cm,
   ybar,
   ymin=0,ymax=34,
   symbolic x coords={Responded,Pending},
@@ -296,21 +306,23 @@ The current implementation already supports the full four-stage flow, and the re
 \end{axis}
 \end{tikzpicture}
 
-\vspace{-0.4em}
+\vspace{0.1em}
 \begin{block}{Status as of 23 Apr 2026}
+{\scriptsize
 \begin{itemize}
   \item \textbf{14 listener responses} have been collected so far.
   \item Duration coverage so far: \textbf{5} for 30s, \textbf{5} for 1min, and \textbf{4} for 5min.
   \item The current dataset is useful for progress reporting, but not yet final for listener-side claims.
 \end{itemize}
+}
 \end{block}
 
-\column{0.60\textwidth}
+\column{0.62\textwidth}
 \centering
 \begin{tikzpicture}
 \begin{axis}[
   width=\linewidth,
-  height=4.6cm,
+  height=3.8cm,
   ybar,
   bar width=14pt,
   ymin=0,ymax=6,
@@ -330,12 +342,12 @@ The current implementation already supports the full four-stage flow, and the re
 \end{tikzpicture}
 
 \vspace{0.2em}
-The listener study is active, but these counts are still too early for final listener-side conclusions. At this stage, they are best treated as a progress snapshot rather than a finished evaluation.
+{\scriptsize The listener study is active, but these counts are still too early for final listener-side conclusions. At this stage, they are best treated as a progress snapshot rather than a finished evaluation.}
 \end{columns}
-\setframebib{[7] Internal listener-response log, Apr. 2026.}
 \end{frame}
 
 \begin{frame}{Results: current evaluation scores and duration-wise trend}
+\setframebib{[7] Human-evaluation response CSV, Apr. 2026.}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
 \column{0.50\textwidth}
@@ -343,7 +355,7 @@ The listener study is active, but these counts are still too early for final lis
 \begin{tikzpicture}
 \begin{axis}[
   width=\linewidth,
-  height=4.6cm,
+  height=4.0cm,
   xbar,
   xmin=0,xmax=5,
   symbolic y coords={Listener exp.,Speaker sim.,Naturalness,Factualness,Flow,Vocal delivery},
@@ -367,7 +379,7 @@ The listener study is active, but these counts are still too early for final lis
 \begin{tikzpicture}
 \begin{axis}[
   width=\linewidth,
-  height=4.6cm,
+  height=4.0cm,
   ymin=3.2,ymax=4.4,
   symbolic x coords={30s,1min,5min},
   xtick=data,
@@ -386,9 +398,9 @@ The listener study is active, but these counts are still too early for final lis
 \end{axis}
 \end{tikzpicture}
 
-\vspace{0.2em}
+\vspace{0.1em}
 \begin{block}{Early pattern from the responses}
-{\tiny
+{\scriptsize
 \begin{itemize}
   \item \textbf{30s}: lowest factualness and listener-experience averages; compression is felt most strongly here.
   \item \textbf{1min}: currently the best balance point, with stronger factualness and the best vocal-delivery mean.
@@ -397,38 +409,42 @@ The listener study is active, but these counts are still too early for final lis
 }
 \end{block}
 \end{columns}
-\setframebib{[7] Human-evaluation response CSV, Apr. 2026.}
 \end{frame}
 
 \begin{frame}{Discussion}
+\setframebib{[4] Agustin et al., \textit{CARD}, 2026. \quad [7] Listener-response log, Apr. 2026.}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
-\column{0.54\textwidth}
+\column{0.52\textwidth}
 \begin{block}{What the results suggest}
+{\scriptsize
 \begin{itemize}
   \item The benchmark evidence already shows that CARD can support controlled comparison across providers and duration settings [4].
   \item The early human scores suggest that the framework is already \textbf{pleasant and understandable overall}, but the shorter outputs still sound more compressed and rushed than the target quality level [7].
   \item This means the remaining challenge is no longer basic feasibility. It is mainly about improving how short summaries keep nuance, pacing, and conversational texture.
 \end{itemize}
+}
 \end{block}
 
-\column{0.46\textwidth}
+\column{0.48\textwidth}
 \begin{block}{Current limitations}
+{\scriptsize
 \begin{itemize}
   \item Human evaluation is still incomplete.
   \item Some podcast-duration cells still have no listener response yet.
   \item Audio comments still mention rushed pacing, occasional monotony, and a few awkward transitions.
 \end{itemize}
+}
 \end{block}
 
 \begin{alertblock}{Interpretation for this report}
-At this point, it is fair to say that the project has a working and benchmarked framework, while the listener study is still building the final evidence for user-facing quality.
+{\scriptsize The project already has a working and benchmarked framework, while the listener study is still building the final evidence for user-facing quality.}
 \end{alertblock}
 \end{columns}
-\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [7] Internal listener-response log, Apr. 2026.}
 \end{frame}
 
 \begin{frame}{Conclusion and Recommendation}
+\setframebib{[1] Litterer et al., SPoRC, 2025. \quad [4] Agustin et al., \textit{CARD}, 2026. \quad [7] Listener-response log, Apr. 2026.}
 \small
 \begin{block}{Conclusion}
 The project has already moved beyond a proof-of-concept stage. The current state includes a complete four-stage pipeline, a matched benchmark with 10 retained samples per provider, a clear trend across 30-second, 1-minute, and 5-minute settings, and an active listener study that is beginning to show where the framework is already strong and where it still needs refinement.
@@ -441,7 +457,6 @@ The project has already moved beyond a proof-of-concept stage. The current state
   \item Keep the matched benchmark protocol fixed so future revisions can be compared against the same retained 10-sample evidence base.
 \end{itemize}
 \end{block}
-\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [7] Internal listener-response log, Apr. 2026.}
 \end{frame}
 
 \end{document}
