@@ -2,7 +2,6 @@
 
 \usetheme{Madrid}
 \setbeamertemplate{navigation symbols}{}
-\setbeamertemplate{footline}[frame number]
 
 \usepackage{booktabs}
 \usepackage{tabularx}
@@ -11,343 +10,438 @@
 \usepackage{xcolor}
 \usepackage{tikz}
 \usepackage{pgfplots}
-\usepgfplotslibrary{groupplots}
-\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit}
-
+\usetikzlibrary{arrows.meta,positioning,fit,shapes.geometric}
 \pgfplotsset{compat=1.18}
 
-\definecolor{cfblue}{HTML}{1F4E79}
-\definecolor{cflight}{HTML}{EAF2F8}
-\definecolor{cfaccent}{HTML}{B54A3A}
-\definecolor{cfgreen}{HTML}{2F6B3C}
-\definecolor{cfgray}{HTML}{5B6570}
-\definecolor{cforange}{HTML}{D78B28}
-\definecolor{cfpurple}{HTML}{6D5BA6}
+\definecolor{cardblue}{HTML}{1E4E79}
+\definecolor{cardlight}{HTML}{EAF2F8}
+\definecolor{cardred}{HTML}{B44B3A}
+\definecolor{cardgreen}{HTML}{2E6B3E}
+\definecolor{cardgold}{HTML}{D69227}
+\definecolor{cardpurple}{HTML}{7057A3}
+\definecolor{cardgray}{HTML}{5A6570}
 
-\setbeamercolor{structure}{fg=cfblue}
-\setbeamercolor{title}{fg=cfblue}
-\setbeamercolor{frametitle}{fg=cfblue,bg=cflight}
-\setbeamercolor{block title}{fg=white,bg=cfblue}
+\setbeamercolor{structure}{fg=cardblue}
+\setbeamercolor{title}{fg=cardblue}
+\setbeamercolor{frametitle}{fg=cardblue,bg=cardlight}
+\setbeamercolor{block title}{fg=white,bg=cardblue}
 \setbeamercolor{block body}{bg=black!3}
-\setbeamercolor{alerted text}{fg=cfaccent}
 
 \newcolumntype{Y}{>{\RaggedRight\arraybackslash}X}
-\newcommand{\sources}[1]{\vfill{\tiny\color{cfgray}Source(s): #1}}
+\newcommand{\framebibtext}{}
+\newcommand{\setframebib}[1]{\gdef\framebibtext{#1}}
+\addtobeamertemplate{frametitle}{}{
+  \vspace{-0.35em}\setframebib{}
+}
+\setbeamertemplate{footline}{%
+  \leavevmode%
+  \hbox{%
+    \begin{beamercolorbox}[wd=.88\paperwidth,ht=6.2ex,dp=1.8ex,leftskip=.9em,rightskip=.8em]{author in head/foot}%
+      {\tiny\color{cardgray}\framebibtext}
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=.12\paperwidth,ht=6.2ex,dp=1.8ex,center]{date in head/foot}%
+      {\scriptsize\insertframenumber}
+    \end{beamercolorbox}%
+  }%
+}
 
-\title{CARD Progress Report}
-\subtitle{Research-focused window: 24 Mar 2026 -- 06 Apr 2026}
-\author{Repository progress summary}
-\institute{Built from git history, repo benchmark notes, and funded benchmark records through 03 Apr 2026}
-\date{06 Apr 2026}
+\title{CARD Progress Presentation}
+\subtitle{Progress update aligned with the IEEE manuscript structure}
+\author{EEE 199 Research Progress Report}
+\institute{University of the Philippines Diliman}
+\date{23 April 2026}
 
 \begin{document}
 
 \begin{frame}
   \titlepage
+  \setframebib{[4] Agustin et al., \textit{CARD: Constraint-aware Audio Resynthesis and Distillation}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
-\begin{frame}{Reporting scope: research-valid progress after 24 Mar 2026}
+\begin{frame}{Outline}
 \small
-\begin{itemize}
-  \item This report excludes earlier March tuning work and focuses on results that strengthened the \textbf{research case}, not only the codebase.
-  \item Three themes dominate this window: \textbf{measurement validity}, \textbf{before/after evidence}, and a \textbf{more robust funded benchmark design}.
-\end{itemize}
-
-\vspace{0.4em}
-\centering
-\begin{tikzpicture}[x=1cm,y=1cm,>=Latex]
-  \draw[cfblue,very thick] (0,0) -- (11.7,0);
-  \foreach \x/\label in {
-    0.8/{24 Mar},
-    3.7/{25 Mar},
-    7.5/{02 Apr},
-    10.8/{03 Apr}
-  } {
-    \fill[cfblue] (\x,0) circle (2.5pt);
-    \node[font=\scriptsize,below=5pt] at (\x,0) {\label};
-  }
-  \node[draw=cfblue,rounded corners,fill=cflight,align=left,font=\scriptsize,anchor=south west,text width=2.4cm] at (0.1,0.35)
-    {Duration rubric scaled by target length; rerender drift exposed};
-  \node[draw=cfblue,rounded corners,fill=cflight,align=left,font=\scriptsize,anchor=south west,text width=2.5cm] at (2.8,0.95)
-    {Stage-4 timing repair; vector-only summary contract};
-  \node[draw=cfblue,rounded corners,fill=cflight,align=left,font=\scriptsize,anchor=south west,text width=2.7cm] at (6.1,0.35)
-    {10-sample-per-provider funded design fixed and budgeted};
-  \node[draw=cfblue,rounded corners,fill=cflight,align=left,font=\scriptsize,anchor=south west,text width=2.8cm] at (8.8,0.95)
-    {Retained cohort completed; retry, salvage, and checkpoint logic hardened};
-\end{tikzpicture}
-
-\sources{coder\_docs/memory/errors\_and\_notes.md; coder\_docs/sporc\_budget\_reference\_20260402.md; git log since 2026-03-24}
+\begin{enumerate}
+  \item Abstract
+  \item Introduction
+  \item Review of Related Work
+  \item Problem Statement \& Objectives
+  \item Methodology
+  \item Results
+  \item Discussion
+  \item Conclusion and Recommendation
+\end{enumerate}
+\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
-\begin{frame}{Why the new benchmark is more research-worthy}
+\begin{frame}{Abstract}
+\small
+Long-form podcasts are rich in information, but they are also difficult to consume quickly. This study addresses that gap through \textbf{CARD}, a framework that shortens multi-speaker audio while trying to keep the conversation understandable, speaker-grounded, and natural to listen to [4].
+
+\vspace{0.5em}
+\begin{block}{Current progress in one view}
+\begin{itemize}
+  \item The pipeline now supports \textbf{duration-bounded drafting}, \textbf{speaker-grounded resynthesis}, and \textbf{interjection refinement} in one end-to-end workflow [4].
+  \item The strongest benchmark result so far is the \textbf{matched 10-sample-per-provider SPoRC comparison} at the 5-minute preset [1], [4].
+  \item Human evaluation is already underway, but the listener study is still incomplete, so this presentation reports only \textbf{current response progress and score trends}, not final claims [7].
+\end{itemize}
+\end{block}
+\setframebib{[1] Litterer et al., ``Mapping the Podcast Ecosystem with the Structured Podcast Research Corpus,'' ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [7] Internal listener-response log, Apr. 2026.}
+\end{frame}
+
+\begin{frame}{Introduction}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
 \column{0.56\textwidth}
-\begin{block}{24 Mar evidence base vs 02--03 Apr evidence base}
-{\scriptsize
-\begin{tabularx}{\linewidth}{p{1.9cm}YY}
-\toprule
- & 24 Mar DeepSeek bundle & 02--03 Apr retained cohort \\
-\midrule
-Design & 5 episodes \(\times\) 3 presets = 15 outputs & 10 retained samples \emph{per provider} \\
-Provider scope & DeepSeek only & Anthropic, DeepSeek, vLLM, OpenAI \\
-What it proved & End-to-end feasibility and duration range & Matched cross-provider benchmark evidence \\
-Completion & 15/15 outputs completed & 40/40 retained samples completed \\
-\bottomrule
-\end{tabularx}
-}
+\begin{itemize}
+  \item Podcasts are often long, informal, and highly conversational, so the listener must spend a large amount of time to get the main ideas [1], [4].
+  \item A plain text summary is faster to read, but it removes the voice, pacing, overlap, and speaker identity that make podcast audio engaging [4].
+  \item For this reason, the study treats summarization not only as a language problem, but also as an \textbf{audio preservation problem}.
+\end{itemize}
+
+\begin{block}{Why this matters}
+The project is trying to make podcast listening more efficient without reducing the result to a flat transcript or a list of bullet points.
 \end{block}
 
 \column{0.44\textwidth}
 \centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=\linewidth,
-  height=4.4cm,
-  ybar,
-  bar width=18pt,
-  ymin=0,ymax=45,
-  symbolic x coords={24 Mar bundle,Apr cohort},
-  xtick=data,
-  xticklabel style={font=\scriptsize,align=center},
-  nodes near coords,
-  nodes near coords style={font=\scriptsize},
-  ylabel={outputs / samples},
-  tick label style={font=\scriptsize},
-  label style={font=\scriptsize},
-  axis line style={draw=black!40},
-  ymajorgrids,
-  grid style={black!10}
-]
-\addplot[fill=cfaccent!75] coordinates {(24 Mar bundle,15) (Apr cohort,40)};
-\end{axis}
+\begin{tikzpicture}[node distance=0.55cm]
+  \node[draw=cardblue,rounded corners,fill=cardlight,align=center,text width=3.8cm,font=\scriptsize] (pod) {Long podcast episode\\40--90 minutes};
+  \node[draw=cardred,rounded corners,fill=cardred!12,below=of pod,align=center,text width=3.8cm,font=\scriptsize] (pain) {Listener bottleneck\\high time cost};
+  \node[draw=cardgreen,rounded corners,fill=cardgreen!12,below=of pain,align=center,text width=3.8cm,font=\scriptsize] (goal) {Goal: shorter audio that still sounds like a conversation};
+  \draw[-{Latex[length=2mm]},thick,cardblue] (pod) -- (pain);
+  \draw[-{Latex[length=2mm]},thick,cardblue] (pain) -- (goal);
 \end{tikzpicture}
-
-\vspace{-0.5em}
-{\scriptsize April cohort transcripts: 17.2k--31.8k words, mean 20.7k.}
 \end{columns}
-
-\sources{research/paper/sections/05\_stage3.tex:49--67; coder\_docs/sporc\_budget\_reference\_20260402.md:7--16, 210--219, 304--324}
+\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
-\begin{frame}{Proof 1: duration validity improved after the rerender-drift bug}
+\begin{frame}{Review of Related Work}
 \small
 \begin{columns}[T,totalwidth=\textwidth]
-\column{0.54\textwidth}
-\begin{block}{Bad behavior observed on 24 Mar}
+\column{0.62\textwidth}
+\begin{tabularx}{\linewidth}{p{2.6cm}YY}
+\toprule
+Area & What prior work shows & Gap that CARD addresses \\
+\midrule
+Podcast summarization & Text summaries can compress long spoken content effectively [2]. & They do not preserve voice, timing, and turn-taking. \\
+Prompted speech summarization & LLMs can summarize spoken material directly from audio or speech-conditioned inputs [5]. & They still do not solve end-to-end speaker-grounded audio resynthesis. \\
+Podcast generation & Systems can synthesize podcast-like dialogue from text [3]. & This is different from shortening one real source conversation faithfully. \\
+\bottomrule
+\end{tabularx}
+
+\column{0.38\textwidth}
+\begin{block}{Position of the study}
 \begin{itemize}
-  \item A critic-approved live draft measured \textbf{30.77 s}.
-  \item Forced stage-3 rerender turned the merged export into \textbf{33.01 s}.
-  \item That is \textbf{+2.24 s drift} or about \textbf{+7.3\%} relative to the approved draft.
+  \item The task is not to generate a new podcast from scratch.
+  \item The task is to compress an existing one while keeping its conversational identity.
 \end{itemize}
 \end{block}
-
-\begin{alertblock}{Why this matters for research}
-If the exported audio no longer matches the draft that the critic approved, then reported duration adherence becomes methodologically weak.
-\end{alertblock}
-
-\column{0.46\textwidth}
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=\linewidth,
-  height=5.2cm,
-  ybar,
-  bar width=16pt,
-  ymin=0,ymax=36,
-  symbolic x coords={Target,Approved draft,Rerendered export},
-  xtick=data,
-  xticklabel style={font=\scriptsize,align=center},
-  ylabel={seconds},
-  label style={font=\scriptsize},
-  tick label style={font=\scriptsize},
-  nodes near coords,
-  nodes near coords style={font=\scriptsize},
-  ymajorgrids,
-  grid style={black!10},
-  axis line style={draw=black!40}
-]
-\addplot[fill=cfblue!70] coordinates {(Target,30) (Approved draft,30.77) (Rerendered export,33.01)};
-\end{axis}
-\end{tikzpicture}
-
-{\scriptsize Fixed path: reuse the already measured live draft instead of rerendering it by default.}
 \end{columns}
-
-\sources{coder\_docs/memory/errors\_and\_notes.md:185--187}
+\setframebib{[2] Zheng et al., ``A Baseline Analysis for Podcast Abstractive Summarization,'' 2020. \quad [3] Xiao et al., ``PodAgent,'' ACL Findings, 2025. \quad [5] Kang and Roy, ``Prompting LLMs with Audio for Speech Summarization,'' 2024.}
 \end{frame}
 
-\begin{frame}{Proof 2: stage-4 overlap timing moved from audible lag to 0 ms residual onset}
+\begin{frame}{Problem Statement \& Objectives}
 \small
-\begin{columns}[T,totalwidth=\textwidth]
-\column{0.58\textwidth}
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=\linewidth,
-  height=5cm,
-  ybar,
-  bar width=12pt,
-  ymin=0,ymax=270,
-  symbolic x coords={Average onset,Max onset},
-  xtick=data,
-  xticklabel style={font=\scriptsize,align=center},
-  ylabel={milliseconds},
-  label style={font=\scriptsize},
-  tick label style={font=\scriptsize},
-  legend style={font=\scriptsize,at={(0.5,1.02)},anchor=south,legend columns=2,draw=none},
-  nodes near coords,
-  nodes near coords style={font=\scriptsize},
-  ymajorgrids,
-  grid style={black!10},
-  axis line style={draw=black!40}
-]
-\addplot[fill=cfaccent!80] coordinates {(Average onset,126.5) (Max onset,245)};
-\addplot[fill=cfgreen!80] coordinates {(Average onset,0) (Max onset,0)};
-\legend{Before repair,After repair}
-\end{axis}
-\end{tikzpicture}
-
-\column{0.42\textwidth}
-\begin{block}{Measured evidence}
-\begin{itemize}
-  \item Hidden leading silence was explicitly logged and trimmed.
-  \item Example accepted trims: \textbf{190 ms}, \textbf{220 ms}, and \textbf{210 ms}.
-  \item After repair, the remaining problems were semantic, not onset-related.
-\end{itemize}
+\begin{block}{Main problem}
+Existing summarization approaches do not handle the full trade-off between \textbf{time compression} and \textbf{audio fidelity} well enough for conversational podcasts [4].
 \end{block}
 
-\begin{block}{Research takeaway}
-This turned a subjective “the overlap sounds late” complaint into a measurable before/after result.
+\begin{columns}[T,totalwidth=\textwidth]
+\column{0.33\textwidth}
+\begin{block}{Objective 1}
+Keep the summary close to a user-selected runtime such as 30 seconds, 1 minute, or 5 minutes.
+\end{block}
+
+\column{0.33\textwidth}
+\begin{block}{Objective 2}
+Keep speakers recognizable by grounding resynthesis on source-linked references and affect cues.
+\end{block}
+
+\column{0.33\textwidth}
+\begin{block}{Objective 3}
+Improve realism by repairing backchannels and overlap timing instead of leaving them fully unconstrained.
 \end{block}
 \end{columns}
-
-\sources{coder\_docs/interjector\_timing\_refinement\_experiments\_20260325.md:310--327; coder\_docs/memory/errors\_and\_notes.md:121--123, 157--159}
+\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
 \end{frame}
 
-\begin{frame}{Retained 10-sample cohort: what the benchmark now shows}
-\scriptsize
+\begin{frame}{Methodology}
+\small
+\begin{center}
+\begin{tikzpicture}[font=\scriptsize,node distance=2.8mm]
+\node[draw=cardblue,rounded corners,fill=cardlight,text width=0.86\textwidth,align=center] (input) {Input: long-form source audio};
+\node[draw=cardblue,rounded corners,fill=cardblue!10,text width=0.86\textwidth,align=left,below=of input] (s1) {\textbf{Stage 1 -- Front end:} separation, ASR, diarization, alignment, and affect analysis.};
+\node[draw=cardblue,rounded corners,fill=cardgreen!10,text width=0.86\textwidth,align=left,below=of s1] (s2) {\textbf{Stage 2 -- Duration-bounded drafting:} summarizer--critic loop with explicit duration checks.};
+\node[draw=cardblue,rounded corners,fill=cardgold!13,text width=0.86\textwidth,align=left,below=of s2] (s3) {\textbf{Stage 3 -- Source-grounded resynthesis:} voice cloning and rendering from harvested speaker references.};
+\node[draw=cardblue,rounded corners,fill=cardpurple!12,text width=0.86\textwidth,align=left,below=of s3] (s4) {\textbf{Stage 4 -- Interjection refinement:} overlap placement, legality checks, trimming, and repair.};
+\node[draw=cardblue,rounded corners,fill=cardlight,text width=0.86\textwidth,align=center,below=of s4] (out) {Output: shorter conversational summary audio};
+\draw[-{Latex[length=2mm]},thick,cardblue] (input) -- (s1);
+\draw[-{Latex[length=2mm]},thick,cardblue] (s1) -- (s2);
+\draw[-{Latex[length=2mm]},thick,cardblue] (s2) -- (s3);
+\draw[-{Latex[length=2mm]},thick,cardblue] (s3) -- (s4);
+\draw[-{Latex[length=2mm]},thick,cardblue] (s4) -- (out);
+\end{tikzpicture}
+\end{center}
+
+\vspace{0.3em}
+The current implementation already supports the full four-stage flow, and the reporting now separates benchmark-side text quality from end-to-end listening quality so that the claims stay realistic [4].
+\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
+\end{frame}
+
+\begin{frame}{Results: matched provider benchmark on 10 retained samples each}
+\small
 \begin{columns}[T,totalwidth=\textwidth]
 \column{0.62\textwidth}
 \centering
 \begin{tikzpicture}
 \begin{axis}[
   width=\linewidth,
-  height=5cm,
+  height=5.2cm,
   ybar,
   bar width=7pt,
   ymin=0,ymax=0.9,
-  symbolic x coords={Anthropic,DeepSeek,vLLM,OpenAI},
+  symbolic x coords={GPT-5.4 mini,Haiku 4.5,DeepSeek Chat,Qwen3.5-27B},
   xtick=data,
   xticklabel style={font=\scriptsize,rotate=20,anchor=east},
-  ylabel={score},
+  ylabel={mean score},
   label style={font=\scriptsize},
   tick label style={font=\scriptsize},
   legend style={font=\scriptsize,at={(0.5,1.02)},anchor=south,legend columns=4,draw=none},
   ymajorgrids,
   grid style={black!10},
-  axis line style={draw=black!40}
+  axis line style={draw=black!35}
 ]
-\addplot[fill=cfblue!75] coordinates {(Anthropic,0.5830) (DeepSeek,0.8160) (vLLM,0.3406) (OpenAI,0.7240)};
-\addplot[fill=cfgreen!75] coordinates {(Anthropic,0.7580) (DeepSeek,0.4160) (vLLM,0.6330) (OpenAI,0.5483)};
-\addplot[fill=cforange!80] coordinates {(Anthropic,0.4660) (DeepSeek,0.4920) (vLLM,0.5920) (OpenAI,0.2763)};
-\addplot[fill=cfpurple!80] coordinates {(Anthropic,0.6023) (DeepSeek,0.5746) (vLLM,0.5219) (OpenAI,0.5162)};
-\legend{Fact., Nat., Speaker, Comp.}
+\addplot[fill=cardblue!80] coordinates {(GPT-5.4 mini,0.724) (Haiku 4.5,0.583) (DeepSeek Chat,0.816) (Qwen3.5-27B,0.341)};
+\addplot[fill=cardgreen!75] coordinates {(GPT-5.4 mini,0.548) (Haiku 4.5,0.758) (DeepSeek Chat,0.416) (Qwen3.5-27B,0.633)};
+\addplot[fill=cardgold!85] coordinates {(GPT-5.4 mini,0.276) (Haiku 4.5,0.466) (DeepSeek Chat,0.492) (Qwen3.5-27B,0.592)};
+\addplot[fill=cardpurple!80] coordinates {(GPT-5.4 mini,0.516) (Haiku 4.5,0.602) (DeepSeek Chat,0.575) (Qwen3.5-27B,0.522)};
+\legend{Factualness,Naturalness,Speaker similarity,Composite}
 \end{axis}
 \end{tikzpicture}
 
 \column{0.38\textwidth}
+\begin{block}{Notable findings}
+\begin{itemize}
+  \item \textbf{Claude Haiku 4.5} had the best composite score at \textbf{0.602} [4].
+  \item \textbf{DeepSeek Chat} had the strongest factualness at \textbf{0.816} [4].
+  \item \textbf{Qwen3.5-27B} had the strongest speaker-style score at \textbf{0.592} [4].
+  \item \textbf{GPT-5.4 mini} stayed competitive in factualness at \textbf{0.724}, but its composite score remained lower at \textbf{0.516} [4].
+\end{itemize}
+\end{block}
+\end{columns}
+\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [9] OpenAI, ``GPT-5 mini Model,'' 2026. \quad [10] Anthropic, ``Claude 4.5 Haiku,'' 2025. \quad [11] DeepSeek-AI, ``DeepSeek-V3 Technical Report,'' 2024. \quad [12] Yang et al., ``Qwen3 Technical Report,'' 2025.}
+\end{frame}
+
+\begin{frame}{Results: trend across 30s, 1min, and 5min benchmark settings}
+\small
+\begin{columns}[T,totalwidth=\textwidth]
+\column{0.60\textwidth}
 \centering
 \begin{tikzpicture}
 \begin{axis}[
   width=\linewidth,
-  height=5cm,
-  xbar stacked,
-  xmin=0,xmax=10,
-  symbolic y coords={Anthropic,DeepSeek,vLLM,OpenAI},
+  height=5.1cm,
+  ymin=0.40,ymax=0.68,
+  symbolic x coords={30s,1min,5min},
+  xtick=data,
+  ylabel={composite score},
+  label style={font=\scriptsize},
+  tick label style={font=\scriptsize},
+  legend style={font=\scriptsize,at={(0.5,1.02)},anchor=south,legend columns=2,draw=none},
+  ymajorgrids,
+  grid style={black!10},
+  axis line style={draw=black!35},
+  mark size=2.5pt
+]
+\addplot[cardred,thick,mark=*] coordinates {(30s,0.502) (1min,0.505) (5min,0.471)};
+\addplot[cardblue,thick,mark=square*] coordinates {(30s,0.583) (1min,0.620) (5min,0.638)};
+\legend{Embeddings enabled,No retrieval}
+\end{axis}
+\end{tikzpicture}
+
+\column{0.40\textwidth}
+\begin{block}{Reading the trend}
+\begin{itemize}
+  \item Under the matched retrieval-ablation setup, the \textbf{no-retrieval condition improved as duration increased}: \textbf{0.583} at 30s, \textbf{0.620} at 1min, and \textbf{0.638} at 5min [4].
+  \item The embedding-enabled setting stayed lower and even declined at 5min [4].
+  \item This suggests that, for the retained SPoRC setup, longer summaries benefit more from stable drafting than from transcript retrieval.
+\end{itemize}
+\end{block}
+\end{columns}
+\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026.}
+\end{frame}
+
+\begin{frame}{Results: current human-evaluation progress}
+\small
+\begin{columns}[T,totalwidth=\textwidth]
+\column{0.40\textwidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=\linewidth,
+  height=4.6cm,
+  ybar,
+  ymin=0,ymax=34,
+  symbolic x coords={Responded,Pending},
+  xtick=data,
+  ylabel={participants},
+  label style={font=\scriptsize},
+  tick label style={font=\scriptsize},
+  nodes near coords,
+  nodes near coords style={font=\scriptsize},
+  axis line style={draw=black!35}
+]
+\addplot[fill=cardgreen!80] coordinates {(Responded,14) (Pending,0)};
+\addplot[fill=cardred!80] coordinates {(Responded,0) (Pending,18)};
+\end{axis}
+\end{tikzpicture}
+
+\vspace{-0.4em}
+\begin{block}{Status as of 23 Apr 2026}
+\begin{itemize}
+  \item \textbf{14 listener responses} have been collected so far.
+  \item Duration coverage so far: \textbf{5} for 30s, \textbf{5} for 1min, and \textbf{4} for 5min.
+  \item The current dataset is useful for progress reporting, but not yet final for listener-side claims.
+\end{itemize}
+\end{block}
+
+\column{0.60\textwidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=\linewidth,
+  height=4.6cm,
+  ybar,
+  bar width=14pt,
+  ymin=0,ymax=6,
+  symbolic x coords={30s,1min,5min},
+  xtick=data,
+  ylabel={responses received},
+  label style={font=\scriptsize},
+  tick label style={font=\scriptsize},
+  nodes near coords,
+  nodes near coords style={font=\scriptsize},
+  axis line style={draw=black!35},
+  ymajorgrids,
+  grid style={black!10}
+]
+\addplot[fill=cardblue!80] coordinates {(30s,5) (1min,5) (5min,4)};
+\end{axis}
+\end{tikzpicture}
+
+\vspace{0.2em}
+The listener study is active, but these counts are still too early for final listener-side conclusions. At this stage, they are best treated as a progress snapshot rather than a finished evaluation.
+\end{columns}
+\setframebib{[7] Internal listener-response log, Apr. 2026.}
+\end{frame}
+
+\begin{frame}{Results: current evaluation scores and duration-wise trend}
+\small
+\begin{columns}[T,totalwidth=\textwidth]
+\column{0.50\textwidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=\linewidth,
+  height=4.6cm,
+  xbar,
+  xmin=0,xmax=5,
+  symbolic y coords={Listener exp.,Speaker sim.,Naturalness,Factualness,Flow,Vocal delivery},
   ytick=data,
   y dir=reverse,
   tick label style={font=\scriptsize},
   label style={font=\scriptsize},
-  xlabel={samples},
-  legend style={font=\scriptsize,at={(0.5,1.02)},anchor=south,legend columns=2,draw=none},
+  xlabel={mean score out of 5},
+  nodes near coords,
+  nodes near coords style={font=\scriptsize},
+  axis line style={draw=black!35},
   xmajorgrids,
-  grid style={black!10},
-  axis line style={draw=black!40}
+  grid style={black!10}
 ]
-\addplot[fill=cfblue!70] coordinates {(7,Anthropic) (2,DeepSeek) (0,vLLM) (5,OpenAI)};
-\addplot[fill=cfaccent!75] coordinates {(3,Anthropic) (8,DeepSeek) (10,vLLM) (5,OpenAI)};
-\legend{Direct pass,Revised}
+\addplot[fill=cardblue!75] coordinates {(4.071,Listener exp.) (4.048,Speaker sim.) (4.048,Naturalness) (3.952,Factualness) (3.786,Flow) (3.619,Vocal delivery)};
 \end{axis}
 \end{tikzpicture}
 
-\vspace{-0.3em}
-\begin{block}{Reading the result}
-\tiny Anthropic led overall; DeepSeek led factualness; vLLM led speaker-style fidelity; OpenAI stayed competitive on grounding but weak on speaker grammar.
-\end{block}
-\end{columns}
-
-\sources{coder\_docs/sporc\_budget\_reference\_20260402.md:311--380}
-\end{frame}
-
-\begin{frame}{Threats to validity and how this window addressed them}
-\small
-\begin{columns}[T,totalwidth=\textwidth]
-\column{0.58\textwidth}
-\begin{block}{Observed threats during the funded run}
-\begin{itemize}
-  \item Provider rate limiting and hidden race conditions increased cost and endangered sample retention.
-  \item Without checkpointed retries, the run could have finished with an uneven or biased cohort.
-\end{itemize}
-\end{block}
-
-\begin{block}{Controls added in response}
-\begin{itemize}
-  \item Exact retained-sample targets instead of raw prefix counts.
-  \item Resume-in-place after rate limits.
-  \item Partial-draft checkpoints for interrupted samples.
-  \item Cheap postprocess revision for capped runs that already had usable drafts.
-\end{itemize}
-\end{block}
-
-\column{0.42\textwidth}
+\column{0.50\textwidth}
 \centering
-\begin{tikzpicture}[node distance=0.6cm]
-  \node[draw=cfaccent,rounded corners,fill=cfaccent!12,align=center,text width=3.6cm,font=\scriptsize] (risk) {Rate limits and race conditions threaten a clean cohort};
-  \node[draw=cfblue,rounded corners,fill=cflight,below=of risk,align=center,text width=3.6cm,font=\scriptsize] (control) {Checkpoint + cooldown-aware retry + salvage logic};
-  \node[draw=cfgreen,rounded corners,fill=cfgreen!12,below=of control,align=center,text width=3.6cm,font=\scriptsize] (result) {Final retained cohort: \textbf{40/40} completed, \textbf{0} failed};
-  \draw[-{Latex[length=2mm]},thick,cfblue] (risk) -- (control);
-  \draw[-{Latex[length=2mm]},thick,cfblue] (control) -- (result);
+\begin{tikzpicture}
+\begin{axis}[
+  width=\linewidth,
+  height=4.6cm,
+  ymin=3.2,ymax=4.4,
+  symbolic x coords={30s,1min,5min},
+  xtick=data,
+  ylabel={mean score out of 5},
+  label style={font=\scriptsize},
+  tick label style={font=\scriptsize},
+  legend style={font=\scriptsize,at={(0.5,1.02)},anchor=south,legend columns=2,draw=none},
+  ymajorgrids,
+  grid style={black!10},
+  axis line style={draw=black!35},
+  mark size=2.5pt
+]
+\addplot[cardred,thick,mark=*] coordinates {(30s,3.533) (1min,4.200) (5min,4.167)};
+\addplot[cardgreen,thick,mark=square*] coordinates {(30s,3.867) (1min,4.133) (5min,4.250)};
+\legend{Factualness,Listener experience}
+\end{axis}
 \end{tikzpicture}
 
-\vspace{0.5em}
-\begin{block}{Budget note}
-\scriptsize Estimated API spend for the funded design was about \$37.62, with a suggested \$48 buffer.
+\vspace{0.2em}
+\begin{block}{Early pattern from the responses}
+{\tiny
+\begin{itemize}
+  \item \textbf{30s}: lowest factualness and listener-experience averages; compression is felt most strongly here.
+  \item \textbf{1min}: currently the best balance point, with stronger factualness and the best vocal-delivery mean.
+  \item \textbf{5min}: best listener-experience and conversational-flow means, suggesting better preservation of interaction quality.
+\end{itemize}
+}
 \end{block}
 \end{columns}
-
-\sources{coder\_docs/sporc\_budget\_reference\_20260402.md:35--48, 95--129, 180--204, 264--324}
+\setframebib{[7] Human-evaluation response CSV, Apr. 2026.}
 \end{frame}
 
-\begin{frame}{Conclusion and next research steps}
+\begin{frame}{Discussion}
 \small
-\begin{block}{What this report can now claim}
+\begin{columns}[T,totalwidth=\textwidth]
+\column{0.54\textwidth}
+\begin{block}{What the results suggest}
 \begin{itemize}
-  \item Since 24 Mar, the project improved not only functionality but also \textbf{research defensibility}.
-  \item Two concrete measurement bugs were turned into before/after evidence: duration drift and stage-4 onset lag.
-  \item The strongest new result is the \textbf{retained 10-sample-per-provider benchmark}, which is a better basis for comparison than the earlier exploratory trials.
+  \item The benchmark evidence already shows that CARD can support controlled comparison across providers and duration settings [4].
+  \item The early human scores suggest that the framework is already \textbf{pleasant and understandable overall}, but the shorter outputs still sound more compressed and rushed than the target quality level [7].
+  \item This means the remaining challenge is no longer basic feasibility. It is mainly about improving how short summaries keep nuance, pacing, and conversational texture.
 \end{itemize}
 \end{block}
 
-\begin{block}{Next steps}
+\column{0.46\textwidth}
+\begin{block}{Current limitations}
 \begin{itemize}
-  \item Freeze the retained cohort and archive the exact benchmark configuration.
-  \item Convert the 10-sample findings into participant-facing listening-study materials.
-  \item Use the same retained-cohort discipline for future model comparisons instead of reverting to smaller ad hoc trials.
+  \item Human evaluation is still incomplete.
+  \item Some podcast-duration cells still have no listener response yet.
+  \item Audio comments still mention rushed pacing, occasional monotony, and a few awkward transitions.
 \end{itemize}
 \end{block}
 
-\sources{coder\_docs/sporc\_budget\_reference\_20260402.md; coder\_docs/memory/errors\_and\_notes.md; research/paper/sections/05\_stage3.tex}
+\begin{alertblock}{Interpretation for this report}
+At this point, it is fair to say that the project has a working and benchmarked framework, while the listener study is still building the final evidence for user-facing quality.
+\end{alertblock}
+\end{columns}
+\setframebib{[4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [7] Internal listener-response log, Apr. 2026.}
+\end{frame}
+
+\begin{frame}{Conclusion and Recommendation}
+\small
+\begin{block}{Conclusion}
+The project has already moved beyond a proof-of-concept stage. The current state includes a complete four-stage pipeline, a matched benchmark with 10 retained samples per provider, a clear trend across 30-second, 1-minute, and 5-minute settings, and an active listener study that is beginning to show where the framework is already strong and where it still needs refinement.
+\end{block}
+
+\begin{block}{Recommended next steps}
+\begin{itemize}
+  \item Finish the remaining human-evaluation responses so that the listener-side analysis becomes complete.
+  \item Prioritize improvements for \textbf{30-second outputs}, since they currently show the clearest signs of over-compression.
+  \item Keep the matched benchmark protocol fixed so future revisions can be compared against the same retained 10-sample evidence base.
+\end{itemize}
+\end{block}
+\setframebib{[1] Litterer et al., ACL, 2025. \quad [4] Agustin et al., \textit{CARD}, current IEEE manuscript draft, 2026. \quad [7] Internal listener-response log, Apr. 2026.}
 \end{frame}
 
 \end{document}
