@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import signal
 import sys
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from card_framework.audio_pipeline.contracts import DiarizationTurn, SpeakerDiarizer
@@ -176,64 +177,65 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             ) from exc
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        diarization_audio_path = self._prepare_diarization_audio(
-            audio_path=audio_path,
-            output_dir=output_dir,
-        )
-        manifest_path = output_dir / "diarization_manifest.json"
-        manifest_payload = self._build_manifest_payload(diarization_audio_path)
-        manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
-
-        cfg = self._build_msdd_config(
-            manifest_path=manifest_path,
-            output_dir=output_dir,
-            omega_conf=OmegaConf,
-            device=device,
-        )
-
-        diarizer = NeuralDiarizer(cfg=cfg).to("cuda" if device == "cuda" else "cpu")
-        exact_speaker_count = self._exact_speaker_count()
-        diarizer._initialize_configs(
-            manifest_path=str(manifest_path),
-            max_speakers=int(self.max_speakers or 8),
-            num_speakers=exact_speaker_count,
-            tmpdir=str(output_dir),
-            batch_size=24,
-            num_workers=0,
-            verbose=False,
-        )
-        diarizer.clustering_embedding.clus_diar_model._diarizer_params.out_dir = str(output_dir)
-        diarizer.clustering_embedding.clus_diar_model._diarizer_params.manifest_filepath = str(
-            manifest_path
-        )
-        diarizer.msdd_model.cfg.test_ds.manifest_filepath = str(manifest_path)
-        diarizer.diarize()
-
-        rttm_path = self._find_rttm(output_dir=output_dir, audio_path=diarization_audio_path)
-        try:
-            raw_labels = rttm_to_labels(str(rttm_path))
-        except Exception:
-            return normalize_speaker_labels(parse_rttm_file(rttm_path))
-
-        turns: list[DiarizationTurn] = []
-        for raw_label in raw_labels:
-            parts = raw_label.split()
-            if len(parts) != 3:
-                continue
-            start_seconds = float(parts[0])
-            end_seconds = float(parts[1])
-            speaker_id = str(parts[2]).split("_")[-1]
-            turns.append(
-                DiarizationTurn(
-                    speaker=f"SPEAKER_{int(speaker_id):02d}",
-                    start_time_ms=max(0, int(round(start_seconds * 1000))),
-                    end_time_ms=max(0, int(round(end_seconds * 1000))),
-                )
+        with TemporaryDirectory(dir=output_dir) as temp_dir:
+            work_dir = Path(temp_dir)
+            diarization_audio_path = self._prepare_diarization_audio(
+                audio_path=audio_path,
+                output_dir=work_dir,
             )
-        turns.sort(key=lambda turn: turn.start_time_ms)
-        if turns:
-            return turns
-        return normalize_speaker_labels(parse_rttm_file(rttm_path))
+            manifest_path = work_dir / "diarization_manifest.json"
+            manifest_payload = self._build_manifest_payload(diarization_audio_path)
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+            cfg = self._build_msdd_config(
+                manifest_path=manifest_path,
+                output_dir=work_dir,
+                omega_conf=OmegaConf,
+                device=device,
+            )
+
+            diarizer = NeuralDiarizer(cfg=cfg).to("cuda" if device == "cuda" else "cpu")
+            diarizer._initialize_configs(
+                manifest_path=str(manifest_path),
+                max_speakers=8,
+                num_speakers=None,
+                tmpdir=str(work_dir),
+                batch_size=24,
+                num_workers=0,
+                verbose=True,
+            )
+            diarizer.clustering_embedding.clus_diar_model._diarizer_params.out_dir = str(work_dir)
+            diarizer.clustering_embedding.clus_diar_model._diarizer_params.manifest_filepath = str(
+                manifest_path
+            )
+            diarizer.msdd_model.cfg.test_ds.manifest_filepath = str(manifest_path)
+            diarizer.diarize()
+
+            rttm_path = self._find_rttm(output_dir=work_dir, audio_path=diarization_audio_path)
+            try:
+                raw_labels = rttm_to_labels(str(rttm_path))
+            except Exception:
+                return normalize_speaker_labels(parse_rttm_file(rttm_path))
+
+            turns: list[DiarizationTurn] = []
+            for raw_label in raw_labels:
+                parts = raw_label.split()
+                if len(parts) != 3:
+                    continue
+                start_seconds = float(parts[0])
+                end_seconds = float(parts[1])
+                speaker_id = int(str(parts[2]).split("_")[-1])
+                turns.append(
+                    DiarizationTurn(
+                        speaker=f"SPEAKER_{speaker_id:02d}",
+                        start_time_ms=max(0, int(round(start_seconds * 1000))),
+                        end_time_ms=max(0, int(round(end_seconds * 1000))),
+                    )
+                )
+            turns.sort(key=lambda turn: turn.start_time_ms)
+            if turns:
+                return turns
+            return normalize_speaker_labels(parse_rttm_file(rttm_path))
 
     def _exact_speaker_count(self) -> int | None:
         """Return an exact speaker count only when both bounds match."""
@@ -251,7 +253,7 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
             "duration": None,
             "label": "infer",
             "text": "-",
-            "num_speakers": self._exact_speaker_count(),
+            "num_speakers": None,
             "rttm_filepath": None,
             "uem_filepath": None,
         }
@@ -276,35 +278,24 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
         cfg.num_workers = 0
         cfg.batch_size = 24
         cfg.sample_rate = 16000
-        cfg.verbose = False
+        cfg.verbose = True
         cfg.device = "cuda" if device == "cuda" else "cpu"
         cfg.diarizer.manifest_filepath = str(manifest_path)
         cfg.diarizer.out_dir = str(output_dir)
         cfg.diarizer.oracle_vad = False
-        cfg.diarizer.ignore_overlap = False
+        cfg.diarizer.ignore_overlap = True
 
         cfg.diarizer.vad.model_path = self.vad_model
         cfg.diarizer.vad.external_vad_manifest = None
         vad_parameters = cfg.diarizer.vad.parameters
-        vad_parameters.onset = float(self.vad_onset)
-        vad_parameters.offset = float(self.vad_offset)
-        vad_parameters.pad_onset = float(self.vad_pad_onset)
-        vad_parameters.pad_offset = float(self.vad_pad_offset)
-        vad_parameters.min_duration_on = float(self.vad_min_duration_on)
-        vad_parameters.min_duration_off = float(self.vad_min_duration_off)
+        vad_parameters.onset = 0.8
+        vad_parameters.offset = 0.6
+        vad_parameters.pad_offset = -0.05
 
         cfg.diarizer.speaker_embeddings.model_path = self.speaker_embedding_model
         cfg.diarizer.msdd_model.model_path = self.msdd_model
 
-        clustering_parameters = cfg.diarizer.clustering.parameters
-        clustering_parameters.oracle_num_speakers = self._exact_speaker_count() is not None
-        clustering_parameters.max_rp_threshold = float(self.clustering_max_rp_threshold)
-        clustering_parameters.sparse_search_volume = int(self.clustering_sparse_search_volume)
-        clustering_parameters.maj_vote_spk_count = bool(self.clustering_maj_vote_spk_count)
-        if self.max_speakers is not None:
-            clustering_parameters.max_num_speakers = int(self.max_speakers)
-        if self.min_speakers is not None and "min_num_speakers" in clustering_parameters:
-            clustering_parameters.min_num_speakers = int(self.min_speakers)
+        cfg.diarizer.clustering.parameters.oracle_num_speakers = False
         return cfg
 
     def _prepare_diarization_audio(self, *, audio_path: Path, output_dir: Path) -> Path:
@@ -344,4 +335,3 @@ class NemoSpeakerDiarizer(SpeakerDiarizer):
     def _report_system_message(self, message: str) -> None:
         """Publish one operator-facing loading message through the event bus."""
         event_bus.publish("system_message", message)
-
