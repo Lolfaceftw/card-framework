@@ -5,6 +5,7 @@ Contents:
 - `audio_slices/`: one copied 10-minute sliced MP3 per episode with human-readable filenames that match the transcript-slice numbering.
 - `voice_samples/`: one folder per episode containing copied speaker-sample WAVs plus the original `manifest.json` from `episode_assets`.
 - `package_summary.json`: machine-readable summary of the copied files and any missing voice samples.
+- `descript_5m_sota_reference_prompts.md`: blind Descript-ready 5-minute reference prompt plus the exact per-episode audio files to import.
 
 Notes:
 - No voice samples were missing when this package was assembled.

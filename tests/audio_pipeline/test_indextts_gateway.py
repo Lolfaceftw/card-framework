@@ -539,6 +539,49 @@ def test_gateway_waits_for_cuda_headroom_before_startup(monkeypatch) -> None:
     )
 
 
+def test_gateway_adapts_cuda_profile_when_static_budget_is_too_strict(
+    monkeypatch,
+) -> None:
+    """A 12 GiB card with enough free VRAM should not fail only on the 8 GiB cap."""
+    events: list[str] = []
+    cleanup_calls: list[str] = []
+    monkeypatch.setattr(
+        gateway_module,
+        "_query_cuda_memory_snapshot",
+        lambda: _CudaMemorySnapshot(free_mb=9796, total_mb=12288, used_mb=2320),
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "release_torch_device_memory_with_reporting",
+        lambda **kwargs: cleanup_calls.append(str(kwargs.get("device", ""))),
+    )
+    monkeypatch.setattr(
+        gateway_module.event_bus,
+        "publish",
+        lambda channel, message, *args, **kwargs: events.append(f"{channel}:{message}"),
+    )
+
+    gateway = IndexTTSVoiceCloneGateway(
+        cfg_path=Path("config.yaml"),
+        model_dir=Path("models"),
+        device="cuda",
+        max_text_tokens_per_segment=120,
+        max_mel_tokens=1500,
+        cuda_vram_budget_mb=8192,
+        cuda_startup_min_free_memory_mb=6000,
+        cuda_startup_expected_worker_delta_mb=6600,
+    )
+
+    gateway._apply_cuda_adaptive_profile_from_telemetry(device="cuda")
+    gateway._wait_for_cuda_worker_headroom(device="cuda")
+
+    assert gateway.max_text_tokens_per_segment == 80
+    assert gateway.max_mel_tokens == 1200
+    assert cleanup_calls == []
+    assert any("Adjusted IndexTTS CUDA generation profile" in event for event in events)
+    assert "effective_budget<=8920 MiB" in events[0]
+
+
 def test_gateway_requires_cuda_memory_telemetry_for_headroom_guard(
     monkeypatch,
 ) -> None:

@@ -1,0 +1,11 @@
+episode_order,episode_title,speaker,source_voice_sample,recording_statement
+1,"The Lion, the Lamb & the Meadow (Chap. 12-13)",SPEAKER_01,"../voice_samples/01 - The Lion, the Lamb & the Meadow (Chap. 12-13)/SPEAKER_01.wav","statement.txt"
+1,"The Lion, the Lamb & the Meadow (Chap. 12-13)",SPEAKER_00,"../voice_samples/01 - The Lion, the Lamb & the Meadow (Chap. 12-13)/SPEAKER_00.wav","statement.txt"
+2,"Spirit Adrift's Nate Garrett on the Love That Saved His Life",SPEAKER_00,"../voice_samples/02 - Spirit Adrift's Nate Garrett on the Love That Saved His Life/SPEAKER_00.wav","statement.txt"
+2,"Spirit Adrift's Nate Garrett on the Love That Saved His Life",SPEAKER_02,"../voice_samples/02 - Spirit Adrift's Nate Garrett on the Love That Saved His Life/SPEAKER_02.wav","statement.txt"
+3,"079 The United State of St Kitts and Nevis ft Nekirah Nicholls",SPEAKER_00,"../voice_samples/03 - 079 The United State of St Kitts and Nevis ft Nekirah Nicholls/SPEAKER_00.wav","statement.txt"
+3,"079 The United State of St Kitts and Nevis ft Nekirah Nicholls",SPEAKER_02,"../voice_samples/03 - 079 The United State of St Kitts and Nevis ft Nekirah Nicholls/SPEAKER_02.wav","statement.txt"
+4,"Ep 6: Polite & Passive Aggression",SPEAKER_01,"../voice_samples/04 - Ep 6 - Polite & Passive Aggression/SPEAKER_01.wav","statement.txt"
+4,"Ep 6: Polite & Passive Aggression",SPEAKER_00,"../voice_samples/04 - Ep 6 - Polite & Passive Aggression/SPEAKER_00.wav","statement.txt"
+5,"Video Game Logic Episode 195: Take Two Takedown",SPEAKER_00,"../voice_samples/05 - Video Game Logic Episode 195 - Take Two Takedown/SPEAKER_00.wav","statement.txt"
+5,"Video Game Logic Episode 195: Take Two Takedown",SPEAKER_01,"../voice_samples/05 - Video Game Logic Episode 195 - Take Two Takedown/SPEAKER_01.wav","statement.txt"

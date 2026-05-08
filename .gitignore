@@ -54,3 +54,8 @@ research/*
 research/4-6-26 Report/*
 !research/4-6-26 Report/.gitignore
 !research/4-6-26 Report/main.tex
+
+# Local private survey exports and generated sharing bundles
+/Podcast Summary Evaluation*.csv
+/human_eval_gdrive_artifacts/
+/ablation_study_*.zip

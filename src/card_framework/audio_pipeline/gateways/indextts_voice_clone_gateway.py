@@ -38,6 +38,13 @@ _INDEXTTS_CUDA_VRAM_BUDGET_MB = 8192
 _INDEXTTS_CUDA_STARTUP_EXPECTED_WORKER_DELTA_MB = 6600
 _INDEXTTS_CUDA_STARTUP_WAIT_SECONDS = 90.0
 _INDEXTTS_CUDA_STARTUP_POLL_SECONDS = 5.0
+_INDEXTTS_CUDA_ADAPTIVE_RESERVE_FREE_MEMORY_MB = 1024
+_INDEXTTS_CUDA_ADAPTIVE_LOW_HEADROOM_MB = 3072
+_INDEXTTS_CUDA_ADAPTIVE_TIGHT_HEADROOM_MB = 2048
+_INDEXTTS_CUDA_ADAPTIVE_BALANCED_TEXT_TOKENS = 80
+_INDEXTTS_CUDA_ADAPTIVE_TIGHT_TEXT_TOKENS = 60
+_INDEXTTS_CUDA_ADAPTIVE_BALANCED_MEL_TOKENS = 1200
+_INDEXTTS_CUDA_ADAPTIVE_TIGHT_MEL_TOKENS = 900
 _CONSOLE_SAFE_TRANSLATIONS = str.maketrans(
     {
         "\u2192": "->",
@@ -73,6 +80,17 @@ class _CudaMemorySnapshot:
     free_mb: int
     total_mb: int
     used_mb: int
+
+
+@dataclass(slots=True, frozen=True)
+class _CudaStartupBudget:
+    """Describe the adaptive CUDA startup budget for one telemetry snapshot."""
+
+    effective_budget_mb: int
+    expected_delta_mb: int
+    projected_total_mb: int
+    projected_free_after_startup_mb: int
+    reserve_free_memory_mb: int
 
 
 _SHARED_INPROCESS_MODELS: dict[_IndexTTSRuntimeKey, object] = {}
@@ -703,6 +721,16 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
     )
     cuda_startup_wait_seconds: float = _INDEXTTS_CUDA_STARTUP_WAIT_SECONDS
     cuda_startup_poll_seconds: float = _INDEXTTS_CUDA_STARTUP_POLL_SECONDS
+    cuda_adaptive_memory_enabled: bool = True
+    cuda_adaptive_reserve_free_memory_mb: int = (
+        _INDEXTTS_CUDA_ADAPTIVE_RESERVE_FREE_MEMORY_MB
+    )
+    cuda_adaptive_low_headroom_mb: int = _INDEXTTS_CUDA_ADAPTIVE_LOW_HEADROOM_MB
+    cuda_adaptive_tight_headroom_mb: int = _INDEXTTS_CUDA_ADAPTIVE_TIGHT_HEADROOM_MB
+    cuda_adaptive_min_text_tokens_per_segment: int = (
+        _INDEXTTS_CUDA_ADAPTIVE_TIGHT_TEXT_TOKENS
+    )
+    cuda_adaptive_min_mel_tokens: int = _INDEXTTS_CUDA_ADAPTIVE_TIGHT_MEL_TOKENS
 
     def synthesize(
         self,
@@ -888,6 +916,13 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             cached_model = _SHARED_INPROCESS_MODELS.get(key)
             if cached_model is not None:
                 return cached_model
+
+        self._apply_cuda_adaptive_profile_from_telemetry(device=self.device)
+        key = self._runtime_key()
+        with _SHARED_RUNTIME_LOCK:
+            cached_model = _SHARED_INPROCESS_MODELS.get(key)
+            if cached_model is not None:
+                return cached_model
             try:
                 from indextts.infer_v2 import IndexTTS2
             except ImportError as exc:
@@ -994,8 +1029,8 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         runner_project_dir = _validate_runner_project_dir(
             runner_project_dir=self.runner_project_dir
         )
-        key = self._runtime_key()
         requested_device = str(device_override or self.device).strip().lower() or "cpu"
+        key = self._runtime_key()
         with _SHARED_RUNTIME_LOCK:
             cached_worker = _SHARED_SUBPROCESS_WORKERS.get(key)
             if (
@@ -1008,6 +1043,23 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
                 return cached_worker
             if cached_worker is not None:
                 cached_worker.close()
+                _SHARED_SUBPROCESS_WORKERS.pop(key, None)
+
+        self._apply_cuda_adaptive_profile_from_telemetry(device=requested_device)
+        key = self._runtime_key()
+        with _SHARED_RUNTIME_LOCK:
+            cached_worker = _SHARED_SUBPROCESS_WORKERS.get(key)
+            if (
+                cached_worker is not None
+                and cached_worker.is_alive()
+                and (
+                    device_override is None or cached_worker.device == requested_device
+                )
+            ):
+                return cached_worker
+            if cached_worker is not None:
+                cached_worker.close()
+                _SHARED_SUBPROCESS_WORKERS.pop(key, None)
             try:
                 cached_worker = self._build_subprocess_worker(
                     cfg_path=cfg_path,
@@ -1094,6 +1146,85 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
             description="IndexTTS subprocess retry preparation",
         )
 
+    def _apply_cuda_adaptive_profile_from_telemetry(self, *, device: str) -> None:
+        """Reduce CUDA generation pressure when current VRAM headroom is tight."""
+        if device.strip().lower() != "cuda" or not self.cuda_adaptive_memory_enabled:
+            return
+        snapshot = _query_cuda_memory_snapshot()
+        if snapshot is None:
+            return
+        budget = self._resolve_cuda_startup_budget(snapshot=snapshot)
+        pressure_detected = budget.projected_total_mb > int(
+            max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0)
+        ) or budget.projected_free_after_startup_mb < int(
+            max(self.cuda_adaptive_low_headroom_mb, 0)
+        )
+        if not pressure_detected:
+            return
+
+        configured_budget_mb = int(
+            max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0)
+        )
+        changes: list[str] = []
+        if self.num_beams > 1:
+            changes.append(f"num_beams {self.num_beams}->1")
+            self.num_beams = 1
+        if self.use_torch_compile:
+            changes.append("use_torch_compile true->false")
+            self.use_torch_compile = False
+        if self.use_accel:
+            changes.append("use_accel true->false")
+            self.use_accel = False
+        if self.use_deepspeed:
+            changes.append("use_deepspeed true->false")
+            self.use_deepspeed = False
+
+        if budget.projected_free_after_startup_mb < int(
+            max(self.cuda_adaptive_tight_headroom_mb, 0)
+        ):
+            target_text_tokens = int(
+                max(self.cuda_adaptive_min_text_tokens_per_segment, 1)
+            )
+            target_mel_tokens = int(max(self.cuda_adaptive_min_mel_tokens, 1))
+        else:
+            target_text_tokens = max(
+                int(max(self.cuda_adaptive_min_text_tokens_per_segment, 1)),
+                _INDEXTTS_CUDA_ADAPTIVE_BALANCED_TEXT_TOKENS,
+            )
+            target_mel_tokens = max(
+                int(max(self.cuda_adaptive_min_mel_tokens, 1)),
+                _INDEXTTS_CUDA_ADAPTIVE_BALANCED_MEL_TOKENS,
+            )
+        if self.max_text_tokens_per_segment > target_text_tokens:
+            changes.append(
+                "max_text_tokens_per_segment "
+                f"{self.max_text_tokens_per_segment}->{target_text_tokens}"
+            )
+            self.max_text_tokens_per_segment = target_text_tokens
+        if self.max_mel_tokens > target_mel_tokens:
+            changes.append(f"max_mel_tokens {self.max_mel_tokens}->{target_mel_tokens}")
+            self.max_mel_tokens = target_mel_tokens
+
+        if changes:
+            refreshed_budget = self._resolve_cuda_startup_budget(snapshot=snapshot)
+            event_bus.publish(
+                "system_message",
+                (
+                    "Adjusted IndexTTS CUDA generation profile for current VRAM "
+                    f"headroom ({'; '.join(changes)}). "
+                    f"{self._format_cuda_startup_constraint_detail(snapshot=snapshot, budget=refreshed_budget)}."
+                ),
+            )
+        elif budget.effective_budget_mb > configured_budget_mb:
+            event_bus.publish(
+                "system_message",
+                (
+                    "Using adaptive IndexTTS CUDA startup budget for current VRAM "
+                    "headroom. "
+                    f"{self._format_cuda_startup_constraint_detail(snapshot=snapshot, budget=budget)}."
+                ),
+            )
+
     def _snapshot_satisfies_cuda_startup_constraints(
         self,
         *,
@@ -1103,25 +1234,68 @@ class IndexTTSVoiceCloneGateway(VoiceCloneProvider):
         minimum_free_mb = int(max(self.cuda_startup_min_free_memory_mb, 0))
         if snapshot.free_mb < minimum_free_mb:
             return False
-        budget_mb = int(max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0))
-        expected_delta_mb = int(max(self.cuda_startup_expected_worker_delta_mb, 0))
-        if budget_mb <= 0:
+        budget = self._resolve_cuda_startup_budget(snapshot=snapshot)
+        if budget.effective_budget_mb <= 0:
             return True
-        return snapshot.used_mb + expected_delta_mb <= budget_mb
+        return budget.projected_total_mb <= budget.effective_budget_mb
 
     def _format_cuda_startup_constraint_detail(
         self,
         *,
         snapshot: _CudaMemorySnapshot,
+        budget: _CudaStartupBudget | None = None,
     ) -> str:
         """Render one operator-facing VRAM-budget detail string."""
-        budget_mb = int(max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0))
-        expected_delta_mb = int(max(self.cuda_startup_expected_worker_delta_mb, 0))
-        predicted_total_mb = snapshot.used_mb + expected_delta_mb
+        resolved_budget = budget or self._resolve_cuda_startup_budget(snapshot=snapshot)
+        configured_budget_mb = int(
+            max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0)
+        )
         return (
             f"used={snapshot.used_mb} MiB, free={snapshot.free_mb} MiB, "
-            f"total={snapshot.total_mb} MiB, predicted_worker_total~={predicted_total_mb} MiB, "
-            f"budget<={budget_mb} MiB, need_free>={int(max(self.cuda_startup_min_free_memory_mb, 0))} MiB"
+            f"total={snapshot.total_mb} MiB, "
+            f"predicted_worker_total~={resolved_budget.projected_total_mb} MiB, "
+            f"configured_budget<={configured_budget_mb} MiB, "
+            f"effective_budget<={resolved_budget.effective_budget_mb} MiB, "
+            f"projected_free_after_startup~={resolved_budget.projected_free_after_startup_mb} MiB, "
+            f"reserve_free>={resolved_budget.reserve_free_memory_mb} MiB, "
+            f"need_free>={int(max(self.cuda_startup_min_free_memory_mb, 0))} MiB"
+        )
+
+    def _resolve_cuda_startup_budget(
+        self,
+        *,
+        snapshot: _CudaMemorySnapshot,
+    ) -> _CudaStartupBudget:
+        """Resolve the effective startup budget from config and current telemetry."""
+        configured_budget_mb = int(
+            max(min(self.cuda_vram_budget_mb, snapshot.total_mb), 0)
+        )
+        expected_delta_mb = int(max(self.cuda_startup_expected_worker_delta_mb, 0))
+        projected_total_mb = snapshot.used_mb + expected_delta_mb
+        projected_free_after_startup_mb = snapshot.free_mb - expected_delta_mb
+        reserve_free_memory_mb = (
+            int(max(self.cuda_adaptive_reserve_free_memory_mb, 0))
+            if self.cuda_adaptive_memory_enabled
+            else 0
+        )
+        if not self.cuda_adaptive_memory_enabled:
+            effective_budget_mb = configured_budget_mb
+        elif configured_budget_mb <= 0:
+            effective_budget_mb = max(snapshot.total_mb - reserve_free_memory_mb, 0)
+        elif projected_free_after_startup_mb >= reserve_free_memory_mb:
+            physical_budget_mb = max(snapshot.total_mb - reserve_free_memory_mb, 0)
+            effective_budget_mb = max(
+                configured_budget_mb,
+                min(physical_budget_mb, projected_total_mb),
+            )
+        else:
+            effective_budget_mb = configured_budget_mb
+        return _CudaStartupBudget(
+            effective_budget_mb=effective_budget_mb,
+            expected_delta_mb=expected_delta_mb,
+            projected_total_mb=projected_total_mb,
+            projected_free_after_startup_mb=projected_free_after_startup_mb,
+            reserve_free_memory_mb=reserve_free_memory_mb,
         )
 
     def _wait_for_cuda_worker_headroom(self, *, device: str) -> None:

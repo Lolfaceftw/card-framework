@@ -746,6 +746,36 @@ def test_factory_respects_indextts_generation_overrides(tmp_path: Path) -> None:
     assert provider.max_mel_tokens == 1200
 
 
+def test_factory_respects_indextts_cuda_adaptive_overrides(tmp_path: Path) -> None:
+    orchestrator = build_voice_clone_orchestrator(
+        {
+            "voice_clone": {
+                "enabled": True,
+                "provider": "indextts",
+                "cuda_adaptive": {
+                    "enabled": False,
+                    "reserve_free_memory_mb": 2048,
+                    "low_headroom_mb": 4096,
+                    "tight_headroom_mb": 1536,
+                    "min_text_tokens_per_segment": 48,
+                    "min_mel_tokens": 768,
+                },
+            }
+        },
+        project_root=tmp_path,
+    )
+
+    assert orchestrator is not None
+    provider = orchestrator.provider
+    assert isinstance(provider, IndexTTSVoiceCloneGateway)
+    assert provider.cuda_adaptive_memory_enabled is False
+    assert provider.cuda_adaptive_reserve_free_memory_mb == 2048
+    assert provider.cuda_adaptive_low_headroom_mb == 4096
+    assert provider.cuda_adaptive_tight_headroom_mb == 1536
+    assert provider.cuda_adaptive_min_text_tokens_per_segment == 48
+    assert provider.cuda_adaptive_min_mel_tokens == 768
+
+
 def test_factory_respects_voice_clone_merged_output_override(tmp_path: Path) -> None:
     orchestrator = build_voice_clone_orchestrator(
         {

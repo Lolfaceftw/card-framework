@@ -25,6 +25,15 @@ providers:
       model: "deepseek-chat"
       base_url: "https://api.deepseek.com"
 
+  - id: deepseek_v4_flash
+    description: DeepSeek V4 Flash/Fast API backend.
+    required_env: ["DEEPSEEK_API_KEY"]
+    llm:
+      _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
+      api_key: "$ENV{DEEPSEEK_API_KEY}"
+      model: "deepseek-v4-flash"
+      base_url: "https://api.deepseek.com"
+
   - id: openai_gpt_5_4_mini
     description: OpenAI GPT-5.4 mini with reasoning disabled for SPoRC budget sweeps.
     required_env: ["OPENAI_API_KEY"]

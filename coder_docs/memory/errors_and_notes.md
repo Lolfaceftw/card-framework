@@ -1,3 +1,109 @@
+### 2026-05-08T21:12:50+08:00 - No-Critic Ablations Must Preserve Memory
+- Problem: The SPoRC ablation wrapper treated `no_critic` as both zero critic
+  iterations and disabled loop memory. That made the cell a combined
+  no-critic/no-memory condition instead of an isolated critic ablation.
+- Solution: Keep loop memory enabled for `no_critic` cells and set only
+  `max_iterations=0`; reserve memory removal for the explicit `no_memory`
+  ablation. Check generated plans before interpreting historical no-critic
+  artifacts as critic-exclusive evidence.
+
+### 2026-05-06T11:18:00+08:00 - No-Cap Generation Requests Must Omit `max_tokens`
+- Problem: For the SPoRC ablation wrapper, interpreting "do not truncate" as a
+  large but finite `max_tokens` value caused context-limit failures and violated
+  the requested no-cap protocol. Lowering the cap again made the protocol drift
+  worse.
+- Solution: When the operator asks for no truncation or no output cap, omit the
+  provider `max_tokens`/`default_max_tokens` control entirely for vLLM/Qwen
+  requests. Do not substitute a "safer" smaller cap unless the operator
+  explicitly requests one.
+
+### 2026-05-06T10:55:00+08:00 - SPoRC Ablations Need Explicit Thinking And Output Budgets
+- Problem: The SPoRC provider prep inferred vLLM thinking from model names and
+  only recognized the Qwen/Qwen3.5-27B budget path. That made Qwen/Qwen3.6-27B
+  ablations ambiguous, and provider defaults could omit explicit large
+  output-token budgets from the actual request payload.
+- Solution: Add provider-profile overrides for SPoRC vLLM thinking mode, keep
+  Qwen/Qwen3.6-27B in the default thinking-aware path, and support provider-level
+  default max-token budgets for vLLM and DeepSeek so ablation artifacts record
+  non-truncating generation controls.
+
+### 2026-05-04T18:58:26+08:00 - IndexTTS CUDA Startup Needs Adaptive Budgeting On 12 GiB Cards
+- Problem: The warm IndexTTS CUDA worker could reject a run on a 12 GiB GPU even
+  with almost 10 GiB free because the startup gate compared the predicted worker
+  total only against the static 8 GiB repo budget.
+- Solution: Keep the minimum free-VRAM guard, but add an adaptive CUDA profile
+  that lowers generation pressure and expands the effective startup budget only
+  when current telemetry shows enough physical-card reserve after the predicted
+  worker load.
+
+### 2026-05-01T21:55:00+08:00 - Judge Reproducibility Needs Explicit Generation Controls And Cache Labels
+- Problem: Participant-audio judge reruns could reuse the same run label across
+  materially different generation settings, such as explicit `8192` output caps
+  versus uncapped/default-max runs. DeepSeek also does not expose a documented
+  seed parameter, so force-rerunning can change judgments even with the same
+  prompt.
+- Solution: Add explicit `--judge-seed` and `--judge-temperature` controls where
+  providers support them, reject unsupported DeepSeek seed requests, include
+  max-token/seed/temperature settings in run labels and cache validation, and
+  preserve cache/trace folders as the reproducibility artifact for external
+  providers.
+
+### 2026-05-01T17:55:00+08:00 - Judge Reasoning Runs Must Not Inherit Tiny Output Caps
+- Problem: Participant-audio judge runs defaulted `--max-tokens` to `8192`.
+  For thinking/reasoning providers, those tokens include hidden/visible
+  reasoning, so DeepSeek high-effort runs could spend the whole budget on
+  `reasoning_content` and return empty or truncated JSON content.
+- Solution: Remove the fixed `8192` default. When no explicit cap is provided,
+  use DeepSeek's published `384K` max output budget, Gemini's advertised
+  `output_token_limit` when available, and vLLM's advertised `max_model_len`
+  with prompt headroom. Record the effective budget in provider request traces.
+
+### 2026-05-01T12:30:00+08:00 - Gemini Judge Runs Should Accept GOOGLE_API_KEY Fallback
+- Problem: The participant-audio Gemini judge runner only read
+  `GEMINI_API_KEY`, while the local dotenv/env path can set both
+  `GOOGLE_API_KEY` and `GEMINI_API_KEY` and prefer `GOOGLE_API_KEY`. That makes
+  manual smoke calls work while the judge runner can still fail in environments
+  that only expose Google's canonical key name.
+- Solution: For `judge_provider=gemini`, resolve `GEMINI_API_KEY` first and
+  fall back to `GOOGLE_API_KEY`; keep traces free of key values and cover the
+  fallback in the participant-audio judge regression test.
+
+### 2026-05-01T11:45:00+08:00 - Judge Prompt Text Changes Must Bump The Prompt Cache Version
+- Problem: The participant-audio judge cache validator keyed on
+  `JUDGE_PROMPT_CACHE_VERSION`, provider/model, audio mode, and prompt-profile
+  name, but not on the literal profile-note text. Editing `PROMPT_PROFILE_NOTES`
+  without bumping the version can silently reuse stale judge outputs whose saved
+  request traces still contain removed prompt text.
+- Solution: Bump `JUDGE_PROMPT_CACHE_VERSION` whenever the rendered judge prompt
+  changes, force a fresh judge rerun for affected profiles, and verify saved
+  request traces/workbooks for removed or added prompt phrases before reporting
+  updated correlations.
+
+### 2026-04-28T19:49:00+08:00 - Artifact-Level Uncertainty Must Use The Same Aggregation As Main Correlations
+- Problem: A first construct-separated ensemble report computed its uncertainty
+  block through a stricter artifact-score reconstruction path than the main
+  artifact-level correlation block. With tied ranks and duplicated human
+  responses on a small `n=13` set, this could move Spearman by a few hundredths
+  and make the report internally inconsistent.
+- Solution: Reuse the same artifact-level aggregation semantics as the main
+  report for item means, dimension means, and composite means before computing
+  Fisher-z and bootstrap confidence intervals.
+
+### 2026-04-28T19:25:25+08:00 - Profile-Specific Judge Caches May Lack In-Entry Prompt Labels
+- Problem: Leave-one-episode-out cache-only reports over older participant-audio
+  prompt-profile runs failed because the cache filenames were profile-specific,
+  but each per-artifact cache entry predated the internal `prompt_profile`
+  field. The loader therefore rejected every otherwise-valid cached score as if
+  it came from the default prompt.
+- Solution: Treat a missing in-entry `prompt_profile` as a legacy
+  profile-specific cache entry for the currently requested profile, while still
+  enforcing explicit prompt labels when present. Added a regression test so
+  older profile-specific caches remain usable for grouped CV reports.
+
+### 2026-04-27T13:42:15+08:00 - Human-Eval Judge Reports Must Derive Dimensions From Item Scores Consistently
+- Problem: Participant-audio judge reports could drift slightly between a fresh API run and a later `--skip-gemini` cache-only rerun because fresh cache entries stored `result.scores`, while cache reloads recomputed dimension means from the nine item scores. That changed a few rounded Pearson/Spearman values even though no judge call changed.
+- Solution: Derive dimension scores from validated item scores before writing traces, cache entries, composites, and reports so fresh and cached participant-audio judge runs use the same score path.
+
 ### 2026-04-03T20:05:00+08:00 - SPoRC `max_iterations` Must Count Critic Budgets, Not Waste The Final Critic
 - Problem: The old loop semantics spent one full outer iteration on `summarizer -> critic`, so `max_iterations=1` stopped immediately after the first failed critic verdict. That meant the benchmark paid for critic feedback that never drove a final summarizer revision, and funded capped runs could not cheaply recover that missing extra pass.
 - Solution: Redefine `max_iterations` as critic-feedback budget (`0` = summarizer only, `1` = summarizer -> critic -> summarizer, etc.), preserve `0` through SPoRC execute and the budget wrapper, and add `scripts/run_sporc_post_critic_revision.py` so already-funded capped reports can run only the missing critic-guided summarizer pass plus judge rerun in place.

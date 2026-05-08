@@ -645,6 +645,19 @@ class _ArtifactCaptureResponseCallback(LLMResponseCallback):
         self._recorder.complete_stream(role=self._role)
 
 
+def _last_provider_response_details(provider: LLMProvider) -> dict[str, Any]:
+    """Return the innermost provider's structured response details when present."""
+    current: Any = provider
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        details = getattr(current, "last_response_details", None)
+        if isinstance(details, dict) and details:
+            return deepcopy(details)
+        current = getattr(current, "inner_provider", None)
+    return {}
+
+
 class _ArtifactCaptureLLMProvider(LLMProvider):
     """Wrap an LLM provider and persist structured request/response trace payloads."""
 
@@ -695,6 +708,9 @@ class _ArtifactCaptureLLMProvider(LLMProvider):
                 "max_tokens": max_tokens,
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 "response_text": response,
+                "provider_last_response_details": _last_provider_response_details(
+                    self.inner_provider
+                ),
             },
         )
         return response
@@ -741,6 +757,9 @@ class _ArtifactCaptureLLMProvider(LLMProvider):
                 "max_tokens": max_tokens,
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 "response": _serialize_provider_response(response),
+                "provider_last_response_details": _last_provider_response_details(
+                    self.inner_provider
+                ),
             },
         )
         return response
@@ -1697,7 +1716,12 @@ def _prepare_provider_config(
         return prepared
 
     model_name = str(prepared.get("model", "") or "")
-    vllm_budget_thinking_enabled = _vllm_budget_thinking_enabled(model_name)
+    explicit_thinking = _pop_explicit_vllm_thinking(prepared)
+    vllm_budget_thinking_enabled = (
+        explicit_thinking
+        if explicit_thinking is not None
+        else _vllm_budget_thinking_enabled(model_name)
+    )
     prepared["request_timeout_seconds"] = max(
         float(prepared.get("request_timeout_seconds", 0.0) or 0.0),
         _BENCHMARK_VLLM_REQUEST_TIMEOUT_SECONDS,
@@ -1728,10 +1752,29 @@ def _prepare_provider_config(
     return prepared
 
 
+def _pop_explicit_vllm_thinking(prepared: dict[str, Any]) -> bool | None:
+    """Pop benchmark-local vLLM thinking overrides before provider instantiation."""
+    for key in ("sporc_enable_thinking", "benchmark_enable_thinking"):
+        if key not in prepared:
+            continue
+        raw_value = prepared.pop(key)
+        if isinstance(raw_value, bool):
+            return raw_value
+        text = str(raw_value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on", "enabled"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "disabled"}:
+            return False
+        raise BenchmarkExecutionError(
+            f"Provider profile field {key!r} must be boolean-like, got {raw_value!r}."
+        )
+    return None
+
+
 def _vllm_budget_thinking_enabled(model_name: str) -> bool:
     """Return whether the SPoRC budget path should keep vLLM thinking enabled."""
     normalized = re.sub(r"[^a-z0-9]+", "", str(model_name or "").strip().lower())
-    return "qwen35" in normalized and "27b" in normalized
+    return ("qwen35" in normalized or "qwen36" in normalized) and "27b" in normalized
 
 
 def _validate_provider_role_constraints(

@@ -1267,6 +1267,19 @@ def test_collect_session_budget_profile_tracks_contestant_and_judge_costs(
     )
 
 
+def test_resolve_budget_pricing_covers_deepseek_v4_flash() -> None:
+    module = _load_module()
+    profiles = module._provider_index(module.DEFAULT_PROVIDER_PROFILES_PATH)
+
+    pricing = module._resolve_budget_pricing("deepseek_v4_flash", profiles)
+
+    assert pricing == {
+        "input_usd_per_million": 0.14,
+        "output_usd_per_million": 0.28,
+        "pricing_reference": module._BUDGET_RATE_REFERENCE,
+    }
+
+
 def test_resolve_session_context_round_trips_original_arguments(
     tmp_path: Path,
     monkeypatch,

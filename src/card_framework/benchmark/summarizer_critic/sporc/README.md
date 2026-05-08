@@ -854,6 +854,68 @@ The wrapper enforces the documented budget defaults:
 - contestants: `openai_gpt_5_4_mini`, `anthropic_claude_haiku_4_5`, `deepseek_chat`, `vllm_default`
 - judge: `google_gemini_3_1_pro_preview_judge`
 
+### Ablation-study wrapper
+
+Use `scripts/run_sporc_ablation_study.py` for the IEEE ablation table. It writes
+a run-local provider profile file, cell-local configs, per-cell execute logs,
+the normal SPoRC sample artifacts, an aggregate JSON/Markdown report, and an
+optional LaTeX section for `research/EEE_199_IEEE`.
+
+Default protocol:
+
+- `5m` preset, `20` retained seeded-random samples per cell, `sample_seed=42`
+- transcript-only path with embeddings disabled
+- ablations: full loop, no persisted loop memory, and no critic
+- Qwen/Qwen3.6-27B through vLLM with explicit thinking and non-thinking matched
+  summarizer/critic conditions
+- no vLLM `max_tokens` cap unless you pass a positive `--vllm-max-tokens`
+- DeepSeek V4 Pro with thinking disabled as the judge
+- factualness as the primary automatic endpoint; naturalness, speaker-grammar
+  similarity, and composite as exploratory diagnostics
+- live wrapper progress with a sample/cell progress bar, heartbeat updates, and
+  ETA smoothed by `--eta-learning-rate`
+
+Plan without running:
+
+```powershell
+uv run python scripts/run_sporc_ablation_study.py --mode plan
+```
+
+Run the ablation study and refresh the paper section:
+
+```powershell
+$env:DEEPSEEK_API_KEY="..."
+$env:VLLM_URL="http://127.0.0.1:8000/v1"
+$env:CARD_FRAMEWORK_VLLM_MODEL="Qwen/Qwen3.6-27B"
+uv run python scripts/run_sporc_ablation_study.py --mode run --update-paper
+```
+
+Use `--eta-learning-rate 0.25` to keep the ETA stable, or increase it when the
+latest sample duration should affect the estimate more strongly.
+
+Use `--thinking-grid factorial` if the paper needs the cross-role interaction
+cells (`summarizer thinking` with `critic non-thinking`, and vice versa).
+
+### Max-iteration sweep wrapper
+
+Use `scripts/run_sporc_max_iter_sweep.py` when you want a quick curve showing
+how the judge scores change as the critic-feedback budget increases. The wrapper
+defaults to `--max-iterations-list 1,2,3,4,5` and `--max-samples 1`, so a smoke
+run executes one retained seeded-random sample per max-iteration value.
+
+```powershell
+$env:DEEPSEEK_API_KEY="..."
+$env:VLLM_URL="http://127.0.0.1:8000/v1"
+$env:CARD_FRAMEWORK_VLLM_MODEL="Qwen/Qwen3.6-27B"
+uv run python scripts/run_sporc_max_iter_sweep.py --mode run
+```
+
+Each run writes `max_iter_sweep_report.json`, `max_iter_sweep_report.md`,
+`max_iter_sweep.csv`, and `max_iter_sweep.svg` under
+`artifacts/summarizer_critic_benchmark/sporc_max_iter_sweeps/<timestamp>/`.
+Use `--max-samples` to increase the per-cell retained sample count after the
+shape of the curve looks worth funding.
+
 The wrapper now treats `--max-iterations` as a critic-feedback budget instead of
 the old summarize+critic pair count:
 

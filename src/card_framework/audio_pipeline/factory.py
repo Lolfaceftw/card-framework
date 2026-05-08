@@ -1036,6 +1036,7 @@ def build_voice_clone_provider(
     voice_clone_cfg = _as_mapping(audio_cfg.get("voice_clone", {}))
     provider = str(voice_clone_cfg.get("provider", "indextts")).strip().lower()
     if provider == "indextts":
+        cuda_adaptive_cfg = _as_mapping(voice_clone_cfg.get("cuda_adaptive", {}))
         execution_backend = str(voice_clone_cfg.get("execution_backend", "subprocess"))
         default_runner_project_dir = _default_vendor_index_tts_dir(project_root)
         runner_project_dir = resolve_path(
@@ -1096,6 +1097,22 @@ def build_voice_clone_provider(
             ),
             emotion_vector_max_sum=float(
                 voice_clone_cfg.get("emotion_vector_max_sum", 0.8)
+            ),
+            cuda_adaptive_memory_enabled=bool(cuda_adaptive_cfg.get("enabled", True)),
+            cuda_adaptive_reserve_free_memory_mb=int(
+                cuda_adaptive_cfg.get("reserve_free_memory_mb", 1024)
+            ),
+            cuda_adaptive_low_headroom_mb=int(
+                cuda_adaptive_cfg.get("low_headroom_mb", 3072)
+            ),
+            cuda_adaptive_tight_headroom_mb=int(
+                cuda_adaptive_cfg.get("tight_headroom_mb", 2048)
+            ),
+            cuda_adaptive_min_text_tokens_per_segment=int(
+                cuda_adaptive_cfg.get("min_text_tokens_per_segment", 60)
+            ),
+            cuda_adaptive_min_mel_tokens=int(
+                cuda_adaptive_cfg.get("min_mel_tokens", 900)
             ),
         )
     if provider in {"passthrough", "none"}:

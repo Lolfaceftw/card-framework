@@ -1466,6 +1466,48 @@ def test_prepare_provider_config_keeps_qwen_3_5_27b_vllm_thinking_enabled() -> N
     assert prepared["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
 
 
+def test_prepare_provider_config_keeps_qwen_3_6_27b_vllm_thinking_enabled() -> None:
+    profile = ProviderProfile(
+        provider_id="vllm_qwen36_27b",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+            "model": "Qwen/Qwen3.6-27B",
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="critic", transcript_only=True)
+
+    assert prepared["request_timeout_seconds"] == 300.0
+    assert prepared["enable_thinking"] is True
+    assert prepared["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+def test_prepare_provider_config_honors_explicit_vllm_thinking_override() -> None:
+    profile = ProviderProfile(
+        provider_id="vllm_qwen36_27b_nonthinking",
+        description="test",
+        llm_config={
+            "_target_": "card_framework.providers.vllm_provider.VLLMProvider",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "EMPTY",
+            "model": "Qwen/Qwen3.6-27B",
+            "sporc_enable_thinking": False,
+        },
+    )
+
+    prepared = _prepare_provider_config(profile, role="critic", transcript_only=True)
+
+    assert "sporc_enable_thinking" not in prepared
+    assert prepared["request_timeout_seconds"] == 300.0
+    assert prepared["enable_thinking"] is False
+    assert prepared["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+
+
 def test_prepare_provider_config_applies_qwen_3_5_27b_vllm_judge_timeout() -> None:
     profile = ProviderProfile(
         provider_id="vllm_default",

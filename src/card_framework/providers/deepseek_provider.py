@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -33,15 +33,40 @@ class DeepSeekProvider(LLMProvider):
         api_key: str,
         model: str = "deepseek-chat",
         base_url: str = "https://api.deepseek.com",
+        request_timeout_seconds: float = 30.0,
+        default_max_tokens: int | None = None,
+        thinking_mode: str = "",
+        reasoning_effort: str = "",
+        extra_body: dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+        temperature: float | None = None,
+        stream: bool = True,
         response_callback: LLMResponseCallback | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
-        self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        self.request_timeout_seconds = max(1.0, float(request_timeout_seconds))
+        self.default_max_tokens = (
+            int(default_max_tokens)
+            if default_max_tokens is not None and int(default_max_tokens) > 0
+            else None
+        )
+        self.thinking_mode = str(thinking_mode or "").strip()
+        self.reasoning_effort = str(reasoning_effort or "").strip()
+        self.extra_body = self._coerce_jsonable(extra_body) or {}
+        self.response_format = self._coerce_jsonable(response_format) or {}
+        self.temperature = float(temperature) if temperature is not None else None
+        self.stream = bool(stream)
+        self._client = OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=self.request_timeout_seconds,
+        )
         self._response_callback: LLMResponseCallback = (
             response_callback or NullLLMResponseCallback()
         )
+        self.last_response_details: dict[str, Any] = {}
 
         event_bus.publish(
             "system_message",
@@ -51,6 +76,96 @@ class DeepSeekProvider(LLMProvider):
     def set_response_callback(self, response_callback: LLMResponseCallback) -> None:
         """Replace the streaming callback sink at runtime."""
         self._response_callback = response_callback
+
+    @classmethod
+    def _coerce_jsonable(cls, value: Any) -> Any:
+        """Convert nested SDK/config containers into JSON-serializable builtins."""
+        if hasattr(value, "model_dump"):
+            return cls._coerce_jsonable(value.model_dump())
+        if isinstance(value, Mapping):
+            return {
+                str(key): cls._coerce_jsonable(raw_value)
+                for key, raw_value in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._coerce_jsonable(item) for item in value]
+        return value
+
+    @classmethod
+    def _merge_dicts(
+        cls,
+        base: dict[str, Any],
+        overlay: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge nested request dictionaries without mutating inputs."""
+        merged = cls._coerce_jsonable(base)
+        for key, value in cls._coerce_jsonable(overlay).items():
+            existing = merged.get(key)
+            if isinstance(existing, Mapping) and isinstance(value, Mapping):
+                merged[key] = cls._merge_dicts(dict(existing), dict(value))
+                continue
+            merged[key] = value
+        return merged
+
+    def _resolve_max_tokens(self, max_tokens: int | None) -> int | None:
+        """Return the call-level output budget or the configured default."""
+        if max_tokens is not None:
+            return int(max_tokens)
+        return self.default_max_tokens
+
+    def _apply_common_request_options(
+        self,
+        create_kwargs: dict[str, Any],
+        *,
+        max_tokens: int | None,
+        include_response_format: bool,
+    ) -> dict[str, Any]:
+        """Attach optional DeepSeek request controls to one payload."""
+        effective_max_tokens = self._resolve_max_tokens(max_tokens)
+        if effective_max_tokens is not None:
+            create_kwargs["max_tokens"] = effective_max_tokens
+        if self.temperature is not None:
+            create_kwargs["temperature"] = self.temperature
+        if include_response_format and self.response_format:
+            create_kwargs["response_format"] = self.response_format
+
+        extra_body = dict(self.extra_body)
+        if self.thinking_mode:
+            extra_body = self._merge_dicts(
+                extra_body,
+                {"thinking": {"type": self.thinking_mode}},
+            )
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
+        if self.thinking_mode == "enabled" and self.reasoning_effort:
+            create_kwargs["reasoning_effort"] = self.reasoning_effort
+        return create_kwargs
+
+    def _record_last_response(
+        self,
+        *,
+        request: dict[str, Any],
+        content: str,
+        reasoning_content: str,
+        tool_calls: list[ToolCall] | None = None,
+        raw_response: Any | None = None,
+    ) -> None:
+        """Persist a lightweight request/response summary for artifact wrappers."""
+        response_payload: dict[str, Any] = {
+            "content": content,
+            "reasoning_content": reasoning_content or None,
+        }
+        if tool_calls is not None:
+            response_payload["tool_calls"] = [
+                tool_call.model_dump() for tool_call in tool_calls
+            ]
+        if raw_response is not None:
+            response_payload["raw_response"] = self._coerce_jsonable(raw_response)
+        self.last_response_details = {
+            "provider": "deepseek",
+            "request": self._coerce_jsonable(request),
+            "response": response_payload,
+        }
 
     def generate(
         self,
@@ -67,14 +182,39 @@ class DeepSeekProvider(LLMProvider):
         create_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "stream": True,
+            "stream": self.stream,
         }
-        if max_tokens is not None:
-            create_kwargs["max_tokens"] = max_tokens
+        create_kwargs = self._apply_common_request_options(
+            create_kwargs,
+            max_tokens=max_tokens,
+            include_response_format=True,
+        )
+
+        if not self.stream:
+            response = self._client.chat.completions.create(**create_kwargs)
+            message = response.choices[0].message
+            content = str(getattr(message, "content", "") or "")
+            reasoning_content = str(getattr(message, "reasoning_content", "") or "")
+            agent_name = infer_agent_name_from_text(system_prompt)
+            self._response_callback.on_start(agent_name)
+            try:
+                if reasoning_content:
+                    self._response_callback.on_thought_token(reasoning_content)
+                if content:
+                    self._response_callback.on_content_token(content)
+            finally:
+                self._response_callback.on_complete()
+            self._record_last_response(
+                request=create_kwargs,
+                content=content,
+                reasoning_content=reasoning_content,
+                raw_response=response,
+            )
+            return content.strip()
 
         response = self._client.chat.completions.create(**create_kwargs)
-
         full_content = ""
+        full_reasoning = ""
         self._response_callback.on_start(infer_agent_name_from_text(system_prompt))
         try:
             for chunk in response:
@@ -84,6 +224,7 @@ class DeepSeekProvider(LLMProvider):
 
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                     self._response_callback.on_thought_token(delta.reasoning_content)
+                    full_reasoning += delta.reasoning_content
 
                 if delta.content:
                     self._response_callback.on_content_token(delta.content)
@@ -91,6 +232,11 @@ class DeepSeekProvider(LLMProvider):
         finally:
             self._response_callback.on_complete()
 
+        self._record_last_response(
+            request=create_kwargs,
+            content=full_content,
+            reasoning_content=full_reasoning,
+        )
         return full_content.strip()
 
     @staticmethod
@@ -294,6 +440,28 @@ class DeepSeekProvider(LLMProvider):
             reasoning_content=full_thought if full_thought else None,
         )
 
+    def _assistant_message_from_response(self, response: Any) -> AssistantMessage:
+        """Convert one non-streaming DeepSeek response into an assistant message."""
+        message = response.choices[0].message
+        raw_tool_calls = list(getattr(message, "tool_calls", None) or [])
+        final_tool_calls = [
+            ToolCall(
+                id=str(getattr(tool_call, "id", None) or f"call_{index}"),
+                function=Function(
+                    name=str(getattr(tool_call.function, "name", "")),
+                    arguments=str(getattr(tool_call.function, "arguments", "")),
+                ),
+            )
+            for index, tool_call in enumerate(raw_tool_calls)
+        ]
+        content = str(getattr(message, "content", "") or "")
+        reasoning_content = str(getattr(message, "reasoning_content", "") or "")
+        return AssistantMessage(
+            content=content,
+            tool_calls=final_tool_calls if final_tool_calls else None,
+            reasoning_content=reasoning_content if reasoning_content else None,
+        )
+
     def chat(
         self,
         messages: Sequence[MessageInput],
@@ -308,16 +476,48 @@ class DeepSeekProvider(LLMProvider):
         create_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": normalized_messages,
-            "stream": True,
+            "stream": self.stream,
         }
         if normalized_tools:
             create_kwargs["tools"] = normalized_tools
             if tool_choice:
                 create_kwargs["tool_choice"] = tool_choice
 
-        if max_tokens:
-            create_kwargs["max_tokens"] = max_tokens
+        create_kwargs = self._apply_common_request_options(
+            create_kwargs,
+            max_tokens=max_tokens,
+            include_response_format=not bool(normalized_tools),
+        )
+
+        agent_name = infer_agent_name(messages)
+        if not self.stream:
+            response = self._client.chat.completions.create(**create_kwargs)
+            assistant_message = self._assistant_message_from_response(response)
+            self._response_callback.on_start(agent_name)
+            try:
+                if assistant_message.reasoning_content:
+                    self._response_callback.on_thought_token(
+                        assistant_message.reasoning_content
+                    )
+                if assistant_message.content:
+                    self._response_callback.on_content_token(assistant_message.content)
+            finally:
+                self._response_callback.on_complete()
+            self._record_last_response(
+                request=create_kwargs,
+                content=assistant_message.content,
+                reasoning_content=assistant_message.reasoning_content or "",
+                tool_calls=assistant_message.tool_calls,
+                raw_response=response,
+            )
+            return assistant_message
 
         response_stream = self._client.chat.completions.create(**create_kwargs)
-        agent_name = infer_agent_name(messages)
-        return self._process_stream(response_stream, agent_name)
+        assistant_message = self._process_stream(response_stream, agent_name)
+        self._record_last_response(
+            request=create_kwargs,
+            content=assistant_message.content,
+            reasoning_content=assistant_message.reasoning_content or "",
+            tool_calls=assistant_message.tool_calls,
+        )
+        return assistant_message

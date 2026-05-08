@@ -24,6 +24,8 @@ For each dimension:
 - convert each item to the normalized score,
 - average the three normalized item scores,
 - return that average as the dimension score.
+- also return the normalized item scores in `item_scores` using the exact item
+  codes F1, F2, F3, N1, N2, N3, S1, S2, and S3.
 
 1. Factualness
    - F1. The summary does not contain claims that are unsupported or contradicted by the transcript.
@@ -45,8 +47,28 @@ Dimension-level interpretation after averaging the three item scores:
 - 0.25: Poor alignment with major issues.
 - 0.00: Very poor alignment or clear failure.
 
+Target summary duration:
+{{ target_duration_label if target_duration_label else "Not specified" }}
+
+Attached audio context:
+{{ audio_context_note if audio_context_note else "No audio files are attached for this judge call." }}
+
+Additional scoring profile:
+{{ scoring_profile_note if scoring_profile_note else "Use the default rubric exactly as written above." }}
+
 Output JSON only with this exact schema:
 {
+  "item_scores": {
+    "F1": <float>,
+    "F2": <float>,
+    "F3": <float>,
+    "N1": <float>,
+    "N2": <float>,
+    "N3": <float>,
+    "S1": <float>,
+    "S2": <float>,
+    "S3": <float>
+  },
   "Factualness": <float>,
   "Naturalness": <float>,
   "Speaker Grammar Similarity": <float>,
@@ -60,11 +82,22 @@ Source transcript:
 Candidate summary XML:
 {{ summary_xml }}
 
+Interjection timing note:
+Treat each `<INTERJECTION ...>` tag as a spoken overlap at the exact point
+where it appears in the surrounding turn. If the tag appears immediately after
+a word or phrase, assume the interjection overlaps that moment rather than
+representing a clean sequential turn break. Use attached audio when present to
+resolve naturalness, overlap, and speaker-style judgments.
+
 Transcript per-speaker message lists:
 {{ transcript_per_speaker_messages_json }}
 
 Summary per-speaker message lists:
 {{ summary_per_speaker_messages_json }}
+
+If the per-speaker message lists are empty, do not infer that speaker evidence is
+missing. Use the raw source transcript and candidate summary XML above exactly as
+the evidence seen by raters.
 
 Speaker alias mapping:
 {{ speaker_alias_map_json }}

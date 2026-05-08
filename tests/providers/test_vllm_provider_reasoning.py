@@ -156,6 +156,25 @@ def test_generate_requests_thinking_mode(free_tcp_port: int) -> None:
     assert server.chat_requests[-1]["chat_template_kwargs"] == {"enable_thinking": True}
 
 
+def test_generate_uses_configured_default_max_tokens(free_tcp_port: int) -> None:
+    """Send a profile-level output budget when the caller does not pass one."""
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream([_chunk(content="answer"), _chunk(finish_reason="stop")])
+        provider = VLLMProvider(
+            base_url=f"{server.base_url}/v1",
+            api_key="EMPTY",
+            enable_thinking=False,
+            default_max_tokens=245_760,
+        )
+
+        result = provider.generate(system_prompt="sys", user_prompt="user")
+
+        provider._client.close()
+
+    assert result == "answer"
+    assert server.chat_requests[-1]["max_tokens"] == 245_760
+
+
 def test_generate_uses_judge_name_for_evaluator_prompts(free_tcp_port: int) -> None:
     """Label evaluator-style generate streams as Judge for the terminal UI."""
     with run_openai_compatible_server(port=free_tcp_port) as server:

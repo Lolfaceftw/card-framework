@@ -1392,12 +1392,13 @@ def _resolve_budget_pricing(
             "output_usd_per_million": 12.0,
             "pricing_reference": _BUDGET_RATE_REFERENCE,
         }
-    if provider_target == _DEEPSEEK_PROVIDER_TARGET and model_name.startswith(
-        "deepseek-chat"
+    if provider_target == _DEEPSEEK_PROVIDER_TARGET and (
+        model_name.startswith("deepseek-chat")
+        or model_name.startswith("deepseek-v4-flash")
     ):
         return {
-            "input_usd_per_million": 0.28,
-            "output_usd_per_million": 0.42,
+            "input_usd_per_million": 0.14,
+            "output_usd_per_million": 0.28,
             "pricing_reference": _BUDGET_RATE_REFERENCE,
         }
     return None

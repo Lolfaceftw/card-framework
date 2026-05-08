@@ -41,6 +41,8 @@ class VLLMProvider(LLMProvider):
         api_key: API key (use ``"EMPTY"`` for keyless vLLM servers).
         model: Optional explicit model id to pin for reproducible benchmarks.
         enable_thinking: Whether to request reasoning/thinking chunks from vLLM.
+        default_max_tokens: Optional output-token budget used when the caller
+            does not pass ``max_tokens``. Leave unset to preserve endpoint defaults.
         fallback_to_reasoning_content: Use ``reasoning_content`` when final content is empty.
         fallback_requires_structured_reasoning: Only fallback when reasoning looks structured.
         thinking_extra_body: Optional OpenAI ``extra_body`` payload for reasoning mode.
@@ -55,6 +57,7 @@ class VLLMProvider(LLMProvider):
         model: str | None = None,
         enable_thinking: bool = True,
         extra_body: dict[str, Any] | None = None,
+        default_max_tokens: int | None = None,
         fallback_to_reasoning_content: bool = True,
         fallback_requires_structured_reasoning: bool = True,
         thinking_extra_body: dict[str, Any] | None = None,
@@ -66,6 +69,11 @@ class VLLMProvider(LLMProvider):
         self.requested_model = str(model).strip() if model else ""
         self.enable_thinking = enable_thinking
         self.extra_body = self._coerce_jsonable(extra_body) or {}
+        self.default_max_tokens = (
+            int(default_max_tokens)
+            if default_max_tokens is not None and int(default_max_tokens) > 0
+            else None
+        )
         self.fallback_to_reasoning_content = bool(fallback_to_reasoning_content)
         self.fallback_requires_structured_reasoning = bool(
             fallback_requires_structured_reasoning
@@ -270,6 +278,12 @@ class VLLMProvider(LLMProvider):
             return True
         return False
 
+    def _resolve_max_tokens(self, max_tokens: int | None) -> int | None:
+        """Return the call-level output budget or the configured default."""
+        if max_tokens is not None:
+            return int(max_tokens)
+        return self.default_max_tokens
+
     def generate(
         self,
         system_prompt: str,
@@ -287,8 +301,9 @@ class VLLMProvider(LLMProvider):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if max_tokens is not None:
-            create_kwargs["max_tokens"] = max_tokens
+        effective_max_tokens = self._resolve_max_tokens(max_tokens)
+        if effective_max_tokens is not None:
+            create_kwargs["max_tokens"] = effective_max_tokens
         create_kwargs = self._maybe_enable_thinking(create_kwargs)
 
         try:
@@ -349,8 +364,9 @@ class VLLMProvider(LLMProvider):
             create_kwargs["tools"] = normalized_tools
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
-        if max_tokens is not None:
-            create_kwargs["max_tokens"] = max_tokens
+        effective_max_tokens = self._resolve_max_tokens(max_tokens)
+        if effective_max_tokens is not None:
+            create_kwargs["max_tokens"] = effective_max_tokens
         create_kwargs = self._maybe_enable_thinking(create_kwargs)
 
         try:

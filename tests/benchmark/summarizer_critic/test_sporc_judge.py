@@ -58,7 +58,126 @@ def test_sporc_judge_parses_three_required_dimensions() -> None:
     assert "S1." in llm.user_prompt
     assert "1 -> 0.00" in llm.user_prompt
     assert "average the three normalized item scores" in llm.user_prompt
+    assert '"item_scores"' in llm.user_prompt
     assert llm.max_tokens is None
+
+
+def test_sporc_judge_parses_optional_item_scores() -> None:
+    llm = _FakeJudgeLLM(
+        json.dumps(
+            {
+                "item_scores": {
+                    "F1": 1.0,
+                    "F2": 0.75,
+                    "F3": 0.5,
+                    "N1": 1.0,
+                    "N2": 0.75,
+                    "N3": 0.75,
+                    "S1": 0.75,
+                    "S2": 0.5,
+                    "S3": 1.0,
+                },
+                "Factualness": 0.75,
+                "Naturalness": 0.8333,
+                "Speaker Grammar Similarity": 0.75,
+                "confidence": 0.6,
+                "rationale": "ok",
+            }
+        )
+    )
+    judge = SPoRCJudge(judge_llm=llm)
+
+    result = judge.evaluate(
+        source_text="[SPEAKER_00]: hello",
+        summary_xml='<SPEAKER_00 emo_preset="neutral">hello</SPEAKER_00>',
+        transcript_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        summary_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        speaker_alias_map={},
+        speaker_notes=[],
+    )
+
+    assert result.status == "ok"
+    assert result.item_scores is not None
+    assert result.item_scores["F1"] == 1.0
+    assert result.item_scores["S2"] == 0.5
+    assert result.confidence == 0.6
+    assert result.rationale == "ok"
+
+
+def test_sporc_judge_derives_dimension_scores_from_items_when_present() -> None:
+    llm = _FakeJudgeLLM(
+        json.dumps(
+            {
+                "item_scores": {
+                    "F1": 1.0,
+                    "F2": 0.75,
+                    "F3": 0.5,
+                    "N1": 1.0,
+                    "N2": 0.75,
+                    "N3": 0.75,
+                    "S1": 0.75,
+                    "S2": 0.5,
+                    "S3": 1.0,
+                },
+                "Factualness": 0.0,
+                "Naturalness": 0.0,
+                "Speaker Grammar Similarity": 0.0,
+            }
+        )
+    )
+    judge = SPoRCJudge(judge_llm=llm)
+
+    result = judge.evaluate(
+        source_text="[SPEAKER_00]: hello",
+        summary_xml='<SPEAKER_00 emo_preset="neutral">hello</SPEAKER_00>',
+        transcript_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        summary_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        speaker_alias_map={},
+        speaker_notes=[],
+    )
+
+    assert result.status == "ok"
+    assert result.scores == {
+        "Factualness": 0.75,
+        "Naturalness": 0.8333,
+        "Speaker Grammar Similarity": 0.75,
+    }
+
+
+def test_sporc_judge_rejects_out_of_range_scores_instead_of_clamping() -> None:
+    llm = _FakeJudgeLLM(
+        json.dumps(
+            {
+                "item_scores": {
+                    "F1": 5,
+                    "F2": 0.75,
+                    "F3": 0.5,
+                    "N1": 1.0,
+                    "N2": 0.75,
+                    "N3": 0.75,
+                    "S1": 0.75,
+                    "S2": 0.5,
+                    "S3": 1.0,
+                },
+                "Factualness": 5,
+                "Naturalness": 0.75,
+                "Speaker Grammar Similarity": 0.75,
+            }
+        )
+    )
+    judge = SPoRCJudge(judge_llm=llm)
+
+    result = judge.evaluate(
+        source_text="[SPEAKER_00]: hello",
+        summary_xml='<SPEAKER_00 emo_preset="neutral">hello</SPEAKER_00>',
+        transcript_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        summary_per_speaker_messages={"SPEAKER_00": ["hello"]},
+        speaker_alias_map={},
+        speaker_notes=[],
+    )
+
+    assert result.status == "error"
+    assert result.scores is None
 
 
 def test_sporc_judge_includes_full_transcript_in_prompt_by_default() -> None:

@@ -280,6 +280,13 @@ audio:
     provider: "indextts"
     execution_backend: "subprocess"
     stream_subprocess_output: true
+    cuda_adaptive:
+      enabled: true
+      reserve_free_memory_mb: 1024
+      low_headroom_mb: 3072
+      tight_headroom_mb: 2048
+      min_text_tokens_per_segment: 60
+      min_mel_tokens: 900
     runner_project_dir: "src/card_framework/_vendor/index_tts"
     uv_executable: "uv"
     fail_on_error: true

@@ -179,6 +179,14 @@ Why this design:
 
 ## Estimated API spend from the local simulation
 
+### 2026-04-26 DeepSeek V4 Flash rerun note
+
+DeepSeek's current public model list exposes `deepseek-v4-flash` and
+`deepseek-v4-pro`; `deepseek-chat` maps to V4 Flash compatibility mode. For the
+2026-04-26 10-sample rerun, the repo uses provider id `deepseek_v4_flash` with
+model `deepseek-v4-flash`. Current DeepSeek pricing is estimated with the cache
+miss input rate `$0.14 / 1M` and output rate `$0.28 / 1M`.
+
 These figures come from the actual local prompt and tool-loop simulation described below. They are estimated token-cost totals, not provider-billed ground truth.
 
 | Provider | Purpose | Expected spend (USD) |
