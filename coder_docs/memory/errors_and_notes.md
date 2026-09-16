@@ -1,3 +1,17 @@
+### 2026-09-16T08:33:00+08:00 - Speaking-Rate Inputs Need Exact Role Selection And Cross-System Identity Checks
+- Problem: The first Descript handoff folders contained source files alongside
+  the summary exports, and Episodes 3-5 reused the byte-identical CARD summary
+  WAV under a Descript filename. The original word counter also counted XML tag
+  attributes as spoken words, while repeated source copies were measured once
+  for every duration condition.
+- Solution: Select the explicit summary transcript and audio naming patterns,
+  reject incomplete episode matrices and CARD/Descript hash collisions, strip
+  XML tags while preserving their spoken contents, and measure each source
+  artifact once from the five-minute participant folder. Inspect implausible
+  pause measurements before reporting them; the available Episode 5 Descript
+  export contains two roughly 96-second digital-silence spans and still needs a
+  valid replacement.
+
 ### 2026-05-08T21:12:50+08:00 - No-Critic Ablations Must Preserve Memory
 - Problem: The SPoRC ablation wrapper treated `no_critic` as both zero critic
   iterations and disabled loop memory. That made the cell a combined

@@ -50,10 +50,10 @@ articulation rate steady and still sound hurried by cutting pauses. Silence come
 from the ffmpeg `silencedetect` filter, so the script needs ffmpeg and ffprobe on
 PATH and no Python audio dependency.
 
-Descript is the useful control here: it edits original speaker audio instead of
-resynthesizing it, so its articulation rate is the source rate by construction. A
-CARD-minus-source gap with no matching Descript-minus-source gap would place the
-effect in Card 3 synthesis rather than in content selection.
+Descript is the edit-only comparison here because it preserves selected spans
+of the original speaker recordings. We compare its observed rate and pause
+allocation directly; the analysis does not assume that editing leaves either
+quantity unchanged.
 
 ### Already measured
 
@@ -75,19 +75,28 @@ python scripts/analyze_speaking_rate.py --source-from-slices
 Mean 2.52 words/sec, or about 151 words per minute. The per-episode totals
 reproduce the 587.02--619.57 second excerpt range reported in Section 3, which
 is the cross-check that the slice parsing is right. These are span-level figures
-with no silence detection, so treat 2.52 as a speech rate and as a lower bound on
-source articulation rate.
+with no silence detection, so 2.52 is reported only as a speech rate. Source
+articulation rate and pause fraction remain unavailable without the waveforms.
 
-### Still blocked
+### External artifacts checked; Episode 5 remains blocked
 
-The CARD and Descript halves need artifacts that are not in this repository and
-are not on JD's machine:
+`Participant Audio v3` and the five Descript transcript exports were located on
+Chris's machine. Input validation found two separate handoff defects before the
+measurements could be reported:
 
-- `Participant Audio v3`, the per-episode `Podcast_XX_<duration>` folders holding
-  the `[SOURCE]` and `[SUMMARY]` transcript and audio pairs. Same layout that
-  `scripts/run_participant_audio_gemini_judge.py` already consumes.
-- The five Descript five-minute exports, WAV plus edited transcript, as described
-  in `datasets/sporc/human_eval_assets_10m/descript_5m_sota_reference_prompts.md`.
+- The copied Descript folders labeled Episodes 3-5 contain the byte-identical
+  CARD five-minute WAVs. The analysis now rejects this cross-system reuse by
+  SHA-256 digest.
+- Separate Descript WAV exports were found for Episodes 3-5. Episodes 3 and 4
+  are complete. The Episode 5 file contains two digital-silence spans of about
+  96 seconds each; only 101.96 of its 303.76 seconds remain voiced at the fixed
+  threshold. Pairing 985 transcript words with that file would yield an
+  implausible 9.66 words per voiced second, so no manuscript result was written.
+
+Episode 5 must be re-exported with both speakers' audio present. After replacing
+that WAV, use the validated folder layout: five `Podcast_XX_5m` directories,
+each with one `[SUMMARY] ... .wav` and one
+`[SUMMARY] ... - summary transcript.txt` file.
 
 With both present:
 
@@ -99,9 +108,10 @@ python scripts/analyze_speaking_rate.py \
 ```
 
 The run writes `speaking_rate.csv` and `speaking_rate_summary.json` under
-`artifacts/speaking_rate/`. The summary carries the episode-paired CARD-minus-
-source and CARD-minus-Descript contrasts for articulation rate and pause
-fraction, each with a 95% interval, which is the form the review asks for.
+`artifacts/speaking_rate/`. The CSV records input basenames and audio digests.
+The summary records the project-specific silence threshold and carries the
+episode-paired CARD-minus-source and CARD-minus-Descript contrasts for
+articulation rate and pause fraction, each with a 95% Student-t interval.
 
 ## 3. Not attempted here
 
