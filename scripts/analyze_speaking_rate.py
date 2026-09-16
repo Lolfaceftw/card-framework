@@ -44,6 +44,12 @@ Examples:
         python scripts/analyze_speaking_rate.py --source-from-slices \\
             --out-dir artifacts/speaking_rate
 
+    CARD-to-source comparison from Participant Audio v3::
+
+        python scripts/analyze_speaking_rate.py \\
+            --participant-audio-root "D:/Participant Audio v3" \\
+            --out-dir artifacts/speaking_rate
+
     Full comparison, once both external artifact sets are available::
 
         python scripts/analyze_speaking_rate.py \\
@@ -562,7 +568,7 @@ def rows_from_transcript_slices(slice_dir: Path) -> list[RateRow]:
     return rows
 
 
-def rows_from_participant_audio(root: Path) -> list[RateRow]:
+def rows_from_participant_audio(root: Path, slice_dir: Path) -> list[RateRow]:
     """Measure CARD summaries and one source artifact per episode.
 
     Expects the ``Podcast_XX_<duration>`` layout used by
@@ -570,22 +576,29 @@ def rows_from_participant_audio(root: Path) -> list[RateRow]:
     slice`` pair and one ``[SUMMARY]...`` pair per folder. CARD is measured at
     all three duration conditions. Source audio is measured from each five-minute
     folder so the repeated copy in the shorter-condition folders is not counted
-    more than once.
+    more than once. Source word counts come from the committed transcript spans,
+    whose recorded durations must match the source waveform to two decimals.
 
     Args:
         root: Participant Audio v3 directory containing all fifteen expected
             episode-condition folders.
+        slice_dir: Directory containing the five committed transcript-span
+            files paired with the source waveforms.
 
     Returns:
         Twenty rows: fifteen CARD outputs and five episode source artifacts.
 
     Raises:
-        FileNotFoundError: If ``root`` is missing.
+        FileNotFoundError: If ``root`` or ``slice_dir`` is missing.
         RuntimeError: If the folder matrix or any transcript-audio pair is
-            incomplete or ambiguous.
+            incomplete or ambiguous, or if a source waveform duration does not
+            match its recorded transcript-span duration.
     """
     if not root.is_dir():
         raise FileNotFoundError(f"Participant audio root not found: {root}")
+    source_slices = {
+        row.podcast_id: row for row in rows_from_transcript_slices(slice_dir)
+    }
     folders: dict[tuple[str, str], Path] = {}
     for folder in sorted(path for path in root.iterdir() if path.is_dir()):
         match = FOLDER_PATTERN.fullmatch(folder.name)
@@ -627,24 +640,35 @@ def rows_from_participant_audio(root: Path) -> list[RateRow]:
         )
         if duration != "5m":
             continue
-        source_transcript = select_single_file(
-            folder,
-            "[[]SOURCE[]]* - 10m audio slice transcript.txt",
-            "source transcript",
-        )
         source_audio = select_single_file(
             folder,
             "[[]SOURCE[]]* - 10m audio slice.*",
             "source audio",
             audio_only=True,
         )
+        source_slice = source_slices[podcast_id]
+        total_seconds = probe_duration_seconds(source_audio)
+        if round(total_seconds, 2) != round(source_slice.total_seconds, 2):
+            raise RuntimeError(
+                f"Source duration mismatch for {podcast_id}: audio has "
+                f"{total_seconds:.3f} seconds, transcript spans record "
+                f"{source_slice.total_seconds:.3f} seconds."
+            )
+        voiced_seconds, longest_silence_seconds = measure_silence(
+            source_audio, total_seconds
+        )
         rows.append(
-            measure_artifact(
+            build_row(
                 system="source_audio",
                 podcast_id=podcast_id,
                 duration_condition="10m_source",
-                transcript_path=source_transcript,
-                audio_path=source_audio,
+                words=source_slice.words,
+                total_seconds=total_seconds,
+                voiced_seconds=voiced_seconds,
+                longest_silence_seconds=longest_silence_seconds,
+                audio_file=source_audio.name,
+                transcript_file=source_slice.transcript_file,
+                audio_sha256=file_sha256(source_audio),
             )
         )
     return rows
@@ -859,17 +883,20 @@ def mean_available(group: list[RateRow], field: str) -> float | None:
 
 
 def summarize(rows: list[RateRow]) -> dict[str, object]:
-    """Aggregate means and add strict paired contrasts for a full run.
+    """Aggregate means and add every supported strict paired contrast.
 
     Args:
         rows: Measurements collected from the selected input mode.
 
     Returns:
         JSON-serializable settings, grouped means, and paired contrasts. A
-        source-slices-only run has no paired contrasts.
+        participant-only run includes CARD-minus-source contrasts; a full run
+        also includes CARD-minus-Descript contrasts. A source-slices-only run
+        has no paired contrasts.
 
     Raises:
-        RuntimeError: If a full comparison group is incomplete or duplicated.
+        RuntimeError: If a requested comparison group is incomplete or
+            duplicated.
     """
     grouped: dict[str, list[RateRow]] = {}
     for row in rows:
@@ -887,45 +914,52 @@ def summarize(rows: list[RateRow]) -> dict[str, object]:
     }
     systems = {row.system for row in rows}
     contrasts: dict[str, dict[str, float]] = {}
-    if {"card", "source_audio", "descript"}.issubset(systems):
-        contrasts = {
-            "card_minus_source_speech_rate": paired_difference(
-                rows,
-                ("card", "5m"),
-                ("source_audio", "10m_source"),
-                "speech_rate_wps",
-            ),
-            "card_minus_descript_speech_rate": paired_difference(
-                rows,
-                ("card", "5m"),
-                ("descript", "5m"),
-                "speech_rate_wps",
-            ),
-            "card_minus_source_articulation": paired_difference(
-                rows,
-                ("card", "5m"),
-                ("source_audio", "10m_source"),
-                "articulation_rate_wps",
-            ),
-            "card_minus_descript_articulation": paired_difference(
-                rows,
-                ("card", "5m"),
-                ("descript", "5m"),
-                "articulation_rate_wps",
-            ),
-            "card_minus_source_pause_fraction": paired_difference(
-                rows,
-                ("card", "5m"),
-                ("source_audio", "10m_source"),
-                "pause_fraction",
-            ),
-            "card_minus_descript_pause_fraction": paired_difference(
-                rows,
-                ("card", "5m"),
-                ("descript", "5m"),
-                "pause_fraction",
-            ),
-        }
+    if {"card", "source_audio"}.issubset(systems):
+        contrasts.update(
+            {
+                "card_minus_source_speech_rate": paired_difference(
+                    rows,
+                    ("card", "5m"),
+                    ("source_audio", "10m_source"),
+                    "speech_rate_wps",
+                ),
+                "card_minus_source_articulation": paired_difference(
+                    rows,
+                    ("card", "5m"),
+                    ("source_audio", "10m_source"),
+                    "articulation_rate_wps",
+                ),
+                "card_minus_source_pause_fraction": paired_difference(
+                    rows,
+                    ("card", "5m"),
+                    ("source_audio", "10m_source"),
+                    "pause_fraction",
+                ),
+            }
+        )
+    if {"card", "descript"}.issubset(systems):
+        contrasts.update(
+            {
+                "card_minus_descript_speech_rate": paired_difference(
+                    rows,
+                    ("card", "5m"),
+                    ("descript", "5m"),
+                    "speech_rate_wps",
+                ),
+                "card_minus_descript_articulation": paired_difference(
+                    rows,
+                    ("card", "5m"),
+                    ("descript", "5m"),
+                    "articulation_rate_wps",
+                ),
+                "card_minus_descript_pause_fraction": paired_difference(
+                    rows,
+                    ("card", "5m"),
+                    ("descript", "5m"),
+                    "pause_fraction",
+                ),
+            }
+        )
     return {
         "analysis_settings": {
             "silence_noise_db": SILENCE_NOISE_DB,
@@ -948,8 +982,8 @@ def parse_args() -> argparse.Namespace:
         Namespace containing the selected input roots and output directory.
 
     Raises:
-        SystemExit: If no input mode is selected or only one side of the full
-            participant-versus-Descript comparison is supplied.
+        SystemExit: If no input mode is selected or a Descript root is supplied
+            without the participant artifacts required for pairing.
     """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--participant-audio-root", type=Path, default=None)
@@ -962,26 +996,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slice-dir", type=Path, default=DEFAULT_SLICE_DIR)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     args = parser.parse_args()
-    artifact_roots = (
-        args.participant_audio_root is not None,
-        args.descript_root is not None,
-    )
-    if artifact_roots.count(True) == 1:
+    if args.descript_root is not None and args.participant_audio_root is None:
         parser.error(
-            "--participant-audio-root and --descript-root must be supplied together."
+            "--descript-root requires --participant-audio-root for paired analysis."
         )
-    if not args.source_from_slices and not all(artifact_roots):
-        parser.error(
-            "Select --source-from-slices, or supply both external artifact roots."
-        )
+    if not args.source_from_slices and args.participant_audio_root is None:
+        parser.error("Select --source-from-slices or supply --participant-audio-root.")
     return args
 
 
 def main() -> None:
     """Run the selected analysis and write traceable CSV and JSON results.
 
-    The source-slices mode can run alone. External artifact analysis requires
-    both Participant Audio v3 and the five Descript exports; before any result
+    The source-slices mode and Participant Audio v3 mode can run independently.
+    A Descript comparison also requires Participant Audio v3; before any result
     is written, the run verifies that matched CARD and Descript WAVs are not
     byte-identical.
 
@@ -999,11 +1027,13 @@ def main() -> None:
         rows.extend(rows_from_transcript_slices(args.slice_dir))
     if args.participant_audio_root is not None:
         LOGGER.info("Probing participant audio under %s", args.participant_audio_root)
-        rows.extend(rows_from_participant_audio(args.participant_audio_root))
+        rows.extend(
+            rows_from_participant_audio(args.participant_audio_root, args.slice_dir)
+        )
     if args.descript_root is not None:
         LOGGER.info("Probing Descript references under %s", args.descript_root)
         rows.extend(rows_from_descript(args.descript_root))
-    if args.participant_audio_root is not None:
+    if args.descript_root is not None:
         validate_distinct_card_descript_audio(rows)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)

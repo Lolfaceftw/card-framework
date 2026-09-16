@@ -7,10 +7,14 @@
 - Solution: Select the explicit summary transcript and audio naming patterns,
   reject incomplete episode matrices and CARD/Descript hash collisions, strip
   XML tags while preserving their spoken contents, and measure each source
-  artifact once from the five-minute participant folder. Inspect implausible
-  pause measurements before reporting them; the available Episode 5 Descript
-  export contains two roughly 96-second digital-silence spans and still needs a
-  valid replacement.
+  artifact once from the five-minute participant folder. Use the committed
+  transcript spans for source word counts because one packaged source transcript
+  includes 112 boundary-spillover words outside its paired waveform. Inspect
+  implausible pause measurements before reporting them; the available Episode 5
+  Descript export contains two roughly 96-second digital-silence spans and still
+  needs a valid replacement. Treat the researchers' score CSV as the verified
+  source for the descriptive listener comparison; the WAV integrity checks
+  govern the separate speaking-rate analysis.
 
 ### 2026-05-08T21:12:50+08:00 - No-Critic Ablations Must Preserve Memory
 - Problem: The SPoRC ablation wrapper treated `no_critic` as both zero critic

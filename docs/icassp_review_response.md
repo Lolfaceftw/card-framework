@@ -6,7 +6,8 @@ The 11 September 2026 review of the ICASSP submission raised two points this
 repository has to answer rather than the manuscript. W6 asks for the fixed
 thresholds and weights to be locatable and for the prompts and configuration to
 be released. Q2 asks for the measured speaking rate of CARD output against the
-source and against Descript. This file covers the first and sets up the second.
+source and against Descript. The CARD--source measurement is complete, while
+the Descript rate leg still needs a complete Episode 5 audio export.
 
 Manuscript changes live in the `EEE_199_IEEE` repository, branch
 `jd-edits-after-feedback`.
@@ -50,12 +51,11 @@ articulation rate steady and still sound hurried by cutting pauses. Silence come
 from the ffmpeg `silencedetect` filter, so the script needs ffmpeg and ffprobe on
 PATH and no Python audio dependency.
 
-Descript is the edit-only comparison here because it preserves selected spans
-of the original speaker recordings. We compare its observed rate and pause
-allocation directly; the analysis does not assume that editing leaves either
-quantity unchanged.
+Every audio measurement records the input basename and SHA-256 digest. The
+script rejects cross-system waveform reuse and an incomplete Descript export
+before writing any result.
 
-### Already measured
+### Source-slice cross-check
 
 The source baseline needs no audio, because the committed transcript slices
 record the measured seconds of every retained span:
@@ -78,7 +78,24 @@ is the cross-check that the slice parsing is right. These are span-level figures
 with no silence detection, so 2.52 is reported only as a speech rate. Source
 articulation rate and pause fraction remain unavailable without the waveforms.
 
-### External artifacts checked; Episode 5 remains blocked
+### CARD--source comparison used in the manuscript
+
+The Participant Audio v3 waveform analysis is reproducible without a Descript
+root:
+
+```
+python scripts/analyze_speaking_rate.py \
+    --participant-audio-root "<path>/Participant Audio v3"
+```
+
+For the five episode-matched five-minute outputs, CARD averaged 3.4846
+words/sec and the source excerpts averaged 2.5228. CARD minus source was
+$+0.9617$ words/sec (95% CI $[0.6145,1.3089]$). The articulation-rate
+difference was $+0.5599$ words/sec (CI $[0.0164,1.1035]$). Pause fraction was
+$-0.1322$ (CI $[-0.2314,-0.0330]$), from means of 0.0222 for CARD and 0.1545
+for source.
+
+### Descript rate comparison awaiting Episode 5
 
 `Participant Audio v3` and the five Descript transcript exports were located on
 Chris's machine. Input validation found two separate handoff defects before the
@@ -90,15 +107,20 @@ measurements could be reported:
 - Separate Descript WAV exports were found for Episodes 3-5. Episodes 3 and 4
   are complete. The Episode 5 file contains two digital-silence spans of about
   96 seconds each; only 101.96 of its 303.76 seconds remain voiced at the fixed
-  threshold. Pairing 985 transcript words with that file would yield an
-  implausible 9.66 words per voiced second, so no manuscript result was written.
+threshold. Pairing 985 transcript words with that file would yield an
+  implausible 9.66 words per voiced second, so no Descript rate result was
+  reported.
+
+The manuscript retains the descriptive CARD--Descript listener-score
+comparison from the researchers' verified response CSV. The audio defects here
+affect the separate speaking-rate analysis.
 
 Episode 5 must be re-exported with both speakers' audio present. After replacing
 that WAV, use the validated folder layout: five `Podcast_XX_5m` directories,
 each with one `[SUMMARY] ... .wav` and one
 `[SUMMARY] ... - summary transcript.txt` file.
 
-With both present:
+For a future rate comparison after replacing Episode 5:
 
 ```
 python scripts/analyze_speaking_rate.py \
@@ -109,9 +131,10 @@ python scripts/analyze_speaking_rate.py \
 
 The run writes `speaking_rate.csv` and `speaking_rate_summary.json` under
 `artifacts/speaking_rate/`. The CSV records input basenames and audio digests.
-The summary records the project-specific silence threshold and carries the
-episode-paired CARD-minus-source and CARD-minus-Descript contrasts for
-articulation rate and pause fraction, each with a 95% Student-t interval.
+The summary records the project-specific silence threshold. Participant-only
+runs carry the episode-paired CARD-minus-source contrasts; a validated full run
+also carries CARD-minus-Descript contrasts. Each contrast includes a 95%
+Student-t interval.
 
 ## 3. Not attempted here
 

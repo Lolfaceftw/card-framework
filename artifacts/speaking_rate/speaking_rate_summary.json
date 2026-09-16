@@ -1,0 +1,61 @@
+{
+  "analysis_settings": {
+    "silence_noise_db": -35.0,
+    "silence_min_seconds": 0.25,
+    "max_descript_contiguous_silence_seconds": 30.0,
+    "interval": "paired two-sided 95% Student t",
+    "expected_episodes": [
+      "Podcast 01",
+      "Podcast 02",
+      "Podcast 03",
+      "Podcast 04",
+      "Podcast 05"
+    ]
+  },
+  "means_by_system_condition": {
+    "card/1m": {
+      "n": 5,
+      "speech_rate_wps": 3.3501,
+      "articulation_rate_wps": 3.3999,
+      "pause_fraction": 0.0146
+    },
+    "card/30s": {
+      "n": 5,
+      "speech_rate_wps": 3.3345,
+      "articulation_rate_wps": 3.4328,
+      "pause_fraction": 0.0311
+    },
+    "card/5m": {
+      "n": 5,
+      "speech_rate_wps": 3.4846,
+      "articulation_rate_wps": 3.5625,
+      "pause_fraction": 0.0222
+    },
+    "source_audio/10m_source": {
+      "n": 5,
+      "speech_rate_wps": 2.5228,
+      "articulation_rate_wps": 3.0026,
+      "pause_fraction": 0.1545
+    }
+  },
+  "paired_contrasts_5m": {
+    "card_minus_source_speech_rate": {
+      "n": 5,
+      "mean": 0.9617,
+      "ci_low": 0.6145,
+      "ci_high": 1.3089
+    },
+    "card_minus_source_articulation": {
+      "n": 5,
+      "mean": 0.5599,
+      "ci_low": 0.0164,
+      "ci_high": 1.1035
+    },
+    "card_minus_source_pause_fraction": {
+      "n": 5,
+      "mean": -0.1322,
+      "ci_low": -0.2314,
+      "ci_high": -0.033
+    }
+  }
+}
