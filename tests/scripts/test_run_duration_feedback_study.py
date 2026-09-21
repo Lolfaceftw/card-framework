@@ -160,6 +160,47 @@ def test_condition_order_counterbalances_paired_repetitions() -> None:
     )
 
 
+def test_vllm_preflight_command_keeps_api_key_out_of_arguments() -> None:
+    """Retain model discovery arguments without retaining the API key value."""
+    module = _load_module()
+
+    command = module._build_vllm_preflight_command(module.DEFAULT_MODEL)
+    command_text = " ".join(command)
+
+    assert "CARD_FRAMEWORK_VLLM_API_KEY" in command
+    assert "CARD_FRAMEWORK_VLLM_BASE_URL" in command_text
+    assert command[-1] == module.DEFAULT_MODEL
+    assert "/models" in command_text
+    assert "timeout=15" in command_text
+
+
+def test_affect_config_uses_verified_model_caches(tmp_path: Path) -> None:
+    """Load both pinned affect models without registry network lookups."""
+    module = _load_module()
+    item = module.PreparedInput(
+        episode_index=1,
+        episode_title="Example",
+        episode_label="01_example",
+        duration_preset="30s",
+        target_seconds=30,
+        transcript_path=(tmp_path / "transcript.json").resolve(),
+        calibration_path=(tmp_path / "calibration.json").resolve(),
+    )
+
+    config_path = module._write_affect_config(item, tmp_path)
+    config = module.OmegaConf.load(config_path)
+
+    assert config.audio.device == "cuda"
+    assert config.audio.affect_analysis.categorical.device == "cuda"
+    assert config.audio.affect_analysis.categorical.model_name == str(
+        module.CONTAINER_EMOTION2VEC_MODEL_PATH
+    )
+    assert config.audio.affect_analysis.dimensional.device == "cuda"
+    assert config.audio.affect_analysis.dimensional.model_name == str(
+        module.CONTAINER_AUDEERING_MODEL_PATH
+    )
+
+
 def test_collect_attempt_metrics_uses_retained_exact_records(tmp_path: Path) -> None:
     """Count revisions, calls, tokens, and every completed synthesis attempt."""
     module = _load_module()

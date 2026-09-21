@@ -20,6 +20,14 @@ from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
 from card_framework.shared.paths import REPO_ROOT, SPORC_HUMAN_EVAL_ASSETS_DIR
 
 CONTAINER_REPO_ROOT = PurePosixPath("/workspace/card-framework")
+CONTAINER_EMOTION2VEC_MODEL_PATH = PurePosixPath(
+    "/root/.cache/huggingface/modelscope/models/iic/emotion2vec_plus_large"
+)
+CONTAINER_AUDEERING_MODEL_PATH = PurePosixPath(
+    "/root/.cache/huggingface/transformers/"
+    "models--audeering--wav2vec2-large-robust-12-ft-emotion-msp-dim/"
+    "snapshots/6eba34a2485ea31cb03600241787c3a5edab8626"
+)
 DEFAULT_OUTPUT_PARENT = (
     REPO_ROOT / "artifacts" / "duration_feedback_study"
 ).resolve()
@@ -415,6 +423,76 @@ def _run_setup(output_root: Path) -> None:
         raise RuntimeError(f"Docker GPU setup failed with exit code {return_code}.")
 
 
+def _build_vllm_preflight_command(model: str) -> list[str]:
+    """Build one authenticated model-discovery command for the Docker network.
+
+    The command checks the OpenAI-compatible ``/models`` endpoint from the
+    same Compose service used by each timed attempt. The API key is forwarded
+    by environment-variable name and never appears in the retained arguments.
+
+    Args:
+        model: Exact model identifier required by every study condition.
+
+    Returns:
+        Docker Compose argument vector for one request with a 15-second socket
+        timeout and no retry behavior.
+
+    Raises:
+        ValueError: The requested model identifier is empty.
+    """
+    requested_model = str(model).strip()
+    if not requested_model:
+        raise ValueError("The vLLM preflight model must be non-empty.")
+    script = (
+        "import json, os, sys, urllib.request; "
+        "base=os.environ['CARD_FRAMEWORK_VLLM_BASE_URL'].rstrip('/'); "
+        "key=os.environ['CARD_FRAMEWORK_VLLM_API_KEY']; "
+        "request=urllib.request.Request(base + '/models', "
+        "headers={'Authorization': 'Bearer ' + key}); "
+        "response=urllib.request.urlopen(request, timeout=15); "
+        "payload=json.load(response); "
+        "models={str(item['id']) for item in payload['data']}; "
+        "requested=sys.argv[1]; "
+        "assert requested in models, 'Requested model is absent from /models'; "
+        "print(json.dumps({'status': 'ready', 'requested_model': requested, "
+        "'advertised_model_count': len(models)}))"
+    )
+    return [
+        *_docker_prefix(),
+        "--entrypoint",
+        "python",
+        "setup-and-run-gpu",
+        "-c",
+        script,
+        requested_model,
+    ]
+
+
+def _preflight_vllm(model: str, output_root: Path) -> dict[str, Any]:
+    """Check endpoint reachability and exact model availability once.
+
+    Args:
+        model: Exact model identifier required by every timed attempt.
+        output_root: Study root that owns the preflight log.
+
+    Returns:
+        Timestamped preflight record with the exit code and retained log path.
+        The caller decides whether a nonzero exit code aborts the study.
+    """
+    log_path = (output_root / "logs/vllm_preflight.log").resolve()
+    started = _utc_now()
+    return_code = _run_logged(
+        _build_vllm_preflight_command(model),
+        log_path=log_path,
+    )
+    return {
+        "started_at": started,
+        "finished_at": _utc_now(),
+        "return_code": return_code,
+        "log_path": str(log_path),
+    }
+
+
 def _write_calibration_config(item: PreparedInput, output_root: Path) -> Path:
     """Write an audio-only config for an unmeasured episode calibration.
 
@@ -485,6 +563,50 @@ def _calibrate_episode(item: PreparedInput, output_root: Path) -> dict[str, Any]
     return record
 
 
+def _write_affect_config(item: PreparedInput, output_root: Path) -> Path:
+    """Write an audio config that loads both affect models from Docker caches.
+
+    The study setup stores pinned ModelScope and Hugging Face snapshots in the
+    persistent Compose model volume. Passing those verified directories to the
+    model loaders avoids registry lookups during study preparation while
+    retaining the exact models selected by the repository configuration.
+
+    Args:
+        item: Prepared episode whose transcript receives affect annotations.
+        output_root: Study root that stores generated preprocessing configs.
+
+    Returns:
+        Host path to the generated OmegaConf YAML file. The corresponding
+        container path remains available through the repository bind mount.
+
+    Raises:
+        ValueError: The repository audio or categorical affect configuration
+            does not resolve to a mutable mapping.
+    """
+    config = OmegaConf.load(REPO_ROOT / "conf/config.yaml")
+    audio = OmegaConf.to_container(config.audio, resolve=True)
+    if not isinstance(audio, dict):
+        raise ValueError("The repository audio configuration did not resolve to a mapping.")
+    audio["device"] = "cuda"
+    affect_analysis = audio["affect_analysis"]
+    if not isinstance(affect_analysis, dict):
+        raise ValueError("audio.affect_analysis must resolve to a mapping.")
+    categorical = affect_analysis["categorical"]
+    if not isinstance(categorical, dict):
+        raise ValueError("audio.affect_analysis.categorical must resolve to a mapping.")
+    categorical["device"] = "cuda"
+    categorical["model_name"] = str(CONTAINER_EMOTION2VEC_MODEL_PATH)
+    dimensional = affect_analysis["dimensional"]
+    if not isinstance(dimensional, dict):
+        raise ValueError("audio.affect_analysis.dimensional must resolve to a mapping.")
+    dimensional["device"] = "cuda"
+    dimensional["model_name"] = str(CONTAINER_AUDEERING_MODEL_PATH)
+    path = (output_root / "preprocessing" / item.episode_label / "config.yaml").resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(config=OmegaConf.create({"audio": audio}), f=path)
+    return path
+
+
 def _prepare_affect_episode(
     item: PreparedInput,
     output_root: Path,
@@ -504,6 +626,7 @@ def _prepare_affect_episode(
     work_dir = (
         output_root / "preprocessing" / item.episode_label / "audio_stage"
     ).resolve()
+    config_path = _write_affect_config(item, output_root)
     command = [
         *_docker_prefix(),
         "--entrypoint",
@@ -520,7 +643,7 @@ def _prepare_affect_episode(
         "--project-root",
         str(CONTAINER_REPO_ROOT),
         "--config-file",
-        str(CONTAINER_REPO_ROOT / "conf/config.yaml"),
+        _to_container_path(config_path),
     ]
     log_path = output_root / "logs/affect" / f"{item.episode_label}.log"
     started = _utc_now()
@@ -1059,6 +1182,7 @@ def main(argv: list[str] | None = None) -> int:
         "llm_seed": None,
         "deterministic_pairing_claimed": False,
         "preparation_summary_path": str(preparation_summary_path),
+        "vllm_preflight": None,
         "affect_preprocessing": [],
         "calibrations": [],
         "runs": [],
@@ -1071,6 +1195,12 @@ def main(argv: list[str] | None = None) -> int:
         raise EnvironmentError("CARD_FRAMEWORK_VLLM_API_KEY is required.")
     if not args.skip_setup:
         _run_setup(output_root)
+    summary["vllm_preflight"] = _preflight_vllm(str(args.llm_model), output_root)
+    _write_json(summary_path, summary)
+    if summary["vllm_preflight"]["return_code"] != 0:
+        raise RuntimeError(
+            "The vLLM endpoint/model preflight failed; see logs/vllm_preflight.log."
+        )
     first_by_episode: dict[int, PreparedInput] = {}
     for item in prepared:
         first_by_episode.setdefault(item.episode_index, item)
