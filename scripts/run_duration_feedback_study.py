@@ -392,16 +392,31 @@ def _load_prepared_inputs(summary_path: Path, output_root: Path) -> tuple[Prepar
     return tuple(records)
 
 
-def _docker_prefix() -> list[str]:
-    """Build the Compose prefix that forwards the API key by name.
+def _docker_prefix(*, offline_models: bool) -> list[str]:
+    """Build the Compose prefix for one setup or study-stage container.
+
+    Args:
+        offline_models: Whether Hugging Face loaders must use only the
+            persistent model cache. Study stages enable this after setup so
+            registry availability cannot alter their elapsed time.
 
     Returns:
         Docker Compose arguments containing no credential value.
     """
-    return [
+    prefix = [
         "docker", "compose", "--profile", "gpu", "run", "--rm",
         "-e", "CARD_FRAMEWORK_VLLM_API_KEY",
     ]
+    if offline_models:
+        prefix.extend(
+            [
+                "-e",
+                "HF_HUB_OFFLINE=1",
+                "-e",
+                "TRANSFORMERS_OFFLINE=1",
+            ]
+        )
+    return prefix
 
 
 def _run_setup(output_root: Path) -> None:
@@ -414,7 +429,7 @@ def _run_setup(output_root: Path) -> None:
         RuntimeError: Docker setup exits unsuccessfully.
     """
     command = [
-        *_docker_prefix(), "setup-and-run-gpu", "--setup-only",
+        *_docker_prefix(offline_models=False), "setup-and-run-gpu", "--setup-only",
         "--skip-repo-update", "--override", "audio.device=cuda",
         "--override", "audio.voice_clone.device=cuda",
     ]
@@ -458,7 +473,7 @@ def _build_vllm_preflight_command(model: str) -> list[str]:
         "'advertised_model_count': len(models)}))"
     )
     return [
-        *_docker_prefix(),
+        *_docker_prefix(offline_models=True),
         "--entrypoint",
         "python",
         "setup-and-run-gpu",
@@ -539,7 +554,7 @@ def _calibrate_episode(item: PreparedInput, output_root: Path) -> dict[str, Any]
     manifest = str(transcript["metadata"]["speaker_samples_manifest_path"])
     config_path = _write_calibration_config(item, output_root)
     command = [
-        *_docker_prefix(), "--entrypoint", "uv", "setup-and-run-gpu",
+        *_docker_prefix(offline_models=True), "--entrypoint", "uv", "setup-and-run-gpu",
         "run", "python", "-m", "card_framework.cli.calibrate",
         "--project-root", str(CONTAINER_REPO_ROOT),
         "--config-file", _to_container_path(config_path),
@@ -628,7 +643,7 @@ def _prepare_affect_episode(
     ).resolve()
     config_path = _write_affect_config(item, output_root)
     command = [
-        *_docker_prefix(),
+        *_docker_prefix(offline_models=True),
         "--entrypoint",
         "uv",
         "setup-and-run-gpu",
@@ -771,7 +786,7 @@ def _build_run_command(
         "session.enabled=false",
     ]
     command = [
-        *_docker_prefix(),
+        *_docker_prefix(offline_models=True),
         "--entrypoint",
         "uv",
         "setup-and-run-gpu",

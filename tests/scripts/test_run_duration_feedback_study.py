@@ -120,6 +120,8 @@ def test_condition_commands_share_inputs_and_enforce_strict_context() -> None:
             left == "-e" and right == "CARD_FRAMEWORK_VLLM_API_KEY"
             for left, right in zip(command, command[1:], strict=False)
         )
+        assert "HF_HUB_OFFLINE=1" in command
+        assert "TRANSFORMERS_OFFLINE=1" in command
     with initialize_config_dir(
         version_base=None,
         config_dir=str((REPO_ROOT / "conf").resolve()),
@@ -172,6 +174,21 @@ def test_vllm_preflight_command_keeps_api_key_out_of_arguments() -> None:
     assert command[-1] == module.DEFAULT_MODEL
     assert "/models" in command_text
     assert "timeout=15" in command_text
+    assert "HF_HUB_OFFLINE=1" in command
+    assert "TRANSFORMERS_OFFLINE=1" in command
+
+
+def test_setup_prefix_allows_explicit_model_downloads() -> None:
+    """Keep the setup container online while study stages use cached models."""
+    module = _load_module()
+
+    setup_prefix = module._docker_prefix(offline_models=False)
+    study_prefix = module._docker_prefix(offline_models=True)
+
+    assert "HF_HUB_OFFLINE=1" not in setup_prefix
+    assert "TRANSFORMERS_OFFLINE=1" not in setup_prefix
+    assert "HF_HUB_OFFLINE=1" in study_prefix
+    assert "TRANSFORMERS_OFFLINE=1" in study_prefix
 
 
 def test_affect_config_uses_verified_model_caches(tmp_path: Path) -> None:
