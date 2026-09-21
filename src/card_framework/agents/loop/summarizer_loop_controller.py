@@ -18,8 +18,6 @@ RunAgentLoopCallable = Callable[
     Awaitable[dict[str, Any] | None],
 ]
 
-_DRAFT_REVIEW_CHAT_MAX_TOKENS = 256
-
 
 @dataclass(slots=True)
 class SummarizerLoopController:
@@ -73,7 +71,6 @@ class SummarizerLoopController:
             "default_chat_max_tokens": None,
             "draft_ready_for_review": False,
             "break_on_no_tool_call_when_draft_ready": True,
-            "draft_review_chat_max_tokens": _DRAFT_REVIEW_CHAT_MAX_TOKENS,
             "loop_guardrail_provider": loop_guardrails["provider_name"],
             "loop_guardrail_model": loop_guardrails["model_id"],
             "enable_staged_discovery": self.is_embedding_enabled

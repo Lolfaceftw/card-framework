@@ -52,15 +52,33 @@ class Emotion2VecPlusAffectGateway(SegmentAffectProvider):
     def __init__(
         self,
         *,
-        model_name: str = "emotion2vec_plus_large",
+        model_name: str = "iic/emotion2vec_plus_large",
         device: str = "cpu",
         batch_size: int = 4,
-        hub: str = "hf",
+        hub: str = "ms",
         granularity: str = "utterance",
         extract_embedding: bool = True,
         disable_update_check: bool = True,
         max_chunk_duration_seconds: float = 30.0,
     ) -> None:
+        """Configure one explicit FunASR emotion2vec+ provider.
+
+        Args:
+            model_name: Fully qualified model identifier for the selected hub.
+            device: Torch execution device such as ``cpu`` or ``cuda``.
+            batch_size: Maximum transcript clips in one inference batch.
+            hub: FunASR model registry identifier, either ``ms`` or ``hf``.
+            granularity: FunASR inference granularity; only ``utterance`` is
+                supported by the shared segment-affect result format.
+            extract_embedding: Whether FunASR should retain model embeddings.
+            disable_update_check: Whether to skip FunASR's package update query.
+            max_chunk_duration_seconds: Maximum audio duration for each bounded
+                inference unit derived from a transcript segment.
+
+        Raises:
+            ValueError: A required identifier is empty, a numeric setting is
+                invalid, or the requested hub or granularity is unsupported.
+        """
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0.")
         normalized_granularity = str(granularity).strip().lower()
@@ -68,10 +86,16 @@ class Emotion2VecPlusAffectGateway(SegmentAffectProvider):
             raise ValueError(
                 "emotion2vec+ currently supports only utterance granularity in this adapter."
             )
-        self.model_name = str(model_name).strip() or "emotion2vec_plus_large"
-        self._device = str(device).strip().lower() or "cpu"
+        self.model_name = str(model_name).strip()
+        if not self.model_name:
+            raise ValueError("model_name must be non-empty.")
+        self._device = str(device).strip().lower()
+        if not self._device:
+            raise ValueError("device must be non-empty.")
         self.batch_size = int(batch_size)
-        self.hub = str(hub).strip() or "hf"
+        self.hub = str(hub).strip().lower()
+        if self.hub not in {"ms", "hf"}:
+            raise ValueError("hub must be 'ms' or 'hf'.")
         self.granularity = normalized_granularity
         self.extract_embedding = bool(extract_embedding)
         self.disable_update_check = bool(disable_update_check)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from omegaconf import OmegaConf
 
+from card_framework.providers.logging_provider import LoggingLLMProvider
 from card_framework.providers.vllm_provider import VLLMProvider
 from card_framework.shared.llm_provider import StreamingResponseAbort
 from tests.support.servers import run_openai_compatible_server
@@ -53,6 +55,7 @@ def _chunk(
     *,
     content: str | None = None,
     reasoning_content: str | None = None,
+    reasoning: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
     finish_reason: str | None = None,
 ) -> dict[str, Any]:
@@ -62,6 +65,8 @@ def _chunk(
         delta["content"] = content
     if reasoning_content is not None:
         delta["reasoning_content"] = reasoning_content
+    if reasoning is not None:
+        delta["reasoning"] = reasoning
     if tool_calls is not None:
         delta["tool_calls"] = tool_calls
 
@@ -106,14 +111,20 @@ def _build_provider(
     base_url: str,
     *,
     enable_thinking: bool = True,
-    fallback_to_reasoning_content: bool = True,
 ) -> VLLMProvider:
-    """Create a provider pointed at the local OpenAI-compatible test server."""
+    """Create a strict provider connected to the local integration server.
+
+    Args:
+        base_url: Root URL exposed by the local OpenAI-compatible server.
+        enable_thinking: Whether the request should enable Qwen reasoning output.
+
+    Returns:
+        A provider that performs one request without transport or content fallbacks.
+    """
     return VLLMProvider(
         base_url=f"{base_url}/v1",
         api_key="EMPTY",
         enable_thinking=enable_thinking,
-        fallback_to_reasoning_content=fallback_to_reasoning_content,
     )
 
 
@@ -230,6 +241,38 @@ def test_chat_returns_reasoning_content_field(free_tcp_port: int) -> None:
     assert "reasoning" not in dumped
 
 
+def test_chat_normalizes_live_vllm_reasoning_field(free_tcp_port: int) -> None:
+    """Capture the reasoning field emitted by the authenticated study server.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+
+    Current vLLM responses expose thinking text as ``delta.reasoning``. CARD's
+    provider preserves it in the stable AssistantMessage reasoning field and
+    records the original server field name for later audit.
+    """
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning="live thought"),
+                _chunk(content="done"),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
+
+        dumped = provider.chat(
+            messages=[{"role": "system", "content": "Summarizer"}]
+        ).model_dump()
+
+        provider._client.close()
+
+    assert dumped["content"] == "done"
+    assert dumped["reasoning_content"] == "live thought"
+    assert provider.last_response is not None
+    assert provider.last_response["reasoning_fields"] == ["reasoning"]
+
+
 def test_chat_can_disable_thinking_mode(free_tcp_port: int) -> None:
     """Omit the extra reasoning body when thinking mode is disabled."""
     with run_openai_compatible_server(port=free_tcp_port) as server:
@@ -269,64 +312,52 @@ def test_generate_accepts_omegaconf_extra_body(free_tcp_port: int) -> None:
     }
 
 
-def test_generate_falls_back_to_non_streaming_on_stream_error(
+def test_chat_rejects_response_without_terminal_finish_reason(
     free_tcp_port: int,
 ) -> None:
-    """Retry as a non-streaming request when the streaming API path fails."""
+    """Reject a partial stream after the server closes it without completion.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+
+    The assertion also verifies that the provider sends one request and does not
+    retry with an alternate transport after receiving the incomplete response.
+    """
     with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream([_chunk(content="partial")])
         provider = _build_provider(server.base_url, enable_thinking=False)
 
-        def _fake_create(**kwargs: Any) -> object:
-            if kwargs.get("stream"):
-                raise RuntimeError("stream failed")
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content="fallback answer", reasoning_content=None
-                        )
-                    )
-                ]
-            )
-
-        provider._client.chat.completions.create = _fake_create  # type: ignore[method-assign]
-
-        result = provider.generate(system_prompt="sys", user_prompt="user")
+        with pytest.raises(ValueError, match="finish_reason=None"):
+            provider.chat(messages=[{"role": "system", "content": "Summarizer"}])
 
         provider._client.close()
 
-    assert result == "fallback answer"
+    assert len(server.chat_requests) == 1
+    assert provider.last_response is not None
+    assert provider.last_response["content"] == "partial"
 
 
-def test_chat_falls_back_to_non_streaming_on_stream_error(free_tcp_port: int) -> None:
-    """Retry chat completions without streaming when the stream path fails."""
+def test_generate_rejects_length_limited_response(free_tcp_port: int) -> None:
+    """Reject output that the server terminated at its token limit.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+
+    A length finish cannot enter the controlled-duration study because its
+    generated text is incomplete and the provider must not retry automatically.
+    """
     with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [_chunk(content="truncated"), _chunk(finish_reason="length")]
+        )
         provider = _build_provider(server.base_url, enable_thinking=False)
 
-        def _fake_create(**kwargs: Any) -> object:
-            if kwargs.get("stream"):
-                raise RuntimeError("stream failed")
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content="fallback chat answer",
-                            reasoning_content=None,
-                            tool_calls=None,
-                        )
-                    )
-                ]
-            )
-
-        provider._client.chat.completions.create = _fake_create  # type: ignore[method-assign]
-
-        dumped = provider.chat(
-            messages=[{"role": "system", "content": "Summarizer"}]
-        ).model_dump()
+        with pytest.raises(ValueError, match="finish_reason='length'"):
+            provider.generate(system_prompt="sys", user_prompt="user")
 
         provider._client.close()
 
-    assert dumped["content"] == "fallback chat answer"
+    assert len(server.chat_requests) == 1
 
 
 def test_chat_reraises_stream_abort_without_non_streaming_fallback(
@@ -346,10 +377,17 @@ def test_chat_reraises_stream_abort_without_non_streaming_fallback(
     assert len(server.chat_requests) == 1
 
 
-def test_generate_falls_back_to_reasoning_when_content_empty(
+def test_generate_keeps_reasoning_separate_when_content_empty(
     free_tcp_port: int,
 ) -> None:
-    """Use structured reasoning content when the content channel stays empty."""
+    """Keep reasoning out of the final generated text.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+
+    The server-returned reasoning remains available in ``last_response`` for the
+    call trace while the user-visible result reflects the empty content channel.
+    """
     with run_openai_compatible_server(port=free_tcp_port) as server:
         server.enqueue_stream(
             [
@@ -363,13 +401,19 @@ def test_generate_falls_back_to_reasoning_when_content_empty(
 
         provider._client.close()
 
-    assert result == '{"ok":true}'
+    assert result == ""
+    assert provider.last_response is not None
+    assert provider.last_response["reasoning_content"] == '{"ok":true}'
 
 
-def test_chat_falls_back_to_reasoning_when_content_empty(
+def test_chat_keeps_reasoning_separate_when_content_empty(
     free_tcp_port: int,
 ) -> None:
-    """Mirror the generate fallback behavior for chat completions."""
+    """Return reasoning metadata without copying it into message content.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+    """
     with run_openai_compatible_server(port=free_tcp_port) as server:
         server.enqueue_stream(
             [
@@ -378,71 +422,6 @@ def test_chat_falls_back_to_reasoning_when_content_empty(
             ]
         )
         provider = _build_provider(server.base_url)
-
-        dumped = provider.chat(
-            messages=[{"role": "system", "content": "Summarizer"}]
-        ).model_dump()
-
-        provider._client.close()
-
-    assert dumped["content"] == '{"plan":"tool"}'
-    assert dumped["reasoning_content"] == '{"plan":"tool"}'
-
-
-def test_generate_can_disable_reasoning_fallback(free_tcp_port: int) -> None:
-    """Return empty content when reasoning fallback is disabled."""
-    with run_openai_compatible_server(port=free_tcp_port) as server:
-        server.enqueue_stream(
-            [
-                _chunk(reasoning_content='{"ok":true}'),
-                _chunk(finish_reason="stop"),
-            ]
-        )
-        provider = _build_provider(
-            server.base_url,
-            fallback_to_reasoning_content=False,
-        )
-
-        result = provider.generate(system_prompt="sys", user_prompt="user")
-
-        provider._client.close()
-
-    assert result == ""
-
-
-def test_generate_does_not_fallback_for_unstructured_reasoning(
-    free_tcp_port: int,
-) -> None:
-    """Reject narrative reasoning when the fallback requires structured output."""
-    with run_openai_compatible_server(port=free_tcp_port) as server:
-        server.enqueue_stream(
-            [
-                _chunk(reasoning_content="step-by-step analysis"),
-                _chunk(finish_reason="stop"),
-            ]
-        )
-        provider = _build_provider(server.base_url)
-
-        result = provider.generate(system_prompt="sys", user_prompt="user")
-
-        provider._client.close()
-
-    assert result == ""
-
-
-def test_chat_can_disable_reasoning_fallback(free_tcp_port: int) -> None:
-    """Keep reasoning metadata without using it as the content body."""
-    with run_openai_compatible_server(port=free_tcp_port) as server:
-        server.enqueue_stream(
-            [
-                _chunk(reasoning_content='{"plan":"tool"}'),
-                _chunk(finish_reason="stop"),
-            ]
-        )
-        provider = _build_provider(
-            server.base_url,
-            fallback_to_reasoning_content=False,
-        )
 
         dumped = provider.chat(
             messages=[{"role": "system", "content": "Summarizer"}]
@@ -452,6 +431,88 @@ def test_chat_can_disable_reasoning_fallback(free_tcp_port: int) -> None:
 
     assert dumped["content"] == ""
     assert dumped["reasoning_content"] == '{"plan":"tool"}'
+
+
+def test_generate_omits_max_tokens_when_unconfigured(free_tcp_port: int) -> None:
+    """Leave the request uncapped when no output limit is configured.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+
+    The study uses the endpoint context capacity and rejects any server-side
+    length finish, so the request must not inject a client output cap.
+    """
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream([_chunk(content="ok"), _chunk(finish_reason="stop")])
+        provider = _build_provider(server.base_url, enable_thinking=False)
+
+        result = provider.generate(system_prompt="sys", user_prompt="user")
+
+        provider._client.close()
+
+    assert result == "ok"
+    assert "max_tokens" not in server.chat_requests[-1]
+
+
+def test_provider_rejects_prompt_truncation_configuration(free_tcp_port: int) -> None:
+    """Reject a provider configuration that asks vLLM to clip the prompt.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+
+    Raises are checked at call time because extra request bodies are merged only
+    when the complete OpenAI request is assembled.
+    """
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        provider = VLLMProvider(
+            base_url=f"{server.base_url}/v1",
+            api_key="EMPTY",
+            enable_thinking=False,
+            extra_body={"truncate_prompt_tokens": 4096},
+        )
+
+        with pytest.raises(ValueError, match="Prompt truncation is disabled"):
+            provider.generate(system_prompt="sys", user_prompt="user")
+
+        provider._client.close()
+
+    assert server.chat_requests == []
+
+
+def test_chat_rejects_malformed_tool_arguments(free_tcp_port: int) -> None:
+    """Reject a completed tool call whose arguments are not valid JSON.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+
+    The invalid call remains in the diagnostic record and is never returned for
+    execution by the caller.
+    """
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(
+                    tool_calls=[
+                        _tool_call_delta(
+                            index=0,
+                            id="call_bad",
+                            name="submit_answer",
+                            arguments='{"question_id":',
+                        )
+                    ]
+                ),
+                _chunk(finish_reason="tool_calls"),
+            ]
+        )
+        provider = _build_provider(server.base_url)
+
+        with pytest.raises(json.JSONDecodeError):
+            provider.chat(messages=[{"role": "system", "content": "Evaluator"}])
+
+        provider._client.close()
+
+    assert provider.last_response is not None
+    assert provider.last_response["tool_calls"][0]["id"] == "call_bad"
 
 
 def test_chat_does_not_fallback_when_tool_calls_present(free_tcp_port: int) -> None:
@@ -502,3 +563,61 @@ def test_chat_does_not_fallback_when_tool_calls_present(free_tcp_port: int) -> N
     assert dumped["tool_calls"][0]["id"] == "call_1"
     assert dumped["tool_calls"][0]["function"]["name"] == "submit_answer"
     assert dumped["tool_calls"][0]["function"]["arguments"] == '{"question_id":"Q001"}'
+
+
+def test_logging_provider_archives_complete_reasoning_and_output(
+    free_tcp_port: int,
+    tmp_path: Path,
+) -> None:
+    """Persist one navigable call without credential or token-fragment records.
+
+    Args:
+        free_tcp_port: Unused localhost port supplied by pytest.
+        tmp_path: Pytest-owned directory for the complete call archive.
+
+    The local HTTP server exercises the real OpenAI client stream parser. The
+    resulting JSON and Markdown must contain the full prompt, reasoning text,
+    final output, provider metadata, and one README index entry.
+    """
+    trace_dir = (tmp_path / "agent_calls").resolve()
+    with run_openai_compatible_server(port=free_tcp_port) as server:
+        server.enqueue_stream(
+            [
+                _chunk(reasoning_content="complete reasoning"),
+                _chunk(content="complete answer"),
+                _chunk(finish_reason="stop"),
+            ]
+        )
+        provider = VLLMProvider(
+            base_url=f"{server.base_url}/v1",
+            api_key="test-secret",
+            enable_thinking=True,
+        )
+        wrapped = LoggingLLMProvider(provider, trace_dir=trace_dir)
+
+        response = wrapped.chat(
+            messages=[
+                {"role": "system", "content": "Summarizer"},
+                {"role": "user", "content": "Keep this complete prompt."},
+            ]
+        )
+
+        provider._client.close()
+
+    json_paths = list(trace_dir.glob("*.json"))
+    markdown_paths = [path for path in trace_dir.glob("*.md") if path.name != "README.md"]
+    assert response.content == "complete answer"
+    assert len(json_paths) == 1
+    assert len(markdown_paths) == 1
+    payload_text = json_paths[0].read_text(encoding="utf-8")
+    payload = json.loads(payload_text)
+    markdown = markdown_paths[0].read_text(encoding="utf-8")
+    assert payload["request"]["messages"][1]["content"] == "Keep this complete prompt."
+    assert payload["provider_response"]["reasoning_content"] == "complete reasoning"
+    assert payload["provider_response"]["content"] == "complete answer"
+    assert "test-secret" not in payload_text
+    assert "complete reasoning" in markdown
+    assert "complete answer" in markdown
+    assert markdown_paths[0].name in (trace_dir / "README.md").read_text(
+        encoding="utf-8"
+    )

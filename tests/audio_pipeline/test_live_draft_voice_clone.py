@@ -98,6 +98,39 @@ def test_render_turn_persists_state_sidecar_before_snapshot_sync(
         record.output_audio_path
     )
     assert payload["turn_audio"]["turn-001"]["duration_ms"] == 2400
+    assert payload["synthesis_count"] == 1
+
+    resumed = LiveDraftVoiceCloneSession(
+        provider=_FakeVoiceCloneProvider(),
+        state_path=state_path,
+        output_dir=state_path.parent,
+        speaker_samples_manifest_path=manifest_path,
+    )
+    resumed.render_turn(
+        turn_id="turn-002",
+        speaker="SPEAKER_00",
+        text="A second turn.",
+        emo_preset="neutral",
+    )
+
+    resumed_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert resumed_payload["synthesis_count"] == 2
+
+    resumed.bootstrap_from_snapshot(
+        [
+            {
+                "line": 1,
+                "turn_id": "stage3-turn-001",
+                "speaker_id": "SPEAKER_00",
+                "content": "The final rerender.",
+                "emo_preset": "neutral",
+            }
+        ]
+    )
+
+    final_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert final_payload["synthesis_count"] == 3
+    assert list(final_payload["turn_audio"]) == ["stage3-turn-001"]
 
 
 def test_restore_snapshot_matches_summary_xml_with_link_metadata(

@@ -879,18 +879,32 @@ def ensure_indextts_model(
     uv_executable: str,
     force_download: bool,
 ) -> ModelProvisionResult:
-    """
-    Ensure IndexTTS2 model artifacts are available (HF first, ModelScope fallback).
+    """Ensure IndexTTS2 model artifacts are available from ModelScope.
+
+    The command downloads the official ``IndexTeam/IndexTTS-2`` snapshot into
+    the repository checkpoint directory. An existing complete snapshot is
+    reused unless the caller explicitly requests a fresh download. ModelScope
+    is the sole configured source so a failed download is reported directly.
 
     Args:
         uv_executable: uv binary name/path.
         force_download: Force download attempts even when checkpoints look ready.
 
     Returns:
-        Model provisioning metadata.
+        Model provisioning metadata naming ``existing`` or ``modelscope`` as
+        the source.
 
     Raises:
-        BootstrapError: If both download paths fail or checkpoints remain invalid.
+        BootstrapError: If ModelScope fails or the downloaded checkpoint set
+            does not pass the local readiness check.
+
+    Examples:
+        Provision the checkpoints during setup::
+
+            result = ensure_indextts_model(
+                uv_executable="uv",
+                force_download=False,
+            )
     """
     checkpoints_dir = resolve_index_tts_checkpoints_dir()
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -898,65 +912,35 @@ def ensure_indextts_model(
     if ready and not force_download:
         return ModelProvisionResult(downloaded=False, source="existing")
 
-    hf_error: BootstrapError | None = None
-    try:
-        run_cmd(
-            step="model_download",
-            command=[
-                uv_executable,
-                "tool",
-                "run",
-                "--from",
-                "huggingface-hub[cli,hf_xet]",
-                "hf",
-                "download",
-                "IndexTeam/IndexTTS-2",
-                "--local-dir",
-                str(checkpoints_dir),
-                "--repo-type",
-                "model",
-            ],
-            cwd=REPO_ROOT,
-        )
-        hf_ready, _hf_reason = checkpoints_ready(checkpoints_dir)
-        if hf_ready:
-            return ModelProvisionResult(downloaded=True, source="huggingface")
-    except BootstrapError as exc:
-        hf_error = exc
-
-    modelscope_error: BootstrapError | None = None
-    try:
-        run_cmd(
-            step="model_download",
-            command=[
-                uv_executable,
-                "tool",
-                "run",
-                "--from",
-                "modelscope",
-                "modelscope",
-                "download",
-                "--model",
-                "IndexTeam/IndexTTS-2",
-                "--local_dir",
-                str(checkpoints_dir),
-            ],
-            cwd=REPO_ROOT,
-        )
-    except BootstrapError as exc:
-        modelscope_error = exc
+    run_cmd(
+        step="model_download",
+        command=[
+            uv_executable,
+            "tool",
+            "run",
+            "--from",
+            "modelscope",
+            "modelscope",
+            "download",
+            "--model",
+            "IndexTeam/IndexTTS-2",
+            "--local_dir",
+            str(checkpoints_dir),
+        ],
+        cwd=REPO_ROOT,
+    )
 
     final_ready, final_reason = checkpoints_ready(checkpoints_dir)
     if final_ready:
         return ModelProvisionResult(downloaded=True, source="modelscope")
 
-    message = "Failed to provision IndexTTS2 checkpoints. "
-    if hf_error is not None:
-        message += f"HF failed: {hf_error.message}. "
-    if modelscope_error is not None:
-        message += f"ModelScope failed: {modelscope_error.message}. "
-    message += f"Readiness check: {final_reason}"
-    raise BootstrapError(step="model_download", message=message)
+    raise BootstrapError(
+        step="model_download",
+        message=(
+            "ModelScope completed without a usable IndexTTS2 checkpoint set. "
+            f"Readiness check: {final_reason}"
+        ),
+    )
 
 
 def resolve_audio_input(path_value: str) -> Path:

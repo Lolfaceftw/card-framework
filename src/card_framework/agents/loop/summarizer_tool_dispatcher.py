@@ -10,7 +10,6 @@ from typing import Any
 from card_framework.agents.loop.tool_call_utils import build_tool_signature
 from card_framework.shared.events import EventBus
 
-_DEFAULT_DRAFT_REVIEW_CHAT_MAX_TOKENS = 256
 _DRAFT_REVIEW_PROMPT = (
     "[DRAFT_REVIEW]\n"
     "The draft is already within budget and has been auto-saved. Your next response "
@@ -381,7 +380,6 @@ class SummarizerToolDispatcher:
                     name="estimate_duration",
                     result=duration_result,
                     event_name="estimate_duration (auto)",
-                    event_result=(f"Total: {total_estimated_seconds:.3f}s"),
                 )
                 turn_total_seconds = total_estimated_seconds
                 context_data["last_total_estimated_seconds"] = turn_total_seconds
@@ -394,7 +392,6 @@ class SummarizerToolDispatcher:
                     name="count_words",
                     result=count_result,
                     event_name="count_words (auto)",
-                    event_result=f"Total: {int(count_result.get('total_word_count', 0))} words",
                 )
                 context_data["last_total_word_count"] = int(
                     count_result.get("total_word_count", 0)
@@ -404,12 +401,9 @@ class SummarizerToolDispatcher:
                 budget = raw_budget if isinstance(raw_budget, dict) else {}
                 if bool(budget.get("in_budget", False)):
                     context_data["draft_ready_for_review"] = True
-                    review_chat_max_tokens = coerce_positive_int(
-                        context_data.get("draft_review_chat_max_tokens"),
-                        default=_DEFAULT_DRAFT_REVIEW_CHAT_MAX_TOKENS,
-                        minimum=32,
+                    context_data["chat_max_tokens"] = context_data.get(
+                        "default_chat_max_tokens"
                     )
-                    context_data["chat_max_tokens"] = review_chat_max_tokens
                     self.event_bus.publish(
                         "status_message",
                         message=(
@@ -427,9 +421,6 @@ class SummarizerToolDispatcher:
                             name="save_draft",
                             result=save_result,
                             event_name="save_draft (auto)",
-                            event_result=(
-                                f"Saved {int(save_result.get('total_messages', 0))} messages"
-                            ),
                         )
                     messages.append(
                         {
@@ -564,9 +555,19 @@ class SummarizerToolDispatcher:
         name: str,
         result: dict[str, Any],
         event_name: str | None = None,
-        event_result: str | None = None,
     ) -> None:
-        """Append a tool result to the message log and event bus."""
+        """Append one complete tool result to message and archive event logs.
+
+        Args:
+            messages: Mutable provider history that receives the tool response.
+            tool_call_id: Identifier of the corresponding model-issued call.
+            name: Tool name written into the provider history.
+            result: Complete JSON-compatible result returned by the tool.
+            event_name: Optional display label for the archived event.
+
+        Returns:
+            None.
+        """
         messages.append(
             {
                 "role": "tool",
@@ -578,7 +579,7 @@ class SummarizerToolDispatcher:
         self.event_bus.publish(
             "tool_result",
             tool_name=event_name or name,
-            result=event_result or json.dumps(result, indent=2),
+            result=json.dumps(result, indent=2),
         )
 
     def _append_auto_tool_feedback(
@@ -588,7 +589,6 @@ class SummarizerToolDispatcher:
         name: str,
         result: dict[str, Any],
         event_name: str | None = None,
-        event_result: str | None = None,
     ) -> None:
         """Append auto-dispatched tool outputs as user feedback, not tool results.
 
@@ -611,5 +611,5 @@ class SummarizerToolDispatcher:
         self.event_bus.publish(
             "tool_result",
             tool_name=event_name or name,
-            result=event_result or json.dumps(result, indent=2),
+            result=json.dumps(result, indent=2),
         )

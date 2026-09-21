@@ -236,10 +236,10 @@ audio:
     categorical:
       enabled: true
       provider: "emotion2vec_plus"
-      model_name: "emotion2vec_plus_large"
+      model_name: "iic/emotion2vec_plus_large"
       device: "auto"
       batch_size: 4
-      hub: "hf"
+      hub: "ms"
       granularity: "utterance"
       extract_embedding: true
       disable_update_check: true
@@ -420,6 +420,7 @@ agents:
       stall_guidance_cooldown_turns: 2
   critic:
     max_tool_turns: 50
+    require_structured_verdict: false
     reasoning_loop_guard:
       enabled: true
       max_consecutive_no_tool_turns: 2

@@ -19,7 +19,7 @@ class AgentTaskClient(Protocol):
         port: int,
         task_data: dict | str | object,
         timeout: float | None = 120.0,
-        max_retries: int = 3,
+        max_retries: int = 1,
         metadata: dict[str, Any] | None = None,
     ) -> str:
         """Send one task request and return serialized response payload."""
@@ -383,11 +383,41 @@ class AgentClient:
         port: int,
         task_data: dict | str | object,
         timeout: float | None = 120.0,
-        max_retries: int = 3,
+        max_retries: int = 1,
         metadata: dict | None = None,
     ) -> str:
-        """
-        Sends a task to the agent.
+        """Send one A2A task and return its serialized terminal response.
+
+        One request attempt is used by default so a transport failure cannot
+        silently duplicate agent work. Callers that explicitly choose a larger
+        value receive retries only for connection-safe request errors; read and
+        write timeouts are never retried.
+
+        Args:
+            port: Local A2A server port for the target agent.
+            task_data: JSON-compatible task payload or serializable request model.
+            timeout: Per-request and polling timeout in seconds. ``None`` uses
+                the client's configured default.
+            max_retries: Total permitted request attempts, including the first.
+            metadata: Optional fields attached to emitted activity records.
+
+        Returns:
+            Text extracted from the terminal A2A response, or the serialized
+            result object when no text part exists.
+
+        Raises:
+            ValueError: If ``max_retries`` is smaller than one.
+            RuntimeError: If the request fails, the task reaches a failed state,
+                or polling cannot obtain a terminal response.
+
+        Examples:
+            Send one non-retried task::
+
+                response = await client.send_task(
+                    port=9010,
+                    task_data={"action": "summarize"},
+                    max_retries=1,
+                )
         """
         if max_retries < 1:
             raise ValueError("max_retries must be >= 1.")

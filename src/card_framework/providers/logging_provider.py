@@ -7,8 +7,10 @@ Wraps an existing LLMProvider to capture its inputs and outputs.
 import json
 import time
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
+from card_framework.providers.call_trace import write_call_trace
 from card_framework.shared.llm_provider import (
     LLMProvider,
     MessageInput,
@@ -16,6 +18,7 @@ from card_framework.shared.llm_provider import (
     ToolInput,
     normalize_messages,
     normalize_tools,
+    infer_agent_name,
 )
 from card_framework.shared.logger_utils import logger
 from card_framework.shared.events import event_bus
@@ -148,11 +151,50 @@ class LoggingLLMProvider(LLMProvider):
     Decorator for LLMProvider that logs all generation requests and responses.
     """
 
-    def __init__(self, inner_provider: LLMProvider) -> None:
+    def __init__(self, inner_provider: LLMProvider, trace_dir: str | Path | None = None) -> None:
+        """Wrap a provider with summaries and optional complete exchange records.
+
+        Args:
+            inner_provider: Provider performing the actual model requests.
+            trace_dir: Run-local archive directory, or None to use summary logs
+                only. Authentication settings are never included in the archive.
+        """
         self.inner_provider = inner_provider
+        self.trace_dir = Path(trace_dir) if trace_dir is not None else None
         logger.info(
             f"LoggingLLMProvider initialized wrapping {type(inner_provider).__name__}"
         )
+
+    def _archive(self, *, operation: str, started: float, request: dict,
+                 response: dict | None, error: Exception | None = None) -> None:
+        """Write a complete call record while excluding known client secrets.
+
+        Args:
+            operation: The public method used for this call.
+            started: Monotonic start time, used only for elapsed-time reporting.
+            request: Complete model messages and requested settings.
+            response: Serialized successful output, or None when the call fails.
+            error: Original failure to record before propagating it unchanged.
+        """
+        if self.trace_dir is None:
+            return
+        error_text = None if error is None else f"{type(error).__name__}: {error}"
+        if error_text is not None:
+            for name in ("api_key", "base_url"):
+                private = getattr(self.inner_provider, name, None)
+                if isinstance(private, str) and private:
+                    error_text = error_text.replace(private, "[REDACTED]")
+        write_call_trace(self.trace_dir, {
+            "agent": infer_agent_name(request["messages"]),
+            "operation": operation,
+            "status": "completed" if error is None else "failed",
+            "elapsed_seconds": time.perf_counter() - started,
+            "request": request,
+            "provider_request": getattr(self.inner_provider, "last_request", None),
+            "response": response,
+            "provider_response": getattr(self.inner_provider, "last_response", None),
+            "error": error_text,
+        })
 
     def generate(
         self,
@@ -179,6 +221,11 @@ class LoggingLLMProvider(LLMProvider):
                 user_prompt=user_prompt,
                 max_tokens=max_tokens,
             )
+            self._archive(operation="generate", started=started, request={
+                "messages": [{"role": "system", "content": system_prompt},
+                             {"role": "user", "content": user_prompt}],
+                "max_tokens": max_tokens,
+            }, response={"content": response})
             latency_ms = int((time.perf_counter() - started) * 1000)
             logger.info(
                 "LLM RESPONSE SUMMARY: "
@@ -196,6 +243,11 @@ class LoggingLLMProvider(LLMProvider):
             logger.info("-" * 40)
             return response
         except Exception as e:
+            self._archive(operation="generate", started=started, request={
+                "messages": [{"role": "system", "content": system_prompt},
+                             {"role": "user", "content": user_prompt}],
+                "max_tokens": max_tokens,
+            }, response=None, error=e)
             logger.error(f"LLM ERROR: {str(e)}")
             logger.info("-" * 40)
             raise
@@ -234,6 +286,12 @@ class LoggingLLMProvider(LLMProvider):
                 tool_choice=tool_choice,
                 max_tokens=max_tokens,
             )
+            self._archive(operation="chat", started=started, request={
+                "messages": normalize_messages(messages),
+                "tools": normalize_tools(tools),
+                "tool_choice": tool_choice,
+                "max_tokens": max_tokens,
+            }, response=_serialize_response_message(response_message))
             logger.info(
                 "LLM CHAT RESPONSE SUMMARY: "
                 f"{_summarize_response_message(response_message)}"
@@ -254,6 +312,12 @@ class LoggingLLMProvider(LLMProvider):
             logger.info("-" * 40)
             return response_message
         except Exception as e:
+            self._archive(operation="chat", started=started, request={
+                "messages": normalize_messages(messages),
+                "tools": normalize_tools(tools),
+                "tool_choice": tool_choice,
+                "max_tokens": max_tokens,
+            }, response=None, error=e)
             logger.error(f"LLM CHAT ERROR: {str(e)}")
             logger.info("-" * 40)
             raise

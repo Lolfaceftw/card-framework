@@ -60,10 +60,29 @@ class CriticExecutor(BaseA2AExecutor):
         retrieval_namespace: str = "default",
         is_embedding_enabled: bool = True,
         reasoning_loop_guard: Mapping[str, Any] | None = None,
+        require_structured_verdict: bool = False,
         agent_client: AgentTaskClient | None = None,
         event_bus: EventBus | None = None,
     ) -> None:
-        """Initialize critic executor and injected collaborators."""
+        """Initialize the critic and its runtime dependencies.
+
+        Args:
+            llm: Provider used for critic reasoning and tool calls.
+            calibration: Speaking-rate calibration for deterministic duration
+                checks when live rendered audio is unavailable.
+            max_tool_turns: Maximum model turns permitted in one critic pass.
+            retrieval_port: Local port for transcript evidence requests.
+            retrieval_namespace: Indexed transcript namespace for this run.
+            is_embedding_enabled: Whether transcript retrieval tools are exposed.
+            reasoning_loop_guard: Repetition and stream-abort settings.
+            require_structured_verdict: Raise when the model does not call
+                ``submit_verdict`` instead of deriving a deterministic verdict.
+            agent_client: Optional injected A2A client.
+            event_bus: Optional injected activity bus.
+
+        Returns:
+            None.
+        """
         super().__init__("Critic")
         self.llm = llm
         self.calibration = calibration
@@ -76,6 +95,7 @@ class CriticExecutor(BaseA2AExecutor):
         self.reasoning_loop_guard = self._resolve_reasoning_loop_guard(
             reasoning_loop_guard
         )
+        self.require_structured_verdict = bool(require_structured_verdict)
         self.agent_client = (
             agent_client if agent_client is not None else get_default_agent_client()
         )
@@ -424,6 +444,14 @@ class CriticExecutor(BaseA2AExecutor):
             messages, tools, self.max_tool_turns, context_data
         )
 
+        if not final_verdict and self.require_structured_verdict:
+            loop_stop_reason = str(context_data.get("loop_stop_reason", "")).strip()
+            detail = f" Stop reason: {loop_stop_reason}" if loop_stop_reason else ""
+            raise RuntimeError(
+                "Critic completed without calling submit_verdict."
+                f"{detail}"
+            )
+
         if not final_verdict:
             stats = self._run_deterministic_checks(
                 draft=draft,
@@ -507,10 +535,7 @@ class CriticExecutor(BaseA2AExecutor):
                 self.event_bus.publish(
                     "tool_result",
                     tool_name="run_deterministic_checks",
-                    result=(
-                        "Status: "
-                        f"{results.get('status')} ({len(results.get('failures', []))} failures)"
-                    ),
+                    result=json.dumps(results, indent=2),
                 )
             elif name == "verify_against_transcript":
                 query_text = args.get("query", "")
@@ -534,7 +559,7 @@ class CriticExecutor(BaseA2AExecutor):
                 self.event_bus.publish(
                     "tool_result",
                     tool_name="verify_against_transcript",
-                    result="Retrieved segments for verification.",
+                    result=raw_resp,
                 )
             elif name == "submit_verdict":
                 final_verdict = {

@@ -119,6 +119,7 @@ class LiveDraftVoiceCloneState:
     speaker_samples_manifest_path: Path
     current_snapshot: tuple[dict[str, Any], ...]
     turn_audio: dict[str, LiveDraftVoiceCloneTurn]
+    synthesis_count: int
 
     @classmethod
     def from_payload(
@@ -172,6 +173,7 @@ class LiveDraftVoiceCloneState:
             speaker_samples_manifest_path=manifest_path,
             current_snapshot=snapshot,
             turn_audio=turn_audio,
+            synthesis_count=int(payload["synthesis_count"]),
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -184,6 +186,7 @@ class LiveDraftVoiceCloneState:
                 turn_id: record.to_payload()
                 for turn_id, record in self.turn_audio.items()
             },
+            "synthesis_count": self.synthesis_count,
         }
 
 
@@ -212,6 +215,7 @@ class LiveDraftVoiceCloneSession:
     merged_output_normalization: AudioNormalizationPolicy | None = None
     _state: LiveDraftVoiceCloneState | None = field(default=None, init=False, repr=False)
     _sample_refs: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _synthesis_count_base: int = field(default=0, init=False, repr=False)
 
     @classmethod
     def from_orchestrator(
@@ -235,9 +239,33 @@ class LiveDraftVoiceCloneSession:
             merged_output_normalization=orchestrator.merged_output_normalization,
         )
 
-    def clear(self) -> None:
-        """Remove any previously persisted live-draft state and session files."""
+    def clear(self, *, preserve_synthesis_count: bool = False) -> None:
+        """Remove persisted live-draft files and reset the active state.
+
+        Args:
+            preserve_synthesis_count: Retain the cumulative number of synthesis
+                calls from the state being cleared. Use this when rebuilding the
+                same attempt's audio so metrics include discarded and final
+                renders. Leave false when beginning a new independent attempt.
+
+        Returns:
+            None.
+
+        Examples:
+            Start a fresh attempt::
+
+                session.clear()
+
+            Rebuild the current attempt while preserving work totals::
+
+                session.clear(preserve_synthesis_count=True)
+        """
         existing_state = self._load_state_if_available()
+        self._synthesis_count_base = (
+            existing_state.synthesis_count
+            if preserve_synthesis_count and existing_state is not None
+            else 0
+        )
         tracked_paths = []
         if existing_state is not None:
             tracked_paths.extend(
@@ -265,15 +293,27 @@ class LiveDraftVoiceCloneSession:
         return [dict(item) for item in state.current_snapshot]
 
     def bootstrap_from_snapshot(self, snapshot: Sequence[Mapping[str, Any]]) -> None:
-        """Populate audio state for an existing snapshot when no reusable state exists."""
-        self.clear()
+        """Rebuild an existing snapshot while retaining cumulative call counts.
+
+        Args:
+            snapshot: Ordered message-registry records to render into turn-level
+                audio for the current attempt.
+
+        Returns:
+            None.
+
+        Raises:
+            NonRetryableAudioStageError: If a snapshot item lacks a stable turn
+                identifier or cannot be synthesized.
+        """
+        self.clear(preserve_synthesis_count=True)
         for item in snapshot:
             turn_id = str(item.get("turn_id", "")).strip()
             if not turn_id:
                 raise NonRetryableAudioStageError(
                     "Cannot bootstrap live draft audio without stable turn_id values."
                 )
-            record = self.render_turn(
+            self.render_turn(
                 turn_id=turn_id,
                 speaker=str(item.get("speaker_id", "")),
                 text=str(item.get("content", "")),
@@ -291,7 +331,6 @@ class LiveDraftVoiceCloneSession:
                     for value in list(item.get("source_segment_weights", []))
                 ),
             )
-            self._state = self._replace_turn_record(record)
         self.sync_snapshot(snapshot)
 
     def render_turn(
@@ -378,6 +417,7 @@ class LiveDraftVoiceCloneSession:
             speaker_samples_manifest_path=self.speaker_samples_manifest_path.resolve(),
             current_snapshot=state.current_snapshot,
             turn_audio=updated_turn_audio,
+            synthesis_count=state.synthesis_count,
         )
         self._persist_state()
 
@@ -425,6 +465,7 @@ class LiveDraftVoiceCloneSession:
             speaker_samples_manifest_path=self.speaker_samples_manifest_path.resolve(),
             current_snapshot=tuple(normalized_snapshot),
             turn_audio=dict(state.turn_audio),
+            synthesis_count=state.synthesis_count,
         )
         self._persist_state()
 
@@ -605,6 +646,7 @@ class LiveDraftVoiceCloneSession:
             speaker_samples_manifest_path=self.speaker_samples_manifest_path.resolve(),
             current_snapshot=(),
             turn_audio={},
+            synthesis_count=self._synthesis_count_base,
         )
         return self._state
 
@@ -622,6 +664,7 @@ class LiveDraftVoiceCloneSession:
             speaker_samples_manifest_path=self.speaker_samples_manifest_path.resolve(),
             current_snapshot=state.current_snapshot,
             turn_audio=updated_turn_audio,
+            synthesis_count=state.synthesis_count + 1,
         )
 
     def _persist_state(self) -> None:

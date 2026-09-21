@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
+from rich.logging import RichHandler
 
 from card_framework.agents.utils import load_transcript
 from card_framework.audio_pipeline.calibration import (
@@ -46,7 +47,11 @@ from card_framework.shared.config_loading import (
     validate_runtime_credentials,
 )
 from card_framework.shared.llm_provider import EmbeddingProvider, LLMProvider
-from card_framework.shared.logger_utils import configure_logger
+from card_framework.shared.logger_utils import (
+    configure_logger,
+    logger,
+    resolve_file_log_directory,
+)
 from card_framework.shared.perf import StatusReporter, report_loading_duration
 from card_framework.shared.platform_support import apply_runtime_platform_fallbacks
 from card_framework.orchestration import StageOrchestrator
@@ -299,7 +304,10 @@ def _instantiate_llm_provider(
     llm: LLMProvider = hydra.utils.instantiate(llm_payload)
     _attach_stream_callback(llm)
     if enable_logging:
-        return LoggingLLMProvider(inner_provider=llm)
+        return LoggingLLMProvider(
+            inner_provider=llm,
+            trace_dir=resolve_file_log_directory() / "agent_calls",
+        )
     return llm
 
 
@@ -334,6 +342,8 @@ def _attach_stream_callback(llm: LLMProvider) -> None:
     This keeps UI dependencies in the composition root rather than provider
     implementation modules.
     """
+    if not any(isinstance(handler, RichHandler) for handler in logger.handlers):
+        return
     callback_setter = getattr(llm, "set_response_callback", None)
     if callable(callback_setter):
         callback_setter(RichConsoleResponseCallback())
@@ -2148,6 +2158,9 @@ def main(cfg: DictConfig) -> None:
                 reasoning_loop_guard=_to_plain_dict(
                     critic_cfg.get("reasoning_loop_guard")
                 ),
+                require_structured_verdict=bool(
+                    critic_cfg.get("require_structured_verdict", False)
+                ),
                 agent_client=shared_agent_client,
                 event_bus=event_bus,
             ),
@@ -2175,6 +2188,9 @@ def main(cfg: DictConfig) -> None:
         )
 
     loop_memory_cfg = _to_plain_dict(orchestrator_cfg_dict.get("loop_memory", {}))
+    loop_diagnostics_cfg = _to_plain_dict(
+        orchestrator_cfg_dict.get("loop_diagnostics", {})
+    )
     post_render_duration_cfg = _to_plain_dict(
         orchestrator_cfg_dict.get("post_render_duration_verification", {})
     )
@@ -2183,6 +2199,15 @@ def main(cfg: DictConfig) -> None:
     if loop_memory_artifact_value:
         loop_memory_artifact_path = resolve_path(
             loop_memory_artifact_value,
+            base_dir=project_root,
+        )
+    loop_diagnostics_artifact_path: Path | None = None
+    loop_diagnostics_artifact_value = str(
+        loop_diagnostics_cfg.get("artifact_path", "")
+    ).strip()
+    if loop_diagnostics_artifact_value:
+        loop_diagnostics_artifact_path = resolve_path(
+            loop_diagnostics_artifact_value,
             base_dir=project_root,
         )
 
@@ -2216,6 +2241,7 @@ def main(cfg: DictConfig) -> None:
         eta_headroom_seconds=audio_orchestrator.eta_headroom_seconds,
         voice_clone_gpu_heartbeat=voice_clone_gpu_heartbeat,
         loop_memory_artifact_path=loop_memory_artifact_path,
+        loop_diagnostics_artifact_path=loop_diagnostics_artifact_path,
         live_draft_audio_enabled=live_draft_audio_enabled,
         summary_turn_emotion_linker=build_summary_turn_emotion_linker(audio_cfg_dict),
         post_render_duration_verification_enabled=bool(

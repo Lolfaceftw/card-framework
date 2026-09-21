@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import types
 from typing import Any
 
+import pytest
+
 from tests.support.a2a import extract_agent_text_message
 
 # Provide minimal `numpy` module stub for llm_provider typing imports.
@@ -591,6 +593,7 @@ def test_run_deterministic_checks_prefers_live_draft_audio_state(
             {
                 "generated_at_utc": "2026-03-07T00:00:00+00:00",
                 "speaker_samples_manifest_path": str(speaker_manifest_path),
+                "synthesis_count": 1,
                 "current_snapshot": [
                     {
                         "line": 1,
@@ -1001,6 +1004,49 @@ def test_handle_task_falls_back_with_loop_guard_prefix() -> None:
     payload = json.loads(extract_agent_text_message(queue.events[0]))
     assert payload["feedback"].startswith("CRITIC LOOP GUARD:")
     assert "single-response repetition" in payload["feedback"]
+
+
+def test_handle_task_requires_model_verdict_in_strict_mode() -> None:
+    """Fail a strict critic pass when the model never submits a verdict."""
+    repeated = (
+        "Wait, the transcript says Ashley said this sentence already. "
+        "Wait, the transcript says Ashley said this sentence already. "
+        "Wait, the transcript says Ashley said this sentence already."
+    )
+    executor = CriticExecutor(
+        llm=_LoopLLM([_LoopResponse(content=repeated)]),
+        calibration=_build_calibration(),
+        is_embedding_enabled=False,
+        require_structured_verdict=True,
+    )
+    original_get_prompt = PromptManager.__dict__["get_prompt"]
+
+    def _fake_get_prompt(cls, key: str, **kwargs: Any) -> str:
+        """Return minimal prompts while retaining the submitted draft text."""
+        if key == "critic_user":
+            return str(kwargs.get("draft", ""))
+        return f"{key} prompt"
+
+    PromptManager.get_prompt = classmethod(_fake_get_prompt)
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="Critic completed without calling submit_verdict",
+        ):
+            asyncio.run(
+                executor.handle_task(
+                    {
+                        "draft": "<SPEAKER_00>Short finalized draft.</SPEAKER_00>",
+                        "target_seconds": 60,
+                        "duration_tolerance_ratio": 0.05,
+                        "full_transcript": "[E0001] [SPEAKER_00] Source text",
+                    },
+                    context=SimpleNamespace(task_id=None, context_id=None),
+                    event_queue=_RecordingQueue(),  # type: ignore[arg-type]
+                )
+            )
+    finally:
+        PromptManager.get_prompt = original_get_prompt
 
 
 def test_handle_task_retries_after_stream_repetition_abort() -> None:

@@ -357,70 +357,65 @@ def _ensure_model_checkpoints(
     uv_executable: str,
     force_download: bool,
 ) -> None:
-    """Download IndexTTS model checkpoints into the writable runtime home when missing."""
+    """Download IndexTTS checkpoints from ModelScope into the runtime home.
+
+    The writable runtime layout is used by installed-package launches that
+    cannot store model files beside packaged source. A complete existing
+    snapshot is retained unless ``force_download`` is true. The official
+    ModelScope repository is the sole source and any command failure is exposed
+    by ``_run_cmd`` without switching providers.
+
+    Args:
+        layout: Writable runtime paths, including the checkpoint destination.
+        uv_executable: Executable used to launch the isolated ModelScope CLI.
+        force_download: Download again even when local weights pass validation.
+
+    Raises:
+        RuntimeBootstrapError: If the download command fails or the resulting
+            checkpoint directory is incomplete.
+
+    Examples:
+        Prepare an installed runtime before voice synthesis::
+
+            _ensure_model_checkpoints(
+                layout=layout,
+                uv_executable="uv",
+                force_download=False,
+            )
+    """
     ready, _reason = checkpoints_ready(layout.checkpoints_dir)
     if ready and not force_download:
         return
 
-    hf_error: RuntimeBootstrapError | None = None
-    try:
-        _run_cmd(
-            step="model_download",
-            command=[
-                uv_executable,
-                "tool",
-                "run",
-                "--from",
-                "huggingface-hub[cli,hf_xet]",
-                "hf",
-                "download",
-                "IndexTeam/IndexTTS-2",
-                "--local-dir",
-                str(layout.checkpoints_dir),
-                "--repo-type",
-                "model",
-            ],
-            cwd=layout.runtime_home,
-        )
-        hf_ready, _hf_reason = checkpoints_ready(layout.checkpoints_dir)
-        if hf_ready:
-            return
-    except RuntimeBootstrapError as exc:
-        hf_error = exc
-
-    modelscope_error: RuntimeBootstrapError | None = None
-    try:
-        _run_cmd(
-            step="model_download",
-            command=[
-                uv_executable,
-                "tool",
-                "run",
-                "--from",
-                "modelscope",
-                "modelscope",
-                "download",
-                "--model",
-                "IndexTeam/IndexTTS-2",
-                "--local_dir",
-                str(layout.checkpoints_dir),
-            ],
-            cwd=layout.runtime_home,
-        )
-    except RuntimeBootstrapError as exc:
-        modelscope_error = exc
+    _run_cmd(
+        step="model_download",
+        command=[
+            uv_executable,
+            "tool",
+            "run",
+            "--from",
+            "modelscope",
+            "modelscope",
+            "download",
+            "--model",
+            "IndexTeam/IndexTTS-2",
+            "--local_dir",
+            str(layout.checkpoints_dir),
+        ],
+        cwd=layout.runtime_home,
+    )
 
     final_ready, final_reason = checkpoints_ready(layout.checkpoints_dir)
     if final_ready:
         return
 
-    message = "Failed to provision IndexTTS2 checkpoints. "
-    if hf_error is not None:
-        message += f"HF failed: {hf_error.message}. "
-    if modelscope_error is not None:
-        message += f"ModelScope failed: {modelscope_error.message}. "
-    message += f"Readiness check: {final_reason}"
-    raise RuntimeBootstrapError(step="model_download", message=message)
+    raise RuntimeBootstrapError(
+        step="model_download",
+        message=(
+            "ModelScope completed without a usable IndexTTS2 checkpoint set. "
+            f"Readiness check: {final_reason}"
+        ),
+    )
 
 
 def _project_fingerprints(project_dir: Path) -> dict[str, str]:

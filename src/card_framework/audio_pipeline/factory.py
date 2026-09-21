@@ -534,11 +534,17 @@ def build_interjector_orchestrator(
         interjector_cfg.get("leading_silence_trim", {})
     )
     echo_pacing_fit_cfg = _as_mapping(interjector_cfg.get("echo_pacing_fit", {}))
+    analysis_max_tokens = interjector_cfg.get("analysis_max_tokens", 900)
+    repair_max_tokens = repair_cfg.get("prompt_max_tokens", 220)
     return InterjectorOrchestrator(
         planner=LLMInterjectionPlanner(
             llm=llm,
-            max_tokens=int(interjector_cfg.get("analysis_max_tokens", 900)),
-            repair_max_tokens=int(repair_cfg.get("prompt_max_tokens", 220)),
+            max_tokens=(
+                None if analysis_max_tokens is None else int(analysis_max_tokens)
+            ),
+            repair_max_tokens=(
+                None if repair_max_tokens is None else int(repair_max_tokens)
+            ),
             max_interjection_words=max_interjection_words,
             min_host_progress_ratio=min_host_progress_ratio,
             echo_min_host_progress_ratio=echo_min_host_progress_ratio,
@@ -909,10 +915,12 @@ def _build_categorical_affect_provider(
     resolved_device = resolve_device(str(affect_cfg.get("device", "auto")))
     if provider == "emotion2vec_plus":
         return Emotion2VecPlusAffectGateway(
-            model_name=str(affect_cfg.get("model_name", "emotion2vec_plus_large")),
+            model_name=str(
+                affect_cfg.get("model_name", "iic/emotion2vec_plus_large")
+            ),
             device=resolved_device,
             batch_size=int(affect_cfg.get("batch_size", 4)),
-            hub=str(affect_cfg.get("hub", "hf")),
+            hub=str(affect_cfg.get("hub", "ms")),
             granularity=str(affect_cfg.get("granularity", "utterance")),
             extract_embedding=bool(affect_cfg.get("extract_embedding", False)),
             disable_update_check=bool(affect_cfg.get("disable_update_check", True)),

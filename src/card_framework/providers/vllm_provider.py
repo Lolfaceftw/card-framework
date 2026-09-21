@@ -8,10 +8,10 @@ behind the LLMProvider strategy interface.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import re
+import json
+import time
 from typing import Any
 
-import requests
 from openai import OpenAI
 
 from card_framework.agents.dtos import AssistantMessage, Function, ToolCall
@@ -21,15 +21,12 @@ from card_framework.shared.llm_provider import (
     LLMResponseCallback,
     MessageInput,
     NullLLMResponseCallback,
-    StreamingResponseAbort,
     ToolChoice,
     ToolInput,
-    infer_agent_name_from_text,
     infer_agent_name,
     normalize_messages,
     normalize_tools,
 )
-from card_framework.shared.logger_utils import logger
 
 
 class VLLMProvider(LLMProvider):
@@ -43,8 +40,6 @@ class VLLMProvider(LLMProvider):
         enable_thinking: Whether to request reasoning/thinking chunks from vLLM.
         default_max_tokens: Optional output-token budget used when the caller
             does not pass ``max_tokens``. Leave unset to preserve endpoint defaults.
-        fallback_to_reasoning_content: Use ``reasoning_content`` when final content is empty.
-        fallback_requires_structured_reasoning: Only fallback when reasoning looks structured.
         thinking_extra_body: Optional OpenAI ``extra_body`` payload for reasoning mode.
         request_timeout_seconds: Request timeout applied to model discovery and chat calls.
         response_callback: Optional callback sink for streamed token updates.
@@ -58,8 +53,6 @@ class VLLMProvider(LLMProvider):
         enable_thinking: bool = True,
         extra_body: dict[str, Any] | None = None,
         default_max_tokens: int | None = None,
-        fallback_to_reasoning_content: bool = True,
-        fallback_requires_structured_reasoning: bool = True,
         thinking_extra_body: dict[str, Any] | None = None,
         request_timeout_seconds: float = 30.0,
         response_callback: LLMResponseCallback | None = None,
@@ -74,11 +67,6 @@ class VLLMProvider(LLMProvider):
             if default_max_tokens is not None and int(default_max_tokens) > 0
             else None
         )
-        self.fallback_to_reasoning_content = bool(fallback_to_reasoning_content)
-        self.fallback_requires_structured_reasoning = bool(
-            fallback_requires_structured_reasoning
-        )
-        self._did_log_reasoning_fallback_warning = False
         self.request_timeout_seconds = max(1.0, float(request_timeout_seconds))
         self.thinking_extra_body = self._coerce_jsonable(thinking_extra_body) or {
             "chat_template_kwargs": {"enable_thinking": True}
@@ -87,7 +75,10 @@ class VLLMProvider(LLMProvider):
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=self.request_timeout_seconds,
+            max_retries=0,
         )
+        self.last_request: dict[str, Any] | None = None
+        self.last_response: dict[str, Any] | None = None
         self._response_callback: LLMResponseCallback = (
             response_callback or NullLLMResponseCallback()
         )
@@ -96,7 +87,7 @@ class VLLMProvider(LLMProvider):
         self.model_id = self._fetch_model_id(self.requested_model or None)
         event_bus.publish(
             "system_message",
-            f"Connected to VLLM -> model={self.model_id}, url={self.base_url}",
+            f"Connected to authenticated vLLM model={self.model_id}",
         )
 
     @classmethod
@@ -116,32 +107,37 @@ class VLLMProvider(LLMProvider):
         self._response_callback = response_callback
 
     def _fetch_model_id(self, requested_model: str | None = None) -> str:
-        """Return a validated model id from the configured endpoint."""
-        resp = requests.get(
-            f"{self.base_url}/models",
-            timeout=self.request_timeout_seconds,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        raw_models = payload.get("data") if isinstance(payload, Mapping) else None
-        available_model_ids = [
-            str(item.get("id", "")).strip()
-            for item in raw_models or []
-            if isinstance(item, Mapping) and str(item.get("id", "")).strip()
-        ]
+        """Discover models using the same authenticated client as chat requests.
+
+        Args:
+            requested_model: Explicit model identifier to validate, or None to
+                select the sole advertised model.
+
+        Returns:
+            The validated server model identifier.
+
+        Raises:
+            ValueError: The server advertises no models, an ambiguous selection,
+                or a set that does not include the requested model.
+            openai.APIError: Authentication, connectivity, or discovery fails.
+        """
+        models = list(self._client.models.list().data)
+        available_model_ids = [model.id for model in models]
         if not available_model_ids:
-            raise ValueError(
-                f"No models were advertised by the vLLM endpoint at {self.base_url}/models."
-            )
+            raise ValueError("The vLLM endpoint advertised no models.")
         if requested_model is None:
-            return available_model_ids[0]
+            if len(available_model_ids) != 1:
+                raise ValueError("Multiple models advertised; set an explicit model.")
+            requested_model = available_model_ids[0]
         normalized_requested_model = requested_model.strip()
         if normalized_requested_model in available_model_ids:
+            selected = models[available_model_ids.index(normalized_requested_model)]
+            self.server_model_metadata = selected.model_dump()
             return normalized_requested_model
         available_models_display = ", ".join(available_model_ids)
         raise ValueError(
             "Configured vLLM model "
-            f"'{normalized_requested_model}' is not advertised by {self.base_url}/models. "
+            f"'{normalized_requested_model}' is not advertised by the vLLM endpoint. "
             f"Available models: {available_models_display}."
         )
 
@@ -150,6 +146,8 @@ class VLLMProvider(LLMProvider):
         extra_body: dict[str, Any] = dict(self.extra_body)
         if self.enable_thinking:
             extra_body = self._merge_extra_body(extra_body, self.thinking_extra_body)
+        if extra_body.get("truncate_prompt_tokens") is not None:
+            raise ValueError("Prompt truncation is disabled; remove truncate_prompt_tokens.")
         if extra_body:
             create_kwargs["extra_body"] = extra_body
         return create_kwargs
@@ -170,114 +168,6 @@ class VLLMProvider(LLMProvider):
             merged[key] = value
         return merged
 
-    def _resolve_streamed_content(
-        self,
-        *,
-        content: str,
-        reasoning: str,
-        operation: str,
-    ) -> str:
-        """
-        Resolve final streamed text, with optional reasoning fallback.
-
-        Some vLLM reasoning models emit only ``reasoning_content`` when thinking is
-        enabled. Falling back prevents empty responses that can trigger retry loops.
-        """
-        normalized_content = content.strip()
-        if normalized_content:
-            return normalized_content
-        if not (self.enable_thinking and self.fallback_to_reasoning_content):
-            return ""
-
-        fallback_content = reasoning.strip()
-        if not fallback_content:
-            return ""
-        if (
-            self.fallback_requires_structured_reasoning
-            and not self._looks_like_structured_output(fallback_content)
-        ):
-            return ""
-
-        if not self._did_log_reasoning_fallback_warning:
-            self._did_log_reasoning_fallback_warning = True
-            logger.warning(
-                "[VLLMProvider] Empty content in %s; falling back to reasoning_content (chars=%s).",
-                operation,
-                len(fallback_content),
-            )
-        return fallback_content
-
-    def _non_stream_create_kwargs(
-        self, create_kwargs: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Clone request kwargs for a non-streaming fallback request."""
-        fallback_kwargs = dict(create_kwargs)
-        fallback_kwargs["stream"] = False
-        fallback_kwargs.pop("stream_options", None)
-        return fallback_kwargs
-
-    def _generate_non_streaming(self, create_kwargs: dict[str, Any]) -> str:
-        """Fallback to a non-streaming generate request when streaming fails."""
-        response = self._client.chat.completions.create(
-            **self._non_stream_create_kwargs(create_kwargs)
-        )
-        message = response.choices[0].message
-        content = str(message.content or "")
-        reasoning = str(getattr(message, "reasoning_content", "") or "")
-        return self._resolve_streamed_content(
-            content=content,
-            reasoning=reasoning,
-            operation="generate_non_streaming",
-        )
-
-    def _chat_non_streaming(self, create_kwargs: dict[str, Any]) -> AssistantMessage:
-        """Fallback to a non-streaming chat request when streaming fails."""
-        response = self._client.chat.completions.create(
-            **self._non_stream_create_kwargs(create_kwargs)
-        )
-        message = response.choices[0].message
-        raw_tool_calls = list(message.tool_calls or [])
-        final_tool_calls = [
-            ToolCall(
-                id=str(getattr(tool_call, "id", None) or f"call_{index}"),
-                function=Function(
-                    name=str(getattr(tool_call.function, "name", "")),
-                    arguments=str(getattr(tool_call.function, "arguments", "")),
-                ),
-            )
-            for index, tool_call in enumerate(raw_tool_calls)
-        ]
-        content = str(message.content or "")
-        reasoning = str(getattr(message, "reasoning_content", "") or "")
-        resolved_content = content
-        if not final_tool_calls:
-            resolved_content = self._resolve_streamed_content(
-                content=content,
-                reasoning=reasoning,
-                operation="chat_non_streaming",
-            )
-        return AssistantMessage(
-            content=resolved_content,
-            tool_calls=final_tool_calls if final_tool_calls else None,
-            reasoning_content=reasoning.strip() if reasoning.strip() else None,
-        )
-
-    @staticmethod
-    def _looks_like_structured_output(candidate: str) -> bool:
-        """Return whether a text payload looks like JSON/XML/fenced structured data."""
-        text = candidate.strip()
-        if not text:
-            return False
-        if "```" in text:
-            return True
-        if "{" in text and "}" in text:
-            return True
-        if "[" in text and "]" in text:
-            return True
-        if re.search(r"</?[A-Za-z][^>]*>", text):
-            return True
-        return False
-
     def _resolve_max_tokens(self, max_tokens: int | None) -> int | None:
         """Return the call-level output budget or the configured default."""
         if max_tokens is not None:
@@ -290,59 +180,27 @@ class VLLMProvider(LLMProvider):
         user_prompt: str,
         max_tokens: int | None = None,
     ) -> str:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        """Generate complete text without accepting length-limited responses.
 
-        create_kwargs: dict[str, Any] = {
-            "model": self.model_id,
-            "messages": messages,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        effective_max_tokens = self._resolve_max_tokens(max_tokens)
-        if effective_max_tokens is not None:
-            create_kwargs["max_tokens"] = effective_max_tokens
-        create_kwargs = self._maybe_enable_thinking(create_kwargs)
+        Args:
+            system_prompt: Full system instruction, passed without clipping.
+            user_prompt: Full user context, passed without clipping.
+            max_tokens: Explicit output cap, or None to omit a client cap.
 
-        try:
-            response = self._client.chat.completions.create(**create_kwargs)
+        Returns:
+            The model's final text, after a valid terminal finish reason.
 
-            full_content = ""
-            full_thought = ""
-            self._response_callback.on_start(infer_agent_name_from_text(system_prompt))
-            try:
-                for chunk in response:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-
-                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                        self._response_callback.on_thought_token(
-                            delta.reasoning_content
-                        )
-                        full_thought += delta.reasoning_content
-
-                    if hasattr(delta, "content") and delta.content:
-                        self._response_callback.on_content_token(delta.content)
-                        full_content += delta.content
-            finally:
-                self._response_callback.on_complete()
-
-            return self._resolve_streamed_content(
-                content=full_content,
-                reasoning=full_thought,
-                operation="generate",
-            )
-        except StreamingResponseAbort:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "[VLLMProvider] Streaming generate failed; retrying non-streaming: %s",
-                exc,
-            )
-            return self._generate_non_streaming(create_kwargs)
+        Raises:
+            ValueError: The response is truncated or ends without a finish reason.
+            openai.APIError: The single provider request fails.
+        """
+        return self.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+        ).content
 
     def chat(
         self,
@@ -351,7 +209,30 @@ class VLLMProvider(LLMProvider):
         tool_choice: ToolChoice | None = None,
         max_tokens: int | None = None,
     ) -> AssistantMessage:
-        """Stream chat completion with tool-call aggregation support."""
+        """Collect one complete response and preserve full request/response records.
+
+        The transport streams to support long requests, but the retained response
+        is a complete exchange, not token fragments. No retry, alternate transport,
+        or prompt reduction follows a failed request. Partial output remains in
+        ``last_response`` for diagnosis and cannot be dispatched as a tool call.
+
+        Args:
+            messages: Complete conversation supplied by the caller.
+            tools: Tool schemas available for this call, or None.
+            tool_choice: Explicit tool-selection instruction, or None.
+            max_tokens: Explicit output limit, or None to omit a client cap.
+
+        Returns:
+            An AssistantMessage containing completed text, server-returned
+            reasoning, and complete tool calls.
+
+        Raises:
+            ValueError: The server reports an incomplete finish, omits a terminal
+                finish reason, or returns an incomplete tool-call identifier.
+            openai.APIError: Authentication, context size, or transport fails.
+        """
+        self.last_request = None
+        self.last_response = None
         normalized_messages = normalize_messages(messages)
         normalized_tools = normalize_tools(tools)
 
@@ -359,6 +240,7 @@ class VLLMProvider(LLMProvider):
             "model": self.model_id,
             "messages": normalized_messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if normalized_tools is not None:
             create_kwargs["tools"] = normalized_tools
@@ -368,27 +250,43 @@ class VLLMProvider(LLMProvider):
         if effective_max_tokens is not None:
             create_kwargs["max_tokens"] = effective_max_tokens
         create_kwargs = self._maybe_enable_thinking(create_kwargs)
-
+        self.last_request = create_kwargs
+        self.last_response = None
+        started = time.perf_counter()
+        full_content = ""
+        full_thought = ""
+        reasoning_fields: set[str] = set()
+        tool_calls_data: list[dict[str, Any]] = []
+        finish_reason = None
+        usage = None
+        response_model = None
+        self._response_callback.on_start(infer_agent_name(messages))
         try:
-            response_stream = self._client.chat.completions.create(**create_kwargs)
-
-            full_content = ""
-            full_thought = ""
-            tool_calls_data: list[dict[str, Any]] = []
-
-            agent_name = infer_agent_name(messages)
-            self._response_callback.on_start(agent_name)
-            try:
+            with self._client.chat.completions.create(**create_kwargs) as response_stream:
                 for chunk in response_stream:
+                    response_model = chunk.model
+                    if chunk.usage is not None:
+                        usage = chunk.usage.model_dump()
                     if not chunk.choices:
                         continue
-                    delta = chunk.choices[0].delta
-
-                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                        self._response_callback.on_thought_token(
-                            delta.reasoning_content
+                    choice = chunk.choices[0]
+                    if choice.finish_reason is not None:
+                        finish_reason = choice.finish_reason
+                    delta = choice.delta
+                    reasoning_content = getattr(delta, "reasoning_content", None)
+                    reasoning = getattr(delta, "reasoning", None)
+                    if reasoning_content and reasoning and reasoning_content != reasoning:
+                        raise ValueError(
+                            "The vLLM response supplied conflicting reasoning and "
+                            "reasoning_content fields."
                         )
-                        full_thought += delta.reasoning_content
+                    thought_delta = reasoning_content or reasoning
+                    if thought_delta:
+                        reasoning_fields.add(
+                            "reasoning_content" if reasoning_content else "reasoning"
+                        )
+                        self._response_callback.on_thought_token(thought_delta)
+                        full_thought += thought_delta
 
                     if hasattr(delta, "content") and delta.content:
                         self._response_callback.on_content_token(delta.content)
@@ -430,39 +328,39 @@ class VLLMProvider(LLMProvider):
                                     tool_call["function"]["arguments"] += (
                                         tc_delta.function.arguments
                                     )
-            finally:
-                self._response_callback.on_complete()
+        finally:
+            self.last_response = {
+                "model": response_model,
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "content": full_content,
+                "reasoning_content": full_thought,
+                "reasoning_fields": sorted(reasoning_fields),
+                "tool_calls": tool_calls_data,
+                "elapsed_seconds": round(time.perf_counter() - started, 6),
+            }
+            self._response_callback.on_complete()
 
-            final_tool_calls = [
-                ToolCall(
-                    id=str(tc.get("id") or f"call_{index}"),
-                    function=Function(
-                        name=str(tc["function"]["name"]),
-                        arguments=str(tc["function"]["arguments"]),
-                    ),
-                )
-                for index, tc in enumerate(tool_calls_data)
-            ]
-            resolved_content = full_content
-            if not final_tool_calls:
-                resolved_content = self._resolve_streamed_content(
-                    content=full_content,
-                    reasoning=full_thought,
-                    operation="chat",
-                )
-
-            return AssistantMessage(
-                content=resolved_content,
-                tool_calls=final_tool_calls if final_tool_calls else None,
-                reasoning_content=full_thought.strip()
-                if full_thought.strip()
-                else None,
+        if finish_reason not in {"stop", "tool_calls"}:
+            raise ValueError(
+                f"Incomplete vLLM response: finish_reason={finish_reason!r}; "
+                "the request will not be retried or its context shortened."
             )
-        except StreamingResponseAbort:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "[VLLMProvider] Streaming chat failed; retrying non-streaming: %s",
-                exc,
+        if any(not tc["id"] or not tc["function"]["name"] for tc in tool_calls_data):
+            raise ValueError("Incomplete tool call in the vLLM response.")
+        for call in tool_calls_data:
+            arguments = json.loads(call["function"]["arguments"])
+            if not isinstance(arguments, dict):
+                raise ValueError("Tool arguments must be a complete JSON object.")
+        final_tool_calls = [
+            ToolCall(
+                id=tc["id"],
+                function=Function(**tc["function"]),
             )
-            return self._chat_non_streaming(create_kwargs)
+            for tc in tool_calls_data
+        ]
+        return AssistantMessage(
+            content=full_content,
+            tool_calls=final_tool_calls if final_tool_calls else None,
+            reasoning_content=full_thought if full_thought else None,
+        )

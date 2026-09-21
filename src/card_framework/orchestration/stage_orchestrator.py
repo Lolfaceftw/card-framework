@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import threading
@@ -73,6 +74,7 @@ class StageOrchestrator:
     eta_headroom_seconds: float = 1.0
     voice_clone_gpu_heartbeat: VoiceCloneGpuHeartbeatService | None = None
     loop_memory_artifact_path: Path | None = None
+    loop_diagnostics_artifact_path: Path | None = None
     live_draft_audio_enabled: bool = False
     summary_turn_emotion_linker: SummaryTurnEmotionLinker | None = None
     post_render_duration_verification_enabled: bool = False
@@ -215,10 +217,11 @@ class StageOrchestrator:
         prepared_transcript = transcript
         speaker_samples_manifest_path: Path | None = None
         draft_audio_state_path: Path | None = None
-        if self.live_draft_audio_enabled and self.voice_clone_orchestrator is not None:
+        if self.voice_clone_orchestrator is not None:
             prepared_transcript, speaker_samples_manifest_path = (
                 self._prepare_transcript_for_live_draft_voice_clone(transcript=transcript)
             )
+        if self.live_draft_audio_enabled:
             draft_audio_state_path = self._build_draft_audio_state_path(
                 transcript=prepared_transcript
             )
@@ -257,6 +260,7 @@ class StageOrchestrator:
                 draft_audio_state_path=draft_audio_state_path,
             )
             diagnostics = {"converged": bool(result), "draft": result}
+        self._persist_loop_diagnostics(diagnostics)
         result = diagnostics["draft"] if diagnostics["converged"] else ""
         if not result:
             return
@@ -448,6 +452,28 @@ class StageOrchestrator:
             "duration_tolerance_ratio": f"{self.duration_tolerance_ratio:.6f}",
         }
 
+    def _persist_loop_diagnostics(self, diagnostics: Mapping[str, object]) -> None:
+        """Persist the exact loop result for later experimental accounting.
+
+        Args:
+            diagnostics: Structured result returned by the loop orchestrator,
+                including the number of summarizer passes and critic outcomes.
+
+        Raises:
+            OSError: The configured diagnostics path cannot be written.
+            TypeError: The loop diagnostics contain a non-JSON value.
+        """
+        path = self.loop_diagnostics_artifact_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(dict(diagnostics), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
     def _build_draft_audio_state_path(self, *, transcript: Transcript) -> Path:
         """Build the persisted live-draft state path for one transcript/target pair."""
         if self.voice_clone_orchestrator is None:
@@ -463,7 +489,17 @@ class StageOrchestrator:
         *,
         transcript: Transcript,
     ) -> tuple[Transcript, Path]:
-        """Ensure speaker samples exist before live drafting begins."""
+        """Resolve the same speaker constraints for estimated and measured drafting.
+
+        Args:
+            transcript: Prepared source transcript with speaker-sample metadata.
+
+        Returns:
+            The prepared transcript and absolute speaker-sample manifest path.
+
+        Raises:
+            ValueError: Speaker-sample metadata cannot be established.
+        """
         prepared_transcript = transcript
         manifest_path_value = str(
             prepared_transcript.metadata.get("speaker_samples_manifest_path", "")
@@ -479,7 +515,7 @@ class StageOrchestrator:
             ).strip()
         if not manifest_path_value:
             raise ValueError(
-                "Speaker sample manifest is required for live drafting. "
+                "Speaker sample manifest is required for voice-cloned drafting. "
                 "Expected transcript metadata key: speaker_samples_manifest_path."
             )
         manifest_path = Path(manifest_path_value)
@@ -536,7 +572,6 @@ class StageOrchestrator:
 
         started_at = time.monotonic()
         try:
-            live_session.clear()
             if self.voice_clone_gpu_heartbeat is not None:
                 self.voice_clone_gpu_heartbeat.start(pipeline_root_pid=os.getpid())
             live_session.bootstrap_from_snapshot(snapshot)

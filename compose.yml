@@ -10,7 +10,9 @@ x-setup-and-run-base: &setup-and-run-base
     CARD_FRAMEWORK_FFMPEG_EXECUTABLE: /usr/bin/ffmpeg
     CARD_FRAMEWORK_REPO_DIR: /workspace/card-framework
     HF_HOME: /root/.cache/huggingface
+    HF_HUB_DISABLE_XET: "1"
     HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+    MODELSCOPE_CACHE: /root/.cache/huggingface/modelscope
     PYTHONUNBUFFERED: "1"
     TRANSFORMERS_CACHE: /root/.cache/huggingface/transformers
   shm_size: "8gb"

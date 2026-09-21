@@ -398,11 +398,16 @@ class _FasterWhisperNativeWordTimingBackend:
 
 @dataclass(slots=True)
 class LLMInterjectionPlanner:
-    """Use an LLM to decide whether summary turns need overlapping interjections."""
+    """Plan interjections without hiding provider failures or partial JSON.
+
+    ``max_tokens`` and ``repair_max_tokens`` accept an explicit ``None`` to
+    leave output length to the provider. Provider errors propagate to the run
+    caller; a rejected or interrupted response cannot produce a default plan.
+    """
 
     llm: LLMProvider
-    max_tokens: int = 900
-    repair_max_tokens: int = 220
+    max_tokens: int | None = 900
+    repair_max_tokens: int | None = 220
     max_interjection_words: int = 5
     min_host_progress_ratio: float = 0.35
     echo_min_host_progress_ratio: float = 0.05
@@ -410,7 +415,20 @@ class LLMInterjectionPlanner:
     prefer_tool_call_planning: bool = True
 
     def plan(self, summary_turns: Sequence[VoiceCloneTurn]) -> list[InterjectionDecision]:
-        """Return one validated decision per eligible host turn."""
+        """Return validated overlap decisions for the supplied summary turns.
+
+        Args:
+            summary_turns: Ordered, complete rendered-summary turns to assess.
+
+        Returns:
+            Validated decisions for eligible turns, or an empty list when the
+            summary has no eligible host/next-speaker pair.
+
+        Raises:
+            Exception: Propagates provider request failures, including context
+                overflow and output-length termination.
+            ValueError: The text planner returned incomplete or invalid JSON.
+        """
         from card_framework.shared.prompt_manager import PromptManager
 
         eligible_turns = _build_eligible_turns(summary_turns)
@@ -439,28 +457,20 @@ class LLMInterjectionPlanner:
         )
         payload = None
         if self.prefer_tool_call_planning:
-            try:
-                with _temporarily_disable_llm_thinking(self.llm):
-                    payload = self._plan_with_tool_call(
-                        eligible_turns=eligible_turns,
-                    )
-            except Exception:
-                payload = None
+            with _temporarily_disable_llm_thinking(self.llm):
+                payload = self._plan_with_tool_call(
+                    eligible_turns=eligible_turns,
+                )
 
         if payload is None:
-            try:
-                with _temporarily_disable_llm_thinking(self.llm):
-                    raw_response = self.llm.generate(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        max_tokens=self.max_tokens,
-                    )
-            except Exception:
-                return _build_default_interjection_decisions(eligible_turns)
+            with _temporarily_disable_llm_thinking(self.llm):
+                raw_response = self.llm.generate(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=self.max_tokens,
+                )
             payload = _parse_plan_payload(raw_response)
 
-        if payload is None:
-            return _build_default_interjection_decisions(eligible_turns)
         return _validate_llm_decisions(
             payload.decisions,
             eligible_turns=eligible_turns,
@@ -482,7 +492,26 @@ class LLMInterjectionPlanner:
         measured_duration_ms: int,
         attempt_index: int,
     ) -> str | None:
-        """Return a shorter grounded repair candidate that fits the overlap budget."""
+        """Request a shorter grounded candidate without recovering failed calls.
+
+        Args:
+            host_turn_text: Complete host turn containing the overlap anchor.
+            next_turn_text: Complete next-speaker turn.
+            interjection_style: Requested overlap style.
+            anchor_text: Source phrase anchoring the overlap.
+            current_text: Candidate that failed the measured fit check.
+            available_overlap_ms: Available interval in milliseconds.
+            measured_duration_ms: Rendered duration of the current candidate.
+            attempt_index: Current audio-fit repair attempt number.
+
+        Returns:
+            A nonempty candidate within the requested word budget, or ``None``
+            when a complete response contains an unusable candidate.
+
+        Raises:
+            Exception: Propagates provider failures unchanged.
+            ValueError: The provider returned incomplete or invalid repair JSON.
+        """
         from card_framework.shared.prompt_manager import PromptManager
 
         target_word_budget = _estimate_target_word_budget(
@@ -508,19 +537,14 @@ class LLMInterjectionPlanner:
             max_interjection_words=self.max_interjection_words,
             target_word_budget=target_word_budget,
         )
-        try:
-            with _temporarily_disable_llm_thinking(self.llm):
-                raw_response = self.llm.generate(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    max_tokens=self.repair_max_tokens,
-                )
-        except Exception:
-            return None
+        with _temporarily_disable_llm_thinking(self.llm):
+            raw_response = self.llm.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=self.repair_max_tokens,
+            )
 
         payload = _parse_interjection_repair_payload(raw_response)
-        if payload is None:
-            return None
         normalized = " ".join(payload.interjection_text.split()).strip()
         if not normalized:
             return None
@@ -571,7 +595,7 @@ class LLMInterjectionPlanner:
                     "type": "function",
                     "function": {"name": _INTERJECTION_DECISION_TOOL_NAME},
                 },
-                max_tokens=min(self.max_tokens, 400),
+                max_tokens=self.max_tokens,
             )
             decision = _parse_interjection_decision_from_chat_response(
                 response_message=response_message,
@@ -1710,19 +1734,6 @@ def _render_eligible_turns_block(
     return "\n".join(lines).strip()
 
 
-def _build_default_interjection_decisions(
-    eligible_turns: Sequence[_EligibleTurn],
-) -> list[InterjectionDecision]:
-    """Return all-false decisions when planning fails."""
-    return [
-        InterjectionDecision(
-            host_turn_index=item.host_turn_index,
-            should_interject=False,
-        )
-        for item in eligible_turns
-    ]
-
-
 def _build_heuristic_interjection_decisions(
     eligible_turns: Sequence[_EligibleTurn],
     *,
@@ -1870,95 +1881,34 @@ def _parse_interjection_decision_from_chat_response(
     return None
 
 
-def _parse_plan_payload(raw_response: str) -> InterjectionPlanPayload | None:
-    """Extract and validate a planner payload from model output text."""
-    candidate = _extract_json_candidate(raw_response)
-    if candidate is None:
-        return None
-    try:
-        return InterjectionPlanPayload.model_validate_json(candidate)
-    except Exception:
-        return _parse_partial_plan_payload(candidate)
+def _parse_plan_payload(raw_response: str) -> InterjectionPlanPayload:
+    """Validate a complete planner response without accepting partial decisions.
+
+    Args:
+        raw_response: Entire text returned by the planner request.
+
+    Returns:
+        Validated plan containing the provider's complete decisions array.
+
+    Raises:
+        ValueError: The response is empty, incomplete, or violates the plan schema.
+    """
+    return InterjectionPlanPayload.model_validate_json(raw_response)
 
 
-def _extract_json_candidate(raw_response: str) -> str | None:
-    """Return the most likely JSON object embedded in model output."""
-    stripped = raw_response.strip()
-    if not stripped:
-        return None
+def _parse_interjection_repair_payload(raw_response: str) -> InterjectionRepairPayload:
+    """Validate the complete JSON response from an interjection repair request.
 
-    candidates = [stripped]
-    fenced_match = re.search(r"```json\s*(.*?)\s*```", stripped, flags=re.DOTALL)
-    if fenced_match:
-        candidates.append(fenced_match.group(1).strip())
-    start_index = stripped.find("{")
-    end_index = stripped.rfind("}")
-    if start_index != -1 and end_index > start_index:
-        candidates.append(stripped[start_index : end_index + 1])
-    return next((candidate for candidate in candidates if candidate.strip()), None)
+    Args:
+        raw_response: Entire repair response, including any unexpected prose.
 
+    Returns:
+        The validated replacement-text response.
 
-def _parse_partial_plan_payload(candidate: str) -> InterjectionPlanPayload | None:
-    """Recover complete decisions from a truncated planner payload when possible."""
-    decisions_array = _extract_decisions_array_text(candidate)
-    if decisions_array is None:
-        return None
-    decoder = json.JSONDecoder()
-    parsed_decisions: list[dict[str, Any]] = []
-    cursor = 0
-    while cursor < len(decisions_array):
-        while cursor < len(decisions_array) and decisions_array[cursor] in {
-            " ",
-            "\t",
-            "\r",
-            "\n",
-            ",",
-        }:
-            cursor += 1
-        if cursor >= len(decisions_array):
-            break
-        if decisions_array[cursor] == "]":
-            break
-        try:
-            parsed_value, next_cursor = decoder.raw_decode(decisions_array, cursor)
-        except json.JSONDecodeError:
-            break
-        if isinstance(parsed_value, dict):
-            parsed_decisions.append(parsed_value)
-        cursor = next_cursor
-    if not parsed_decisions:
-        return None
-    try:
-        return InterjectionPlanPayload.model_validate({"decisions": parsed_decisions})
-    except Exception:
-        return None
-
-
-def _extract_decisions_array_text(candidate: str) -> str | None:
-    """Return the raw decisions-array slice from complete or truncated JSON text."""
-    match = re.search(r'"decisions"\s*:\s*\[', candidate)
-    if match is None:
-        return None
-    return candidate[match.end() :]
-
-
-def _parse_interjection_repair_payload(raw_response: str) -> InterjectionRepairPayload | None:
-    """Parse one repair-only JSON payload from an LLM response."""
-    candidate = raw_response.strip()
-    if not candidate:
-        return None
-    try:
-        return InterjectionRepairPayload.model_validate_json(candidate)
-    except Exception:
-        pass
-
-    match = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
-    if match is None:
-        return None
-    try:
-        return InterjectionRepairPayload.model_validate_json(match.group(0))
-    except Exception:
-        return None
+    Raises:
+        ValueError: JSON is incomplete or does not match the repair schema.
+    """
+    return InterjectionRepairPayload.model_validate_json(raw_response)
 
 
 def _validate_llm_decisions(

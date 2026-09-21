@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,7 @@ def _dummy_voice_clone_result(tmp_path: Path) -> VoiceCloneRunResult:
 
 def test_run_skips_stage_three_when_voice_cloning_is_disabled(tmp_path: Path) -> None:
     session_store = _FakeSessionStore()
+    diagnostics_path = tmp_path / "loop_diagnostics.json"
     orchestrator = StageOrchestrator(
         orchestrator=_FakeLoopOrchestrator(),
         stage_plan=PipelineStagePlan(start_stage="stage-2"),
@@ -112,6 +114,7 @@ def test_run_skips_stage_three_when_voice_cloning_is_disabled(tmp_path: Path) ->
         target_seconds=60,
         duration_tolerance_ratio=0.1,
         max_iterations=1,
+        loop_diagnostics_artifact_path=diagnostics_path,
         session_store=session_store,
         session_id="session-1",
     )
@@ -135,6 +138,7 @@ def test_run_skips_stage_three_when_voice_cloning_is_disabled(tmp_path: Path) ->
     assert session_store.started == ["stage-2"]
     assert session_store.completed == ["stage-2"]
     assert (tmp_path / "summary.xml").exists()
+    assert json.loads(diagnostics_path.read_text(encoding="utf-8"))["converged"] is True
 
 
 def test_run_links_summary_turn_emotions_before_stage_three(tmp_path: Path) -> None:
@@ -468,6 +472,12 @@ def test_full_loop_does_not_mark_stage_three_complete_when_verification_fails(
 ) -> None:
     merged_audio_path = tmp_path / "voice_cloned.wav"
     merged_audio_path.write_text("placeholder", encoding="utf-8")
+    speaker_manifest_path = tmp_path / "speaker_samples.json"
+    speaker_manifest_path.write_text(
+        '{"samples":[{"speaker":"SPEAKER_00","path":"sample.wav",'
+        '"duration_ms":1000}]}',
+        encoding="utf-8",
+    )
     session_store = _FakeSessionStore()
     transcript = Transcript.from_mapping(
         {
@@ -479,7 +489,9 @@ def test_full_loop_does_not_mark_stage_three_complete_when_verification_fails(
                     "text": "hello from stage two",
                 }
             ],
-            "metadata": {},
+            "metadata": {
+                "speaker_samples_manifest_path": str(speaker_manifest_path)
+            },
         }
     )
 

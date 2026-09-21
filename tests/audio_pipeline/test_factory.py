@@ -149,6 +149,8 @@ def test_factory_builds_transcript_affect_analyzer(tmp_path: Path) -> None:
 
     assert isinstance(analyzer, TranscriptAffectAnalyzer)
     assert isinstance(analyzer.categorical_provider, Emotion2VecPlusAffectGateway)
+    assert analyzer.categorical_provider.model_name == "iic/emotion2vec_plus_large"
+    assert analyzer.categorical_provider.hub == "ms"
     assert analyzer.categorical_provider.extract_embedding is False
     assert analyzer.categorical_provider.max_chunk_duration_seconds == pytest.approx(
         30.0

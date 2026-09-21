@@ -512,6 +512,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         budget_manager = runtime_context.get("context_budget_manager")
         if not isinstance(budget_manager, ContextBudgetManager):
             return False
+        if not budget_manager.config.enabled:
+            return False
         profile_name = str(
             runtime_context.get("prompt_compaction_profile_name", "")
         ).strip()
@@ -597,6 +599,8 @@ class BaseA2AExecutor(AgentExecutor, ABC):
         """Compact and retry once when a provider rejects the prompt for size."""
         budget_manager = runtime_context.get("context_budget_manager")
         if not isinstance(budget_manager, ContextBudgetManager):
+            return False
+        if not budget_manager.config.enabled:
             return False
         if not budget_manager.config.retry_on_overflow:
             return False
@@ -875,7 +879,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                 msg_dict = {
                     k: v
                     for k, v in msg_dict.items()
-                    if k in ("role", "content", "tool_calls")
+                    if k in ("role", "content", "tool_calls", "reasoning_content")
                 }
             else:
                 raw_reasoning = getattr(response_message, "reasoning_content", None)
@@ -887,6 +891,7 @@ class BaseA2AExecutor(AgentExecutor, ABC):
                 msg_dict = {
                     "role": response_message.role,
                     "content": response_message.content,
+                    "reasoning_content": raw_reasoning,
                     "tool_calls": [
                         {
                             "id": tc.id,

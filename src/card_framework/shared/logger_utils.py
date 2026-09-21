@@ -1,6 +1,7 @@
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 import time
 
 from rich.logging import RichHandler
@@ -146,6 +147,22 @@ def configure_logger(cfg):
 logger = setup_logger("AgentLogger")
 
 
+def resolve_file_log_directory() -> Path:
+    """Return the directory that owns the active complete run log.
+
+    Returns:
+        Parent directory of the configured file logger.
+
+    Raises:
+        RuntimeError: Logging is enabled for provider archives without an active
+            file handler. Call :func:`configure_logger` before this function.
+    """
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            return Path(handler.baseFilename).parent.resolve()
+    raise RuntimeError("A configured file log is required for complete call archives.")
+
+
 def _on_system_message(message: str, **kwargs):
     logger.info(_format_with_metadata(f"[System] {message}", **kwargs))
 
@@ -173,6 +190,7 @@ def _on_agent_thought(agent_name: str, thought: str, **kwargs):
 
 
 def _on_tool_invocation(tool_name: str, arguments: dict, **kwargs):
+    _archive_tool_event("invocation", tool_name, arguments)
     logger.info(
         _format_with_metadata(
             f"[Tool Invocation] {tool_name} with {arguments}", **kwargs
@@ -181,12 +199,33 @@ def _on_tool_invocation(tool_name: str, arguments: dict, **kwargs):
 
 
 def _on_tool_result(tool_name: str, result: str, **kwargs):
+    _archive_tool_event("result", tool_name, result)
     logger.info(
         _format_with_metadata(
             f"[Tool Result] {tool_name}: {_summarize_tool_result(result)}",
             **kwargs,
         )
     )
+
+
+def _archive_tool_event(event: str, name: str, value: object) -> None:
+    """Save full tool data beside an explicitly configured file log.
+
+    Args:
+        event: Tool invocation or result event category.
+        name: Executed tool name.
+        value: Complete arguments or result as emitted by the tool handler.
+
+    No archive is created before file logging is configured. The selected file
+    handler determines the run directory; terminal previews never replace data.
+    """
+    from card_framework.providers.call_trace import write_tool_event
+
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            root = Path(handler.baseFilename).parent / "agent_calls"
+            write_tool_event(root, event, name, value)
+            return
 
 
 def _on_a2a_call_started(

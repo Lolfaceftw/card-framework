@@ -1,3 +1,25 @@
+### 2026-09-20T16:30:00+08:00 - Controlled Duration Runs Need Strict Context And Complete Call Records
+- Problem: The historical human-evaluation sweep could compact prompts, retry
+  context overflows, recover failed live-draft runs, and cap several generation
+  stages. The authenticated Qwen server also emitted thinking text under the
+  streamed `reasoning` field, which the main vLLM adapter did not retain.
+- Solution: Add a dedicated paired-condition runner that disables prompt
+  compaction, overflow retry, post-render acceptance filtering, and client
+  output caps. Reject incomplete provider finishes and malformed tool calls,
+  preserve the server's `reasoning` or `reasoning_content` field in complete
+  per-call JSON/Markdown records, share one speaker manifest and calibration per
+  episode, and measure final WAV duration outside CARD.
+
+### 2026-09-21T06:30:00+08:00 - IndexTTS Xet Download Produced A Zero-Filled Model
+- Problem: An interrupted Hugging Face Xet transfer left the 2.32 GB
+  Wav2Vec2-BERT Safetensors blob with a zero-length header. IndexTTS then failed
+  during calibration with `InvalidHeaderDeserialization`, although the main
+  IndexTTS checkpoint was intact.
+- Solution: Disable Xet in Docker, replace only the corrupt cached blob through
+  standard HTTPS, and use ModelScope as the single source for the main
+  IndexTTS2 snapshot. Episode 1 calibration then loaded all auxiliary models
+  and wrote two-speaker WPM profiles for every configured emotion preset.
+
 ### 2026-09-16T08:33:00+08:00 - Speaking-Rate Inputs Need Exact Role Selection And Cross-System Identity Checks
 - Problem: The first Descript handoff folders contained source files alongside
   the summary exports, and Episodes 3-5 reused the byte-identical CARD summary
