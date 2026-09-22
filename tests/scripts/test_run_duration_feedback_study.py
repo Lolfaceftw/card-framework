@@ -162,6 +162,145 @@ def test_condition_order_counterbalances_paired_repetitions() -> None:
     )
 
 
+def test_progress_tracker_reports_periodic_ema_eta(
+    monkeypatch,
+    capsys,
+) -> None:
+    """Update and print the attempt-runtime EWMA across completed work.
+
+    The deterministic clock verifies the first-attempt pending state, the
+    active-attempt adjustment, and the EWMA after a slower second attempt.
+    """
+    module = _load_module()
+    clock_values = iter((0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 30.0))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock_values))
+    tracker = module.StudyProgressTracker(
+        total_attempts=3,
+        interval_seconds=30.0,
+        ema_alpha=0.5,
+    )
+
+    tracker.start_attempt("attempt-1")
+    pending_output = capsys.readouterr().out
+    assert "0/3 (0.0%)" in pending_output
+    assert "ema_attempt=pending" in pending_output
+    assert "eta_approx=pending" in pending_output
+
+    tracker.finish_attempt(elapsed_seconds=10.0, outcome="completed")
+    first_snapshot = tracker.snapshot(now_monotonic=10.0)
+    assert first_snapshot.completed_attempts == 1
+    assert first_snapshot.ema_attempt_seconds == 10.0
+    assert first_snapshot.eta_seconds == 20.0
+
+    tracker.start_attempt("attempt-2")
+    active_snapshot = tracker.snapshot(now_monotonic=15.0)
+    assert active_snapshot.current_attempt_elapsed_seconds == 5.0
+    assert active_snapshot.eta_seconds == 15.0
+
+    tracker.finish_attempt(elapsed_seconds=20.0, outcome="failed")
+    second_snapshot = tracker.snapshot(now_monotonic=30.0)
+    final_output = capsys.readouterr().out
+    assert second_snapshot.completed_attempts == 2
+    assert second_snapshot.ema_attempt_seconds == 15.0
+    assert second_snapshot.eta_seconds == 15.0
+    assert "finished=attempt-2:failed" in final_output
+
+
+def test_progress_parser_exposes_configurable_heartbeat_and_ema() -> None:
+    """Accept explicit progress cadence and EWMA weight from the study CLI."""
+    module = _load_module()
+
+    args = module.build_parser().parse_args(
+        [
+            "--progress-interval-seconds",
+            "45",
+            "--progress-ema-alpha",
+            "0.4",
+        ]
+    )
+
+    assert args.progress_interval_seconds == 45.0
+    assert args.progress_ema_alpha == 0.4
+
+
+def test_monitored_attempt_emits_heartbeat_while_child_runs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Poll the monitoring child and publish progress on a wait timeout."""
+    module = _load_module()
+
+    class RecordingProgress:
+        """Record heartbeats requested by the monitored subprocess wrapper."""
+
+        interval_seconds = 2.0
+
+        def __init__(self) -> None:
+            """Initialize an empty heartbeat record."""
+            self.heartbeat_count = 0
+
+        def heartbeat(self) -> None:
+            """Count one periodic progress request."""
+            self.heartbeat_count += 1
+
+    class WaitingProcess:
+        """Model one child that times out once before exiting successfully."""
+
+        def __init__(self) -> None:
+            """Initialize the wait-call counter."""
+            self.wait_calls = 0
+
+        def wait(self, *, timeout: float) -> int:
+            """Return success after one timeout at the requested cadence.
+
+            Args:
+                timeout: Polling interval supplied by the study tracker.
+
+            Returns:
+                Zero after the second wait call.
+
+            Raises:
+                subprocess.TimeoutExpired: The first wait represents a running
+                    child that has not exited within the heartbeat interval.
+            """
+            assert timeout == 2.0
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise module.subprocess.TimeoutExpired("monitor", timeout)
+            return 0
+
+    process = WaitingProcess()
+
+    def fake_popen(command: list[str], *, cwd: str) -> WaitingProcess:
+        """Return the deterministic process at the operating-system boundary.
+
+        Args:
+            command: Wrapper argument vector produced by the study runner.
+            cwd: Repository working directory passed to the child process.
+
+        Returns:
+            Deterministic process used to exercise timeout polling.
+        """
+        assert command[:4] == ["uv", "run", "--no-sync", "python"]
+        assert cwd == str(module.REPO_ROOT)
+        return process
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    progress = RecordingProgress()
+
+    return_code, paths = module._run_monitored(
+        command=["docker", "compose"],
+        log_root=tmp_path,
+        attempt_id="attempt-1",
+        progress=progress,
+    )
+
+    assert return_code == 0
+    assert process.wait_calls == 2
+    assert progress.heartbeat_count == 1
+    assert Path(paths["status_path"]).name == "status.json"
+
+
 def test_vllm_preflight_command_keeps_api_key_out_of_arguments() -> None:
     """Retain model discovery arguments without retaining the API key value."""
     module = _load_module()

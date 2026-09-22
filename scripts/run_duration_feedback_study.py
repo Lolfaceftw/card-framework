@@ -1,4 +1,10 @@
-"""Run the paired estimated-versus-measured duration-feedback study."""
+"""Run the paired estimated-versus-measured duration-feedback study.
+
+References:
+    [1] S. W. Roberts, "Control Chart Tests Based on Geometric Moving
+        Averages," Technometrics, vol. 1, no. 3, pp. 239-250, 1959,
+        doi: 10.1080/00401706.1959.10489860.
+"""
 
 from __future__ import annotations
 
@@ -34,6 +40,8 @@ DEFAULT_OUTPUT_PARENT = (
 DEFAULT_MODEL = "Qwen/Qwen3.8-27B"
 DEFAULT_CONTEXT_WINDOW_TOKENS = 262_144
 DEFAULT_CONDITIONS = ("estimated", "measured")
+DEFAULT_PROGRESS_INTERVAL_SECONDS = 30.0
+DEFAULT_PROGRESS_EMA_ALPHA = 0.3
 FINAL_AUDIO_RELATIVE_PATH = Path(
     "audio_stage/interjector/voice_cloned_interjected.wav"
 )
@@ -60,6 +68,231 @@ class PreparedInput:
     target_seconds: int
     transcript_path: Path
     calibration_path: Path
+
+
+@dataclass(slots=True, frozen=True)
+class StudyProgressSnapshot:
+    """Describe one immutable view of study execution progress.
+
+    Attributes:
+        completed_attempts: Attempts that have exited and entered the study
+            record, including failed attempts.
+        total_attempts: Attempts scheduled by the selected episodes, targets,
+            conditions, and repetitions.
+        current_attempt_id: Active attempt identifier, or an empty string when
+            execution is between attempts.
+        current_attempt_elapsed_seconds: Wall time consumed by the active
+            attempt, or ``None`` when no attempt is active.
+        elapsed_seconds: Wall time since the tracker was created.
+        ema_attempt_seconds: Exponentially weighted mean runtime of completed
+            attempts, or ``None`` before the first attempt completes.
+        eta_seconds: Approximate time remaining under the current runtime EMA,
+            or ``None`` before an observed runtime is available.
+    """
+
+    completed_attempts: int
+    total_attempts: int
+    current_attempt_id: str
+    current_attempt_elapsed_seconds: float | None
+    elapsed_seconds: float
+    ema_attempt_seconds: float | None
+    eta_seconds: float | None
+
+
+class StudyProgressTracker:
+    """Print periodic study progress and an EWMA-based runtime estimate.
+
+    The estimate applies one exponential moving average to completed attempt
+    runtimes. It is an operator aid, not a research measurement: 30-, 60-, and
+    300-second targets can have materially different runtimes. Failed attempts
+    remain part of the estimate because the runner still spends wall time on
+    them and counts them in the scheduled study.
+    """
+
+    def __init__(
+        self,
+        *,
+        total_attempts: int,
+        interval_seconds: float,
+        ema_alpha: float,
+    ) -> None:
+        """Initialize progress state for one fixed study schedule.
+
+        Args:
+            total_attempts: Positive number of attempts in the frozen schedule.
+            interval_seconds: Positive minimum time between heartbeat lines.
+            ema_alpha: Weight assigned to the newest completed runtime. Values
+                must be greater than zero and at most one. The project default
+                of ``0.3`` is an operator-facing smoothing choice.
+
+        Raises:
+            ValueError: Any numeric setting falls outside its accepted range.
+        """
+        if total_attempts <= 0:
+            raise ValueError("total_attempts must be greater than zero.")
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be greater than zero.")
+        if not 0 < ema_alpha <= 1:
+            raise ValueError("ema_alpha must be greater than zero and at most one.")
+        self.total_attempts = int(total_attempts)
+        self.interval_seconds = float(interval_seconds)
+        self.ema_alpha = float(ema_alpha)
+        self.completed_attempts = 0
+        self.ema_attempt_seconds: float | None = None
+        self.current_attempt_id = ""
+        self.current_attempt_started_monotonic: float | None = None
+        self.started_monotonic = time.monotonic()
+        self.last_render_monotonic = 0.0
+
+    def start_attempt(self, attempt_id: str) -> None:
+        """Mark one scheduled attempt active and print its initial status.
+
+        Args:
+            attempt_id: Unique identifier already written to the study summary.
+
+        Raises:
+            RuntimeError: Another attempt remains active.
+            ValueError: The identifier is empty or all attempts already ended.
+        """
+        if self.current_attempt_started_monotonic is not None:
+            raise RuntimeError("Cannot start a second progress attempt concurrently.")
+        if not attempt_id.strip():
+            raise ValueError("attempt_id must be non-empty.")
+        if self.completed_attempts >= self.total_attempts:
+            raise ValueError("All scheduled attempts are already complete.")
+        self.current_attempt_id = attempt_id
+        self.current_attempt_started_monotonic = time.monotonic()
+        self.render(force=True)
+
+    def heartbeat(self) -> None:
+        """Print a periodic line when the configured interval has elapsed."""
+        self.render(force=False)
+
+    def finish_attempt(self, *, elapsed_seconds: float, outcome: str) -> None:
+        """Record one exited attempt, update the EWMA, and print completion.
+
+        Args:
+            elapsed_seconds: Positive measured wall time for the attempt.
+            outcome: Persisted attempt status included in the terminal line.
+
+        Raises:
+            RuntimeError: No attempt is currently active.
+            ValueError: The measured runtime or outcome is invalid.
+        """
+        if self.current_attempt_started_monotonic is None:
+            raise RuntimeError("Cannot finish progress without an active attempt.")
+        if elapsed_seconds <= 0:
+            raise ValueError("elapsed_seconds must be greater than zero.")
+        if not outcome.strip():
+            raise ValueError("outcome must be non-empty.")
+        # IEEE citation: The geometrically decaying runtime weights follow [1].
+        if self.ema_attempt_seconds is None:
+            self.ema_attempt_seconds = float(elapsed_seconds)
+        else:
+            self.ema_attempt_seconds = (
+                self.ema_alpha * float(elapsed_seconds)
+                + (1.0 - self.ema_alpha) * self.ema_attempt_seconds
+            )
+        finished_attempt_id = self.current_attempt_id
+        self.completed_attempts += 1
+        self.current_attempt_id = ""
+        self.current_attempt_started_monotonic = None
+        self.render(force=True, outcome=f"{finished_attempt_id}:{outcome}")
+
+    def snapshot(self, *, now_monotonic: float | None = None) -> StudyProgressSnapshot:
+        """Build a progress snapshot using one monotonic-clock observation.
+
+        Args:
+            now_monotonic: Explicit clock value for deterministic tests. When
+                omitted, the process monotonic clock is read once.
+
+        Returns:
+            Current counts, elapsed values, EWMA, and approximate remaining
+            runtime. ETA is unavailable before the first attempt completes.
+        """
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        current_elapsed = None
+        if self.current_attempt_started_monotonic is not None:
+            current_elapsed = max(
+                0.0,
+                now - self.current_attempt_started_monotonic,
+            )
+        eta_seconds = self._eta_seconds(current_elapsed)
+        return StudyProgressSnapshot(
+            completed_attempts=self.completed_attempts,
+            total_attempts=self.total_attempts,
+            current_attempt_id=self.current_attempt_id,
+            current_attempt_elapsed_seconds=current_elapsed,
+            elapsed_seconds=max(0.0, now - self.started_monotonic),
+            ema_attempt_seconds=self.ema_attempt_seconds,
+            eta_seconds=eta_seconds,
+        )
+
+    def render(self, *, force: bool, outcome: str = "") -> None:
+        """Print one progress line when forced or when the interval expires.
+
+        Args:
+            force: Emit regardless of the time since the previous line.
+            outcome: Optional just-finished attempt identifier and status.
+        """
+        now = time.monotonic()
+        if not force and now - self.last_render_monotonic < self.interval_seconds:
+            return
+        self.last_render_monotonic = now
+        snapshot = self.snapshot(now_monotonic=now)
+        percent = 100.0 * snapshot.completed_attempts / snapshot.total_attempts
+        active = snapshot.current_attempt_id or "-"
+        suffix = f" | finished={outcome}" if outcome else ""
+        print(
+            "[study-progress] "
+            f"{snapshot.completed_attempts}/{snapshot.total_attempts} "
+            f"({percent:.1f}%) | active={active} "
+            f"| active_elapsed={_format_duration(snapshot.current_attempt_elapsed_seconds)} "
+            f"| total_elapsed={_format_duration(snapshot.elapsed_seconds)} "
+            f"| ema_attempt={_format_duration(snapshot.ema_attempt_seconds)} "
+            f"| eta_approx={_format_duration(snapshot.eta_seconds)}{suffix}",
+            flush=True,
+        )
+
+    def _eta_seconds(self, current_elapsed: float | None) -> float | None:
+        """Estimate remaining wall time from the observed attempt EWMA.
+
+        Args:
+            current_elapsed: Runtime already consumed by the active attempt, or
+                ``None`` between attempts.
+
+        Returns:
+            Approximate remaining seconds, zero after the final attempt, or
+            ``None`` until at least one attempt runtime has been observed.
+        """
+        remaining_attempts = self.total_attempts - self.completed_attempts
+        if remaining_attempts <= 0:
+            return 0.0
+        if self.ema_attempt_seconds is None:
+            return None
+        if current_elapsed is None:
+            return remaining_attempts * self.ema_attempt_seconds
+        active_remaining = max(0.0, self.ema_attempt_seconds - current_elapsed)
+        return active_remaining + (
+            max(0, remaining_attempts - 1) * self.ema_attempt_seconds
+        )
+
+
+def _format_duration(seconds: float | None) -> str:
+    """Format a nonnegative duration for compact progress output.
+
+    Args:
+        seconds: Duration in seconds, or ``None`` when no estimate exists.
+
+    Returns:
+        ``HH:MM:SS`` for known values and ``pending`` for unavailable values.
+    """
+    if seconds is None:
+        return "pending"
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, whole_seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,6 +354,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--prepare-only",
         action="store_true",
         help="Prepare immutable source inputs and stop before calibration and runs.",
+    )
+    parser.add_argument(
+        "--progress-interval-seconds",
+        type=float,
+        default=DEFAULT_PROGRESS_INTERVAL_SECONDS,
+        help="Seconds between study progress and approximate ETA lines.",
+    )
+    parser.add_argument(
+        "--progress-ema-alpha",
+        type=float,
+        default=DEFAULT_PROGRESS_EMA_ALPHA,
+        help="Newest-attempt weight for the runtime EWMA in (0, 1].",
     )
     return parser
 
@@ -810,6 +1055,7 @@ def _run_monitored(
     command: list[str],
     log_root: Path,
     attempt_id: str,
+    progress: StudyProgressTracker,
 ) -> tuple[int, dict[str, str]]:
     """Run one Docker attempt with separate logs and resource sampling.
 
@@ -817,6 +1063,8 @@ def _run_monitored(
         command: Exact Docker command built by :func:`_build_run_command`.
         log_root: Study log directory.
         attempt_id: Unique filesystem-safe attempt identifier.
+        progress: Study-level tracker that prints periodic heartbeats while the
+            monitored wrapper remains active.
 
     Returns:
         Exit code and paths to the retained execution records.
@@ -839,7 +1087,13 @@ def _run_monitored(
         "--status-path", str(status_path),
         "--sample-interval-seconds", "5",
     ]
-    completed = subprocess.run(wrapper, cwd=str(REPO_ROOT), check=False)
+    process = subprocess.Popen(wrapper, cwd=str(REPO_ROOT))
+    while True:
+        try:
+            return_code = process.wait(timeout=progress.interval_seconds)
+            break
+        except subprocess.TimeoutExpired:
+            progress.heartbeat()
     paths = {
         "docker_args_path": str(args_path),
         "stdout_path": str(stdout_path),
@@ -847,7 +1101,7 @@ def _run_monitored(
         "resource_monitor_path": str(monitor_path),
         "status_path": str(status_path),
     }
-    return int(completed.returncode), paths
+    return int(return_code), paths
 
 
 def _measure_attempt(attempt_root: Path, target_seconds: int) -> dict[str, Any]:
@@ -1177,11 +1431,23 @@ def main(argv: list[str] | None = None) -> int:
     conditions = _parse_conditions(str(args.conditions))
     if args.repetitions <= 0:
         raise ValueError("repetitions must be greater than zero.")
+    if args.progress_interval_seconds <= 0:
+        raise ValueError("progress_interval_seconds must be greater than zero.")
+    if not 0 < args.progress_ema_alpha <= 1:
+        raise ValueError(
+            "progress_ema_alpha must be greater than zero and at most one."
+        )
     output_root = _resolve_output_root(str(args.output_root))
     output_root.mkdir(parents=True)
     summary_path = output_root / "study_summary.json"
     preparation_summary_path = _prepare_inputs(args, output_root)
     prepared = _load_prepared_inputs(preparation_summary_path, output_root)
+    total_attempts = len(prepared) * len(conditions) * int(args.repetitions)
+    progress = StudyProgressTracker(
+        total_attempts=total_attempts,
+        interval_seconds=float(args.progress_interval_seconds),
+        ema_alpha=float(args.progress_ema_alpha),
+    )
     summary: dict[str, Any] = {
         "study_id": output_root.name,
         "created_at_utc": _utc_now(),
@@ -1191,6 +1457,8 @@ def main(argv: list[str] | None = None) -> int:
         "orchestrator_max_iterations": int(args.orchestrator_max_iterations),
         "conditions": list(conditions),
         "repetitions": int(args.repetitions),
+        "progress_interval_seconds": float(args.progress_interval_seconds),
+        "progress_ema_alpha": float(args.progress_ema_alpha),
         "prompt_compaction_enabled": False,
         "overflow_retry_enabled": False,
         "post_render_duration_verification_enabled": False,
@@ -1256,6 +1524,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 summary["runs"].append(record)
                 _write_json(summary_path, summary)
+                progress.start_attempt(attempt_id)
                 command = _build_run_command(
                     item=item,
                     condition=condition,
@@ -1269,13 +1538,12 @@ def main(argv: list[str] | None = None) -> int:
                     command=command,
                     log_root=log_root,
                     attempt_id=attempt_id,
+                    progress=progress,
                 )
                 record.update(log_paths)
                 record["return_code"] = return_code
-                record["elapsed_seconds"] = round(
-                    time.perf_counter() - attempt_started,
-                    3,
-                )
+                attempt_elapsed_seconds = time.perf_counter() - attempt_started
+                record["elapsed_seconds"] = round(attempt_elapsed_seconds, 3)
                 record["finished_at"] = _utc_now()
                 if return_code == 0:
                     try:
@@ -1295,6 +1563,10 @@ def main(argv: list[str] | None = None) -> int:
                     record["status"] = "failed"
                     failed = True
                 _write_json(summary_path, summary)
+                progress.finish_attempt(
+                    elapsed_seconds=attempt_elapsed_seconds,
+                    outcome=str(record["status"]),
+                )
     summary["finished_at_utc"] = _utc_now()
     summary["status"] = "completed_with_failures" if failed else "completed"
     _write_json(summary_path, summary)
