@@ -207,7 +207,7 @@ def test_progress_tracker_reports_periodic_ema_eta(
 
 
 def test_progress_parser_exposes_configurable_heartbeat_and_ema() -> None:
-    """Accept explicit progress cadence and EWMA weight from the study CLI."""
+    """Accept explicit progress, readiness, and reuse settings from the CLI."""
     module = _load_module()
 
     args = module.build_parser().parse_args(
@@ -216,11 +216,141 @@ def test_progress_parser_exposes_configurable_heartbeat_and_ema() -> None:
             "45",
             "--progress-ema-alpha",
             "0.4",
+            "--connection-max-attempts",
+            "8",
+            "--connection-retry-delay-seconds",
+            "12",
+            "--connection-stability-successes",
+            "2",
+            "--reuse-study-root",
+            "artifacts/prior-study",
         ]
     )
 
     assert args.progress_interval_seconds == 45.0
     assert args.progress_ema_alpha == 0.4
+    assert args.connection_max_attempts == 8
+    assert args.connection_retry_delay_seconds == 12.0
+    assert args.connection_stability_successes == 2
+    assert args.reuse_study_root == "artifacts/prior-study"
+
+
+def test_readiness_gate_retries_temporary_failure_and_persists_each_probe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Require a stable success streak after one temporary connection loss."""
+    module = _load_module()
+    return_codes = iter((module.TEMPORARY_CONNECTION_EXIT_CODE, 0, 0))
+    observed_logs: list[Path] = []
+    observed_sleeps: list[float] = []
+
+    def deterministic_preflight(model: str, log_path: Path) -> dict[str, object]:
+        """Return the next deterministic transport result for the retry gate.
+
+        Args:
+            model: Exact model identifier passed by the readiness gate.
+            log_path: Unique per-probe log path selected by the gate.
+
+        Returns:
+            Minimal timestamped preflight record used by the production loop.
+        """
+        assert model == module.DEFAULT_MODEL
+        observed_logs.append(log_path)
+        return {
+            "started_at": "2026-09-22T00:00:00+00:00",
+            "finished_at": "2026-09-22T00:00:01+00:00",
+            "return_code": next(return_codes),
+            "log_path": str(log_path),
+        }
+
+    monkeypatch.setattr(module, "_preflight_vllm", deterministic_preflight)
+    monkeypatch.setattr(
+        module.time,
+        "sleep",
+        lambda seconds: observed_sleeps.append(seconds),
+    )
+    summary = {"connection_readiness": []}
+    summary_path = tmp_path / "study_summary.json"
+
+    record = module._wait_for_vllm_readiness(
+        summary=summary,
+        summary_path=summary_path,
+        model=module.DEFAULT_MODEL,
+        output_root=tmp_path,
+        phase="before_preparation",
+        max_attempts=5,
+        retry_delay_seconds=12.0,
+        required_consecutive_successes=2,
+    )
+
+    persisted = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert record["status"] == "ready"
+    assert len(record["checks"]) == 3
+    assert observed_sleeps == [12.0]
+    assert len(set(observed_logs)) == 3
+    assert persisted["connection_readiness"][0]["status"] == "ready"
+    assert len(persisted["connection_readiness"][0]["checks"]) == 3
+
+
+def test_readiness_gate_stops_immediately_for_permanent_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Avoid retry delays when authentication or model validation is final."""
+    module = _load_module()
+    calls = 0
+
+    def permanent_preflight(model: str, log_path: Path) -> dict[str, object]:
+        """Return one permanent authentication-style preflight result.
+
+        Args:
+            model: Exact model identifier passed by the readiness gate.
+            log_path: Unique log path selected for the failed probe.
+
+        Returns:
+            Permanent nontransport preflight record with exit code 20.
+        """
+        nonlocal calls
+        calls += 1
+        return {
+            "started_at": "2026-09-22T00:00:00+00:00",
+            "finished_at": "2026-09-22T00:00:01+00:00",
+            "return_code": 20,
+            "log_path": str(log_path),
+        }
+
+    monkeypatch.setattr(module, "_preflight_vllm", permanent_preflight)
+
+    def fail_on_sleep(seconds: float) -> None:
+        """Fail if a permanent readiness error enters the retry delay.
+
+        Args:
+            seconds: Unexpected retry delay supplied by the production loop.
+
+        Raises:
+            AssertionError: Always, because no sleep should occur.
+        """
+        raise AssertionError(seconds)
+
+    monkeypatch.setattr(module.time, "sleep", fail_on_sleep)
+    summary = {"connection_readiness": []}
+    summary_path = tmp_path / "study_summary.json"
+
+    record = module._wait_for_vllm_readiness(
+        summary=summary,
+        summary_path=summary_path,
+        model=module.DEFAULT_MODEL,
+        output_root=tmp_path,
+        phase="before_preparation",
+        max_attempts=12,
+        retry_delay_seconds=30.0,
+        required_consecutive_successes=3,
+    )
+
+    assert record["status"] == "unavailable_permanent"
+    assert calls == 1
+    assert len(record["checks"]) == 1
 
 
 def test_monitored_attempt_emits_heartbeat_while_child_runs(
@@ -313,6 +443,8 @@ def test_vllm_preflight_command_keeps_api_key_out_of_arguments() -> None:
     assert command[-1] == module.DEFAULT_MODEL
     assert "/models" in command_text
     assert "timeout=15" in command_text
+    assert "http.client.HTTPException" in command_text
+    assert f"return {module.TEMPORARY_CONNECTION_EXIT_CODE}" in command_text
     assert "HF_HUB_OFFLINE=1" in command
     assert "TRANSFORMERS_OFFLINE=1" in command
 
