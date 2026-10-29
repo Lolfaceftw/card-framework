@@ -101,7 +101,7 @@ unless the repository intentionally changes release policy:
 - Keep job names stable unless the corresponding protection or documentation is
   updated in the same change.
 
-If workflow behavior changes materially, update this file, `AGENTS.md`,
+If workflow behavior changes materially, update this file,
 `coder_docs/git_github_workflow.md`, and `coder_docs/codebase_guide.md` in the
 same change.
 

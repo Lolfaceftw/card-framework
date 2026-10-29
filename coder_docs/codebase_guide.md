@@ -1,33 +1,14 @@
 ﻿<?xml version="1.0" encoding="UTF-8"?>
 <codebaseGuide workspace="llm_test" package="card-framework" language="Python" pythonVersion="3.12+" packageManager="uv" linter="ruff">
   <overview>
-    <purpose>Orient a new coding agent to the actual architecture, workflows, contracts, and maintenance expectations of this repository before code changes are made.</purpose>
+    <purpose>Describe the repository architecture, runtime workflows, and development requirements.</purpose>
     <repositoryIdentity>This workspace combines a Hydra-configured summarization runtime, an audio-to-transcript and voice-clone pipeline, multiple LLM and embedding provider adapters, and two benchmark systems: a matrix-style summarization benchmark and a source-grounded QA benchmark.</repositoryIdentity>
-    <sessionStartChecklist>
-      <step>Read this file first to understand subsystem boundaries, entrypoints, and data flow.</step>
-      <step>Use coder_docs/research_agents.md as the source of truth for optional delegation and delegated web-research workflow.</step>
-      <step>Review coder_docs/memory/errors_and_notes.md for previously captured pitfalls before repeating work in an area.</step>
-      <step>Use coder_docs/academic_standards.md for formulas, thresholds, scoring logic, or methodology-sensitive implementations.</step>
-      <step>Use coder_docs/agent_communication_standards.md for agent tone and response style. Use coder_docs/python_engineering_standards.md, coder_docs/security_standards.md, coder_docs/logging_standards.md, and coder_docs/testing_standards.md for the repository's Python, security, logging, and testing standards. Use coder_docs/ruff.md for lint workflow, coder_docs/uv_package_manager.md for dependency and environment workflow, coder_docs/git_github_workflow.md for contributor Git and GitHub workflow, coder_docs/github_actions_release_spec.md for GitHub Actions release/build verification, and coder_docs/scrapling.md for external web retrieval workflow.</step>
-      <step>Use coder_docs/fault_localization_workflow.md as the source of truth when a task is primarily bug triage, failing-test analysis, or fault localization.</step>
-      <step>Inspect the exact config and prompt files for the subsystem you are changing before editing behavior.</step>
-      <step>When behavior, configuration, commands, or workflow changes materially, update this guide in the same change.</step>
-    </sessionStartChecklist>
     <primaryWorkflow>
       <stage id="stage-1">Audio stage: source separation, Granite Speech ASR by default, diarization, alignment, and transcript JSON emission.</stage>
       <stage id="stage-2">Summarization stage: local A2A retrieval, summarizer, and critic agents cooperate until convergence or iteration cap. When `audio.voice_clone.live_drafting.enabled=true` and voice cloning is enabled, each mutating draft step also renders per-turn audio immediately and uses actual measured segment duration instead of WPM estimates.</stage>
       <stage id="stage-3">Voice-clone stage: summary XML plus generated speaker samples are rendered into per-turn cloned audio and optional merged output. In live-draft mode this stage usually finalizes already-rendered turn audio into the persisted manifest instead of re-synthesizing every turn.</stage>
       <stage id="stage-4">Interjector stage: the next speaker can add short overlapping backchannels or echo-agreements onto the stage-3 merged audio using summary-aware token anchors, rendered-turn forced alignment, leading-silence trimming on synthesized overlay assets, optional Faster-Whisper-native echo phrase matching plus word-level retiming for short echo-agreements, actual overlay-duration fit checks, and a repair loop that shortens or tightens interjections before they collide with the next full turn.</stage>
     </primaryWorkflow>
-    <agentOperatingPrinciples>
-      <principle>Treat configuration as authoritative; prefer overrides and config edits over hardcoded values.</principle>
-      <principle>Preserve the separation between orchestration, provider adapters, prompts, and data-contract modules.</principle>
-      <principle>Favor behavior-level understanding first: runtime pipeline, audio pipeline, and benchmark workflows are all first-class parts of this repo.</principle>
-      <principle>Communication must stay direct and evidence-first. Do not flatter the user, apologize reflexively, or hide disagreement behind vague language.</principle>
-      <principle>If the active developer runtime supports delegation, follow its discoverable delegated-role inventory rather than assuming only a research-only role is allowed. Delegate only when that inventory is non-empty; if delegation is unavailable, keep the equivalent work in the main thread. In all cases, keep the main thread responsible for coordination, integration, and the final response.</principle>
-      <principle>When a task asks you to run a repo entrypoint or script, execute it and validate the result through persisted logs plus RAM and GPU telemetry when relevant; do not rely only on the live terminal stream.</principle>
-      <principle>Treat code-edit tasks as incomplete until the required critic-review loop in `coder_docs/research_agents.md` reports no material flaws, or until the remaining blocker is external to the workspace.</principle>
-    </agentOperatingPrinciples>
   </overview>
 
   <section id="repo-layout" title="Repository Layout">
@@ -43,8 +24,7 @@
     <directory path="tests">Pytest coverage grouped by subsystem: agents, audio_pipeline, benchmark, bootstrap, orchestration, providers, and top-level runtime behavior.</directory>
     <directory path="docker">Container entrypoint helpers for the Docker Compose `setup_and_run` workflow.</directory>
     <directory path=".github/workflows">Repository automation. `ci.yml` runs the targeted cross-platform CPU compatibility matrix on `windows-2025`, `ubuntu-24.04`, and `macos-14`, while `publish-pypi.yml` builds tagged release distributions, smoke-checks the built wheel and source distribution, and publishes them to PyPI through GitHub OIDC trusted publishing.</directory>
-    <directory path="coder_docs">Project-local policy and workflow documentation. This file is the architecture/session guide; sibling docs cover delegation workflow, Python standards, security, logging, testing, methodology, fault localization, linting, package management, Git and GitHub workflow, and web retrieval workflow.</directory>
-    <file path="AGENTS.md">Repo-local coding-agent entrypoint that should stay a compact pointer into the topic-specific files under coder_docs.</file>
+    <directory path="coder_docs">Technical guides for architecture, Docker, Python standards, security, logging, testing, methodology, linting, dependency management, and releases.</directory>
     <file path="compose.yml">Docker Compose workflow centered on `card_framework.cli.setup_and_run`, including CPU and GPU services that mount the repo checkout, keep Linux virtual environments in named Docker volumes, and cap runtime containers at about 8 GB RAM plus 2 GB swap.</file>
     <file path="coder_docs/docker_workflow.md">Operator-facing Docker guide for the preferred containerized `setup_and_run` path, including CUDA-aware GPU-profile usage, resource limits, host caveats, and Windows plus NeMo recommendations.</file>
     <entrypoints>
@@ -408,10 +388,7 @@
     <maintenanceRules>
       <rule>When changing runtime flow, prompts, provider behavior, contracts, benchmark workflow, or operator-facing commands, update this guide in the same change.</rule>
       <rule>When a change affects tested behavior, add or update tests in the corresponding subsystem.</rule>
-      <rule>When you fix a meaningful error, recurring pitfall, or debugging trap, prepend a short dated and timed Problem and Solution note to the top of coder_docs/memory/errors_and_notes.md.</rule>
-      <rule>When the delegation workflow or delegated web-research expectations change materially, update coder_docs/research_agents.md, AGENTS.md, and this guide in the same change.</rule>
       <rule>When contributor Git or GitHub workflow expectations change materially, update coder_docs/git_github_workflow.md and this guide in the same change.</rule>
-      <rule>When the repository's bug-triage or fault-localization workflow changes materially, update coder_docs/fault_localization_workflow.md and this guide in the same change.</rule>
       <rule>Before commit or pull request, review staged diffs for secrets, private endpoints such as vLLM URLs, credentials, tokens, and other private data. Do not let them enter repo history.</rule>
       <rule>When methodology-sensitive benchmark logic changes, update coder_docs/academic_standards.md usage at the implementation site and keep citations or gap notes current.</rule>
       <rule>Keep README.md, src/card_framework/benchmark/README.md, and coder_docs files aligned when commands or workflows move.</rule>

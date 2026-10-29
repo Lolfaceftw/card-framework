@@ -40,5 +40,3 @@ repository.
   complete.
 - Use `uv run pytest` for repository test execution and `uv run ruff check .`
   for lint validation.
-- Treat `coder_docs/fault_localization_workflow.md` as the companion guide when
-  the task is primarily failing-test analysis or bug triage.

@@ -11,7 +11,7 @@ This document is intentionally about linting, not formatting. If the project lat
 - Current baseline status is clean: `uv run ruff check .` passes.
 - `pyproject.toml` now defines `[tool.ruff] extend-exclude = ["src/card_framework/_vendor"]` so the repo-level lint gate applies to maintained project code and does not treat the vendored third-party IndexTTS tree as first-party Ruff debt.
 
-The working baseline is the default Ruff behavior plus the repo-local vendor exclusion and project conventions from `AGENTS.md` and `coder_docs/`.
+The working baseline is the default Ruff behavior plus the repo-local vendor exclusion and project conventions from `coder_docs/python_engineering_standards.md`.
 
 ## Canonical Commands
 
