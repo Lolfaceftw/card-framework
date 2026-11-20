@@ -20,7 +20,7 @@ profiles:
     anthropic_claude_opus:
       _target_: card_framework.providers.anthropic_provider.AnthropicProvider
       api_key: ${oc.env:ANTHROPIC_API_KEY,""}
-      model: "claude-opus-4-6"
+      model: "claude-opus-4-6"  # DEPRECATED(model): superseded by claude-opus-5-5 (see CONFIG.MD, Model status)
     transformers_local:
       _target_: card_framework.providers.transformers_provider.TransformersProvider
       model: "Salesforce/Llama-xLAM-2-3b-fc-r"
@@ -29,27 +29,27 @@ profiles:
     deepseek_chat:
       _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
       api_key: ${oc.env:DEEPSEEK_API_KEY,""}
-      model: "deepseek-chat"
+      model: "deepseek-chat"  # DEPRECATED(model): DeepSeek retired this name on 2026-07-24; use deepseek-v4-flash (see CONFIG.MD, Model status)
       base_url: "https://api.deepseek.com"
       context_window_tokens: 131072
       compaction_target_ratio: 0.65
     deepseek_reasoner:
       _target_: card_framework.providers.deepseek_provider.DeepSeekProvider
       api_key: ${oc.env:DEEPSEEK_API_KEY,""}
-      model: "deepseek-reasoner"
+      model: "deepseek-reasoner"  # DEPRECATED(model): DeepSeek retired this name on 2026-07-24; use deepseek-v4-flash/pro in thinking mode (see CONFIG.MD, Model status)
       base_url: "https://api.deepseek.com"
       context_window_tokens: 131072
       compaction_target_ratio: 0.65
     google_gemini:
       _target_: card_framework.providers.google_genai_provider.GoogleGenAIProvider
       api_key: ${oc.env:GEMINI_API_KEY,""}
-      model: "gemini-2.5-pro"
+      model: "gemini-2.5-pro"  # DEPRECATED(model): closed to new Gemini API users; use a Gemini 3 model (see CONFIG.MD, Model status)
       context_window_tokens: 131072
       compaction_target_ratio: 0.65
     glm_46:
       _target_: card_framework.providers.glm_provider.GLMProvider
       api_key: ${oc.env:ZAI_API_KEY,""}
-      model: "glm-4.6"
+      model: "glm-4.6"  # DEPRECATED(model): superseded by GLM-5.x (see CONFIG.MD, Model status)
     huggingface_toolace:
       _target_: card_framework.providers.huggingface_provider.HuggingfaceProvider
       api_key: ${oc.env:HF_TOKEN,""}

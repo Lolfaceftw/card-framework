@@ -352,7 +352,9 @@ uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample \
 The model reads each full transcript and returns spans that fit the preset
 length. It has a tool to measure the duration of its picks before submitting.
 The defaults are Anthropic and `claude-opus-4-6` with thinking on, which needs
-`ANTHROPIC_API_KEY`.
+`ANTHROPIC_API_KEY`. That model is deprecated in CARD. Newer Claude models work
+with thinking on, but not with `--disable-thinking` (see
+[Model status](../../../../../CONFIG.MD#model-status)).
 
 | Flag | Effect |
 | --- | --- |
@@ -447,7 +449,9 @@ uv run python scripts/run_episode_audio_slicing.py \
 
 It stops once the estimated Anthropic cost reaches `--max-estimated-cost-usd`.
 The estimate comes from each response's token usage, because the API doesn't
-report your remaining balance. Results go to
+report your remaining balance. **The price table only covers Claude 4.x models**
+(`claude-sonnet-4-6`, the deprecated default, among them). With any other model
+the estimate stays at 0 and the limit never triggers. Results go to
 `artifacts/summarizer_critic_benchmark/sporc_episode_audio_slices/<run_id>/`.
 
 ## Reference

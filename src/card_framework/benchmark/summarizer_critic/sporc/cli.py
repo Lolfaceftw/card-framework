@@ -633,7 +633,7 @@ def _build_parser(
     )
     llm_sample.add_argument("--words-per-minute", type=float, default=170.0)
     llm_sample.add_argument("--sample-factor", type=float, default=5.0)
-    llm_sample.add_argument("--model", default="claude-opus-4-6")
+    llm_sample.add_argument("--model", default="claude-opus-4-6")  # DEPRECATED(model): superseded by claude-opus-5-5 (see CONFIG.MD, Model status)
     llm_sample.add_argument(
         "--thinking-effort",
         choices=("low", "medium", "high", "max"),

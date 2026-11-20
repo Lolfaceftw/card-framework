@@ -217,7 +217,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--deepseek-model",
-        default="deepseek-chat",
+        default="deepseek-chat",  # DEPRECATED(model): DeepSeek retired this name on 2026-07-24; use deepseek-v4-flash (see CONFIG.MD, Model status)
         help="DeepSeek model to add when --deepseek-api-key is provided.",
     )
     parser.add_argument(
@@ -739,7 +739,7 @@ def main(argv: list[str] | None = None) -> int:
         ).strip()
         model_profiles = build_model_profiles(
             include_deepseek=bool(deepseek_api_key),
-            deepseek_model=args.deepseek_model.strip() or "deepseek-chat",
+            deepseek_model=args.deepseek_model.strip() or "deepseek-chat",  # DEPRECATED(model): DeepSeek retired this name on 2026-07-24; use deepseek-v4-flash (see CONFIG.MD, Model status)
         )
         model_pairs = build_model_pairs(model_profiles)
         env = build_child_env(args, deepseek_api_key=deepseek_api_key)

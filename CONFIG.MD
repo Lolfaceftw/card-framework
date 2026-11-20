@@ -38,19 +38,20 @@ critic, set `critic: "deepseek_reasoner"`.
 
 ### LLM profiles
 
-| Profile | Model | Key in `.env` |
-| --- | --- | --- |
-| `vllm_local` | Any model served by an OpenAI-compatible vLLM server | `CARD_FRAMEWORK_VLLM_API_KEY` (only if the server needs one) |
-| `anthropic_claude_opus` | `claude-opus-4-6` | `ANTHROPIC_API_KEY` |
-| `deepseek_chat` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
-| `deepseek_reasoner` | `deepseek-reasoner` | `DEEPSEEK_API_KEY` |
-| `google_gemini` | `gemini-2.5-pro` | `GEMINI_API_KEY` |
-| `glm_46` | `glm-4.6` | `ZAI_API_KEY` |
-| `huggingface_toolace` | `Team-ACE/ToolACE-8B` via the Hugging Face router | `HF_TOKEN` |
-| `nanbeige_thinking` | `Nanbeige/Nanbeige4-3B-Thinking-2511` via the Hugging Face router | `HF_TOKEN` |
-| `transformers_local` | `Salesforce/Llama-xLAM-2-3b-fc-r`, run in-process | none |
+| Profile | Model | Key in `.env` | Status |
+| --- | --- | --- | --- |
+| `vllm_local` | Any model served by an OpenAI-compatible vLLM server | `CARD_FRAMEWORK_VLLM_API_KEY` (only if the server needs one) | Current |
+| `anthropic_claude_opus` | `claude-opus-4-6` | `ANTHROPIC_API_KEY` | **Deprecated** |
+| `deepseek_chat` | `deepseek-chat` | `DEEPSEEK_API_KEY` | **Deprecated, likely not working** |
+| `deepseek_reasoner` | `deepseek-reasoner` | `DEEPSEEK_API_KEY` | **Deprecated, likely not working** |
+| `google_gemini` | `gemini-2.5-pro` | `GEMINI_API_KEY` | **Deprecated** |
+| `glm_46` | `glm-4.6` | `ZAI_API_KEY` | **Deprecated** |
+| `huggingface_toolace` | `Team-ACE/ToolACE-8B` via the Hugging Face router | `HF_TOKEN` | Not checked |
+| `nanbeige_thinking` | `Nanbeige/Nanbeige4-3B-Thinking-2511` via the Hugging Face router | `HF_TOKEN` | Not checked |
+| `transformers_local` | `Salesforce/Llama-xLAM-2-3b-fc-r`, run in-process | none | Not checked |
 
-`vllm_local` reads its address from `CARD_FRAMEWORK_VLLM_BASE_URL`.
+`vllm_local` reads its address from `CARD_FRAMEWORK_VLLM_BASE_URL`. For what
+"Deprecated" means here, see [Model status](#model-status).
 
 ### Embedding profiles
 
@@ -61,6 +62,46 @@ Embeddings are only used for retrieval, which is off by default.
 | `disabled` | none | none |
 | `qwen3_4b` | `Qwen/Qwen3-Embedding-4B` | CUDA |
 | `minilm_cpu` | `sentence-transformers/all-MiniLM-L6-v2` | CPU |
+
+### Model status
+
+*Checked 2026-11-20.* "Deprecated" means CARD still ships the model as a
+default, but a newer one exists and CARD will switch to it in a future
+release. Every such line in the code and config is tagged `DEPRECATED(model)`,
+so `git grep "DEPRECATED(model)"` finds them all.
+
+| Model | Used by | Status | Replacement |
+| --- | --- | --- | --- |
+| `claude-opus-4-6` | `anthropic_claude_opus`, SPoRC `llm-sample` default | Still served by Anthropic; superseded | `claude-opus-5-5` |
+| `claude-sonnet-4-6` | SPoRC audio-slicing default | Still served by Anthropic; superseded | `claude-sonnet-5-5` |
+| `deepseek-chat` | `deepseek_chat`, summary-matrix default | DeepSeek announced this name would be discontinued on 2026-07-24 | `deepseek-v4-flash` |
+| `deepseek-reasoner` | `deepseek_reasoner`, benchmark judge | Same as above | `deepseek-v4-flash` or `deepseek-v4-pro`, in thinking mode |
+| `gemini-2.5-pro` | `google_gemini` | Closed to new Gemini API users; shutdown dates conflict | A Gemini 3 model |
+| `glm-4.6` | `glm_46` | Still listed; superseded | GLM-5.x |
+
+The open-weight models (ToolACE, Nanbeige, xLAM, Qwen, Granite) run locally or
+through the Hugging Face router and were not checked.
+
+#### Known issues with newer models
+
+Changing the model name works for most profiles: CARD already passes back
+Gemini thought signatures and DeepSeek/GLM `reasoning_content` in tool loops.
+Fix these first:
+
+- **Newer Claude models, thinking off.** `--disable-thinking` (in `llm-sample`
+  and audio slicing) sends `temperature: 0`, and `llm-sample --text-only
+  --disable-thinking` also forces the `submit_samples` tool.
+  `claude-opus-5-5` and `claude-sonnet-5-5` reject both with a 400 error, and on
+  `claude-opus-5-5` thinking can't be turned off at all. With thinking on (the
+  default), CARD builds a valid request for these models.
+- **Newer Claude models, cost limit.** The audio-slicing price table only
+  lists 4.x models. For any other model the cost estimate is 0, so
+  `--max-estimated-cost-usd` never stops the run.
+- **Newer Claude models, effort.** `--thinking-effort` accepts
+  `low|medium|high|max` but not `xhigh`.
+- **DeepSeek V4.** Thinking is turned on with a request parameter rather than
+  a separate model name, which `DeepSeekProvider` doesn't send yet. Switching
+  `deepseek-reasoner` to `deepseek-v4-flash` would run without reasoning.
 
 ## `.env` variables
 
