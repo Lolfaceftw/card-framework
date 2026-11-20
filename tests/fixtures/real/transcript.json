@@ -1,0 +1,20 @@
+{
+  "segments": [
+    {
+      "speaker": "SPEAKER_00",
+      "start_time": 0,
+      "end_time": 4200,
+      "text": "Welcome back. Today we're testing the packaged src layout with a short real transcript fixture."
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start_time": 4200,
+      "end_time": 9100,
+      "text": "Right, and the goal is to keep the workflow realistic without needing a live model call or a GPU."
+    }
+  ],
+  "metadata": {
+    "source_audio_path": "artifacts/audio_stage/input.wav",
+    "speaker_samples_manifest_path": "artifacts/audio_stage/speaker_samples/manifest.json"
+  }
+}

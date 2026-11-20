@@ -1,0 +1,550 @@
+"""Critic executor for duration-aware summary evaluation."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+import json
+from pathlib import Path
+import re
+from typing import Any
+
+from a2a.server.agent_execution import RequestContext
+from a2a.server.events import EventQueue
+
+from card_framework.agents.base import BaseA2AExecutor
+from card_framework.agents.client import AgentTaskClient, get_default_agent_client
+from card_framework.agents.dtos import RetrieveTaskRequest
+from card_framework.agents.utils import count_words
+from card_framework.audio_pipeline.calibration import VoiceCloneCalibration
+from card_framework.audio_pipeline.live_draft_voice_clone import (
+    _snapshot_matches_summary_xml,
+    load_live_draft_voice_clone_state,
+)
+from card_framework.audio_pipeline.runtime import probe_audio_duration_ms
+from card_framework.providers.response_callbacks import (
+    CompositeResponseCallback,
+    StreamingRepeatGuardCallback,
+)
+from card_framework.shared.events import EventBus, get_event_bus
+from card_framework.shared.llm_provider import (
+    LLMProvider,
+    LLMResponseCallback,
+    StreamingResponseAbort,
+)
+from card_framework.shared.prompt_manager import PromptManager
+from card_framework.shared.summary_xml import DEFAULT_EMO_PRESET, parse_summary_xml
+
+_SENTENCE_ENDING_PUNCTUATION_PATTERN = re.compile(r"""[.!?](?:["'”’)\]]+)?\s*$""")
+
+
+class CriticExecutor(BaseA2AExecutor):
+    """Evaluate a draft summary using deterministic checks plus an LLM critic."""
+
+    _DEFAULT_NEUTRAL_WPM = 150.0
+    _DEFAULT_REASONING_LOOP_GUARD = {
+        "enabled": True,
+        "max_consecutive_no_tool_turns": 2,
+        "single_response_repeat_threshold": 3,
+        "min_repeated_sentence_words": 8,
+        "cross_turn_similarity_threshold": 0.96,
+        "stream_abort_enabled": True,
+        "max_stream_abort_retries": 1,
+    }
+
+    def __init__(
+        self,
+        llm: LLMProvider,
+        calibration: VoiceCloneCalibration | None,
+        max_tool_turns: int = 5,
+        retrieval_port: int = 9012,
+        retrieval_namespace: str = "default",
+        is_embedding_enabled: bool = True,
+        reasoning_loop_guard: Mapping[str, Any] | None = None,
+        agent_client: AgentTaskClient | None = None,
+        event_bus: EventBus | None = None,
+    ) -> None:
+        """Initialize critic executor and injected collaborators."""
+        super().__init__("Critic")
+        self.llm = llm
+        self.calibration = calibration
+        self.max_tool_turns = max_tool_turns
+        self.retrieval_port = retrieval_port
+        self.retrieval_namespace = (
+            str(retrieval_namespace or "").strip() or "default"
+        )
+        self.is_embedding_enabled = is_embedding_enabled
+        self.reasoning_loop_guard = self._resolve_reasoning_loop_guard(
+            reasoning_loop_guard
+        )
+        self.agent_client = (
+            agent_client if agent_client is not None else get_default_agent_client()
+        )
+        self.event_bus = event_bus if event_bus is not None else get_event_bus()
+
+    def _resolve_reasoning_loop_guard(
+        self,
+        reasoning_loop_guard: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Resolve critic no-tool repetition guard settings for the shared loop."""
+        resolved: dict[str, Any] = dict(self._DEFAULT_REASONING_LOOP_GUARD)
+        if isinstance(reasoning_loop_guard, Mapping):
+            resolved.update(
+                {
+                    str(key): value
+                    for key, value in reasoning_loop_guard.items()
+                }
+            )
+        normalized = self._coerce_reasoning_loop_guard_config(resolved)
+
+        raw_stream_abort_enabled = resolved.get("stream_abort_enabled", True)
+        normalized["stream_abort_enabled"] = (
+            raw_stream_abort_enabled
+            if isinstance(raw_stream_abort_enabled, bool)
+            else True
+        )
+
+        raw_max_stream_abort_retries = resolved.get("max_stream_abort_retries", 1)
+        try:
+            max_stream_abort_retries = int(raw_max_stream_abort_retries)
+        except (TypeError, ValueError):
+            max_stream_abort_retries = 1
+        normalized["max_stream_abort_retries"] = max(0, max_stream_abort_retries)
+        return normalized
+
+    def _build_stream_response_callback(
+        self,
+        existing_callback: LLMResponseCallback,
+    ) -> LLMResponseCallback:
+        """Wrap the existing callback with the critic stream repetition guard."""
+        return CompositeResponseCallback(
+            StreamingRepeatGuardCallback(
+                min_repeated_sentence_words=int(
+                    self.reasoning_loop_guard["min_repeated_sentence_words"]
+                ),
+                single_response_repeat_threshold=int(
+                    self.reasoning_loop_guard["single_response_repeat_threshold"]
+                ),
+            ),
+            existing_callback,
+        )
+
+    def _build_stream_abort_retry_prompt(
+        self,
+        *,
+        abort_error: StreamingResponseAbort,
+        attempt: int,
+        max_attempts: int,
+    ) -> str:
+        """Build a corrective retry prompt after a repetitive streamed response."""
+        return (
+            "Your previous response was interrupted because you started repeating the "
+            f"same transcript-verification loop ({abort_error.reason}). Retry the same "
+            f"critique now. This is retry {attempt} of {max_attempts}. Do not repeat "
+            "or re-check the same transcript line over and over. If the issue is real, "
+            "state it once, cite the transcript evidence once, and then call "
+            "`submit_verdict`. If you need more evidence, use the available tools "
+            "instead of narrating repeated re-reads."
+        )
+
+    def _resolve_target_seconds(
+        self, *, target_seconds: int | None, min_words: int, max_words: int
+    ) -> int:
+        """Resolve the intended duration target for the critic pass."""
+        if target_seconds is not None and int(target_seconds) > 0:
+            return int(target_seconds)
+        midpoint_words = max(1, int((min_words + max_words) / 2))
+        if self.calibration is not None:
+            neutral_wpm = self.calibration.wpm_for(
+                speaker="",
+                emo_preset=DEFAULT_EMO_PRESET,
+            )
+        else:
+            neutral_wpm = self._DEFAULT_NEUTRAL_WPM
+        return max(1, int(round((midpoint_words / neutral_wpm) * 60.0)))
+
+    def _resolve_draft_duration_seconds(
+        self,
+        *,
+        draft: str,
+        turns: list,
+        draft_audio_state_path: Path | None,
+    ) -> tuple[float, str]:
+        """Resolve duration from live rendered audio when available, else fallback estimate."""
+        if draft_audio_state_path is not None and draft_audio_state_path.exists():
+            try:
+                state = load_live_draft_voice_clone_state(draft_audio_state_path)
+            except Exception:
+                state = None
+            if state is not None and _snapshot_matches_summary_xml(
+                state.current_snapshot, draft
+            ):
+                total_seconds = round(
+                    sum(
+                        record.duration_ms / 1000.0
+                        for record in state.turn_audio.values()
+                        if any(
+                            str(item.get("turn_id", "")).strip() == record.turn_id
+                            for item in state.current_snapshot
+                        )
+                    ),
+                    3,
+                )
+                return total_seconds, "actual_audio"
+        fallback_audio_dir = self._resolve_live_draft_turn_dir(
+            draft_audio_state_path=draft_audio_state_path,
+            expected_turn_count=len(turns),
+        )
+        if fallback_audio_dir is not None:
+            return fallback_audio_dir, "actual_audio_dir"
+        if turns:
+            if self.calibration is not None:
+                return self.calibration.estimate_turns_seconds(turns), "estimated_wpm"
+            actual_count = count_words(draft)
+            derived_seconds = round(
+                (actual_count / self._DEFAULT_NEUTRAL_WPM) * 60.0,
+                3,
+            )
+            return derived_seconds, "default_wpm"
+        return 0.0, "empty"
+
+    def _resolve_live_draft_turn_dir(
+        self,
+        *,
+        draft_audio_state_path: Path | None,
+        expected_turn_count: int,
+    ) -> float | None:
+        """Fall back to the live-draft turn directory when the sidecar is unavailable."""
+        if draft_audio_state_path is None or expected_turn_count <= 0:
+            return None
+        turn_dir = draft_audio_state_path.parent / "live_draft_turns"
+        if not turn_dir.is_dir():
+            return None
+        wav_paths = sorted(turn_dir.glob("*.wav"))
+        if len(wav_paths) != expected_turn_count:
+            return None
+        total_duration_ms = 0
+        for wav_path in wav_paths:
+            duration_ms = probe_audio_duration_ms(wav_path)
+            if duration_ms is None or duration_ms <= 0:
+                return None
+            total_duration_ms += int(duration_ms)
+        return round(total_duration_ms / 1000.0, 3)
+
+    def _run_deterministic_checks(
+        self,
+        *,
+        draft: str,
+        target_seconds: int,
+        duration_tolerance_ratio: float,
+        draft_audio_state_path: Path | None = None,
+    ) -> dict[str, object]:
+        """Run non-LLM checks for duration, truncation, and XML coherence."""
+        actual_count = count_words(draft)
+        failures: list[str] = []
+        tolerance_seconds = target_seconds * duration_tolerance_ratio
+        min_seconds = target_seconds - tolerance_seconds
+        max_seconds = target_seconds + tolerance_seconds
+
+        try:
+            turns = parse_summary_xml(draft)
+        except ValueError:
+            turns = []
+
+        estimated_seconds, duration_source = self._resolve_draft_duration_seconds(
+            draft=draft,
+            turns=turns,
+            draft_audio_state_path=draft_audio_state_path,
+        )
+
+        if not (min_seconds <= estimated_seconds <= max_seconds):
+            failures.append(
+                "DURATION: "
+                f"{estimated_seconds:.2f}s outside {min_seconds:.2f}-{max_seconds:.2f}s."
+            )
+
+        if turns:
+            last_block_text = turns[-1].text.strip()
+            if last_block_text and not _SENTENCE_ENDING_PUNCTUATION_PATTERN.search(
+                last_block_text
+            ):
+                failures.append(
+                    "TRUNCATION: The last speaker block does not end with sentence-ending punctuation (. ! ?)."
+                )
+        else:
+            failures.append(
+                "COHERENCE: No properly closed speaker-tagged XML blocks found."
+            )
+
+        open_tags = re.findall(r"<([A-Za-z0-9_.-]+)(?:\s[^>]*)?>", draft)
+        close_tags = re.findall(r"</([A-Za-z0-9_.-]+)>", draft)
+        if open_tags != close_tags:
+            failures.append("COHERENCE: Mismatched speaker tags.")
+
+        return {
+            "actual_word_count": actual_count,
+            "actual_estimated_seconds": round(estimated_seconds, 3),
+            "duration_source": duration_source,
+            "failures": failures,
+            "status": "pass" if not failures else "fail",
+        }
+
+    async def handle_task(
+        self, task_data: dict, context: RequestContext, event_queue: EventQueue
+    ) -> None:
+        """Execute one critic task end to end."""
+        from card_framework.agents.dtos import CriticTaskRequest
+
+        req = CriticTaskRequest.model_validate(task_data)
+        draft = req.draft
+        target_seconds = self._resolve_target_seconds(
+            target_seconds=req.target_seconds,
+            min_words=req.min_words,
+            max_words=req.max_words,
+        )
+        duration_tolerance_ratio = float(req.duration_tolerance_ratio or 0.05)
+        tolerance_seconds = target_seconds * duration_tolerance_ratio
+        draft_audio_state_path = (
+            Path(req.draft_audio_state_path).resolve()
+            if str(req.draft_audio_state_path).strip()
+            else None
+        )
+        full_transcript = req.full_transcript
+
+        self.event_bus.publish(
+            "system_message", "Evaluating draft using LLM Critic Loop..."
+        )
+
+        system_prompt = PromptManager.get_prompt(
+            "critic_system",
+            target_seconds=target_seconds,
+            target_minutes=round(target_seconds / 60.0, 2),
+            duration_tolerance_ratio=duration_tolerance_ratio,
+            duration_tolerance_percent=round(duration_tolerance_ratio * 100.0, 2),
+            min_seconds=round(target_seconds - tolerance_seconds, 2),
+            max_seconds=round(target_seconds + tolerance_seconds, 2),
+            is_embedding_enabled=self.is_embedding_enabled,
+        )
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_deterministic_checks",
+                    "description": "Runs hard checks on duration, truncation, and coherence.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "draft_text": {"type": "string"},
+                        },
+                        "required": ["draft_text"],
+                    },
+                },
+            },
+        ]
+
+        if self.is_embedding_enabled:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "verify_against_transcript",
+                        "description": (
+                            "Retrieves original transcript segments matching a semantic "
+                            "query for factual verification."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "The semantic query for transcript verification.",
+                                },
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                }
+            )
+
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_verdict",
+                    "description": "Submits the final critique and verdict.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "status": {"type": "string", "enum": ["pass", "fail"]},
+                            "actual_word_count": {"type": "integer"},
+                            "estimated_seconds": {"type": "number"},
+                            "feedback": {"type": "string"},
+                        },
+                        "required": [
+                            "status",
+                            "actual_word_count",
+                            "estimated_seconds",
+                            "feedback",
+                        ],
+                    },
+                },
+            }
+        )
+
+        user_content = PromptManager.get_prompt("critic_user", draft=draft)
+        if not self.is_embedding_enabled:
+            user_content += f"\n\n--- FULL TRANSCRIPT ---\n{full_transcript}"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+
+        context_data = {
+            "draft": draft,
+            "target_seconds": target_seconds,
+            "duration_tolerance_ratio": duration_tolerance_ratio,
+            "draft_audio_state_path": draft_audio_state_path,
+            "reasoning_loop_guard": dict(self.reasoning_loop_guard),
+        }
+        if bool(self.reasoning_loop_guard.get("stream_abort_enabled", False)):
+            context_data["max_stream_abort_retries"] = int(
+                self.reasoning_loop_guard.get("max_stream_abort_retries", 0)
+            )
+            context_data["stream_response_callback_factory"] = (
+                self._build_stream_response_callback
+            )
+            context_data["stream_abort_retry_prompt_builder"] = (
+                self._build_stream_abort_retry_prompt
+            )
+        final_verdict = await self.run_agent_loop(
+            messages, tools, self.max_tool_turns, context_data
+        )
+
+        if not final_verdict:
+            stats = self._run_deterministic_checks(
+                draft=draft,
+                target_seconds=target_seconds,
+                duration_tolerance_ratio=duration_tolerance_ratio,
+                draft_audio_state_path=draft_audio_state_path,
+            )
+            loop_stop_category = str(context_data.get("loop_stop_category", "")).strip()
+            loop_stop_reason = str(context_data.get("loop_stop_reason", "")).strip()
+            if loop_stop_category == "reasoning_loop_guard":
+                feedback_prefix = "CRITIC LOOP GUARD: "
+                feedback_body = (
+                    loop_stop_reason
+                    if loop_stop_reason
+                    else "Stopped repetitive no-tool reasoning before verdict."
+                )
+            else:
+                feedback_prefix = (
+                    "CRITIC ERROR: LLM failed to submit a structured verdict. "
+                )
+                feedback_body = ""
+            final_verdict = {
+                "status": stats["status"],
+                "word_count": stats["actual_word_count"],
+                "estimated_seconds": stats["actual_estimated_seconds"],
+                "feedback": feedback_prefix
+                + feedback_body
+                + (" | " if feedback_body and stats["failures"] else "")
+                + " | ".join(stats["failures"]),
+            }
+
+        result_json = json.dumps(final_verdict)
+        if final_verdict.get("status") == "pass":
+            self.event_bus.publish(
+                "status_message", message=f"Final Verdict: {result_json}"
+            )
+        else:
+            self.event_bus.publish(
+                "agent_message",
+                agent_name=self.name,
+                message=f"Final Verdict: {result_json}",
+            )
+
+        await self.send_response(result_json, context, event_queue)
+
+    async def process_tool_calls(
+        self, tool_calls: list[dict], messages: list, context_data: dict
+    ) -> tuple[bool, dict | None]:
+        """Execute critic tool calls."""
+        draft = context_data["draft"]
+        target_seconds = int(context_data["target_seconds"])
+        duration_tolerance_ratio = float(context_data["duration_tolerance_ratio"])
+        draft_audio_state_path = context_data.get("draft_audio_state_path")
+        final_verdict = None
+
+        for tc in tool_calls:
+            name = tc["name"]
+            args = tc["arguments"]
+
+            if name == "run_deterministic_checks":
+                llm_draft_text = str(args.get("draft_text", ""))
+                if llm_draft_text.strip() and llm_draft_text.strip() != draft.strip():
+                    self.event_bus.publish(
+                        "system_message",
+                        "Ignoring LLM-supplied draft_text and using finalized draft from task payload.",
+                    )
+                results = self._run_deterministic_checks(
+                    draft=draft,
+                    target_seconds=target_seconds,
+                    duration_tolerance_ratio=duration_tolerance_ratio,
+                    draft_audio_state_path=draft_audio_state_path,
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "content": json.dumps(results),
+                    }
+                )
+                self.event_bus.publish(
+                    "tool_result",
+                    tool_name="run_deterministic_checks",
+                    result=(
+                        "Status: "
+                        f"{results.get('status')} ({len(results.get('failures', []))} failures)"
+                    ),
+                )
+            elif name == "verify_against_transcript":
+                query_text = args.get("query", "")
+                retrieve_task = RetrieveTaskRequest(
+                    action="retrieve",
+                    query=query_text,
+                    top_k=10,
+                    namespace=self.retrieval_namespace,
+                )
+                raw_resp = await self.agent_client.send_task(
+                    self.retrieval_port, retrieve_task
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "content": raw_resp,
+                    }
+                )
+                self.event_bus.publish(
+                    "tool_result",
+                    tool_name="verify_against_transcript",
+                    result="Retrieved segments for verification.",
+                )
+            elif name == "submit_verdict":
+                final_verdict = {
+                    "status": args["status"],
+                    "word_count": args["actual_word_count"],
+                    "estimated_seconds": args.get("estimated_seconds", 0.0),
+                    "feedback": args["feedback"],
+                }
+                break
+
+        if final_verdict:
+            return True, final_verdict
+        return False, None

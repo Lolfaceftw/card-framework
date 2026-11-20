@@ -1,0 +1,16 @@
+{
+  "samples": [
+    {
+      "sample_id": "callhome_example",
+      "dataset": "callhome",
+      "subset": "part2",
+      "audio_filepath": "artifacts/diarization_benchmark_inputs/callhome_example.wav",
+      "rttm_filepath": "artifacts/diarization_benchmark_inputs/callhome_example.rttm",
+      "uem_filepath": "artifacts/diarization_benchmark_inputs/callhome_example.uem",
+      "num_speakers": 2,
+      "metadata": {
+        "notes": "Replace these paths with licensed CALLHOME/DIHARD benchmark assets."
+      }
+    }
+  ]
+}

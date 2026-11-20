@@ -1,0 +1,31 @@
+{
+  "rubric_id": "summarization_reference_free_v1",
+  "version": "1.0.0",
+  "pairwise_dimension": "overall",
+  "dimensions": [
+    {
+      "name": "factuality",
+      "description": "How accurately the summary reflects claims supported by the source transcript.",
+      "min_score": 0.0,
+      "max_score": 1.0
+    },
+    {
+      "name": "relevance",
+      "description": "How well the summary captures the most important source content.",
+      "min_score": 0.0,
+      "max_score": 1.0
+    },
+    {
+      "name": "coherence",
+      "description": "How logically and fluently the summary is organized for a reader.",
+      "min_score": 0.0,
+      "max_score": 1.0
+    },
+    {
+      "name": "overall",
+      "description": "Overall quality balancing factuality, relevance, and coherence.",
+      "min_score": 0.0,
+      "max_score": 1.0
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "manifest_version": "1",
+  "created_at_utc": "2026-03-09T05:31:05.551379+00:00",
+  "sources": [
+    "local"
+  ],
+  "samples": [
+    {
+      "sample_id": "local_summary",
+      "dataset": "local",
+      "transcript_path": "artifacts/transcripts/latest.transcript.json",
+      "metadata": {
+        "segment_count": 286,
+        "speaker_count": 3,
+        "approx_words": 15464
+      }
+    }
+  ]
+}

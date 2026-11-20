@@ -1,0 +1,155 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "card-framework"
+version = "1.5.0"
+description = "Constraint-aware audio resynthesis and distillation pipeline."
+readme = "README.md"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE.md"]
+requires-python = ">=3.12"
+classifiers = [
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "openai>=2.21,<3",
+    "requests",
+    "a2a-sdk[all]>=0.3.24,<0.4",
+    "httpx",
+    "uvicorn",
+    "starlette<1",
+    "sentence-transformers>=2.7.0,<6",
+    "torch>=2.0.0",
+    "numpy",
+    "accelerate>=1.12.0",
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+    "rich>=14.3.3,<15",
+    "google-genai>=1.64.0,<2",
+    "zai-sdk>=0.2.2",
+    "jinja2",
+    "datasets>=4.5.0,<5",
+    "huggingface-hub[hf-xet]>=0.34.0,<1",
+    "hf-transfer>=0.1.9",
+    "pydantic>=2.12.5",
+    "platformdirs>=4.3.6",
+    "imageio-ffmpeg>=0.6.0",
+    "demucs>=4.0.1",
+    "faster-whisper>=1.1.1",
+    "nemo-toolkit[asr]>=2.4.0; sys_platform == 'linux'",
+    "torchaudio>=2.0.0",
+    "soundfile>=0.13.1",
+    "torchcodec>=0.10.0",
+    "nltk>=3.8.1",
+    "deepmultilingualpunctuation",
+    "tiktoken",
+    "textual",
+    "unidecode",
+    "uv>=0.10.0",
+    "python-dotenv>=1.2.2",
+    "anthropic>=0.72.0,<1",
+    "transformers>=4.52.1,<5",
+    "matplotlib>=3.10.8",
+    "funasr>=1.3.1",
+    "modelscope>=1.35.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Lolfaceftw/card-framework"
+Repository = "https://github.com/Lolfaceftw/card-framework"
+Issues = "https://github.com/Lolfaceftw/card-framework/issues"
+
+[project.scripts]
+card-framework = "card_framework.cli.card:main"
+card-framework-main = "card_framework.cli.main:main"
+card-framework-setup = "card_framework.cli.setup_and_run:main"
+card-framework-calibrate = "card_framework.cli.calibrate:main"
+card-framework-eval = "card_framework.cli.eval:main"
+card-framework-ui = "card_framework.cli.ui_cli:main"
+card-framework-benchmark = "card_framework.benchmark.run:main"
+card-framework-benchmark-watchdog = "card_framework.benchmark.watchdog:main"
+card-framework-benchmark-watch = "card_framework.benchmark.watchdog:main"
+card-framework-summarizer-critic = "card_framework.benchmark.summarizer_critic.cli:main"
+card-framework-qa = "card_framework.benchmark.qa:main"
+card-framework-qa-supervisor = "card_framework.benchmark.qa_supervisor:main"
+card-framework-diarization = "card_framework.benchmark.diarization:main"
+card-framework-summary-matrix = "card_framework.cli.run_summary_matrix:main"
+
+[dependency-groups]
+dev = [
+    "ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git@e23e1525bae810f0582b6e539ce7aec63fd01196",
+    "pytest>=8.0",
+    "ruff>=0.9.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+card_framework = [
+    "config/*.yaml",
+    "prompts/templates/*.jinja2",
+    "benchmark/*.yaml",
+    "benchmark/*.md",
+    "benchmark/manifests/*.json",
+    "benchmark/rubrics/*.json",
+    "audio_pipeline/gateways/*.yaml",
+    "_vendor/index_tts/pyproject.toml",
+    "_vendor/index_tts/uv.lock",
+    "_vendor/index_tts/**/*.py",
+    "_vendor/index_tts/**/*.json",
+    "_vendor/index_tts/**/*.jsonl",
+    "_vendor/index_tts/**/*.md",
+    "_vendor/index_tts/**/*.model",
+    "_vendor/index_tts/**/*.txt",
+    "_vendor/index_tts/**/*.yaml",
+    "_vendor/index_tts/**/*.yml",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+deepmultilingualpunctuation = { git = "https://github.com/oliverguhr/deepmultilingualpunctuation.git" }
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+xfail_strict = true
+junit_family = "xunit2"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--durations=10",
+    "--durations-min=1.0",
+]
+markers = [
+    "unit: deterministic fast unit tests",
+    "integration: component integration tests using local dependencies",
+    "contract: shared interface/adapter behavior tests",
+    "slow: intentionally slow tests",
+    "gpu: tests that require GPU acceleration",
+    "network: tests that require external network access",
+]
+
+[tool.ruff]
+extend-exclude = ["src/card_framework/_vendor"]

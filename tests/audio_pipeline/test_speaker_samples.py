@@ -1,0 +1,561 @@
+﻿import json
+from pathlib import Path
+
+import pytest
+
+from card_framework.audio_pipeline.errors import NonRetryableAudioStageError
+from card_framework.audio_pipeline.speaker_samples import (
+    AudioSlice,
+    SpeakerSampleGenerator,
+    build_speaker_sample_plans,
+    resolve_sample_source_audio_path,
+)
+
+
+def test_build_speaker_sample_plans_truncates_to_target_and_marks_shorter() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 20_000, "text": "a"},
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 50_000,
+                "end_time": 60_000,
+                "text": "b",
+            },
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 25_000,
+                "end_time": 45_000,
+                "text": "c",
+            },
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=30_000,
+    )
+
+    assert [plan.speaker for plan in plans] == ["SPEAKER_00", "SPEAKER_01"]
+    assert plans[0].actual_duration_ms == 30_000
+    assert plans[0].status == "ok"
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=20_000),
+        AudioSlice(start_time_ms=25_000, end_time_ms=35_000),
+    )
+    assert plans[1].actual_duration_ms == 10_000
+    assert plans[1].status == "shorter_than_requested"
+    assert plans[1].slices == (AudioSlice(start_time_ms=50_000, end_time_ms=60_000),)
+
+
+def test_build_speaker_sample_plans_subtracts_cross_speaker_overlap() -> None:
+    transcript_payload = {
+        "metadata": {"dataset": "sporc"},
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 10_000,
+                "text": "host line",
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 4_000,
+                "end_time": 6_000,
+                "text": "interruption",
+            },
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=6_000,
+        min_slice_duration_ms=1_000,
+        max_slices=3,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert [plan.speaker for plan in plans] == ["SPEAKER_00"]
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=4_000),
+        AudioSlice(start_time_ms=6_000, end_time_ms=8_000),
+    )
+    assert plans[0].actual_duration_ms == 6_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_prefers_persisted_diarization_turns() -> None:
+    transcript_payload = {
+        "metadata": {
+            "diarization_turns": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 10_000,
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "start_time": 4_000,
+                    "end_time": 6_000,
+                },
+            ]
+        },
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 12_000,
+                "text": "host line with noisy alignment",
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 3_500,
+                "end_time": 6_500,
+                "text": "interruption with noisy alignment",
+            },
+        ],
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=6_000,
+        min_slice_duration_ms=1_000,
+        max_slices=3,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert [plan.speaker for plan in plans] == ["SPEAKER_00"]
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=4_000),
+        AudioSlice(start_time_ms=6_000, end_time_ms=8_000),
+    )
+    assert plans[0].actual_duration_ms == 6_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_keeps_legacy_behavior_without_overlap_markers() -> None:
+    transcript_payload = {
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 10_000,
+                "text": "host line",
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "start_time": 4_000,
+                "end_time": 6_000,
+                "text": "interruption",
+            },
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=6_000,
+        min_slice_duration_ms=1_000,
+        max_slices=3,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert [plan.speaker for plan in plans] == ["SPEAKER_00", "SPEAKER_01"]
+    assert plans[0].slices == (AudioSlice(start_time_ms=0, end_time_ms=6_000),)
+    assert plans[0].actual_duration_ms == 6_000
+    assert plans[0].status == "ok"
+    assert plans[1].slices == (AudioSlice(start_time_ms=4_000, end_time_ms=6_000),)
+    assert plans[1].actual_duration_ms == 2_000
+    assert plans[1].status == "shorter_than_requested"
+
+
+def test_build_speaker_sample_plans_prefers_non_overlap_marked_segments() -> None:
+    transcript_payload = {
+        "metadata": {"dataset": "sporc"},
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 8_000,
+                "text": "crowded line",
+                "overlap_speakers": ["SPEAKER_01"],
+            },
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 10_000,
+                "end_time": 14_000,
+                "text": "clean line",
+            },
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=4_000,
+        min_slice_duration_ms=1_000,
+        max_slices=2,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (AudioSlice(start_time_ms=10_000, end_time_ms=14_000),)
+    assert plans[0].actual_duration_ms == 4_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_prefers_longest_slices_and_caps_count() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 1_300, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 5_000, "end_time": 7_000, "text": "b"},
+            {"speaker": "SPEAKER_00", "start_time": 9_000, "end_time": 11_500, "text": "c"},
+            {"speaker": "SPEAKER_00", "start_time": 15_000, "end_time": 17_000, "text": "d"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=3_000,
+        min_slice_duration_ms=1_200,
+        max_slices=2,
+        selection_order="longest_first",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=9_000, end_time_ms=11_500),
+        AudioSlice(start_time_ms=5_000, end_time_ms=5_500),
+    )
+    assert plans[0].actual_duration_ms == 3_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_chronological_appends_from_start() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 1_300, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 5_000, "end_time": 7_000, "text": "b"},
+            {"speaker": "SPEAKER_00", "start_time": 9_000, "end_time": 11_500, "text": "c"},
+            {"speaker": "SPEAKER_00", "start_time": 15_000, "end_time": 17_000, "text": "d"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=3_000,
+        min_slice_duration_ms=1_200,
+        max_slices=2,
+        selection_order="chronological",
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=1_300),
+        AudioSlice(start_time_ms=5_000, end_time_ms=6_700),
+    )
+    assert plans[0].actual_duration_ms == 3_000
+    assert plans[0].status == "ok"
+
+
+def test_build_speaker_sample_plans_uses_quality_first_fallback_for_short_slices() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 500, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 1_000, "end_time": 1_700, "text": "b"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=3_000,
+        min_slice_duration_ms=1_200,
+        max_slices=3,
+        low_data_policy="quality_first_shorter",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (AudioSlice(start_time_ms=1_000, end_time_ms=1_700),)
+    assert plans[0].actual_duration_ms == 700
+    assert plans[0].status == "shorter_than_requested"
+
+
+def test_build_speaker_sample_plans_fail_speaker_policy_raises() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 500, "text": "a"},
+        ]
+    }
+
+    with pytest.raises(NonRetryableAudioStageError, match="no slices >= 1200"):
+        build_speaker_sample_plans(
+            transcript_payload=transcript_payload,
+            target_duration_ms=3_000,
+            min_slice_duration_ms=1_200,
+            max_slices=3,
+            low_data_policy="fail_speaker",
+        )
+
+
+def test_build_speaker_sample_plans_backfills_when_policy_enabled() -> None:
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 1_000, "text": "a"},
+            {"speaker": "SPEAKER_00", "start_time": 2_000, "end_time": 3_000, "text": "b"},
+            {"speaker": "SPEAKER_00", "start_time": 4_000, "end_time": 5_000, "text": "c"},
+        ]
+    }
+
+    plans = build_speaker_sample_plans(
+        transcript_payload=transcript_payload,
+        target_duration_ms=2_500,
+        min_slice_duration_ms=1_200,
+        max_slices=3,
+        low_data_policy="backfill_to_target",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].slices == (
+        AudioSlice(start_time_ms=0, end_time_ms=1_000),
+        AudioSlice(start_time_ms=2_000, end_time_ms=3_000),
+        AudioSlice(start_time_ms=4_000, end_time_ms=4_500),
+    )
+    assert plans[0].actual_duration_ms == 2_500
+    assert plans[0].status == "ok"
+
+
+def test_speaker_sample_generator_writes_manifest_and_audio_files(tmp_path: Path) -> None:
+    class _StubExporter:
+        def export(
+            self,
+            *,
+            source_audio_path: Path,
+            slices: list[AudioSlice] | tuple[AudioSlice, ...],
+            output_path: Path,
+            sample_rate_hz: int,
+            channels: int,
+            edge_fade_ms: int = 0,
+            audio_codec: str = "pcm_s24le",
+        ) -> None:
+            del (
+                source_audio_path,
+                slices,
+                sample_rate_hz,
+                channels,
+                edge_fade_ms,
+                audio_codec,
+            )
+            output_path.write_bytes(b"wav")
+
+    source_audio_path = tmp_path / "vocals.wav"
+    source_audio_path.write_bytes(b"source")
+    transcript_payload = {
+        "segments": [
+            {
+                "speaker": "SPEAKER/00",
+                "start_time": 0,
+                "end_time": 10_000,
+                "text": "hello",
+            },
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 11_000,
+                "end_time": 21_000,
+                "text": "world",
+            },
+        ]
+    }
+    generator = SpeakerSampleGenerator(
+        exporter=_StubExporter(),
+        target_duration_seconds=30,
+        manifest_filename="samples.manifest.json",
+    )
+
+    result = generator.generate(
+        transcript_payload=transcript_payload,
+        source_audio_path=source_audio_path,
+        output_dir=tmp_path / "speaker_samples",
+    )
+
+    assert result.manifest_path.exists()
+    assert len(result.artifacts) == 2
+    assert all(artifact.path.exists() for artifact in result.artifacts)
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["target_duration_ms"] == 30_000
+    assert manifest["clip_method"] == "concat_turns"
+    assert manifest["short_speaker_policy"] == "export_shorter"
+    assert manifest["sample_rate_hz"] == 44_100
+    assert manifest["channels"] == 1
+    assert manifest["codec"] == "pcm_s24le"
+    assert manifest["edge_fade_ms"] == 20
+    assert manifest["min_slice_duration_ms"] == 1200
+    assert manifest["max_slices"] == 6
+    assert manifest["selection_order"] == "chronological"
+    assert manifest["low_data_policy"] == "quality_first_shorter"
+    assert len(manifest["samples"]) == 2
+    assert all("selected_slice_count" in sample for sample in manifest["samples"])
+    assert all("dropped_slice_count" in sample for sample in manifest["samples"])
+
+
+def test_resolve_sample_source_audio_path_supports_modes_and_fallback(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"source")
+    vocals = tmp_path / "vocals.wav"
+    vocals.write_bytes(b"vocals")
+
+    metadata = {
+        "source_audio_path": str(source),
+        "vocals_audio_path": str(vocals),
+    }
+
+    resolved_vocals = resolve_sample_source_audio_path(
+        source_mode="vocals",
+        transcript_metadata=metadata,
+        configured_audio_path="",
+        base_dir=tmp_path,
+    )
+    assert resolved_vocals == vocals
+
+    fallback_vocals = resolve_sample_source_audio_path(
+        source_mode="vocals",
+        transcript_metadata={},
+        configured_audio_path=str(source),
+        base_dir=tmp_path,
+    )
+    assert fallback_vocals == source
+
+    resolved_source = resolve_sample_source_audio_path(
+        source_mode="source",
+        transcript_metadata={"source_audio_path": str(source)},
+        configured_audio_path="",
+        base_dir=tmp_path,
+    )
+    assert resolved_source == source
+
+    fallback_source = resolve_sample_source_audio_path(
+        source_mode="source",
+        transcript_metadata={},
+        configured_audio_path=str(source),
+        base_dir=tmp_path,
+    )
+    assert fallback_source == source
+
+    with pytest.raises(NonRetryableAudioStageError):
+        resolve_sample_source_audio_path(
+            source_mode="vocals",
+            transcript_metadata={},
+            configured_audio_path="",
+            base_dir=tmp_path,
+        )
+
+
+def test_speaker_sample_generator_propagates_export_failure_without_manifest(
+    tmp_path: Path,
+) -> None:
+    class _FailingExporter:
+        def export(
+            self,
+            *,
+            source_audio_path: Path,
+            slices: list[AudioSlice] | tuple[AudioSlice, ...],
+            output_path: Path,
+            sample_rate_hz: int,
+            channels: int,
+            edge_fade_ms: int = 0,
+            audio_codec: str = "pcm_s24le",
+        ) -> None:
+            del (
+                source_audio_path,
+                slices,
+                output_path,
+                sample_rate_hz,
+                channels,
+                edge_fade_ms,
+                audio_codec,
+            )
+            raise NonRetryableAudioStageError("Failed to export speaker sample with ffmpeg")
+
+    source_audio_path = tmp_path / "vocals.wav"
+    source_audio_path.write_bytes(b"source")
+    transcript_payload = {
+        "segments": [
+            {
+                "speaker": "SPEAKER_00",
+                "start_time": 0,
+                "end_time": 10_000,
+                "text": "hello",
+            }
+        ]
+    }
+    output_dir = tmp_path / "speaker_samples"
+    generator = SpeakerSampleGenerator(
+        exporter=_FailingExporter(),
+        target_duration_seconds=30,
+        manifest_filename="samples.manifest.json",
+    )
+
+    with pytest.raises(NonRetryableAudioStageError, match="Failed to export speaker sample"):
+        generator.generate(
+            transcript_payload=transcript_payload,
+            source_audio_path=source_audio_path,
+            output_dir=output_dir,
+        )
+
+    assert not (output_dir / "samples.manifest.json").exists()
+    assert list(output_dir.glob("*.wav")) == []
+
+
+def test_speaker_sample_generator_emits_progress_updates(tmp_path: Path) -> None:
+    class _StubExporter:
+        def export(
+            self,
+            *,
+            source_audio_path: Path,
+            slices: list[AudioSlice] | tuple[AudioSlice, ...],
+            output_path: Path,
+            sample_rate_hz: int,
+            channels: int,
+            edge_fade_ms: int = 0,
+            audio_codec: str = "pcm_s24le",
+        ) -> None:
+            del (
+                source_audio_path,
+                slices,
+                sample_rate_hz,
+                channels,
+                edge_fade_ms,
+                audio_codec,
+            )
+            output_path.write_bytes(b"wav")
+
+    source_audio_path = tmp_path / "vocals.wav"
+    source_audio_path.write_bytes(b"source")
+    transcript_payload = {
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_time": 0, "end_time": 10_000, "text": "hello"},
+            {"speaker": "SPEAKER_01", "start_time": 10_000, "end_time": 20_000, "text": "world"},
+        ]
+    }
+    updates: list[tuple[int | None, int | None]] = []
+    generator = SpeakerSampleGenerator(exporter=_StubExporter(), target_duration_seconds=10)
+
+    result = generator.generate(
+        transcript_payload=transcript_payload,
+        source_audio_path=source_audio_path,
+        output_dir=tmp_path / "speaker_samples",
+        progress_callback=lambda update: updates.append(
+            (update.completed_units, update.total_units)
+        ),
+    )
+
+    assert len(result.artifacts) == 2
+    assert updates[0] == (0, 2)
+    assert updates[-1] == (2, 2)
+
