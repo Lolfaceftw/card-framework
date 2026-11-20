@@ -1,53 +1,46 @@
 # Summarizer-Critic Benchmarks
 
-This package contains the repository's real-dataset benchmark CLIs for the
-duration-first summarizer/critic runtime. It currently has two benchmark
-tracks with different datasets and operator workflows.
+These benchmarks run CARD's summarizer and critic loop on real datasets and
+check how well each summary hits its target duration. There are two:
 
-## Which CLI To Use
+| Dataset | Content | Guide |
+| --- | --- | --- |
+| QMSum | Meeting transcripts with human reference summaries | [qmsum/README.md](qmsum/README.md) |
+| SPoRC | Long multi-speaker podcast episodes | [sporc/README.md](sporc/README.md) |
 
-- `uv run python -m card_framework.benchmark.summarizer_critic`
-  Backward-compatible root CLI for the QMSum benchmark path.
-- `uv run python -m card_framework.benchmark.summarizer_critic.qmsum`
-  Explicit QMSum CLI. This is the same benchmark surface as the package root.
-- `uv run python -m card_framework.benchmark.summarizer_critic.sporc`
-  SPoRC CLI for dataset preparation, transcript sampling, execute runs,
-  duration sweeps, and supervised runs.
+## Which command to use
 
-## Shared Defaults
+| Command | Runs |
+| --- | --- |
+| `uv run python -m card_framework.benchmark.summarizer_critic.qmsum` | QMSum |
+| `uv run python -m card_framework.benchmark.summarizer_critic` | QMSum (older alias for the line above) |
+| `uv run python -m card_framework.benchmark.summarizer_critic.sporc` | SPoRC |
 
-- Provider profiles default to
-  `src/card_framework/benchmark/provider_profiles.yaml`.
-- The tracked `vllm_default` profile points at `http://127.0.0.1:8000/v1`.
-- To override that tracked vLLM base URL at runtime without editing YAML, set
-  one of `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`,
-  `CARD_FRAMEWORK_VLLM_BASE_URL`, or `VLLM_BASE_URL`.
-- `--sample-seed <int>` enables deterministic seeded-random sample selection.
-  Omitting the flag preserves manifest order.
-- `--max-samples 0` means "all prepared samples" for both benchmark families.
+## Shared defaults
 
-## Generated Output Roots
+- Provider profiles come from `src/card_framework/benchmark/provider_profiles.yaml`.
+- The `vllm_default` profile points at `http://127.0.0.1:8000/v1`. To change it
+  without editing YAML, set `VLLM_URL`. `CARD_FRAMEWORK_VLLM_URL`,
+  `CARD_FRAMEWORK_VLLM_BASE_URL`, and `VLLM_BASE_URL` also work.
+- `--max-samples 0` runs every prepared sample.
+- `--sample-seed <n>` picks a reproducible random subset. Without it, samples
+  run in manifest order.
 
-Generated benchmark artifacts default to the gitignored
-`artifacts/summarizer_critic_benchmark` tree.
+## Where outputs go
 
-Common subtrees:
+Everything is written under `artifacts/summarizer_critic_benchmark/`, which git
+ignores:
 
-- `datasets/qmsum_general_test`: prepared QMSum manifest and transcript files
-- `runs`: direct QMSum benchmark runs
-- `supervisor`: QMSum supervised sessions
-- `embedding_cache`: persistent transcript-embedding cache reused across embedding-enabled benchmark runs when the sample ID, transcript content, and embedding provider identity match
-- `datasets/sporc/prepared_sample`: prepared SPoRC sample split
-- `datasets/sporc/prepared_full`: prepared SPoRC full split and curated manifests
-- `sporc_runs`: direct SPoRC execute runs
-- `sporc_supervisor`: SPoRC supervised sessions
-- `sweeps`: SPoRC duration-sweep aggregates
-- `sporc_human_sampling`: human transcript-sampling sessions
-- `sporc_llm_sampling`: Anthropic-backed transcript-sampling runs
-
-## Detailed Guides
-
-- [`qmsum/README.md`](./qmsum/README.md): QMSum prepare, execute, supervise,
-  concurrency, and output details
-- [`sporc/README.md`](./sporc/README.md): SPoRC preparation, sampling,
-  transcript export, execute runs, sweeps, and troubleshooting
+| Folder | Contents |
+| --- | --- |
+| `datasets/qmsum_general_test` | Prepared QMSum manifest and transcripts |
+| `datasets/sporc/prepared_sample` | Prepared SPoRC sample split |
+| `datasets/sporc/prepared_full` | Prepared SPoRC full split and curated manifests |
+| `runs` | QMSum runs |
+| `supervisor` | QMSum supervised sessions |
+| `sporc_runs` | SPoRC runs |
+| `sporc_supervisor` | SPoRC supervised sessions |
+| `sweeps` | SPoRC duration sweeps |
+| `sporc_human_sampling` | Human transcript-sampling sessions |
+| `sporc_llm_sampling` | LLM transcript-sampling runs |
+| `embedding_cache` | Transcript embeddings, reused across runs when the sample, transcript, and embedding model match |

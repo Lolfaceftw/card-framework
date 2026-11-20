@@ -1,9 +1,0 @@
-atla
-pymongo
-gradio
-python-dotenv
-openai
-anthropic
-together
-cohere
-transformers

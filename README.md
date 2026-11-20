@@ -22,7 +22,7 @@ flowchart LR
 | Voice synthesis | Renders summary turns with IndexTTS; can render during summary editing |
 | Interjection | Adds optional backchannels and speech overlap |
 
-Runs produce a transcript, a speaker-tagged XML summary, and audio outputs when synthesis is enabled. The repository also includes QMSum and SPoRC summarization benchmarks, source-grounded question answering, and speaker diarization evaluation.
+Runs produce a transcript, a speaker-tagged XML summary, and audio outputs when synthesis is enabled. The repository also includes [benchmarks](src/card_framework/benchmark/README.md) for summarization (QMSum and SPoRC), question answering, and speaker diarization.
 
 ## Install with pip
 
@@ -100,7 +100,7 @@ For an NVIDIA GPU exposed to Docker:
 docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
 ```
 
-Use `--help` for available run options. See [Configuration](CONFIG.MD) for duration settings, provider selection, and Docker runtime requirements. The first run downloads model weights and prepares the speech runtime.
+Use `--help` for available run options. See [CONFIG.MD](CONFIG.MD) for model selection, API keys, and Docker details. The first run downloads model weights and prepares the speech runtime.
 
 For source development, install dependencies with `uv sync --dev`. Run checks with `uv run ruff check .` and `uv run pytest`.
 
@@ -109,9 +109,11 @@ For source development, install dependencies with `uv sync --dev`. Run checks wi
 | Path | Contents |
 | --- | --- |
 | [src/card_framework/](src/card_framework/) | Audio processing, summarization, and runtime code |
-| [conf/config.yaml](conf/config.yaml) | Source-checkout settings |
+| [conf/config.yaml](conf/config.yaml) | Settings for source checkouts |
+| [CONFIG.MD](CONFIG.MD) | How to choose models, set keys, run with Docker, and tune the audio stages |
+| [src/card_framework/benchmark/](src/card_framework/benchmark/README.md) | QMSum, SPoRC, diarization, and QA benchmarks |
 | [tests/](tests/) | Automated checks |
-| [scripts/](scripts/) | SPoRC benchmark preparation and analysis helpers |
+| [scripts/](scripts/) | Helpers for preparing and analyzing SPoRC benchmark runs |
 | [Dockerfile](Dockerfile), [compose.yml](compose.yml) | Container build and run setup |
 
 ## Research and license

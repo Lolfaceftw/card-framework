@@ -1,182 +1,115 @@
-# QMSum Summarizer-Critic Benchmark
+# QMSum Benchmark
 
-This benchmark runs the repository's real summarizer/critic stack against the
-official QMSum general-summary test split. It derives `target_seconds` from the
-human reference summaries, executes the same A2A-style summarizer and critic
-agents used by the runtime, and writes JSON plus Markdown artifacts under
-`artifacts/summarizer_critic_benchmark`.
+Runs CARD's summarizer and critic on the
+[QMSum](https://github.com/Yale-LILY/QMSum) general-summary test split. Each
+sample's target duration comes from the length of its human reference summary,
+and an LLM judge scores the result.
 
-For the package-level benchmark split and shared defaults, see
-[`../README.md`](../README.md).
+For defaults shared with the SPoRC benchmark, see [../README.md](../README.md).
 
-## Entry Points
+Commands below use bash syntax. In PowerShell, set variables with
+`$env:VLLM_URL = "..."` and replace the trailing `\` with a backtick.
 
-Both commands below run the same QMSum benchmark CLI:
+## 1. Point it at your LLM
 
-```powershell
-uv run python -m card_framework.benchmark.summarizer_critic --help
-uv run python -m card_framework.benchmark.summarizer_critic.qmsum --help
+The `vllm_default` profile expects a vLLM server at `http://127.0.0.1:8000/v1`.
+If yours runs there, skip this step. Otherwise:
+
+```bash
+export VLLM_URL="http://your-host:8000/v1"
 ```
 
-## Defaults That Matter
+## 2. Prepare the dataset
 
-- Provider profiles default to
-  `src/card_framework/benchmark/provider_profiles.yaml`.
-- The default QMSum dataset manifest path is
-  `artifacts/summarizer_critic_benchmark/datasets/qmsum_general_test/manifest.json`.
-- The default official QMSum checkout path is
-  `artifacts/summarizer_critic_benchmark/datasets/qmsum_official_repo`.
-- The tracked `vllm_default` provider profile points at
-  `http://127.0.0.1:8000/v1`.
-- To override that vLLM endpoint without editing YAML, set one of
-  `VLLM_URL`, `CARD_FRAMEWORK_VLLM_URL`,
-  `CARD_FRAMEWORK_VLLM_BASE_URL`, or `VLLM_BASE_URL`.
-
-Example PowerShell override:
-
-```powershell
-$env:VLLM_URL = "http://host:8000/v1"
-```
-
-## Prepare The Dataset
-
-This clones or reuses the official `Yale-LILY/QMSum` repository and prepares the
-reproducible benchmark manifest:
-
-```powershell
+```bash
 uv run python -m card_framework.benchmark.summarizer_critic prepare-dataset
 ```
 
-Override the repo checkout or prepared-output roots only when you need a custom
-location:
+This clones the QMSum repository (or reuses an existing clone) and writes a
+manifest to
+`artifacts/summarizer_critic_benchmark/datasets/qmsum_general_test/manifest.json`.
+To use other folders, pass `--qmsum-repo-dir <path>` and `--prepared-root <path>`.
 
-```powershell
-uv run python -m card_framework.benchmark.summarizer_critic prepare-dataset `
-  --qmsum-repo-dir "C:\benchmarks\QMSum" `
-  --prepared-root "C:\benchmarks\qmsum_general_test"
-```
+You can skip this step: the commands below take `--prepare-if-missing`.
 
-## Smoke Run
+## 3. Run a smoke test
 
-Use one supervised sample first to verify your provider, live streaming, judge
-scoring, and telemetry:
+Run a single sample first to check that your provider, streaming, judge, and
+telemetry all work:
 
-```powershell
-$env:VLLM_URL = "http://host:8000/v1"
-uv run python -m card_framework.benchmark.summarizer_critic supervise `
-  --prepare-if-missing `
-  --summarizer-provider vllm_default `
-  --critic-provider vllm_default `
-  --judge-provider vllm_default `
-  --max-samples 1 `
-  --max-iterations 1 `
-  --max-runs 1 `
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic supervise \
+  --prepare-if-missing \
+  --summarizer-provider vllm_default \
+  --max-samples 1 \
+  --max-iterations 1 \
+  --max-runs 1 \
   --sample-interval-seconds 5
 ```
 
-## Full Supervised Run
+The critic defaults to the summarizer's provider, and the judge to the critic's.
+Pass `--critic-provider` or `--judge-provider` to use different models.
 
-Use the supervisor when you want repeated benchmark runs with RAM/GPU guardrails,
-session notes, and child logs:
+## 4. Run the full benchmark
 
-```powershell
-$env:VLLM_URL = "http://host:8000/v1"
-uv run python -m card_framework.benchmark.summarizer_critic supervise `
-  --prepare-if-missing `
-  --summarizer-provider vllm_default `
-  --critic-provider vllm_default `
-  --judge-provider vllm_default `
-  --max-iterations 4 `
-  --critic-timeout-seconds 900 `
-  --max-runs 1 `
+There are two ways to run it:
+
+| Command | Use it when |
+| --- | --- |
+| `supervise` | You want the run killed if RAM hits 80% or a GPU hits 12 GiB, plus session notes and child logs |
+| `execute` | You want one plain run with no supervisor |
+
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic supervise \
+  --prepare-if-missing \
+  --summarizer-provider vllm_default \
+  --max-iterations 4 \
+  --critic-timeout-seconds 900 \
+  --max-runs 1 \
   --sample-interval-seconds 15
 ```
 
-Default supervisor guardrails:
+To run without the supervisor, replace `supervise` with `execute` and drop
+`--max-runs` and `--sample-interval-seconds`.
 
-- total system RAM threshold: `80%`
-- per-GPU VRAM threshold: `12 GiB`
+### Useful flags
 
-## Full Direct Run
+| Flag | Meaning |
+| --- | --- |
+| `--max-samples <n>` | Number of samples to run; `0` runs all |
+| `--sample-seed <n>` | Pick a reproducible random subset instead of manifest order |
+| `--max-iterations <n>` | Maximum summarizer/critic rounds per sample |
+| `--embedding-mode disabled\|enabled` | Turn retrieval on or off |
+| `--summarizer-timeout-seconds <s>` | Per-request timeout for the summarizer |
+| `--critic-timeout-seconds <s>` | Per-request timeout for the critic |
+| `--retrieval-timeout-seconds <s>` | Per-request timeout for retrieval |
+| `--index-timeout-seconds <s>` | Per-request timeout for indexing |
 
-Use `execute` when you want one benchmark run without the outer supervisor:
+With `--embedding-mode enabled`, transcript embeddings are cached in
+`artifacts/summarizer_critic_benchmark/embedding_cache` and reused when the
+sample, transcript, and embedding model are unchanged.
 
-```powershell
-$env:VLLM_URL = "http://host:8000/v1"
-uv run python -m card_framework.benchmark.summarizer_critic execute `
-  --prepare-if-missing `
-  --summarizer-provider vllm_default `
-  --critic-provider vllm_default `
-  --judge-provider vllm_default `
-  --max-iterations 4 `
-  --critic-timeout-seconds 900
-```
+## Running several benchmarks at once
 
-Useful execution flags:
+Each `execute` process starts three local services (retrieval, summarizer,
+critic) on fixed ports. To run processes in parallel, give each one its own
+three ports:
 
-- `--max-samples <int>`: `0` means all prepared examples
-- `--sample-seed <int>`: deterministic seeded-random sample selection
-- `--embedding-mode disabled|enabled`
-- `--summarizer-timeout-seconds <float>`
-- `--critic-timeout-seconds <float>`
-- `--retrieval-timeout-seconds <float>`
-- `--index-timeout-seconds <float>`
-
-The reference-free judge path now receives the full transcript by default
-instead of a capped `30,000`-character prefix.
-
-When `--embedding-mode enabled`, the benchmark now reuses a persistent
-transcript-embedding cache under
-`artifacts/summarizer_critic_benchmark/embedding_cache`. Cache hits are keyed
-by the sample ID, a stable transcript-content hash, and the active embedding
-provider identity, so reruns skip `encode(...)` when those inputs match.
-
-## Concurrent Direct Runs
-
-When you launch multiple `execute` processes in parallel, give each process its
-own internal service ports so the retrieval, summarizer, and critic A2A servers
-do not collide:
-
-```powershell
-$env:VLLM_URL = "http://host:8000/v1"
-uv run python -m card_framework.benchmark.summarizer_critic execute `
-  --prepare-if-missing `
-  --summarizer-provider vllm_default `
-  --critic-provider vllm_default `
-  --judge-provider vllm_default `
-  --max-iterations 1 `
-  --retrieval-port 31000 `
-  --summarizer-port 31001 `
+```bash
+uv run python -m card_framework.benchmark.summarizer_critic execute \
+  --prepare-if-missing \
+  --summarizer-provider vllm_default \
+  --retrieval-port 31000 \
+  --summarizer-port 31001 \
   --critic-port 31002
 ```
 
-Each concurrent run must use a distinct trio of
-`--retrieval-port`, `--summarizer-port`, and `--critic-port` values.
-
 ## Outputs
 
-Main artifact roots:
+| Folder | Contents |
+| --- | --- |
+| `artifacts/summarizer_critic_benchmark/runs/<run_id>/` | `report.json`, `notes.md`, `results.md` |
+| `artifacts/summarizer_critic_benchmark/supervisor/<session_id>/` | Supervisor notes, logs, and telemetry |
 
-- prepared dataset: `artifacts/summarizer_critic_benchmark/datasets/qmsum_general_test`
-- shared embedding cache: `artifacts/summarizer_critic_benchmark/embedding_cache`
-- direct runs: `artifacts/summarizer_critic_benchmark/runs/<run_id>`
-- supervised sessions: `artifacts/summarizer_critic_benchmark/supervisor/<session_id>`
-
-Each direct run writes:
-
-- `report.json`
-- `notes.md`
-- `results.md`
-
-The report records the active sample-selection mode as either a concrete
-`sample_seed` or `manifest_order`.
-
-## Notes
-
-- `judge-provider` defaults to the critic provider when omitted, and the critic
-  provider defaults to the summarizer provider when omitted.
-- If you keep the tracked `vllm_default` profile on `127.0.0.1:8000/v1`, you do
-  not need to set a vLLM URL environment variable at all.
-- Use `src/card_framework/benchmark/provider_profiles.yaml` when you want tracked,
-  reviewable benchmark provider definitions. Use env overrides only for
-  deploy-varying endpoint details.
+Start with `results.md`. `report.json` has per-sample detail and records
+whether samples were chosen by seed or by manifest order.

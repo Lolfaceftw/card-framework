@@ -1,106 +1,110 @@
-﻿# Benchmark Runner
+﻿# Benchmarks
 
-The benchmark source, manifests, rubrics, and QA settings now live under
-`src/card_framework/benchmark`. The CLIs resolve those packaged resources by
-default, so explicit path flags are usually optional.
+This folder holds every benchmark that ships with CARD. Each one is a module
+you run with `uv run python -m ...` from a source checkout. Manifests, rubrics,
+and provider profiles are bundled with the package, so most path flags are
+optional.
 
-## Summarizer-Critic Real Dataset Benchmark
+All outputs go under `artifacts/`, which git ignores.
+
+| Benchmark | What it measures | Command |
+| --- | --- | --- |
+| [Summarizer-critic](#summarizer-critic-benchmarks) | Summary quality and duration control on QMSum and SPoRC | `card_framework.benchmark.summarizer_critic` |
+| [Summarization matrix](#summarization-matrix) | Several providers on the same transcripts, scored by a judge | `card_framework.benchmark.run` |
+| [Diarization](#diarization) | Speaker diarization error rate on AMI-style data | `card_framework.benchmark.diarization` |
+| [QA](#qa) | Whether a summary answers questions about its source | `card_framework.benchmark.qa` |
+
+Most benchmarks expect an OpenAI-compatible vLLM server at
+`http://127.0.0.1:8000/v1`. To use a different address, set `VLLM_URL`.
+
+## Summarizer-critic benchmarks
+
+These run the same summarizer, critic, and retrieval agents the main pipeline
+uses, against real datasets with human reference summaries.
 
 ```bash
 uv run python -m card_framework.benchmark.summarizer_critic prepare-dataset
 uv run python -m card_framework.benchmark.summarizer_critic execute --prepare-if-missing --summarizer-provider vllm_default
-uv run python -m card_framework.benchmark.summarizer_critic supervise --prepare-if-missing --max-runs 3
 ```
-This package lives under `src/card_framework/benchmark/summarizer_critic` and is
-separate from the older matrix benchmark. It:
-- fetches or reuses the official `Yale-LILY/QMSum` repository
-- prepares the full `data/ALL/test` general-summary slice into a reproducible manifest
-- derives `target_seconds` from the human reference summary length
-- runs the actual summarizer, critic, retrieval, and orchestrator stack with the duration-first contracts
-- scores duration control, factualness, naturalness, and speaker attribution
-- writes machine-readable reports plus `notes.md` and `results.md` under `artifacts/summarizer_critic_benchmark`
 
-The reusable multi-speaker LLM-as-a-judge prompt wording now lives under
-`src/card_framework/prompts/templates/conversation_summary_judge_system.jinja2`
-and `src/card_framework/prompts/templates/conversation_summary_judge_user.jinja2`.
-That shared prompt now uses equal-count Likert-friendly guide items per
-dimension so the same rubric wording can support both human participant surveys
-and LLM-as-a-judge runs.
+A run scores duration control, factualness, naturalness, and speaker
+attribution, then writes `report.json`, `notes.md`, and `results.md` under
+`artifacts/summarizer_critic_benchmark`.
 
-See `src/card_framework/benchmark/summarizer_critic/README.md` for the full
-package overview and benchmark-family split.
+Detailed guides:
 
-Use these benchmark guides for the current command surfaces:
+- [summarizer_critic/README.md](summarizer_critic/README.md): which CLI to use and shared defaults
+- [summarizer_critic/qmsum/README.md](summarizer_critic/qmsum/README.md): the QMSum meeting benchmark
+- [summarizer_critic/sporc/README.md](summarizer_critic/sporc/README.md): the SPoRC podcast benchmark
 
-- `src/card_framework/benchmark/summarizer_critic/README.md`: shared
-  summarizer-critic benchmark entrypoints, defaults, and artifact roots
-- `src/card_framework/benchmark/summarizer_critic/qmsum/README.md`: QMSum
-  prepare, execute, supervise, and concurrency workflow
-- `src/card_framework/benchmark/summarizer_critic/sporc/README.md`: SPoRC
-  preparation, sampling, execute, duration-sweep, and supervisor workflow
+The judge prompt is shared by every benchmark and lives in
+`src/card_framework/prompts/templates/conversation_summary_judge_*.jinja2`. Each
+scored dimension uses the same 1–5 Likert items, so the same wording works for
+human raters and for the LLM judge.
 
-## Summarization Benchmark
+## Summarization matrix
+
+Runs several providers over the same transcripts and scores each one with a
+reference-free judge that sees the full source transcript.
 
 ```bash
+# Build a manifest from a local transcript
+uv run python -m card_framework.benchmark.run prepare-manifest --sources local
+
+# Run the benchmark
 uv run python -m card_framework.benchmark.run execute --preset hourly
 ```
 
-Common options:
-- `--preset smoke|hourly|full`
-- `--manifest src/card_framework/benchmark/manifests/benchmark_v1.json`
-- `--provider-profiles src/card_framework/benchmark/provider_profiles.yaml`
-- `--providers <comma-separated ids>`
-- `--judge-provider <provider id>`
-- `--judge-rubric src/card_framework/benchmark/rubrics/default_summarization_rubric.json`
-- `--judge-repeats <int>`
-- `--disable-order-swap`
-- `--alignscore-model <model name>`
-- `--output-dir artifacts/benchmark`
+`prepare-manifest --sources local` uses the first transcript it finds, checking
+in this order (or pass `--local-transcript-path`):
 
-The reference-free judge now receives the full source transcript by default
-instead of a capped prefix.
+1. `transcript.json` in the repository root
+2. `*.transcript.json` in the repository root
+3. `artifacts/transcripts/*.transcript.json`
+
+Common `execute` options:
+
+| Option | Default |
+| --- | --- |
+| `--preset smoke\|hourly\|full` | |
+| `--manifest <path>` | `manifests/benchmark_v1.json` |
+| `--provider-profiles <path>` | `provider_profiles.yaml` |
+| `--providers <ids>` | all profiles, comma-separated |
+| `--judge-provider <id>` | |
+| `--judge-rubric <path>` | `rubrics/default_summarization_rubric.json` |
+| `--judge-repeats <n>` | |
+| `--disable-order-swap` | order swap on |
+| `--alignscore-model <name>` | |
+| `--output-dir <path>` | `artifacts/benchmark` |
 
 Outputs:
+
 - `artifacts/benchmark/<run_id>/benchmark_report.json`
 - `artifacts/benchmark/<run_id>/verification.json`
 - `artifacts/quality/<run_id>/report.json`
 
-If every benchmark cell is skipped before any sample runs, the CLI exits
-non-zero and keeps the generated artifacts so the failure can be diagnosed.
+If every sample is skipped, the command exits with a non-zero code and keeps its
+output folder so you can see why.
 
-Prepare a manifest:
+### Running with memory limits
 
-```bash
-uv run python -m card_framework.benchmark.run prepare-manifest --sources local
-```
-
-For the local source, the CLI now auto-discovers a reusable transcript in this
-order unless you pass `--local-transcript-path` explicitly:
-- repo-root `transcript.json`
-- repo-root `*.transcript.json`
-- `artifacts/transcripts/*.transcript.json`
-
-## Watchdog Runner
-
-Use the watchdog when you need repeated summarization benchmark runs with periodic RAM and GPU telemetry plus automatic threshold kills.
+`watchdog` runs a benchmark repeatedly and kills it if system RAM reaches 80% or
+GPU memory reaches 12 GiB. It records RAM and GPU usage while it runs.
 
 ```bash
 uv run python -m card_framework.benchmark.watchdog --max-runs 3 --sample-interval-seconds 5
 ```
 
-Defaults:
-- loops the summarization smoke benchmark (`benchmark.run execute --preset smoke`)
-- kills the child run at `80%` total system RAM or `12 GiB` used GPU VRAM
-- writes markdown notes, markdown results, per-run stdout/stderr logs, and telemetry under `artifacts/benchmark_watchdog`
-- uses the repo-local `.uv-cache` directory for child runs
-
-You can replace the child command after `--`.
+By default it runs `benchmark.run execute --preset smoke`. To watch a different
+command, put it after `--`:
 
 ```bash
 uv run python -m card_framework.benchmark.watchdog -- python -m card_framework.benchmark.qa --summary-xml summary.xml --source-transcript transcript.json
 ```
 
-## Diarization Benchmark
+Logs, telemetry, and notes go to `artifacts/benchmark_watchdog`.
+
+## Diarization
 
 ```bash
 uv run python -m card_framework.benchmark.diarization prepare-manifest
@@ -108,39 +112,45 @@ uv run python -m card_framework.benchmark.diarization execute
 ```
 
 Common options:
-- `--manifest src/card_framework/benchmark/manifests/diarization_ami_test.json`
-- `--config src/card_framework/config/config.yaml`
-- `--providers <comma-separated provider ids>`
-- `--device auto|cpu|cuda`
-- `--max-samples <int>`
-- `--collar <seconds>`
-- `--skip-overlap`
-- `--output-dir artifacts/diarization_benchmark`
 
-## QA Benchmark
+| Option | Default |
+| --- | --- |
+| `--manifest <path>` | `manifests/diarization_ami_test.json` |
+| `--config <path>` | the bundled `config/config.yaml` |
+| `--providers <ids>` | |
+| `--device auto\|cpu\|cuda` | `auto` |
+| `--max-samples <n>` | all |
+| `--collar <seconds>` | `0` (strict) |
+| `--skip-overlap` | overlap scored |
+| `--output-dir <path>` | `artifacts/diarization_benchmark` |
+
+The bundled AMI manifest expects the audio under
+`artifacts/diarization_datasets/ami/`. To describe your own data, see
+`manifests/diarization_manifest.example.json`.
+
+## QA
 
 ```bash
 uv run python -m card_framework.benchmark.qa
 ```
 
-The QA CLI uses:
-- `src/card_framework/benchmark/provider_profiles.yaml`
-- `src/card_framework/benchmark/qa_config.yaml`
-- `src/card_framework/config/config.yaml`
+Settings come from `provider_profiles.yaml`, `qa_config.yaml`, and the bundled
+`config/config.yaml`.
 
-## QA Supervisor
+To run it with the same RAM and GPU limits as `watchdog`, use the supervisor:
 
 ```bash
-uv run python -m card_framework.benchmark.qa_supervisor --summary-xml <path-to-summary.xml> --source-transcript <path-to-transcript>
+uv run python -m card_framework.benchmark.qa_supervisor --summary-xml <summary.xml> --source-transcript <transcript.json>
 ```
 
-The supervisor wraps the real QA CLI in a child process, runs a telemetry smoke test first, samples host RAM plus NVIDIA VRAM periodically, kills the child when RAM reaches `80%` or any GPU reaches `12288 MiB`, and writes session notes, markdown results, logs, and telemetry under `artifacts/qa_supervisor/<session_id>`.
+It runs a short telemetry check first, then writes notes, logs, and telemetry
+under `artifacts/qa_supervisor/<session_id>`.
 
-## MRCR Helper
+## MRCR helper
 
 ```bash
 uv run python -m card_framework.benchmark.mrcr --skip-model-metadata
 ```
 
-This helper resolves MRCR vLLM client settings from the packaged benchmark and
-runtime configs without downloading datasets at import time.
+Prints the vLLM client settings that MRCR runs would use, based on the bundled
+configs. It doesn't download any datasets.

@@ -1,240 +1,68 @@
-# Configuration Guide
+# Configuration
 
-`conf/config.yaml` is the canonical runtime config for source checkouts.
-`src/card_framework/config/config.yaml` is the bundled fallback used by packaged
-installs when the repo-root config is not available.
+CARD reads its settings from one YAML file:
 
-## Quick Start
+| You are running | Config file used |
+| --- | --- |
+| A source checkout | `conf/config.yaml` |
+| A pip install | `src/card_framework/config/config.yaml` (bundled with the package) |
+| Either, with a custom file | The path in `CARD_FRAMEWORK_CONFIG` |
+
+Secrets never go in YAML. They go in a `.env` file or in environment variables.
+
+## Quick start
 
 1. Copy `.env.example` to `.env`.
-2. Fill only the provider secrets you actually use.
-3. Edit the `selection` block in `conf/config.yaml`.
-4. Leave the concrete provider definitions in `profiles` alone unless you are
-   intentionally changing a model, base URL, or local embedding choice.
+2. Fill in the keys for the providers you use. Leave the rest empty.
+3. Pick your models in the `selection` block of `conf/config.yaml`.
 
-## Docker setup_and_run path
+Leave the `profiles` block alone unless you are adding a model or changing a
+base URL.
 
-The repository now ships a Docker workflow centered on
-`card_framework.cli.setup_and_run`.
+## Choosing models
 
-Prefer this Docker workflow for routine repo-local runs. If Docker can expose
-CUDA, prefer the `setup-and-run-gpu` service under the `gpu` profile.
-
-Build the image:
-
-```bash
-docker compose build setup-and-run
-```
-
-Run the wrapper from source audio on CPU-only or non-CUDA Docker hosts:
-
-```bash
-docker compose run --rm setup-and-run --audio-path audio.wav
-```
-
-Run the interactive menu-first launcher:
-
-```bash
-docker compose run --rm setup-and-run
-```
-
-Run a sequential multi-audio sweep:
-
-```bash
-docker compose run --rm setup-and-run --audio-path episode-a.mp3 --audio-path episode-b.mp3
-```
-
-Run the per-episode duration sweep:
-
-```bash
-docker compose run --rm setup-and-run --audio-path episode-a.mp3 --audio-path episode-b.mp3 --duration-sweep
-```
-
-Run the GPU profile for Windows or Linux NVIDIA hosts:
-
-```bash
-docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
-```
-
-Both runtime services inherit the same Compose resource cap: about `8 GB` RAM
-plus about `2 GB` swap through `mem_limit: 8g` and `memswap_limit: 10g`.
-
-The Compose services bind-mount the repository checkout, so the container sees
-the same `conf/config.yaml`, `.env`, `audio.wav`, `transcript.json`, and
-`summary.xml` files you use locally. The root `.venv` and vendored
-`src/card_framework/_vendor/index_tts/.venv` are redirected to Docker volumes
-so the host checkout does not receive Linux virtual environments.
-Repeated `--audio-path` flags now run sequentially and isolate each audio
-input under its own output folder, with a top-level `batch_manifest.json`
-written at the batch root.
-Adding `--duration-sweep` changes that wrapper flow into a per-episode preset
-sweep for `30s`, `1m`, and `5m`. Each episode boots once, later presets reuse
-the cached transcript from stage-2, and completed preset folders are reused on
-reruns. The sweep ledger is written to `duration_sweep_manifest.json`.
-When the wrapper starts without explicit run inputs, it now opens an
-interactive menu by default so operators can choose the run mode, select LLM
-and embedding profiles, and provide audio, transcript, summary, or resume
-inputs. Pass `--no-menu` to skip that menu. The shared runtime profiles now
-also include `selection.llm=anthropic_claude_opus`, which uses
-`ANTHROPIC_API_KEY` for `claude-opus-4-6`.
-
-## Session Resume
-
-`card_framework.cli.setup_and_run` now creates a UUID-backed pipeline session
-for each wrapper-managed run and persists it in
-`artifacts/pipeline_sessions/sessions.sqlite3`.
-
-- The wrapper prints the `session_id` at the end of the run.
-- Resume with `--resume-session <uuid>`.
-- Resume is stage-level only: if transcription, summarization, voice cloning, or
-  interjection was interrupted, the pipeline reruns that whole stage instead of
-  trying to continue from the middle of a chunk or synth call.
-- The wrapper checkpoints the final summary for resume under
-  `artifacts/pipeline_sessions/<session_id>/summary.xml` while still mirroring
-  the latest summary to workspace-root `summary.xml`.
-
-The `session.*` config keys in `conf/config.yaml` and
-`src/card_framework/config/config.yaml` are primarily wrapper-managed. Most
-operators should not set them by hand unless they are integrating the runtime
-outside `setup_and_run`.
-
-## What To Edit
-
-Most day-to-day changes happen in this block:
+Most changes happen in `selection`:
 
 ```yaml
 selection:
-  llm: "vllm_local"
-  embedding: "disabled"
-  stage_llm:
-    summarizer: "default"
+  llm: "vllm_local"        # LLM profile used by every stage
+  embedding: "disabled"    # retrieval embedding profile
+  stage_llm:               # optional per-stage override
+    summarizer: "default"  # "default" means: use selection.llm
     critic: "default"
     interjector: "default"
 ```
 
-- `selection.llm`: chooses the shared LLM profile used by the runtime.
-- `selection.embedding`: chooses the retrieval embedding profile.
-- `selection.stage_llm.*`: optionally overrides one stage with another LLM
-  profile. Use `default` to inherit the shared LLM.
+For example, to keep a local model for summarizing but use DeepSeek as the
+critic, set `critic: "deepseek_reasoner"`.
 
-## Stage 1 Audio Defaults
+### LLM profiles
 
-Stage-1 separation settings live under `audio.separation` and ASR settings live
-under `audio.asr` in `conf/config.yaml`.
+| Profile | Model | Key in `.env` |
+| --- | --- | --- |
+| `vllm_local` | Any model served by an OpenAI-compatible vLLM server | `CARD_FRAMEWORK_VLLM_API_KEY` (only if the server needs one) |
+| `anthropic_claude_opus` | `claude-opus-4-6` | `ANTHROPIC_API_KEY` |
+| `deepseek_chat` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| `deepseek_reasoner` | `deepseek-reasoner` | `DEEPSEEK_API_KEY` |
+| `google_gemini` | `gemini-2.5-pro` | `GEMINI_API_KEY` |
+| `glm_46` | `glm-4.6` | `ZAI_API_KEY` |
+| `huggingface_toolace` | `Team-ACE/ToolACE-8B` via the Hugging Face router | `HF_TOKEN` |
+| `nanbeige_thinking` | `Nanbeige/Nanbeige4-3B-Thinking-2511` via the Hugging Face router | `HF_TOKEN` |
+| `transformers_local` | `Salesforce/Llama-xLAM-2-3b-fc-r`, run in-process | none |
 
-The current Demucs separation defaults are:
+`vllm_local` reads its address from `CARD_FRAMEWORK_VLLM_BASE_URL`.
 
-```yaml
-audio:
-  separation:
-    provider: "demucs"
-    model: "htdemucs"
-    timeout_seconds: 1800
-    window_length_seconds: 600
-    window_context_seconds: 5
-```
+### Embedding profiles
 
-- Long source files are separated in `10m` outer windows with `5s` context on
-  each side before the vocals stem is stitched back together.
-- Stage-1 now emits timed Demucs loading/status lines and separation chunk
-  progress such as `chunk 2/10` with ETA-bearing stage updates.
+Embeddings are only used for retrieval, which is off by default.
 
-The current repo default is:
+| Profile | Model | Device |
+| --- | --- | --- |
+| `disabled` | none | none |
+| `qwen3_4b` | `Qwen/Qwen3-Embedding-4B` | CUDA |
+| `minilm_cpu` | `sentence-transformers/all-MiniLM-L6-v2` | CPU |
 
-```yaml
-audio:
-  asr:
-    provider: "granite_speech"
-    model: "ibm-granite/granite-4.0-1b-speech"
-    chunk_length_seconds: 25
-    chunk_overlap_seconds: 1
-    max_new_tokens: 96
-    repetition_penalty: 1.25
-    language: "en"
-    forced_alignment:
-      enabled: true
-      required: true
-      batch_size: 8
-```
-
-- `granite_speech` is the default ASR backend for new runs.
-- The runtime chunks preprocessed audio into `25s` windows with `1s` overlap.
-- Stage-1 now emits timed Granite model loading messages and inline
-  transcription progress such as `segment 2/9` plus an ETA on the first run
-  from the configured/default audio ETA profile, then refines later runs with
-  learned stage history.
-- `faster_whisper` is still supported, but it is now an explicit opt-in
-  provider instead of the default.
-
-The current NeMo diarization defaults are:
-
-```yaml
-audio:
-  diarization:
-    provider: "nemo"
-    nemo_model: "diar_msdd_telephonic"
-    vad_model: "vad_multilingual_marblenet"
-    speaker_embedding_model: "titanet_large"
-    min_speakers:
-    max_speakers: 10
-    allow_single_speaker_fallback: false
-    vad_onset: 0.8
-    vad_offset: 0.6
-    vad_pad_onset: 0.1
-    vad_pad_offset: 0.0
-    vad_min_duration_on: 0.2
-    vad_min_duration_off: 0.6
-    clustering_max_rp_threshold: 0.4
-    clustering_sparse_search_volume: 60
-    clustering_maj_vote_spk_count: true
-```
-
-- Leave `min_speakers` blank for variable-guest episodes and raise
-  `max_speakers` above the default `10` only when a show can genuinely exceed
-  that many voices.
-- Set `min_speakers` and `max_speakers` to the same value only when you want
-  NeMo to use an exact known speaker count for the whole file.
-- The `vad_*` keys are NeMo-only tuning controls for boundary sensitivity and
-  micro-turn suppression.
-- The `clustering_*` keys are NeMo-only tuning controls for speaker-count
-  search. Raise `clustering_max_rp_threshold` and
-  `clustering_sparse_search_volume` when NeMo consistently undercounts
-  speakers, and consider `clustering_maj_vote_spk_count: true` when you want a
-  more conservative speaker-count estimate across scales.
-- The latest fixed-vocals Granite pass keeps `max_new_tokens: 96`, drops
-  Granite overlap to `1s`, and raises Granite `repetition_penalty` to `1.25`
-  because that combination cut seam-style duplicate candidates much more than
-  the old `25s/2s/96/1.15` default while preserving more words than the
-  tighter `80`-token cap.
-- The current NeMo pass keeps the better-behaving `vad_pad_offset: 0.0`,
-  `vad_min_duration_on: 0.2`, and `vad_min_duration_off: 0.6` values, then
-  broadens NeMo's clustering search with `max_speakers: 10`,
-  `clustering_max_rp_threshold: 0.4`,
-  `clustering_sparse_search_volume: 60`, and
-  `clustering_maj_vote_spk_count: true`, while keeping transcript-side
-  short-sandwich smoothing for tiny one-word speaker intrusions when both
-  neighboring segments agree.
-
-## Built-In LLM Profiles
-
-- `vllm_local`: local OpenAI-compatible vLLM endpoint.
-- `transformers_local`: local Transformers provider.
-- `deepseek_chat`: DeepSeek chat model.
-- `deepseek_reasoner`: DeepSeek reasoning model.
-- `google_gemini`: Gemini provider.
-- `glm_46`: GLM provider.
-- `huggingface_toolace`: Hugging Face ToolACE through the router endpoint.
-- `nanbeige_thinking`: Nanbeige through the Hugging Face router endpoint.
-
-## Built-In Embedding Profiles
-
-- `disabled`: disables retrieval embeddings and uses the no-op provider.
-- `qwen3_4b`: Qwen embedding model on CUDA.
-- `minilm_cpu`: lightweight CPU embedding fallback.
-
-## `.env` Variables
-
-Use canonical variable names in `.env`:
+## `.env` variables
 
 ```dotenv
 CARD_FRAMEWORK_VLLM_API_KEY=EMPTY
@@ -245,69 +73,146 @@ ZAI_API_KEY=
 HF_TOKEN=
 ```
 
-The runtime also accepts older aliases and mirrors them automatically. That
-means existing values such as `VLLM_API_KEY`, `GOOGLE_API_KEY`, `GLM_API_KEY`,
-`HF_ACCESS_TOKEN`, and `HF_API_TOKEN` still work.
+CARD loads `.env` from the folder you run in. Variables already set in your
+shell take priority. Older names still work and are copied to the names above:
+`VLLM_API_KEY`, `GOOGLE_API_KEY`, `GLM_API_KEY`, `HF_ACCESS_TOKEN`, and
+`HF_API_TOKEN`.
 
-The Docker Compose services load that same `.env` file through `env_file`, so
-you do not need a second container-specific secrets file for the standard
-`setup_and_run` workflow.
+The benchmark QA config (`src/card_framework/benchmark/qa_config.yaml`) also
+reads its vLLM key from `.env`.
 
-The new SPoRC automatic sampler also reads `ANTHROPIC_API_KEY` from `.env` or
-the process environment when you run:
+## Running with Docker
+
+Docker Compose is the recommended way to run from a source checkout. The
+services mount your checkout, so the container uses your `conf/config.yaml`,
+`.env`, and input files directly.
 
 ```bash
-uv run python -m card_framework.benchmark.summarizer_critic.sporc llm-sample
+docker compose build setup-and-run
+
+# One recording, CPU
+docker compose run --rm setup-and-run --audio-path audio.wav
+
+# One recording, NVIDIA GPU
+docker compose --profile gpu run --rm setup-and-run-gpu --override audio.device=cuda --audio-path audio.wav
+
+# Interactive menu (pick mode, models, and inputs)
+docker compose run --rm setup-and-run
+
+# Several recordings, one after another
+docker compose run --rm setup-and-run --audio-path a.mp3 --audio-path b.mp3
+
+# Each recording shortened to 30s, 1m, and 5m
+docker compose run --rm setup-and-run --audio-path a.mp3 --audio-path b.mp3 --duration-sweep
 ```
 
-## Common Examples
+Things to know:
 
-Use local vLLM with no retrieval:
+- Each service is capped at about 8 GB of RAM plus 2 GB of swap
+  (`mem_limit: 8g`, `memswap_limit: 10g` in `compose.yml`).
+- The container keeps its Python environments in Docker volumes, so it never
+  writes Linux virtualenvs into your checkout.
+- Without input flags, the wrapper opens the interactive menu. Add `--no-menu`
+  to skip it.
+- With several `--audio-path` flags, each recording gets its own output folder
+  and the batch root gets a `batch_manifest.json`.
+- `--duration-sweep` transcribes each recording once and reuses that
+  transcript for every length. Finished lengths are skipped on rerun. Progress
+  is recorded in `duration_sweep_manifest.json`.
+
+## Resuming a run
+
+Every run started by `card_framework.cli.setup_and_run` gets a session ID,
+printed when the run ends. To continue an interrupted run:
+
+```bash
+docker compose run --rm setup-and-run --resume-session <session-id>
+```
+
+Resume works per stage. If a stage (transcription, summarization, voice
+cloning, or interjection) was interrupted, that whole stage runs again.
+
+Sessions are stored in `artifacts/pipeline_sessions/sessions.sqlite3`, and each
+session's final summary is saved to
+`artifacts/pipeline_sessions/<session-id>/summary.xml`. The `session.*` keys in
+the config are managed by the wrapper; you only need them if you call the
+runtime without `setup_and_run`.
+
+## Audio stage settings
+
+These live under `audio` in `conf/config.yaml`. The defaults suit podcasts and
+other long multi-speaker recordings.
+
+### Speech separation (`audio.separation`)
 
 ```yaml
-selection:
-  llm: "vllm_local"
-  embedding: "disabled"
-  stage_llm:
-    summarizer: "default"
-    critic: "default"
-    interjector: "default"
+provider: "demucs"
+model: "htdemucs"
+timeout_seconds: 1800
+window_length_seconds: 600   # process long files in 10-minute windows
+window_context_seconds: 5    # with 5 seconds of overlap on each side
 ```
 
-Use DeepSeek for the critic only:
+### Transcription (`audio.asr`)
 
 ```yaml
-selection:
-  llm: "vllm_local"
-  embedding: "disabled"
-  stage_llm:
-    summarizer: "default"
-    critic: "deepseek_reasoner"
-    interjector: "default"
+provider: "granite_speech"   # or "faster_whisper"
+model: "ibm-granite/granite-4.0-1b-speech"
+chunk_length_seconds: 25
+chunk_overlap_seconds: 1
+max_new_tokens: 96
+repetition_penalty: 1.25
+language: "en"
+forced_alignment:
+  enabled: true
+  required: true
+  batch_size: 8
 ```
 
-Enable retrieval with the Qwen embedding model:
+The overlap and repetition penalty were tuned to stop words repeating where
+chunks meet, such as "index index". A larger overlap or a lower penalty brings
+those repeats back. Lowering `max_new_tokens` drops words without reducing the
+repeats further.
+
+### Speaker diarization (`audio.diarization`)
 
 ```yaml
-selection:
-  llm: "vllm_local"
-  embedding: "qwen3_4b"
-  stage_llm:
-    summarizer: "default"
-    critic: "default"
-    interjector: "default"
+provider: "nemo"
+nemo_model: "diar_msdd_telephonic"
+vad_model: "vad_multilingual_marblenet"
+speaker_embedding_model: "titanet_large"
+min_speakers:                # blank = let NeMo estimate
+max_speakers: 10
+allow_single_speaker_fallback: false
+vad_onset: 0.8
+vad_offset: 0.6
+vad_pad_onset: 0.1
+vad_pad_offset: 0.0
+vad_min_duration_on: 0.2
+vad_min_duration_off: 0.6
+clustering_max_rp_threshold: 0.4
+clustering_sparse_search_volume: 60
+clustering_maj_vote_spk_count: true
 ```
 
-## QA Benchmark Config
+How to adjust it:
 
-`src/card_framework/benchmark/qa_config.yaml` now resolves its `vllm.api_key`
-from `.env` too. Keep the benchmark base URL and timeout in YAML, but keep the
-actual key in `.env`.
+- **Unknown number of speakers** (for example, shows with guests): leave
+  `min_speakers` blank. Raise `max_speakers` only if a recording can really
+  have more than 10 voices.
+- **Known number of speakers:** set `min_speakers` and `max_speakers` to the
+  same value. NeMo then uses exactly that count.
+- **Too many tiny speaker switches:** the `vad_*` keys control how short a
+  speech burst or pause can be before it counts. Raising
+  `vad_min_duration_on` and `vad_min_duration_off` merges short fragments.
+- **Too few speakers found:** raise `clustering_max_rp_threshold` and
+  `clustering_sparse_search_volume`.
 
-## Notes
+CARD also fixes one- to three-word speaker switches in the transcript when the
+segments on both sides agree on the speaker.
 
-- Do not commit `.env`.
-- Keep secrets out of CLI overrides when possible.
-- If you need a packaged install to use a custom full config file, point
-  `CARD_FRAMEWORK_CONFIG` at that YAML and keep the secrets in environment
-  variables.
+## Security notes
+
+- Never commit `.env`. It is in `.gitignore`.
+- Avoid passing secrets as `--override` flags, since they end up in your shell
+  history.
